@@ -1,0 +1,50 @@
+{
+  "name": "munin-memory",
+  "version": "0.1.0",
+  "description": "MCP server providing persistent memory for Claude across conversations",
+  "author": "Magnus Gille",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Magnus-Gille/munin-memory"
+  },
+  "homepage": "https://github.com/Magnus-Gille/munin-memory#readme",
+  "keywords": [
+    "mcp",
+    "memory",
+    "sqlite",
+    "ai",
+    "self-hosted",
+    "model-context-protocol"
+  ],
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.8.1",
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "better-sqlite3": "^11.8.2",
+    "express": "^5.2.1",
+    "sqlite-vec": "^0.1.7-alpha.2",
+    "uuid": "^11.1.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.13.4",
+    "@types/supertest": "^6.0.3",
+    "@types/uuid": "^10.0.0",
+    "supertest": "^7.2.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

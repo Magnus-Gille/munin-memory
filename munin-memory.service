@@ -1,0 +1,27 @@
+# NOTE: Update User, WorkingDirectory, EnvironmentFile, and ReadWritePaths
+# to match your system username and install location.
+[Unit]
+Description=Munin Memory MCP Server
+After=network.target
+
+[Service]
+Type=simple
+User=magnus
+WorkingDirectory=/home/magnus/munin-memory
+ExecStart=/usr/bin/node dist/index.js
+Restart=always
+RestartSec=5
+Environment=MUNIN_TRANSPORT=http
+Environment=MUNIN_HTTP_PORT=3030
+Environment=MUNIN_HTTP_HOST=0.0.0.0
+EnvironmentFile=/home/magnus/munin-memory/.env
+
+# Sandboxing
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/magnus/.munin-memory
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

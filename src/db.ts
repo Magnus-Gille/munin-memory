@@ -1,0 +1,598 @@
+import Database from "better-sqlite3";
+import * as sqliteVec from "sqlite-vec";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, chmodSync, existsSync } from "node:fs";
+import { dirname } from "node:path";
+import { homedir } from "node:os";
+import type { Entry, AuditEntry, EntryType } from "./types.js";
+import { runMigrations } from "./migrations.js";
+
+let _vecLoaded = false;
+
+export function nowUTC(): string {
+  return new Date().toISOString();
+}
+
+function resolveDbPath(configuredPath?: string): string {
+  const raw = configuredPath || "~/.munin-memory/memory.db";
+  return raw.replace(/^~/, homedir());
+}
+
+export function initDatabase(dbPath?: string): Database.Database {
+  const resolvedPath = resolveDbPath(dbPath);
+  const dir = dirname(resolvedPath);
+
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+  }
+
+  const db = new Database(resolvedPath);
+
+  // Set permissions on the DB file (owner read/write only)
+  try {
+    chmodSync(resolvedPath, 0o600);
+  } catch {
+    // May fail if file doesn't exist yet; will be created on first write
+  }
+
+  // Pragmas per debate resolution #3
+  db.pragma("journal_mode = WAL");
+  db.pragma("busy_timeout = 5000");
+  db.pragma("synchronous = NORMAL");
+  db.pragma("foreign_keys = ON");
+
+  // Load sqlite-vec extension (soft dependency — vec features disabled if unavailable)
+  try {
+    sqliteVec.load(db);
+    _vecLoaded = true;
+  } catch {
+    _vecLoaded = false;
+  }
+
+  runMigrations(db);
+
+  // Create vec0 table idempotently after migrations (not version-gated)
+  if (_vecLoaded) {
+    ensureVecSchema(db);
+  }
+
+  return db;
+}
+
+export function vecLoaded(): boolean {
+  return _vecLoaded;
+}
+
+/**
+ * Idempotently create the entries_vec vec0 table.
+ * Called on every startup when sqlite-vec is available.
+ * NOT part of the migration system — vec0 tables can't be created
+ * without the extension loaded.
+ */
+function ensureVecSchema(db: Database.Database): void {
+  const hasVec = db
+    .prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='entries_vec'",
+    )
+    .get();
+
+  if (!hasVec) {
+    db.exec(`
+      CREATE VIRTUAL TABLE entries_vec USING vec0(
+        entry_id TEXT,
+        embedding float[384]
+      );
+    `);
+  }
+}
+
+// Rebuild FTS index — for maintenance (debate resolution #7)
+export function rebuildFTS(db: Database.Database): void {
+  db.exec("INSERT INTO entries_fts(entries_fts) VALUES('rebuild')");
+}
+
+// --- State entry operations ---
+
+export function writeState(
+  db: Database.Database,
+  namespace: string,
+  key: string,
+  content: string,
+  tags: string[],
+  agentId = "default",
+): { status: "created" | "updated"; id: string } {
+  const now = nowUTC();
+  const tagsJson = JSON.stringify(tags);
+
+  // Check if exists
+  const existing = db.prepare(
+    "SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'",
+  ).get(namespace, key) as { id: string } | undefined;
+
+  const txn = db.transaction(() => {
+    if (existing) {
+      db.prepare(
+        `UPDATE entries SET content = ?, tags = ?, updated_at = ?, agent_id = ?,
+         embedding_status = 'pending', embedding_model = NULL
+         WHERE namespace = ? AND key = ? AND entry_type = 'state'`,
+      ).run(content, tagsJson, now, agentId, namespace, key);
+
+      db.prepare(
+        "INSERT INTO audit_log (timestamp, agent_id, action, namespace, key, detail) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run(now, agentId, "update", namespace, key, "overwritten previous value");
+
+      return { status: "updated" as const, id: existing.id };
+    } else {
+      const id = randomUUID();
+      db.prepare(
+        `INSERT INTO entries (id, namespace, key, entry_type, content, tags, agent_id, created_at, updated_at)
+         VALUES (?, ?, ?, 'state', ?, ?, ?, ?, ?)`,
+      ).run(id, namespace, key, content, tagsJson, agentId, now, now);
+
+      db.prepare(
+        "INSERT INTO audit_log (timestamp, agent_id, action, namespace, key, detail) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run(now, agentId, "write", namespace, key, null);
+
+      return { status: "created" as const, id };
+    }
+  });
+
+  return txn();
+}
+
+export function readState(
+  db: Database.Database,
+  namespace: string,
+  key: string,
+): Entry | null {
+  return (
+    db
+      .prepare(
+        "SELECT * FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'",
+      )
+      .get(namespace, key) as Entry | undefined
+  ) ?? null;
+}
+
+export function getById(db: Database.Database, id: string): Entry | null {
+  return (
+    db.prepare("SELECT * FROM entries WHERE id = ?").get(id) as Entry | undefined
+  ) ?? null;
+}
+
+// --- Log entry operations ---
+
+export function appendLog(
+  db: Database.Database,
+  namespace: string,
+  content: string,
+  tags: string[],
+  agentId = "default",
+): { id: string; timestamp: string } {
+  const now = nowUTC();
+  const id = randomUUID();
+  const tagsJson = JSON.stringify(tags);
+
+  const txn = db.transaction(() => {
+    db.prepare(
+      `INSERT INTO entries (id, namespace, key, entry_type, content, tags, agent_id, created_at, updated_at)
+       VALUES (?, ?, NULL, 'log', ?, ?, ?, ?, ?)`,
+    ).run(id, namespace, content, tagsJson, agentId, now, now);
+
+    db.prepare(
+      "INSERT INTO audit_log (timestamp, agent_id, action, namespace, key, detail) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run(now, agentId, "log", namespace, null, null);
+  });
+
+  txn();
+  return { id, timestamp: now };
+}
+
+// --- Query / search operations ---
+
+function escapeFtsQuery(query: string): string {
+  // If the query already contains double quotes, assume the caller
+  // is using FTS5 syntax intentionally and pass through as-is
+  if (query.includes('"')) {
+    return query;
+  }
+  // Wrap each whitespace-separated token in double quotes so that
+  // special FTS5 characters (hyphens, colons, etc.) are treated as
+  // literals. Implicit AND between quoted tokens.
+  return query
+    .split(/\s+/)
+    .filter((t) => t.length > 0)
+    .map((t) => `"${t}"`)
+    .join(" ");
+}
+
+function escapeForLike(s: string): string {
+  // Debate resolution #10: escape LIKE wildcards
+  return s.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+}
+
+export interface QueryOptions {
+  query: string;
+  namespace?: string;
+  entryType?: EntryType;
+  tags?: string[];
+  limit?: number;
+}
+
+export function queryEntries(
+  db: Database.Database,
+  options: QueryOptions,
+): Entry[] {
+  const { query, namespace, entryType, tags, limit = 10 } = options;
+  const clampedLimit = Math.min(Math.max(limit, 1), 50);
+
+  // Over-fetch before tag filtering (debate resolution #4 caveat)
+  const fetchLimit = tags && tags.length > 0 ? clampedLimit * 5 : clampedLimit;
+
+  let sql = `
+    SELECT e.* FROM entries e
+    JOIN entries_fts fts ON e.rowid = fts.rowid
+    WHERE entries_fts MATCH ?
+  `;
+  const params: unknown[] = [escapeFtsQuery(query)];
+
+  if (namespace) {
+    if (namespace.endsWith("/")) {
+      sql += " AND e.namespace LIKE ? ESCAPE '\\'";
+      params.push(escapeForLike(namespace) + "%");
+    } else {
+      sql += " AND e.namespace = ?";
+      params.push(namespace);
+    }
+  }
+
+  if (entryType) {
+    sql += " AND e.entry_type = ?";
+    params.push(entryType);
+  }
+
+  sql += " ORDER BY rank LIMIT ?";
+  params.push(fetchLimit);
+
+  let results = db.prepare(sql).all(...params) as Entry[];
+
+  // Post-filter by tags (debate resolution #4: filter before limit)
+  if (tags && tags.length > 0) {
+    results = results.filter((entry) => {
+      const entryTags: string[] = JSON.parse(entry.tags);
+      return tags.every((t) => entryTags.includes(t));
+    });
+    results = results.slice(0, clampedLimit);
+  }
+
+  return results;
+}
+
+// --- List operations ---
+
+export interface NamespaceCount {
+  namespace: string;
+  state_count: number;
+  log_count: number;
+  last_activity_at: string;
+}
+
+export function listNamespaces(db: Database.Database): NamespaceCount[] {
+  return db
+    .prepare(
+      `SELECT namespace,
+              SUM(CASE WHEN entry_type = 'state' THEN 1 ELSE 0 END) as state_count,
+              SUM(CASE WHEN entry_type = 'log' THEN 1 ELSE 0 END) as log_count,
+              MAX(updated_at) as last_activity_at
+       FROM entries
+       GROUP BY namespace
+       ORDER BY namespace`,
+    )
+    .all() as NamespaceCount[];
+}
+
+export interface StateEntryPreview {
+  key: string;
+  preview: string;
+  tags: string;
+  updated_at: string;
+}
+
+export interface LogSummary {
+  log_count: number;
+  earliest: string | null;
+  latest: string | null;
+}
+
+export function listNamespaceContents(
+  db: Database.Database,
+  namespace: string,
+): { stateEntries: StateEntryPreview[]; logSummary: LogSummary } {
+  const stateEntries = db
+    .prepare(
+      `SELECT key, substr(content, 1, 100) as preview, tags, updated_at
+       FROM entries WHERE namespace = ? AND entry_type = 'state' ORDER BY key`,
+    )
+    .all(namespace) as StateEntryPreview[];
+
+  const logSummary = (db
+    .prepare(
+      `SELECT COUNT(*) as log_count, MIN(created_at) as earliest, MAX(created_at) as latest
+       FROM entries WHERE namespace = ? AND entry_type = 'log'`,
+    )
+    .get(namespace) as LogSummary) ?? { log_count: 0, earliest: null, latest: null };
+
+  return { stateEntries, logSummary };
+}
+
+// --- Delete operations ---
+
+export interface DeleteInfo {
+  stateCount: number;
+  logCount: number;
+  keys: string[];
+}
+
+export function previewDelete(
+  db: Database.Database,
+  namespace: string,
+  key?: string,
+): DeleteInfo {
+  if (key) {
+    const entry = db
+      .prepare(
+        "SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'",
+      )
+      .get(namespace, key) as { id: string } | undefined;
+    return {
+      stateCount: entry ? 1 : 0,
+      logCount: 0,
+      keys: entry ? [key] : [],
+    };
+  }
+
+  const stateKeys = db
+    .prepare(
+      "SELECT key FROM entries WHERE namespace = ? AND entry_type = 'state' ORDER BY key",
+    )
+    .all(namespace) as Array<{ key: string }>;
+
+  const logCount = (
+    db
+      .prepare("SELECT COUNT(*) as cnt FROM entries WHERE namespace = ? AND entry_type = 'log'")
+      .get(namespace) as { cnt: number }
+  ).cnt;
+
+  return {
+    stateCount: stateKeys.length,
+    logCount,
+    keys: stateKeys.map((r) => r.key),
+  };
+}
+
+export function executeDelete(
+  db: Database.Database,
+  namespace: string,
+  key?: string,
+  agentId = "default",
+): number {
+  const now = nowUTC();
+
+  const txn = db.transaction(() => {
+    // App-level vec cleanup (no SQL trigger — extension may not be loaded)
+    if (_vecLoaded) {
+      if (key) {
+        const entry = db
+          .prepare("SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'")
+          .get(namespace, key) as { id: string } | undefined;
+        if (entry) {
+          db.prepare("DELETE FROM entries_vec WHERE entry_id = ?").run(entry.id);
+        }
+      } else {
+        const ids = db
+          .prepare("SELECT id FROM entries WHERE namespace = ?")
+          .all(namespace) as Array<{ id: string }>;
+        const deleteVec = db.prepare("DELETE FROM entries_vec WHERE entry_id = ?");
+        for (const { id } of ids) {
+          deleteVec.run(id);
+        }
+      }
+    }
+
+    let deletedCount: number;
+
+    if (key) {
+      const result = db
+        .prepare("DELETE FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'")
+        .run(namespace, key);
+      deletedCount = result.changes;
+
+      db.prepare(
+        "INSERT INTO audit_log (timestamp, agent_id, action, namespace, key, detail) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run(now, agentId, "delete", namespace, key, null);
+    } else {
+      const result = db
+        .prepare("DELETE FROM entries WHERE namespace = ?")
+        .run(namespace);
+      deletedCount = result.changes;
+
+      db.prepare(
+        "INSERT INTO audit_log (timestamp, agent_id, action, namespace, key, detail) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run(now, agentId, "delete_namespace", namespace, null, `deleted ${deletedCount} entries`);
+    }
+
+    return deletedCount;
+  });
+
+  return txn();
+}
+
+// --- Semantic search operations ---
+
+export interface SemanticQueryOptions {
+  queryEmbedding: Buffer;
+  namespace?: string;
+  entryType?: EntryType;
+  tags?: string[];
+  limit?: number;
+}
+
+export function queryEntriesSemantic(
+  db: Database.Database,
+  options: SemanticQueryOptions,
+): Entry[] {
+  const { queryEmbedding, namespace, entryType, tags, limit = 10 } = options;
+  const clampedLimit = Math.min(Math.max(limit, 1), 50);
+
+  // Over-fetch for post-filtering (5x per Codex finding)
+  const fetchLimit = tags && tags.length > 0 ? clampedLimit * 5 : clampedLimit;
+
+  // KNN query via vec0
+  const vecResults = db
+    .prepare(
+      `SELECT v.entry_id, v.distance
+       FROM entries_vec v
+       WHERE v.embedding MATCH ? AND k = ?
+       ORDER BY v.distance`,
+    )
+    .all(queryEmbedding, fetchLimit * 2) as Array<{ entry_id: string; distance: number }>;
+
+  if (vecResults.length === 0) return [];
+
+  // Fetch full entries and apply filters
+  const getEntry = db.prepare("SELECT * FROM entries WHERE id = ?");
+  let results: Entry[] = [];
+
+  for (const { entry_id } of vecResults) {
+    const entry = getEntry.get(entry_id) as Entry | undefined;
+    if (!entry) continue;
+
+    if (namespace) {
+      if (namespace.endsWith("/")) {
+        if (!entry.namespace.startsWith(namespace)) continue;
+      } else {
+        if (entry.namespace !== namespace) continue;
+      }
+    }
+
+    if (entryType && entry.entry_type !== entryType) continue;
+
+    results.push(entry);
+    if (results.length >= fetchLimit) break;
+  }
+
+  // Post-filter by tags
+  if (tags && tags.length > 0) {
+    results = results.filter((entry) => {
+      const entryTags: string[] = JSON.parse(entry.tags);
+      return tags.every((t) => entryTags.includes(t));
+    });
+    results = results.slice(0, clampedLimit);
+  } else {
+    results = results.slice(0, clampedLimit);
+  }
+
+  return results;
+}
+
+export interface HybridQueryOptions {
+  ftsOptions: QueryOptions;
+  semanticOptions: SemanticQueryOptions;
+}
+
+export function queryEntriesHybrid(
+  db: Database.Database,
+  options: HybridQueryOptions,
+): Entry[] {
+  const { ftsOptions, semanticOptions } = options;
+  const limit = Math.min(Math.max(ftsOptions.limit ?? 10, 1), 50);
+
+  // Over-fetch from both sources (5x limit per Codex finding)
+  const overFetchLimit = limit * 5;
+
+  const ftsResults = queryEntries(db, { ...ftsOptions, limit: overFetchLimit });
+  const vecResults = queryEntriesSemantic(db, { ...semanticOptions, limit: overFetchLimit });
+
+  // Build 1-indexed rank maps
+  const ftsRanks = new Map<string, number>();
+  ftsResults.forEach((entry, i) => ftsRanks.set(entry.id, i + 1));
+
+  const vecRanks = new Map<string, number>();
+  vecResults.forEach((entry, i) => vecRanks.set(entry.id, i + 1));
+
+  // Collect all unique entry IDs
+  const allIds = new Set<string>([...ftsRanks.keys(), ...vecRanks.keys()]);
+
+  // RRF scoring (k = 60)
+  const k = 60;
+  const scored: Array<{ id: string; score: number; entry: Entry }> = [];
+
+  // Build entry map for quick lookup
+  const entryMap = new Map<string, Entry>();
+  for (const entry of ftsResults) entryMap.set(entry.id, entry);
+  for (const entry of vecResults) entryMap.set(entry.id, entry);
+
+  for (const id of allIds) {
+    const entry = entryMap.get(id)!;
+    let score = 0;
+
+    const ftsRank = ftsRanks.get(id);
+    const vecRank = vecRanks.get(id);
+
+    // No Infinity sentinel — explicit conditional (Codex finding #6)
+    if (ftsRank !== undefined) {
+      score += 1 / (k + ftsRank);
+    }
+    if (vecRank !== undefined) {
+      score += 1 / (k + vecRank);
+    }
+
+    scored.push({ id, score, entry });
+  }
+
+  // Sort by score descending
+  scored.sort((a, b) => b.score - a.score);
+
+  return scored.slice(0, limit).map((s) => s.entry);
+}
+
+// --- Vec helpers (used by embeddings.ts) ---
+
+export function storeEmbedding(
+  db: Database.Database,
+  entryId: string,
+  embedding: Buffer,
+  model: string,
+): void {
+  // Delete existing, then insert (vec0 doesn't support UPSERT)
+  db.prepare("DELETE FROM entries_vec WHERE entry_id = ?").run(entryId);
+  db.prepare(
+    "INSERT INTO entries_vec (entry_id, embedding) VALUES (?, ?)",
+  ).run(entryId, embedding);
+
+  db.prepare(
+    "UPDATE entries SET embedding_status = 'generated', embedding_model = ? WHERE id = ? AND updated_at = (SELECT updated_at FROM entries WHERE id = ?)",
+  ).run(model, entryId, entryId);
+}
+
+export function removeEmbedding(
+  db: Database.Database,
+  entryId: string,
+): void {
+  db.prepare("DELETE FROM entries_vec WHERE entry_id = ?").run(entryId);
+}
+
+// --- Hint helpers ---
+
+export function getOtherKeysInNamespace(
+  db: Database.Database,
+  namespace: string,
+  excludeKey?: string,
+): string[] {
+  const rows = db
+    .prepare(
+      "SELECT key FROM entries WHERE namespace = ? AND entry_type = 'state' AND key != ? ORDER BY key",
+    )
+    .all(namespace, excludeKey ?? "") as Array<{ key: string }>;
+  return rows.map((r) => r.key);
+}

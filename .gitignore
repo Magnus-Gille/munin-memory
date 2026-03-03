@@ -1,0 +1,21 @@
+node_modules/
+dist/
+*.db
+*.db-wal
+*.db-shm
+.env
+.DS_Store
+.claude/
+.playwright-mcp/
+STATUS.md
+*.zip
+
+# Debate files — keep only summaries and resolutions
+debate/*
+!debate/INDEX.md
+!debate/*-summary.md
+!debate/*-resolution.md
+!debate/resolution.md
+# Off-topic debates (not about Munin Memory)
+debate/tm-tailscale-summary.md
+debate/ortelius-collab-summary.md
