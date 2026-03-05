@@ -748,11 +748,12 @@ describe("memory_orient workbench drift", () => {
 
     const raw = await callTool("memory_orient", {});
     const result = parseToolResponse(raw) as {
-      workbench: { drift?: Array<{ namespace: string; last_activity_at: string }> };
+      workbench: { drift?: Array<{ namespace: string; status_updated_at: string }> };
     };
     expect(result.workbench.drift).toBeDefined();
     expect(result.workbench.drift!.length).toBe(1);
     expect(result.workbench.drift![0].namespace).toBe("projects/alpha");
+    expect(result.workbench.drift![0].status_updated_at).toBeTruthy();
   });
 
   it("does not include drift when workbench is up to date", async () => {
@@ -794,7 +795,36 @@ describe("memory_orient workbench drift", () => {
     expect(result.workbench.drift).toBeUndefined();
   });
 
-  it("filters demo namespaces from orient", async () => {
+  it("does not mark drift from newer project log activity alone", async () => {
+    await callTool("memory_write", {
+      namespace: "meta",
+      key: "workbench",
+      content: "# Workbench\n## Active\n- projects/alpha",
+    });
+    await callTool("memory_write", {
+      namespace: "projects/alpha",
+      key: "status",
+      content: "In sync",
+    });
+
+    // Backdate both workbench and status to the same old point.
+    db.prepare("UPDATE entries SET updated_at = '2026-01-01T00:00:00.000Z' WHERE namespace = 'meta' AND key = 'workbench'").run();
+    db.prepare("UPDATE entries SET updated_at = '2026-01-01T00:00:00.000Z' WHERE namespace = 'projects/alpha' AND key = 'status'").run();
+
+    // Newer log activity should not count as status drift.
+    await callTool("memory_log", {
+      namespace: "projects/alpha",
+      content: "Background note",
+    });
+
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as {
+      workbench: { drift?: unknown[] };
+    };
+    expect(result.workbench.drift).toBeUndefined();
+  });
+
+  it("filters demo namespaces from orient by default", async () => {
     await callTool("memory_write", { namespace: "projects/real", key: "s", content: "c" });
     await callTool("memory_write", { namespace: "demo/test", key: "s", content: "c" });
 
@@ -805,6 +835,19 @@ describe("memory_orient workbench drift", () => {
     const names = result.namespaces.map((n) => n.namespace);
     expect(names).toContain("projects/real");
     expect(names).not.toContain("demo/test");
+  });
+
+  it("shows demo namespaces in orient when include_demo is true", async () => {
+    await callTool("memory_write", { namespace: "projects/real", key: "s", content: "c" });
+    await callTool("memory_write", { namespace: "demo/test", key: "s", content: "c" });
+
+    const raw = await callTool("memory_orient", { include_demo: true });
+    const result = parseToolResponse(raw) as {
+      namespaces: Array<{ namespace: string }>;
+    };
+    const names = result.namespaces.map((n) => n.namespace);
+    expect(names).toContain("projects/real");
+    expect(names).toContain("demo/test");
   });
 });
 

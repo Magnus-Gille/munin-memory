@@ -139,6 +139,14 @@ export interface NamespaceSummary {
   namespace: string;
   state_count: number;
   log_count: number;
+  last_activity_at: string;
+}
+
+export interface LogPreview {
+  id: string;
+  content_preview: string;
+  tags: string[];
+  created_at: string;
 }
 
 export interface NamespaceDetail {
@@ -149,16 +157,18 @@ export interface NamespaceDetail {
     updated_at: string;
   }>;
   log_summary: {
-    count: number;
+    log_count: number;
     earliest: string | null;
     latest: string | null;
+    recent: LogPreview[];
   };
 }
 
 export interface ListResponse {
   namespaces?: NamespaceSummary[];
   namespace?: string;
-  detail?: NamespaceDetail;
+  state_entries?: NamespaceDetail["state_entries"];
+  log_summary?: NamespaceDetail["log_summary"];
 }
 
 export interface DeletePreview {

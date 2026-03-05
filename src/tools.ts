@@ -128,10 +128,16 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_orient",
     description:
-      "START HERE. Call this at the beginning of every conversation before using any other memory tool. Returns the usage conventions (how to use this memory system), the active project dashboard, and a namespace overview — everything needed to orient yourself in one call.\n\nAlso surfaces workbench drift: namespaces whose status was updated more recently than the workbench itself, so you know what may need syncing.\n\nIf you are unsure how to use memory_write, memory_read, memory_log, or any other memory tool, the conventions returned by this tool contain the full guide.",
+      "START HERE. Call this at the beginning of every conversation before using any other memory tool. Returns the usage conventions (how to use this memory system), the active project dashboard, and a namespace overview — everything needed to orient yourself in one call.\n\nAlso surfaces workbench drift: projects whose `status` entry was updated more recently than the workbench itself, so you know what may need syncing. Demo namespaces are hidden by default; pass `include_demo: true` if you want them in the namespace overview.\n\nIf you are unsure how to use memory_write, memory_read, memory_log, or any other memory tool, the conventions returned by this tool contain the full guide.",
     inputSchema: {
       type: "object" as const,
-      properties: {},
+      properties: {
+        include_demo: {
+          type: "boolean",
+          description:
+            "Optional. If true, include demo/* namespaces in the namespace overview. Default: false.",
+        },
+      },
       required: [],
     },
   },
@@ -356,6 +362,7 @@ export function registerTools(server: Server, db: Database.Database): void {
       try {
         switch (name) {
           case "memory_orient": {
+            const { include_demo } = (args ?? {}) as ListParams;
             // Read conventions, workbench, and namespace list in one call
             const conventions = readState(db, "meta/conventions", "conventions");
             const workbench = readState(db, "meta", "workbench");
@@ -386,17 +393,19 @@ export function registerTools(server: Server, db: Database.Database): void {
               };
               if (isStale(parsed.updated_at)) wb.stale = true;
 
-              // Workbench drift detection: find namespaces updated after the workbench
+              // Workbench drift detection: compare project status entries, not namespace activity.
               const wbUpdatedAt = new Date(parsed.updated_at).getTime();
               const drifted = namespaces
-                .filter((ns) =>
-                  ns.namespace.startsWith("projects/") &&
-                  new Date(ns.last_activity_at).getTime() > wbUpdatedAt
-                )
-                .map((ns) => ({
-                  namespace: ns.namespace,
-                  last_activity_at: ns.last_activity_at,
-                }));
+                .filter((ns) => ns.namespace.startsWith("projects/"))
+                .flatMap((ns) => {
+                  const status = readState(db, ns.namespace, "status");
+                  if (!status) return [];
+                  if (new Date(status.updated_at).getTime() <= wbUpdatedAt) return [];
+                  return [{
+                    namespace: ns.namespace,
+                    status_updated_at: status.updated_at,
+                  }];
+                });
               if (drifted.length > 0) {
                 wb.drift = drifted;
               }
@@ -409,10 +418,11 @@ export function registerTools(server: Server, db: Database.Database): void {
               };
             }
 
-            // Filter demo namespaces from orient view
-            response.namespaces = namespaces.filter(
-              (ns) => !ns.namespace.startsWith("demo/") && ns.namespace !== "demo"
-            );
+            response.namespaces = include_demo
+              ? namespaces
+              : namespaces.filter(
+                  (ns) => !ns.namespace.startsWith("demo/") && ns.namespace !== "demo"
+                );
 
             return {
               content: [{
