@@ -302,6 +302,40 @@ describe("listNamespaceContents", () => {
     const { stateEntries, logSummary } = listNamespaceContents(db, "empty/ns");
     expect(stateEntries).toEqual([]);
     expect(logSummary.log_count).toBe(0);
+    expect(logSummary.recent).toEqual([]);
+  });
+
+  it("includes recent log previews ordered by newest first", () => {
+    appendLog(db, "projects/test", "First log", ["milestone"]);
+    appendLog(db, "projects/test", "Second log", []);
+    appendLog(db, "projects/test", "Third log", ["decision"]);
+
+    const { logSummary } = listNamespaceContents(db, "projects/test");
+    expect(logSummary.log_count).toBe(3);
+    expect(logSummary.recent).toHaveLength(3);
+    expect(logSummary.recent[0].content_preview).toBe("Third log");
+    expect(logSummary.recent[1].content_preview).toBe("Second log");
+    expect(logSummary.recent[2].content_preview).toBe("First log");
+    expect(logSummary.recent[0].id).toBeTruthy();
+    expect(logSummary.recent[0].created_at).toBeTruthy();
+  });
+
+  it("limits recent log previews to 5", () => {
+    for (let i = 0; i < 8; i++) {
+      appendLog(db, "projects/test", `Event ${i}`, []);
+    }
+
+    const { logSummary } = listNamespaceContents(db, "projects/test");
+    expect(logSummary.log_count).toBe(8);
+    expect(logSummary.recent).toHaveLength(5);
+  });
+
+  it("truncates long log content in preview", () => {
+    const longContent = "A".repeat(500);
+    appendLog(db, "projects/test", longContent, []);
+
+    const { logSummary } = listNamespaceContents(db, "projects/test");
+    expect(logSummary.recent[0].content_preview.length).toBe(200);
   });
 });
 

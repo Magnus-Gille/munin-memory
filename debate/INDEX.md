@@ -2,6 +2,7 @@
 
 | Date | Topic | Rounds | Key decision | Critique points | Self-review catch rate |
 |------|-------|--------|--------------|----------------|-----------------------|
+| 2026-03-05 | [Usability improvement plan](usability-improvement-summary.md) | synth | All 7 items implemented: log browsing, compact status, key discovery, drift visibility, demo filtering, tag governance, agent-neutral | — | — |
 | 2026-02-09 | [v1 spec review](resolution.md) | 2 | 11 spec amendments adopted | — | — |
 | 2026-02-13 | [Expansion plan (Features 0-5)](expansion-resolution.md) | 2 | Implementation order + debate outcomes | — | — |
 | 2026-02-16 | [meta/conventions improvement](conventions-summary.md) | 2 | Session Handshake as centerpiece; compact playbook; tag vocabulary | 14 | 2/14 (14%) |

@@ -128,7 +128,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_orient",
     description:
-      "START HERE. Call this at the beginning of every conversation before using any other memory tool. Returns the usage conventions (how to use this memory system), the active project dashboard, and a namespace overview — everything needed to orient yourself in one call.\n\nIf you are unsure how to use memory_write, memory_read, memory_log, or any other memory tool, the conventions returned by this tool contain the full guide.",
+      "START HERE. Call this at the beginning of every conversation before using any other memory tool. Returns the usage conventions (how to use this memory system), the active project dashboard, and a namespace overview — everything needed to orient yourself in one call.\n\nAlso surfaces workbench drift: namespaces whose status was updated more recently than the workbench itself, so you know what may need syncing.\n\nIf you are unsure how to use memory_write, memory_read, memory_log, or any other memory tool, the conventions returned by this tool contain the full guide.",
     inputSchema: {
       type: "object" as const,
       properties: {},
@@ -138,7 +138,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_write",
     description:
-      "Store or update a state entry in memory. If an entry with the same namespace+key exists, it will be overwritten. Use this for mutable facts: project status, current decisions, known preferences.\n\nIf this is your first memory operation in this conversation, call memory_orient first.\n\nNamespace conventions: projects/<name> for project state (key 'status' for summary, other keys for aspects), people/<name> for context about people, decisions/<topic> for cross-cutting decisions, meta/workbench for cross-project dashboard.\n\nTo start a new project: (1) write projects/<name>/status with scope, decisions, and next steps, (2) update meta/workbench to list it as active.",
+      "Store or update a state entry in memory. If an entry with the same namespace+key exists, it will be overwritten. Use this for mutable facts: project status, current decisions, known preferences.\n\nIf this is your first memory operation in this conversation, call memory_orient first.\n\nNamespace conventions: projects/<name> for project state, people/<name> for context about people, decisions/<topic> for cross-cutting decisions, meta/workbench for cross-project dashboard.\n\nKey conventions: 'status' = compact resumption summary (Phase / Current work / Blockers / Next — keep brief, move details to other keys like 'architecture', 'workflow', 'research'). 'index' = directory of important keys in this namespace and their purpose.\n\nTag vocabulary: Use canonical tags for consistency — lifecycle: active, completed, paused, blocked; category: decision, architecture, preference, milestone, convention; type: bug, feature, research. Add at most one freeform tag when it clearly improves retrieval.\n\nTo start a new project: (1) write projects/<name>/status, (2) write projects/<name>/index listing the keys, (3) update meta/workbench to list it as active.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -269,7 +269,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_log",
     description:
-      "Append a chronological log entry. Log entries are immutable and timestamped. Use this for recording decisions (always include rationale), milestones, discoveries, and events worth preserving. Pair with memory_write: state entries hold current truth, log entries hold the history of how you got there.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Append a chronological log entry. Log entries are immutable and timestamped. Use this for recording decisions (always include rationale), milestones, discoveries, and events worth preserving. Pair with memory_write: state entries hold current truth, log entries hold the history of how you got there.\n\nTag vocabulary: Use canonical tags — decision, milestone, blocker, discovery, correction. Add at most one freeform tag when it clearly improves retrieval.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -294,7 +294,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_list",
     description:
-      "Browse memory contents. Without a namespace: shows all namespaces with entry counts and last_activity_at. With a namespace: shows all state keys and log count in that namespace. Use without namespace to get a full inventory of what's stored.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Browse memory contents. Without a namespace: shows all namespaces with entry counts and last_activity_at (demo/* namespaces hidden by default). With a namespace: shows all state keys, log count, and the 5 most recent log entry previews.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -302,6 +302,11 @@ const TOOL_DEFINITIONS = [
           type: "string",
           description:
             "Optional. If provided, list contents of this namespace. If omitted, list all namespaces.",
+        },
+        include_demo: {
+          type: "boolean",
+          description:
+            "Optional. If true, include demo/* namespaces in the top-level listing. Default: false.",
         },
       },
       required: [],
@@ -380,6 +385,22 @@ export function registerTools(server: Server, db: Database.Database): void {
                 updated_at: parsed.updated_at,
               };
               if (isStale(parsed.updated_at)) wb.stale = true;
+
+              // Workbench drift detection: find namespaces updated after the workbench
+              const wbUpdatedAt = new Date(parsed.updated_at).getTime();
+              const drifted = namespaces
+                .filter((ns) =>
+                  ns.namespace.startsWith("projects/") &&
+                  new Date(ns.last_activity_at).getTime() > wbUpdatedAt
+                )
+                .map((ns) => ({
+                  namespace: ns.namespace,
+                  last_activity_at: ns.last_activity_at,
+                }));
+              if (drifted.length > 0) {
+                wb.drift = drifted;
+              }
+
               response.workbench = wb;
             } else {
               response.workbench = {
@@ -388,7 +409,10 @@ export function registerTools(server: Server, db: Database.Database): void {
               };
             }
 
-            response.namespaces = namespaces;
+            // Filter demo namespaces from orient view
+            response.namespaces = namespaces.filter(
+              (ns) => !ns.namespace.startsWith("demo/") && ns.namespace !== "demo"
+            );
 
             return {
               content: [{
@@ -687,9 +711,12 @@ export function registerTools(server: Server, db: Database.Database): void {
           }
 
           case "memory_list": {
-            const { namespace } = (args ?? {}) as ListParams;
+            const { namespace, include_demo } = (args ?? {}) as ListParams;
             if (!namespace) {
-              const namespaces = listNamespaces(db);
+              let namespaces = listNamespaces(db);
+              if (!include_demo) {
+                namespaces = namespaces.filter((ns) => !ns.namespace.startsWith("demo/") && ns.namespace !== "demo");
+              }
               return {
                 content: [{
                   type: "text",
@@ -713,7 +740,17 @@ export function registerTools(server: Server, db: Database.Database): void {
                     tags: JSON.parse(e.tags) as string[],
                     updated_at: e.updated_at,
                   })),
-                  log_summary: logSummary,
+                  log_summary: {
+                    log_count: logSummary.log_count,
+                    earliest: logSummary.earliest,
+                    latest: logSummary.latest,
+                    recent: logSummary.recent.map((l) => ({
+                      id: l.id,
+                      content_preview: l.content_preview,
+                      tags: JSON.parse(l.tags) as string[],
+                      created_at: l.created_at,
+                    })),
+                  },
                 }),
               }],
             };

@@ -62,6 +62,7 @@ export interface LogParams {
 
 export interface ListParams {
   namespace?: string;
+  include_demo?: boolean;
 }
 
 export interface DeleteParams {

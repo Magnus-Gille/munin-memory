@@ -33,7 +33,7 @@ Part of the Hugin & Munin personal AI system. See `prd.md` for full product cont
 | `memory_get` | Retrieve any entry (state or log) by UUID |
 | `memory_query` | Search memories (lexical/semantic/hybrid) with filters |
 | `memory_log` | Append a chronological log entry to a namespace |
-| `memory_list` | Browse namespaces and their contents |
+| `memory_list` | Browse namespaces and their contents (with recent log previews and demo filtering) |
 | `memory_delete` | Delete entries (with token-based confirmation) |
 
 ## Project structure

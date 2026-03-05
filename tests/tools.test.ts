@@ -658,6 +658,156 @@ describe("memory_read_batch", () => {
   });
 });
 
+describe("memory_list recent logs", () => {
+  it("includes recent log previews in namespace listing", async () => {
+    await callTool("memory_log", { namespace: "projects/test", content: "First event" });
+    await callTool("memory_log", { namespace: "projects/test", content: "Second event" });
+    await callTool("memory_log", { namespace: "projects/test", content: "Third event" });
+
+    const raw = await callTool("memory_list", { namespace: "projects/test" });
+    const result = parseToolResponse(raw) as {
+      log_summary: {
+        log_count: number;
+        recent: Array<{ id: string; content_preview: string; tags: string[]; created_at: string }>;
+      };
+    };
+    expect(result.log_summary.log_count).toBe(3);
+    expect(result.log_summary.recent).toHaveLength(3);
+    // Most recent first
+    expect(result.log_summary.recent[0].content_preview).toBe("Third event");
+    expect(result.log_summary.recent[1].content_preview).toBe("Second event");
+    expect(result.log_summary.recent[2].content_preview).toBe("First event");
+    expect(result.log_summary.recent[0].tags).toEqual([]);
+    expect(result.log_summary.recent[0].id).toBeTruthy();
+    expect(result.log_summary.recent[0].created_at).toBeTruthy();
+  });
+
+  it("limits recent logs to 5", async () => {
+    for (let i = 0; i < 8; i++) {
+      await callTool("memory_log", { namespace: "projects/test", content: `Event ${i}` });
+    }
+
+    const raw = await callTool("memory_list", { namespace: "projects/test" });
+    const result = parseToolResponse(raw) as {
+      log_summary: { log_count: number; recent: unknown[] };
+    };
+    expect(result.log_summary.log_count).toBe(8);
+    expect(result.log_summary.recent).toHaveLength(5);
+  });
+
+  it("returns empty recent array when no logs", async () => {
+    await callTool("memory_write", { namespace: "projects/test", key: "status", content: "active" });
+
+    const raw = await callTool("memory_list", { namespace: "projects/test" });
+    const result = parseToolResponse(raw) as {
+      log_summary: { log_count: number; recent: unknown[] };
+    };
+    expect(result.log_summary.log_count).toBe(0);
+    expect(result.log_summary.recent).toEqual([]);
+  });
+});
+
+describe("memory_list demo filtering", () => {
+  it("hides demo namespaces by default", async () => {
+    await callTool("memory_write", { namespace: "projects/real", key: "s", content: "c" });
+    await callTool("memory_write", { namespace: "demo/test", key: "s", content: "c" });
+
+    const raw = await callTool("memory_list", {});
+    const result = parseToolResponse(raw) as { namespaces: Array<{ namespace: string }> };
+    expect(result.namespaces.map((n) => n.namespace)).toEqual(["projects/real"]);
+  });
+
+  it("shows demo namespaces when include_demo is true", async () => {
+    await callTool("memory_write", { namespace: "projects/real", key: "s", content: "c" });
+    await callTool("memory_write", { namespace: "demo/test", key: "s", content: "c" });
+
+    const raw = await callTool("memory_list", { include_demo: true });
+    const result = parseToolResponse(raw) as { namespaces: Array<{ namespace: string }> };
+    const names = result.namespaces.map((n) => n.namespace);
+    expect(names).toContain("demo/test");
+    expect(names).toContain("projects/real");
+  });
+});
+
+describe("memory_orient workbench drift", () => {
+  it("surfaces namespaces updated after workbench", async () => {
+    await callTool("memory_write", {
+      namespace: "meta",
+      key: "workbench",
+      content: "# Workbench\n## Active\n- projects/alpha",
+    });
+    // Backdate workbench
+    db.prepare("UPDATE entries SET updated_at = '2026-01-01T00:00:00.000Z' WHERE namespace = 'meta' AND key = 'workbench'").run();
+
+    // Create a project that's newer than the workbench
+    await callTool("memory_write", {
+      namespace: "projects/alpha",
+      key: "status",
+      content: "Updated recently",
+    });
+
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as {
+      workbench: { drift?: Array<{ namespace: string; last_activity_at: string }> };
+    };
+    expect(result.workbench.drift).toBeDefined();
+    expect(result.workbench.drift!.length).toBe(1);
+    expect(result.workbench.drift![0].namespace).toBe("projects/alpha");
+  });
+
+  it("does not include drift when workbench is up to date", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/alpha",
+      key: "status",
+      content: "Old",
+    });
+    // Backdate the project
+    db.prepare("UPDATE entries SET updated_at = '2025-01-01T00:00:00.000Z' WHERE namespace = 'projects/alpha'").run();
+
+    await callTool("memory_write", {
+      namespace: "meta",
+      key: "workbench",
+      content: "# Workbench\n## Active\n- projects/alpha",
+    });
+
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as {
+      workbench: { drift?: unknown[] };
+    };
+    expect(result.workbench.drift).toBeUndefined();
+  });
+
+  it("only tracks drift for projects/* namespaces", async () => {
+    await callTool("memory_write", {
+      namespace: "meta",
+      key: "workbench",
+      content: "# Workbench",
+    });
+    db.prepare("UPDATE entries SET updated_at = '2026-01-01T00:00:00.000Z' WHERE namespace = 'meta' AND key = 'workbench'").run();
+
+    await callTool("memory_write", { namespace: "people/alice", key: "prefs", content: "vim" });
+
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as {
+      workbench: { drift?: unknown[] };
+    };
+    expect(result.workbench.drift).toBeUndefined();
+  });
+
+  it("filters demo namespaces from orient", async () => {
+    await callTool("memory_write", { namespace: "projects/real", key: "s", content: "c" });
+    await callTool("memory_write", { namespace: "demo/test", key: "s", content: "c" });
+
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as {
+      namespaces: Array<{ namespace: string }>;
+    };
+    const names = result.namespaces.map((n) => n.namespace);
+    expect(names).toContain("projects/real");
+    expect(names).not.toContain("demo/test");
+  });
+});
+
 describe("unknown tool", () => {
   it("returns error for unknown tool name", async () => {
     const raw = await callTool("memory_nonexistent", {});

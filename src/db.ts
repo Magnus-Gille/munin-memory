@@ -298,10 +298,18 @@ export interface StateEntryPreview {
   updated_at: string;
 }
 
+export interface LogPreview {
+  id: string;
+  content_preview: string;
+  tags: string;
+  created_at: string;
+}
+
 export interface LogSummary {
   log_count: number;
   earliest: string | null;
   latest: string | null;
+  recent: LogPreview[];
 }
 
 export function listNamespaceContents(
@@ -315,12 +323,25 @@ export function listNamespaceContents(
     )
     .all(namespace) as StateEntryPreview[];
 
-  const logSummary = (db
+  const logStats = (db
     .prepare(
       `SELECT COUNT(*) as log_count, MIN(created_at) as earliest, MAX(created_at) as latest
        FROM entries WHERE namespace = ? AND entry_type = 'log'`,
     )
-    .get(namespace) as LogSummary) ?? { log_count: 0, earliest: null, latest: null };
+    .get(namespace) as { log_count: number; earliest: string | null; latest: string | null }) ?? { log_count: 0, earliest: null, latest: null };
+
+  const recentLogs = db
+    .prepare(
+      `SELECT id, substr(content, 1, 200) as content_preview, tags, created_at
+       FROM entries WHERE namespace = ? AND entry_type = 'log'
+       ORDER BY rowid DESC LIMIT 5`,
+    )
+    .all(namespace) as LogPreview[];
+
+  const logSummary: LogSummary = {
+    ...logStats,
+    recent: recentLogs,
+  };
 
   return { stateEntries, logSummary };
 }
