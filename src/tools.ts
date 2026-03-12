@@ -19,6 +19,7 @@ import {
   previewDelete,
   executeDelete,
   getOtherKeysInNamespace,
+  getTrackedStatuses,
   vecLoaded,
 } from "./db.js";
 import {
@@ -45,6 +46,8 @@ import type {
   DeleteParams,
   Entry,
   SearchMode,
+  DashboardEntry,
+  MaintenanceItem,
 } from "./types.js";
 
 // In-memory delete token store (debate resolution #9)
@@ -98,37 +101,42 @@ function isStale(updatedAt: string): boolean {
   return Date.now() - new Date(updatedAt).getTime() > STALENESS_THRESHOLD_MS;
 }
 
-/**
- * Auto-add a new projects/* namespace to the workbench's "Needs Review" section.
- * Only called when the first entry in a projects/* namespace is created.
- * Returns true if the workbench was actually updated, false otherwise.
- */
-function autoAddToWorkbench(db: Database.Database, namespace: string): boolean {
-  const workbench = readState(db, "meta", "workbench");
-  if (!workbench) return false;
+// --- Lifecycle tag management ---
 
-  const content = workbench.content;
-  const needsReviewHeader = "## Needs Review";
-  const idx = content.indexOf(needsReviewHeader);
-  if (idx === -1) return false;
+const LIFECYCLE_TAGS = new Set(["active", "blocked", "completed", "stopped", "maintenance", "archived"]);
 
-  const line = `\n- ${namespace} — auto-added, not yet reviewed`;
+const TAG_ALIASES: Record<string, string> = {
+  "done": "completed",
+  "paused": "stopped",
+  "inactive": "archived",
+};
 
-  // Find the end of the "Needs Review" section (next ## or end of content)
-  const afterHeader = idx + needsReviewHeader.length;
-  const nextSection = content.indexOf("\n##", afterHeader);
-  const insertAt = nextSection !== -1 ? nextSection : content.length;
+function isTrackedNamespace(namespace: string): boolean {
+  return namespace.startsWith("projects/") || namespace.startsWith("clients/");
+}
 
-  const updated = content.slice(0, insertAt) + line + content.slice(insertAt);
-  writeState(db, "meta", "workbench", updated, JSON.parse(workbench.tags) as string[]);
-  return true;
+function canonicalizeTags(tags: string[]): { canonical: string[]; normalized: string[] } {
+  const normalized: string[] = [];
+  const canonical = tags.map(t => {
+    const alias = TAG_ALIASES[t];
+    if (alias) {
+      normalized.push(`"${t}" → "${alias}"`);
+      return alias;
+    }
+    return t;
+  });
+  return { canonical, normalized };
+}
+
+function getLifecycleTags(tags: string[]): string[] {
+  return tags.filter(t => LIFECYCLE_TAGS.has(t));
 }
 
 const TOOL_DEFINITIONS = [
   {
     name: "memory_orient",
     description:
-      "START HERE. Call this at the beginning of every conversation before using any other memory tool. Returns the usage conventions (how to use this memory system), the active project dashboard, and a namespace overview — everything needed to orient yourself in one call.\n\nAlso surfaces workbench drift: projects whose `status` entry was updated more recently than the workbench itself, so you know what may need syncing. Demo namespaces are hidden by default; pass `include_demo: true` if you want them in the namespace overview.\n\nIf you are unsure how to use memory_write, memory_read, memory_log, or any other memory tool, the conventions returned by this tool contain the full guide.",
+      "START HERE. Call this at the beginning of every conversation before using any other memory tool. Returns conventions, a computed project dashboard (grouped by lifecycle from status entries), optional curated notes, actionable maintenance suggestions, and a namespace overview — everything needed to orient yourself in one call.\n\nThe dashboard is computed automatically from status entries in projects/* and clients/* namespaces. No manual workbench maintenance needed. Demo namespaces are hidden by default; pass `include_demo: true` if you want them in the namespace overview.\n\nIf you are unsure how to use memory_write, memory_read, memory_log, or any other memory tool, the conventions returned by this tool contain the full guide.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -144,7 +152,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_write",
     description:
-      "Store or update a state entry in memory. If an entry with the same namespace+key exists, it will be overwritten. Use this for mutable facts: project status, current decisions, known preferences.\n\nIf this is your first memory operation in this conversation, call memory_orient first.\n\nNamespace conventions: projects/<name> for project state, people/<name> for context about people, decisions/<topic> for cross-cutting decisions, meta/workbench for cross-project dashboard.\n\nKey conventions: 'status' = compact resumption summary (Phase / Current work / Blockers / Next — keep brief, move details to other keys like 'architecture', 'workflow', 'research'). 'index' = directory of important keys in this namespace and their purpose.\n\nTag vocabulary: Use canonical tags for consistency — lifecycle: active, completed, paused, blocked; category: decision, architecture, preference, milestone, convention; type: bug, feature, research. Add at most one freeform tag when it clearly improves retrieval.\n\nTo start a new project: (1) write projects/<name>/status, (2) write projects/<name>/index listing the keys, (3) update meta/workbench to list it as active.",
+      "Store or update a state entry in memory. If an entry with the same namespace+key exists, it will be overwritten. Use this for mutable facts: project status, current decisions, known preferences.\n\nIf this is your first memory operation in this conversation, call memory_orient first.\n\nNamespace conventions: projects/<name> for project state, people/<name> for context about people, decisions/<topic> for cross-cutting decisions, meta/<topic> for system notes.\n\nKey conventions: 'status' = compact resumption summary (Phase / Current work / Blockers / Next — keep brief, move details to other keys like 'architecture', 'workflow', 'research'). 'index' = directory of important keys in this namespace and their purpose.\n\nTag vocabulary: Use canonical lifecycle tags on status entries: active, blocked, completed, stopped, maintenance, archived. Aliases are auto-normalized (done→completed, paused→stopped, inactive→archived). Category tags: decision, architecture, preference, milestone, convention. Type tags: bug, feature, research.\n\nThe project dashboard is computed automatically from status entries with lifecycle tags. No manual workbench maintenance needed. Writing to 'status' in projects/* or clients/* supports compare-and-swap via expected_updated_at.\n\nTo start a new project: (1) write projects/<name>/status with a lifecycle tag (e.g. 'active'), (2) optionally write projects/<name>/index listing the keys.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -168,6 +176,11 @@ const TOOL_DEFINITIONS = [
           items: { type: "string" },
           description:
             'Optional freeform tags for cross-cutting queries. Must be a JSON array, e.g. ["decision", "raspberry-pi", "active"]. Do NOT pass as a comma-separated string.',
+        },
+        expected_updated_at: {
+          type: "string",
+          description:
+            "Optional. For tracked status writes (projects/*, clients/*): pass the updated_at from your last read to prevent blind overwrites. Returns conflict error if the entry was modified since.",
         },
       },
       required: ["namespace", "key", "content"],
@@ -275,7 +288,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_log",
     description:
-      "Append a chronological log entry. Log entries are immutable and timestamped. Use this for recording decisions (always include rationale), milestones, discoveries, and events worth preserving. Pair with memory_write: state entries hold current truth, log entries hold the history of how you got there.\n\nTag vocabulary: Use canonical tags — decision, milestone, blocker, discovery, correction. Add at most one freeform tag when it clearly improves retrieval.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Append a chronological log entry. Log entries are immutable and timestamped. Use for decisions, events, and milestones with rationale. Status changes do NOT auto-log — log explicitly when decisions are made. Pair with memory_write: state entries hold current truth, log entries hold the history of how you got there.\n\nTag vocabulary: Use canonical tags — decision, milestone, blocker, discovery, correction. Add at most one freeform tag when it clearly improves retrieval.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -363,13 +376,13 @@ export function registerTools(server: Server, db: Database.Database): void {
         switch (name) {
           case "memory_orient": {
             const { include_demo } = (args ?? {}) as ListParams;
-            // Read conventions, workbench, and namespace list in one call
+            // Read conventions and namespace list
             const conventions = readState(db, "meta/conventions", "conventions");
-            const workbench = readState(db, "meta", "workbench");
             const namespaces = listNamespaces(db);
 
             const response: Record<string, unknown> = {};
 
+            // Conventions
             if (conventions) {
               const parsed = parseEntry(conventions);
               const conv: Record<string, unknown> = {
@@ -385,39 +398,100 @@ export function registerTools(server: Server, db: Database.Database): void {
               };
             }
 
-            if (workbench) {
-              const parsed = parseEntry(workbench);
-              const wb: Record<string, unknown> = {
-                content: parsed.content,
-                updated_at: parsed.updated_at,
-              };
-              if (isStale(parsed.updated_at)) wb.stale = true;
+            // Computed dashboard from tracked status entries
+            const trackedStatuses = getTrackedStatuses(db);
+            const dashboard: Record<string, DashboardEntry[]> = {
+              active: [],
+              blocked: [],
+              maintenance: [],
+              stopped: [],
+              completed: [],
+              uncategorized: [],
+            };
+            const maintenanceNeeded: MaintenanceItem[] = [];
 
-              // Workbench drift detection: compare project status entries, not namespace activity.
-              const wbUpdatedAt = new Date(parsed.updated_at).getTime();
-              const drifted = namespaces
-                .filter((ns) => ns.namespace.startsWith("projects/"))
-                .flatMap((ns) => {
-                  const status = readState(db, ns.namespace, "status");
-                  if (!status) return [];
-                  if (new Date(status.updated_at).getTime() <= wbUpdatedAt) return [];
-                  return [{
-                    namespace: ns.namespace,
-                    status_updated_at: status.updated_at,
-                  }];
+            for (const row of trackedStatuses) {
+              const tags: string[] = JSON.parse(row.tags);
+              const { canonical } = canonicalizeTags(tags);
+              const lifecycleTags = getLifecycleTags(canonical);
+
+              let lifecycle: string;
+              if (lifecycleTags.length === 0) {
+                lifecycle = "uncategorized";
+                maintenanceNeeded.push({
+                  namespace: row.namespace,
+                  issue: "missing_lifecycle",
+                  suggestion: `Status has no lifecycle tag. Add one of: ${[...LIFECYCLE_TAGS].join(", ")}.`,
                 });
-              if (drifted.length > 0) {
-                wb.drift = drifted;
+              } else if (lifecycleTags.length > 1) {
+                lifecycle = lifecycleTags[0]; // use first, but flag it
+                maintenanceNeeded.push({
+                  namespace: row.namespace,
+                  issue: "conflicting_lifecycle",
+                  suggestion: `Status has tags [${lifecycleTags.join(", ")}]. Use exactly one.`,
+                });
+              } else {
+                lifecycle = lifecycleTags[0];
               }
 
-              response.workbench = wb;
-            } else {
-              response.workbench = {
-                content: null,
-                message: "No workbench found. Write to meta with key 'workbench' to set it up.",
+              const entry: DashboardEntry = {
+                namespace: row.namespace,
+                summary: row.content_preview.slice(0, 150),
+                updated_at: row.updated_at,
+                lifecycle,
+              };
+
+              if (lifecycle === "active" && isStale(row.updated_at)) {
+                entry.needs_attention = true;
+                const daysSince = Math.floor((Date.now() - new Date(row.updated_at).getTime()) / (24 * 60 * 60 * 1000));
+                maintenanceNeeded.push({
+                  namespace: row.namespace,
+                  issue: "active_but_stale",
+                  suggestion: `Last updated ${daysSince} days ago. Update status or change lifecycle to maintenance/archived.`,
+                });
+              }
+
+              const group = dashboard[lifecycle] ?? dashboard.uncategorized;
+              group.push(entry);
+            }
+
+            // Check for tracked namespaces that have entries but no status key
+            const trackedNsWithStatus = new Set(trackedStatuses.map(r => r.namespace));
+            for (const ns of namespaces) {
+              if (isTrackedNamespace(ns.namespace) && !trackedNsWithStatus.has(ns.namespace)) {
+                maintenanceNeeded.push({
+                  namespace: ns.namespace,
+                  issue: "missing_status",
+                  suggestion: "Has entries but no 'status' key. Write a status entry with a lifecycle tag.",
+                });
+              }
+            }
+
+            response.dashboard = dashboard;
+
+            // Curated overlay (meta/workbench-notes)
+            const notes = readState(db, "meta", "workbench-notes");
+            if (notes) {
+              response.notes = notes.content;
+            }
+
+            // Maintenance suggestions
+            if (maintenanceNeeded.length > 0) {
+              response.maintenance_needed = maintenanceNeeded;
+            }
+
+            // Legacy workbench (transition period)
+            const workbench = readState(db, "meta", "workbench");
+            if (workbench) {
+              const parsed = parseEntry(workbench);
+              response.legacy_workbench = {
+                content: parsed.content,
+                updated_at: parsed.updated_at,
+                deprecation_note: "The workbench is deprecated. The computed dashboard above is now the source of truth for project/client state. Delete meta/workbench when ready.",
               };
             }
 
+            // Namespace overview
             response.namespaces = include_demo
               ? namespaces
               : namespaces.filter(
@@ -433,32 +507,76 @@ export function registerTools(server: Server, db: Database.Database): void {
           }
 
           case "memory_write": {
-            const { namespace, key, content, tags } = args as unknown as WriteParams;
+            const { namespace, key, content, tags, expected_updated_at } =
+              args as unknown as WriteParams & { expected_updated_at?: string };
             const validation = validateWriteInput(namespace, key, content, tags, maxContentSize);
             if (!validation.valid) {
               return { content: [{ type: "text", text: JSON.stringify({ error: "validation_error", message: validation.error }) }] };
             }
-            const result = writeState(db, namespace, key, content, tags ?? []);
+
+            const isTrackedStatus = key === "status" && isTrackedNamespace(namespace);
+            const warnings: string[] = [];
+
+            // Canonicalize tags for tracked status writes
+            let effectiveTags = tags ?? [];
+            if (isTrackedStatus && effectiveTags.length > 0) {
+              const { canonical, normalized } = canonicalizeTags(effectiveTags);
+              if (normalized.length > 0) {
+                warnings.push(`Tags normalized: ${normalized.join(", ")}`);
+              }
+              effectiveTags = canonical;
+            }
+
+            // Lifecycle validation for tracked status writes
+            if (isTrackedStatus) {
+              const lifecycleTags = getLifecycleTags(effectiveTags);
+              if (lifecycleTags.length === 0) {
+                warnings.push(`No lifecycle tag found. Consider adding one of: ${[...LIFECYCLE_TAGS].join(", ")}.`);
+              } else if (lifecycleTags.length > 1) {
+                warnings.push(`Multiple lifecycle tags found: [${lifecycleTags.join(", ")}]. Use exactly one.`);
+              }
+            }
+
+            const result = writeState(db, namespace, key, content, effectiveTags, "default", expected_updated_at);
+
+            if (result.status === "conflict") {
+              return {
+                content: [{
+                  type: "text",
+                  text: JSON.stringify({
+                    status: "conflict",
+                    namespace,
+                    key,
+                    message: result.message,
+                    current_updated_at: result.current_updated_at,
+                  }),
+                }],
+              };
+            }
+
             const otherKeys = getOtherKeysInNamespace(db, namespace, key);
             const isFirstEntry = otherKeys.length === 0;
             const hint = isFirstEntry
               ? "This is the first entry in this namespace."
               : `Related entries in this namespace: ${otherKeys.join(", ")}`;
 
-            // Auto-add new projects/* namespaces to workbench
-            let workbenchUpdated = false;
-            if (result.status === "created" && isFirstEntry && namespace.startsWith("projects/")) {
-              try {
-                workbenchUpdated = autoAddToWorkbench(db, namespace);
-              } catch {
-                // Non-critical — don't fail the write
-              }
+            const response: Record<string, unknown> = {
+              status: result.status,
+              id: result.id,
+              namespace,
+              key,
+              hint,
+            };
+
+            // CAS hint for tracked status writes without expected_updated_at
+            if (isTrackedStatus && !expected_updated_at && result.status === "updated") {
+              warnings.push("Consider passing expected_updated_at for tracked status writes to prevent blind overwrites.");
             }
 
-            const response: Record<string, unknown> = { ...result, namespace, key, hint };
-            if (workbenchUpdated) {
-              response.workbench_updated = true;
+            if (warnings.length > 0) {
+              response.warnings = warnings;
             }
+
             return {
               content: [{
                 type: "text",

@@ -390,7 +390,7 @@ describe("memory_delete", () => {
 });
 
 describe("memory_orient", () => {
-  it("returns conventions, workbench, and namespaces when all exist", async () => {
+  it("returns conventions, dashboard, and namespaces", async () => {
     await callTool("memory_write", {
       namespace: "meta/conventions",
       key: "conventions",
@@ -398,72 +398,131 @@ describe("memory_orient", () => {
       tags: ["governance"],
     });
     await callTool("memory_write", {
-      namespace: "meta",
-      key: "workbench",
-      content: "# Workbench\n## Active\n- projects/test",
-      tags: ["index"],
-    });
-    await callTool("memory_write", {
       namespace: "projects/test",
       key: "status",
-      content: "Active",
+      content: "Active project",
+      tags: ["active"],
     });
 
     const raw = await callTool("memory_orient", {});
     const result = parseToolResponse(raw) as {
       conventions: { content: string; updated_at: string };
-      workbench: { content: string; updated_at: string };
-      namespaces: Array<{ namespace: string; state_count: number; log_count: number; last_activity_at: string }>;
+      dashboard: Record<string, unknown[]>;
+      namespaces: Array<{ namespace: string }>;
     };
 
     expect(result.conventions.content).toContain("# Conventions");
     expect(result.conventions.updated_at).toBeTruthy();
-    expect(result.workbench.content).toContain("# Workbench");
-    expect(result.workbench.updated_at).toBeTruthy();
-    expect(result.namespaces).toHaveLength(3);
-    expect(result.namespaces.map((n) => n.namespace).sort()).toEqual(
-      ["meta", "meta/conventions", "projects/test"]
-    );
+    expect(result.dashboard).toBeDefined();
+    expect(result.dashboard.active).toHaveLength(1);
   });
 
-  it("returns helpful messages when conventions and workbench are missing", async () => {
+  it("returns empty dashboard when no projects exist", async () => {
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as {
+      dashboard: Record<string, unknown[]>;
+    };
+    expect(result.dashboard.active).toHaveLength(0);
+    expect(result.dashboard.blocked).toHaveLength(0);
+    expect(result.dashboard.completed).toHaveLength(0);
+    expect(result.dashboard.uncategorized).toHaveLength(0);
+  });
+
+  it("groups entries by lifecycle tag correctly", async () => {
+    await callTool("memory_write", { namespace: "projects/a", key: "status", content: "Active", tags: ["active"] });
+    await callTool("memory_write", { namespace: "projects/b", key: "status", content: "Blocked", tags: ["blocked"] });
+    await callTool("memory_write", { namespace: "projects/c", key: "status", content: "Done", tags: ["completed"] });
+    await callTool("memory_write", { namespace: "projects/d", key: "status", content: "On hold", tags: ["stopped"] });
+    await callTool("memory_write", { namespace: "projects/e", key: "status", content: "In maint", tags: ["maintenance"] });
+    await callTool("memory_write", { namespace: "clients/f", key: "status", content: "Client active", tags: ["active"] });
+
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as {
+      dashboard: Record<string, Array<{ namespace: string }>>;
+    };
+    expect(result.dashboard.active).toHaveLength(2);
+    expect(result.dashboard.blocked).toHaveLength(1);
+    expect(result.dashboard.completed).toHaveLength(1);
+    expect(result.dashboard.stopped).toHaveLength(1);
+    expect(result.dashboard.maintenance).toHaveLength(1);
+  });
+
+  it("entries with no lifecycle tag go to uncategorized", async () => {
+    await callTool("memory_write", { namespace: "projects/x", key: "status", content: "No lifecycle", tags: ["feature"] });
+
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as {
+      dashboard: Record<string, Array<{ namespace: string }>>;
+    };
+    expect(result.dashboard.uncategorized).toHaveLength(1);
+    expect(result.dashboard.uncategorized[0].namespace).toBe("projects/x");
+  });
+
+  it("active entries >14 days old get needs_attention", async () => {
+    await callTool("memory_write", { namespace: "projects/stale", key: "status", content: "Old", tags: ["active"] });
+    db.prepare("UPDATE entries SET updated_at = '2020-01-01T00:00:00.000Z' WHERE namespace = 'projects/stale'").run();
+
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as {
+      dashboard: { active: Array<{ namespace: string; needs_attention?: boolean }> };
+    };
+    expect(result.dashboard.active[0].needs_attention).toBe(true);
+  });
+
+  it("includes legacy_workbench when meta:workbench exists", async () => {
+    await callTool("memory_write", { namespace: "meta", key: "workbench", content: "# Old Workbench" });
+
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as {
+      legacy_workbench: { content: string; deprecation_note: string };
+    };
+    expect(result.legacy_workbench.content).toContain("# Old Workbench");
+    expect(result.legacy_workbench.deprecation_note).toContain("deprecated");
+  });
+
+  it("includes notes when meta/workbench-notes exists", async () => {
+    await callTool("memory_write", { namespace: "meta", key: "workbench-notes", content: "Remember to check X" });
+
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as { notes: string };
+    expect(result.notes).toBe("Remember to check X");
+  });
+
+  it("excludes demo namespaces by default", async () => {
+    await callTool("memory_write", { namespace: "projects/real", key: "s", content: "c" });
+    await callTool("memory_write", { namespace: "demo/test", key: "s", content: "c" });
+
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as { namespaces: Array<{ namespace: string }> };
+    const names = result.namespaces.map((n) => n.namespace);
+    expect(names).toContain("projects/real");
+    expect(names).not.toContain("demo/test");
+  });
+
+  it("shows demo namespaces when include_demo is true", async () => {
+    await callTool("memory_write", { namespace: "projects/real", key: "s", content: "c" });
+    await callTool("memory_write", { namespace: "demo/test", key: "s", content: "c" });
+
+    const raw = await callTool("memory_orient", { include_demo: true });
+    const result = parseToolResponse(raw) as { namespaces: Array<{ namespace: string }> };
+    const names = result.namespaces.map((n) => n.namespace);
+    expect(names).toContain("demo/test");
+  });
+
+  it("returns helpful message when conventions are missing", async () => {
     const raw = await callTool("memory_orient", {});
     const result = parseToolResponse(raw) as {
       conventions: { content: null; message: string };
-      workbench: { content: null; message: string };
-      namespaces: unknown[];
     };
-
     expect(result.conventions.content).toBeNull();
     expect(result.conventions.message).toContain("No conventions found");
-    expect(result.workbench.content).toBeNull();
-    expect(result.workbench.message).toContain("No workbench found");
-    expect(result.namespaces).toHaveLength(0);
-  });
-
-  it("works with conventions but no workbench", async () => {
-    await callTool("memory_write", {
-      namespace: "meta/conventions",
-      key: "conventions",
-      content: "# Guide",
-    });
-
-    const raw = await callTool("memory_orient", {});
-    const result = parseToolResponse(raw) as {
-      conventions: { content: string };
-      workbench: { content: null; message: string };
-    };
-
-    expect(result.conventions.content).toBe("# Guide");
-    expect(result.workbench.content).toBeNull();
   });
 
   it("requires no parameters", async () => {
-    // Should work with no args at all
     const raw = await callTool("memory_orient");
-    const result = parseToolResponse(raw) as { conventions: unknown; workbench: unknown; namespaces: unknown };
+    const result = parseToolResponse(raw) as { conventions: unknown; dashboard: unknown; namespaces: unknown };
     expect(result.conventions).toBeDefined();
-    expect(result.workbench).toBeDefined();
+    expect(result.dashboard).toBeDefined();
     expect(result.namespaces).toBeDefined();
   });
 });
@@ -511,92 +570,187 @@ describe("staleness flag", () => {
     expect(result.stale).toBe(true);
   });
 
-  it("includes stale flag in memory_orient for stale workbench", async () => {
-    await callTool("memory_write", {
-      namespace: "meta",
-      key: "workbench",
-      content: "# Workbench\n## Active\n## Blocked\n## Recently Completed\n## Needs Review",
-    });
-    db.prepare("UPDATE entries SET updated_at = '2020-01-01T00:00:00.000Z' WHERE namespace = 'meta' AND key = 'workbench'").run();
+});
 
-    const raw = await callTool("memory_orient", {});
-    const result = parseToolResponse(raw) as { workbench: { stale?: boolean } };
-    expect(result.workbench.stale).toBe(true);
+describe("compare-and-swap (memory_write)", () => {
+  it("write succeeds with correct expected_updated_at", async () => {
+    await callTool("memory_write", { namespace: "projects/cas", key: "status", content: "v1", tags: ["active"] });
+    const readRaw = await callTool("memory_read", { namespace: "projects/cas", key: "status" });
+    const readResult = parseToolResponse(readRaw) as { updated_at: string };
+
+    const raw = await callTool("memory_write", {
+      namespace: "projects/cas",
+      key: "status",
+      content: "v2",
+      tags: ["active"],
+      expected_updated_at: readResult.updated_at,
+    });
+    const result = parseToolResponse(raw) as { status: string };
+    expect(result.status).toBe("updated");
+  });
+
+  it("write returns conflict with wrong expected_updated_at", async () => {
+    await callTool("memory_write", { namespace: "projects/cas", key: "status", content: "v1", tags: ["active"] });
+
+    const raw = await callTool("memory_write", {
+      namespace: "projects/cas",
+      key: "status",
+      content: "v2",
+      tags: ["active"],
+      expected_updated_at: "2020-01-01T00:00:00.000Z",
+    });
+    const result = parseToolResponse(raw) as { status: string; current_updated_at: string; message: string };
+    expect(result.status).toBe("conflict");
+    expect(result.current_updated_at).toBeTruthy();
+    expect(result.message).toContain("was updated at");
+  });
+
+  it("write succeeds without expected_updated_at (optional)", async () => {
+    await callTool("memory_write", { namespace: "projects/cas", key: "status", content: "v1", tags: ["active"] });
+
+    const raw = await callTool("memory_write", {
+      namespace: "projects/cas",
+      key: "status",
+      content: "v2",
+      tags: ["active"],
+    });
+    const result = parseToolResponse(raw) as { status: string };
+    expect(result.status).toBe("updated");
+  });
+
+  it("hints CAS for tracked status writes without expected_updated_at", async () => {
+    await callTool("memory_write", { namespace: "projects/cas", key: "status", content: "v1", tags: ["active"] });
+
+    const raw = await callTool("memory_write", {
+      namespace: "projects/cas",
+      key: "status",
+      content: "v2",
+      tags: ["active"],
+    });
+    const result = parseToolResponse(raw) as { warnings?: string[] };
+    expect(result.warnings).toBeDefined();
+    expect(result.warnings!.some(w => w.includes("expected_updated_at"))).toBe(true);
   });
 });
 
-describe("auto-add to workbench", () => {
-  it("adds new projects/* namespace to workbench Needs Review", async () => {
-    // Create workbench first
-    await callTool("memory_write", {
-      namespace: "meta",
-      key: "workbench",
-      content: "# Workbench\n\n## Active\n\n## Blocked\n\n## Recently Completed\n\n## Needs Review",
-    });
-
-    // Create first entry in a new project namespace
+describe("tag canonicalization (memory_write)", () => {
+  it("normalizes 'done' to 'completed' with warning", async () => {
     const raw = await callTool("memory_write", {
-      namespace: "projects/new-thing",
+      namespace: "projects/canon",
       key: "status",
-      content: "Just started",
+      content: "Finished",
+      tags: ["done"],
     });
-    const result = parseToolResponse(raw) as { status: string; workbench_updated?: boolean };
+    const result = parseToolResponse(raw) as { status: string; warnings?: string[] };
     expect(result.status).toBe("created");
-    expect(result.workbench_updated).toBe(true);
+    expect(result.warnings).toBeDefined();
+    expect(result.warnings!.some(w => w.includes('"done" → "completed"'))).toBe(true);
 
-    // Verify workbench was updated
-    const wbRaw = await callTool("memory_read", { namespace: "meta", key: "workbench" });
-    const wb = parseToolResponse(wbRaw) as { content: string };
-    expect(wb.content).toContain("projects/new-thing");
-    expect(wb.content).toContain("auto-added");
+    // Verify stored tags are canonical
+    const readRaw = await callTool("memory_read", { namespace: "projects/canon", key: "status" });
+    const readResult = parseToolResponse(readRaw) as { tags: string[] };
+    expect(readResult.tags).toContain("completed");
+    expect(readResult.tags).not.toContain("done");
   });
 
-  it("does not update workbench for second entry in existing namespace", async () => {
-    await callTool("memory_write", {
-      namespace: "meta",
-      key: "workbench",
-      content: "# Workbench\n\n## Active\n\n## Blocked\n\n## Recently Completed\n\n## Needs Review",
-    });
-
-    await callTool("memory_write", {
-      namespace: "projects/existing",
-      key: "status",
-      content: "First",
-    });
+  it("normalizes 'paused' to 'stopped' with warning", async () => {
     const raw = await callTool("memory_write", {
-      namespace: "projects/existing",
-      key: "architecture",
-      content: "Second entry",
+      namespace: "projects/canon2",
+      key: "status",
+      content: "On hold",
+      tags: ["paused"],
     });
-    const result = parseToolResponse(raw) as { workbench_updated?: boolean };
-    expect(result.workbench_updated).toBeUndefined();
+    const result = parseToolResponse(raw) as { warnings?: string[] };
+    expect(result.warnings!.some(w => w.includes('"paused" → "stopped"'))).toBe(true);
+
+    const readRaw = await callTool("memory_read", { namespace: "projects/canon2", key: "status" });
+    const readResult = parseToolResponse(readRaw) as { tags: string[] };
+    expect(readResult.tags).toContain("stopped");
   });
 
-  it("does not update workbench for non-projects namespaces", async () => {
-    await callTool("memory_write", {
-      namespace: "meta",
-      key: "workbench",
-      content: "# Workbench\n\n## Active\n\n## Blocked\n\n## Recently Completed\n\n## Needs Review",
+  it("canonical tags pass through unchanged", async () => {
+    const raw = await callTool("memory_write", {
+      namespace: "projects/canon3",
+      key: "status",
+      content: "Active",
+      tags: ["active"],
     });
+    const result = parseToolResponse(raw) as { warnings?: string[] };
+    // No normalization warnings (CAS hint may still be absent since this is "created")
+    const normWarnings = (result.warnings ?? []).filter(w => w.includes("normalized"));
+    expect(normWarnings).toHaveLength(0);
+  });
 
+  it("no canonicalization for non-status / non-tracked writes", async () => {
     const raw = await callTool("memory_write", {
       namespace: "people/alice",
       key: "prefs",
-      content: "Likes TypeScript",
+      content: "Likes vim",
+      tags: ["done"],
     });
-    const result = parseToolResponse(raw) as { workbench_updated?: boolean };
-    expect(result.workbench_updated).toBeUndefined();
+    const result = parseToolResponse(raw) as { warnings?: string[] };
+    // Tags should NOT be canonicalized for non-tracked writes
+    const readRaw = await callTool("memory_read", { namespace: "people/alice", key: "prefs" });
+    const readResult = parseToolResponse(readRaw) as { tags: string[] };
+    expect(readResult.tags).toContain("done");
+  });
+});
+
+describe("lifecycle validation (memory_write)", () => {
+  it("warns when no lifecycle tag", async () => {
+    const raw = await callTool("memory_write", {
+      namespace: "projects/lc",
+      key: "status",
+      content: "No lifecycle",
+      tags: ["feature"],
+    });
+    const result = parseToolResponse(raw) as { warnings?: string[] };
+    expect(result.warnings!.some(w => w.includes("No lifecycle tag"))).toBe(true);
   });
 
-  it("does not crash when no workbench exists", async () => {
+  it("warns when tags omitted entirely", async () => {
     const raw = await callTool("memory_write", {
-      namespace: "projects/orphan",
+      namespace: "projects/lc2",
       key: "status",
-      content: "No workbench",
+      content: "No tags at all",
     });
-    const result = parseToolResponse(raw) as { status: string; workbench_updated?: boolean };
-    expect(result.status).toBe("created");
-    expect(result.workbench_updated).toBeUndefined();
+    const result = parseToolResponse(raw) as { warnings?: string[] };
+    expect(result.warnings!.some(w => w.includes("No lifecycle tag"))).toBe(true);
+  });
+
+  it("warns when multiple lifecycle tags", async () => {
+    const raw = await callTool("memory_write", {
+      namespace: "projects/lc3",
+      key: "status",
+      content: "Confused",
+      tags: ["active", "blocked"],
+    });
+    const result = parseToolResponse(raw) as { warnings?: string[] };
+    expect(result.warnings!.some(w => w.includes("Multiple lifecycle tags"))).toBe(true);
+  });
+
+  it("no lifecycle warning for exactly one lifecycle tag", async () => {
+    const raw = await callTool("memory_write", {
+      namespace: "projects/lc4",
+      key: "status",
+      content: "Good",
+      tags: ["active", "feature"],
+    });
+    const result = parseToolResponse(raw) as { warnings?: string[] };
+    const lifecycleWarnings = (result.warnings ?? []).filter(w =>
+      w.includes("lifecycle tag") || w.includes("Multiple lifecycle")
+    );
+    expect(lifecycleWarnings).toHaveLength(0);
+  });
+
+  it("no validation for non-status / non-tracked writes", async () => {
+    const raw = await callTool("memory_write", {
+      namespace: "people/bob",
+      key: "notes",
+      content: "Random",
+    });
+    const result = parseToolResponse(raw) as { warnings?: string[] };
+    expect(result.warnings).toBeUndefined();
   });
 });
 
@@ -729,125 +883,77 @@ describe("memory_list demo filtering", () => {
   });
 });
 
-describe("memory_orient workbench drift", () => {
-  it("surfaces namespaces updated after workbench", async () => {
-    await callTool("memory_write", {
-      namespace: "meta",
-      key: "workbench",
-      content: "# Workbench\n## Active\n- projects/alpha",
-    });
-    // Backdate workbench
-    db.prepare("UPDATE entries SET updated_at = '2026-01-01T00:00:00.000Z' WHERE namespace = 'meta' AND key = 'workbench'").run();
-
-    // Create a project that's newer than the workbench
-    await callTool("memory_write", {
-      namespace: "projects/alpha",
-      key: "status",
-      content: "Updated recently",
-    });
+describe("maintenance suggestions (memory_orient)", () => {
+  it("flags active-but-stale entries", async () => {
+    await callTool("memory_write", { namespace: "projects/old", key: "status", content: "Stale", tags: ["active"] });
+    db.prepare("UPDATE entries SET updated_at = '2020-01-01T00:00:00.000Z' WHERE namespace = 'projects/old'").run();
 
     const raw = await callTool("memory_orient", {});
     const result = parseToolResponse(raw) as {
-      workbench: { drift?: Array<{ namespace: string; status_updated_at: string }> };
+      maintenance_needed: Array<{ namespace: string; issue: string; suggestion: string }>;
     };
-    expect(result.workbench.drift).toBeDefined();
-    expect(result.workbench.drift!.length).toBe(1);
-    expect(result.workbench.drift![0].namespace).toBe("projects/alpha");
-    expect(result.workbench.drift![0].status_updated_at).toBeTruthy();
+    expect(result.maintenance_needed).toBeDefined();
+    const staleItem = result.maintenance_needed.find(m => m.issue === "active_but_stale");
+    expect(staleItem).toBeDefined();
+    expect(staleItem!.namespace).toBe("projects/old");
+    expect(staleItem!.suggestion).toContain("days ago");
   });
 
-  it("does not include drift when workbench is up to date", async () => {
-    await callTool("memory_write", {
-      namespace: "projects/alpha",
-      key: "status",
-      content: "Old",
-    });
-    // Backdate the project
-    db.prepare("UPDATE entries SET updated_at = '2025-01-01T00:00:00.000Z' WHERE namespace = 'projects/alpha'").run();
-
-    await callTool("memory_write", {
-      namespace: "meta",
-      key: "workbench",
-      content: "# Workbench\n## Active\n- projects/alpha",
-    });
+  it("flags missing status key in tracked namespaces", async () => {
+    // Create a project namespace with a non-status key
+    await callTool("memory_write", { namespace: "projects/nostatus", key: "architecture", content: "monolith" });
 
     const raw = await callTool("memory_orient", {});
     const result = parseToolResponse(raw) as {
-      workbench: { drift?: unknown[] };
+      maintenance_needed: Array<{ namespace: string; issue: string }>;
     };
-    expect(result.workbench.drift).toBeUndefined();
+    const missingStatus = result.maintenance_needed.find(m => m.issue === "missing_status" && m.namespace === "projects/nostatus");
+    expect(missingStatus).toBeDefined();
   });
 
-  it("only tracks drift for projects/* namespaces", async () => {
-    await callTool("memory_write", {
-      namespace: "meta",
-      key: "workbench",
-      content: "# Workbench",
-    });
-    db.prepare("UPDATE entries SET updated_at = '2026-01-01T00:00:00.000Z' WHERE namespace = 'meta' AND key = 'workbench'").run();
+  it("flags conflicting lifecycle tags", async () => {
+    await callTool("memory_write", { namespace: "projects/conflict", key: "status", content: "Both", tags: ["active", "blocked"] });
 
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as {
+      maintenance_needed: Array<{ namespace: string; issue: string }>;
+    };
+    const conflicting = result.maintenance_needed.find(m => m.issue === "conflicting_lifecycle");
+    expect(conflicting).toBeDefined();
+    expect(conflicting!.namespace).toBe("projects/conflict");
+  });
+
+  it("flags missing lifecycle tags", async () => {
+    await callTool("memory_write", { namespace: "projects/nolc", key: "status", content: "No lifecycle", tags: ["feature"] });
+
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as {
+      maintenance_needed: Array<{ namespace: string; issue: string }>;
+    };
+    const missing = result.maintenance_needed.find(m => m.issue === "missing_lifecycle");
+    expect(missing).toBeDefined();
+    expect(missing!.namespace).toBe("projects/nolc");
+  });
+
+  it("empty maintenance_needed when clean", async () => {
+    await callTool("memory_write", { namespace: "projects/clean", key: "status", content: "Good", tags: ["active"] });
+
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as {
+      maintenance_needed?: unknown[];
+    };
+    expect(result.maintenance_needed).toBeUndefined();
+  });
+
+  it("does not flag non-tracked namespaces", async () => {
     await callTool("memory_write", { namespace: "people/alice", key: "prefs", content: "vim" });
 
     const raw = await callTool("memory_orient", {});
     const result = parseToolResponse(raw) as {
-      workbench: { drift?: unknown[] };
+      maintenance_needed?: Array<{ namespace: string }>;
     };
-    expect(result.workbench.drift).toBeUndefined();
-  });
-
-  it("does not mark drift from newer project log activity alone", async () => {
-    await callTool("memory_write", {
-      namespace: "meta",
-      key: "workbench",
-      content: "# Workbench\n## Active\n- projects/alpha",
-    });
-    await callTool("memory_write", {
-      namespace: "projects/alpha",
-      key: "status",
-      content: "In sync",
-    });
-
-    // Backdate both workbench and status to the same old point.
-    db.prepare("UPDATE entries SET updated_at = '2026-01-01T00:00:00.000Z' WHERE namespace = 'meta' AND key = 'workbench'").run();
-    db.prepare("UPDATE entries SET updated_at = '2026-01-01T00:00:00.000Z' WHERE namespace = 'projects/alpha' AND key = 'status'").run();
-
-    // Newer log activity should not count as status drift.
-    await callTool("memory_log", {
-      namespace: "projects/alpha",
-      content: "Background note",
-    });
-
-    const raw = await callTool("memory_orient", {});
-    const result = parseToolResponse(raw) as {
-      workbench: { drift?: unknown[] };
-    };
-    expect(result.workbench.drift).toBeUndefined();
-  });
-
-  it("filters demo namespaces from orient by default", async () => {
-    await callTool("memory_write", { namespace: "projects/real", key: "s", content: "c" });
-    await callTool("memory_write", { namespace: "demo/test", key: "s", content: "c" });
-
-    const raw = await callTool("memory_orient", {});
-    const result = parseToolResponse(raw) as {
-      namespaces: Array<{ namespace: string }>;
-    };
-    const names = result.namespaces.map((n) => n.namespace);
-    expect(names).toContain("projects/real");
-    expect(names).not.toContain("demo/test");
-  });
-
-  it("shows demo namespaces in orient when include_demo is true", async () => {
-    await callTool("memory_write", { namespace: "projects/real", key: "s", content: "c" });
-    await callTool("memory_write", { namespace: "demo/test", key: "s", content: "c" });
-
-    const raw = await callTool("memory_orient", { include_demo: true });
-    const result = parseToolResponse(raw) as {
-      namespaces: Array<{ namespace: string }>;
-    };
-    const names = result.namespaces.map((n) => n.namespace);
-    expect(names).toContain("projects/real");
-    expect(names).toContain("demo/test");
+    const aliceIssue = (result.maintenance_needed ?? []).find(m => m.namespace === "people/alice");
+    expect(aliceIssue).toBeUndefined();
   });
 });
 

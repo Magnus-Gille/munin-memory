@@ -75,11 +75,38 @@ export interface DeleteParams {
 // Tool response types
 
 export interface WriteResponse {
-  status: "created" | "updated";
+  status: "created" | "updated" | "conflict";
+  id?: string;
+  namespace: string;
+  key: string;
+  hint?: string;
+  message?: string;
+  current_updated_at?: string;
+  warnings?: string[];
+}
+
+export interface DashboardEntry {
+  namespace: string;
+  summary: string;
+  updated_at: string;
+  lifecycle: string;
+  needs_attention?: true;
+}
+
+export interface MaintenanceItem {
+  namespace: string;
+  issue: "active_but_stale" | "missing_status" | "conflicting_lifecycle" | "missing_lifecycle";
+  suggestion: string;
+}
+
+export interface TrackedStatusRow {
   id: string;
   namespace: string;
   key: string;
-  hint: string;
+  content_preview: string;
+  tags: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface ReadResponse {

@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, chmodSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { homedir } from "node:os";
-import type { Entry, AuditEntry, EntryType } from "./types.js";
+import type { Entry, AuditEntry, EntryType, TrackedStatusRow } from "./types.js";
 import { runMigrations } from "./migrations.js";
 
 let _vecLoaded = false;
@@ -91,7 +91,28 @@ export function rebuildFTS(db: Database.Database): void {
   db.exec("INSERT INTO entries_fts(entries_fts) VALUES('rebuild')");
 }
 
+// --- Tracked status queries ---
+
+export function getTrackedStatuses(db: Database.Database): TrackedStatusRow[] {
+  return db
+    .prepare(
+      `SELECT id, namespace, key, substr(content, 1, 300) as content_preview, tags, created_at, updated_at
+       FROM entries
+       WHERE entry_type = 'state' AND key = 'status'
+         AND (namespace LIKE 'projects/%' ESCAPE '\\' OR namespace LIKE 'clients/%' ESCAPE '\\')
+       ORDER BY updated_at DESC`,
+    )
+    .all() as TrackedStatusRow[];
+}
+
 // --- State entry operations ---
+
+export interface WriteStateResult {
+  status: "created" | "updated" | "conflict";
+  id?: string;
+  message?: string;
+  current_updated_at?: string;
+}
 
 export function writeState(
   db: Database.Database,
@@ -100,14 +121,24 @@ export function writeState(
   content: string,
   tags: string[],
   agentId = "default",
-): { status: "created" | "updated"; id: string } {
+  expectedUpdatedAt?: string,
+): WriteStateResult {
   const now = nowUTC();
   const tagsJson = JSON.stringify(tags);
 
   // Check if exists
   const existing = db.prepare(
-    "SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'",
-  ).get(namespace, key) as { id: string } | undefined;
+    "SELECT id, updated_at FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'",
+  ).get(namespace, key) as { id: string; updated_at: string } | undefined;
+
+  // Compare-and-swap: reject if entry was modified since caller last read it
+  if (expectedUpdatedAt && existing && existing.updated_at !== expectedUpdatedAt) {
+    return {
+      status: "conflict",
+      message: `Entry was updated at ${existing.updated_at}, expected ${expectedUpdatedAt}. Read the current version before overwriting.`,
+      current_updated_at: existing.updated_at,
+    };
+  }
 
   const txn = db.transaction(() => {
     if (existing) {

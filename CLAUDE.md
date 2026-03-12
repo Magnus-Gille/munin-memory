@@ -10,7 +10,7 @@ Part of the Hugin & Munin personal AI system. See `prd.md` for full product cont
 
 - **Runtime:** Node.js 20+, TypeScript (strict mode)
 - **Database:** SQLite via `better-sqlite3` with FTS5 full-text search + sqlite-vec vector search
-- **Protocol:** MCP over stdio (local) or Streamable HTTP with SSE (network, Express-based)
+- **Protocol:** MCP over stdio (local) or stateless Streamable HTTP (network, Express-based)
 - **Auth:** Dual auth — legacy Bearer token (MUNIN_API_KEY) + OAuth 2.1 (dynamic client registration, PKCE)
 - **Platforms:** macOS (dev), Linux ARM64 (Raspberry Pi 5 target)
 
@@ -27,8 +27,8 @@ Part of the Hugin & Munin personal AI system. See `prd.md` for full product cont
 
 | Tool | Purpose |
 |------|---------|
-| `memory_orient` | **Start here.** Returns conventions + workbench + namespace list in one call |
-| `memory_write` | Store/update a state entry (namespace + key + content) |
+| `memory_orient` | **Start here.** Returns conventions, computed project dashboard (grouped by lifecycle), curated notes, maintenance suggestions, and namespace overview in one call |
+| `memory_write` | Store/update a state entry (namespace + key + content). Supports compare-and-swap via `expected_updated_at` for tracked statuses. Auto-canonicalizes lifecycle tags. |
 | `memory_read` | Retrieve a specific state entry by namespace + key |
 | `memory_get` | Retrieve any entry (state or log) by UUID |
 | `memory_query` | Search memories (lexical/semantic/hybrid) with filters |
@@ -59,10 +59,14 @@ munin-memory/
 │   ├── db.test.ts
 │   ├── embeddings.test.ts
 │   ├── migrations.test.ts
+│   ├── http-hardening.test.ts
+│   ├── http-transport.test.ts   # Stateless HTTP route tests
 │   ├── oauth.test.ts              # OAuth provider unit tests
 │   ├── oauth-integration.test.ts  # OAuth end-to-end tests (supertest)
 │   ├── tools.test.ts
 │   └── security.test.ts
+├── docs/
+│   └── agentic-dev-days-munin-memory.md   # Presentation case study for the stateless HTTP incident
 ├── munin-memory.service   # systemd unit file for RPi deployment
 ├── scripts/
 │   ├── deploy-rpi.sh      # Deploy to Raspberry Pi
@@ -114,6 +118,8 @@ npm run dev      # tsx watch src/index.ts
 The Pi needs a `.env` file at the project root:
 ```
 MUNIN_API_KEY=<generate with: openssl rand -hex 32>
+MUNIN_OAUTH_ISSUER_URL=https://<your-domain>
+MUNIN_ALLOWED_HOSTS=<your-domain>,<your-domain>:443
 ```
 
 ## MCP client configuration
@@ -139,6 +145,28 @@ Requires reverse proxy path policies for OAuth endpoints (see OAuth section belo
 claude mcp add-json munin-memory '{"command":"node","args":["/path/to/munin-memory/dist/index.js"]}' -s user
 ```
 
+## Computed dashboard and tracked statuses
+
+The project dashboard in `memory_orient` is computed dynamically from status entries, replacing the manually-maintained `meta/workbench`.
+
+### Tracked namespaces
+Namespaces matching `projects/*` or `clients/*` are "tracked". Status entries (`key = "status"`) in these namespaces feed the computed dashboard.
+
+### Lifecycle tags
+Canonical lifecycle tags: `active`, `blocked`, `completed`, `stopped`, `maintenance`, `archived`. Aliases are auto-normalized on write: `done` → `completed`, `paused` → `stopped`, `inactive` → `archived`.
+
+### Compare-and-swap (CAS)
+`memory_write` accepts an optional `expected_updated_at` parameter. For tracked status writes, if the entry was modified since the given timestamp, the write returns `status: "conflict"` instead of overwriting. This prevents blind overwrites from concurrent environments.
+
+### Curated overlay
+`meta/workbench-notes` is a freeform entry for items not backed by namespaces (obligations, cross-cutting notes). Read by `memory_orient` as a `notes` field alongside the computed dashboard.
+
+### Maintenance suggestions
+`memory_orient` returns `maintenance_needed` when it detects: active-but-stale entries (>14 days), tracked namespaces missing a status key, conflicting lifecycle tags, or missing lifecycle tags.
+
+### Legacy workbench
+During the transition period, `memory_orient` includes `legacy_workbench` if `meta/workbench` exists, with a deprecation note. Delete `meta/workbench` when the transition is complete.
+
 ## Key design decisions
 
 - SQLite + FTS5 + sqlite-vec for storage, keyword search, and vector search
@@ -150,6 +178,7 @@ claude mcp add-json munin-memory '{"command":"node","args":["/path/to/munin-memo
 - Database file created with `0600` permissions
 - **Dual auth:** Bearer token (MUNIN_API_KEY) for existing clients + OAuth 2.1 for web/mobile
 - HTTP transport uses Express (required by MCP SDK's `mcpAuthRouter`)
+- `/mcp` runs in stateless Streamable HTTP mode: fresh transport and fresh MCP `Server` per POST request
 - `agent_id` field included in schema for future multi-agent support
 
 ## Semantic search architecture (Feature 2)
@@ -236,7 +265,7 @@ Existing Claude Code and Claude Desktop clients using `MUNIN_API_KEY` continue w
 - Access tokens: configurable TTL (default 1 hour), checked on every request
 - Refresh tokens: configurable TTL (default 30 days), rotation on use (old token revoked)
 - Auth codes: 10-minute TTL, single use
-- Cleanup: expired/revoked tokens swept on the same timer as session sweeps (60s)
+- Cleanup: expired/revoked tokens swept on a periodic cleanup timer (60s)
 
 ### Reverse proxy path policies
 
@@ -286,9 +315,8 @@ See `technical-spec.md` § Security Module for the full pattern list.
 | `MUNIN_MEMORY_MAX_CONTENT_SIZE` | `100000` | Max content size in characters |
 | `MUNIN_TRANSPORT` | `stdio` | Transport mode: `stdio` or `http` |
 | `MUNIN_HTTP_PORT` | `3030` | HTTP server port (http mode only) |
-| `MUNIN_HTTP_HOST` | `0.0.0.0` | HTTP bind address (http mode only) |
+| `MUNIN_HTTP_HOST` | `127.0.0.1` | HTTP bind address (http mode only) |
 | `MUNIN_API_KEY` | — | Bearer token for auth (required in http mode) |
-| `MUNIN_SESSION_IDLE_TTL_MS` | `1800000` | Session idle timeout in ms (http mode only) |
 | `MUNIN_EMBEDDINGS_ENABLED` | `true` | Load embedding model + run worker |
 | `MUNIN_SEMANTIC_ENABLED` | `true` | Gate 1: accept `search_mode: "semantic"` |
 | `MUNIN_HYBRID_ENABLED` | `false` | Gate 2: accept `search_mode: "hybrid"` |
