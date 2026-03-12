@@ -406,6 +406,7 @@ export function registerTools(server: Server, db: Database.Database): void {
               maintenance: [],
               stopped: [],
               completed: [],
+              archived: [],
               uncategorized: [],
             };
             const maintenanceNeeded: MaintenanceItem[] = [];
