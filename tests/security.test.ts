@@ -202,6 +202,18 @@ describe("validateTags", () => {
   it("rejects tags with special chars", () => {
     expect(validateTags(["@invalid"]).valid).toBe(false);
   });
+
+  it("accepts prefixed tags with colons", () => {
+    expect(validateTags(["client:lofalk", "person:sara", "topic:ai-education", "type:pdf", "source:external"]).valid).toBe(true);
+  });
+
+  it("rejects tags starting with colon", () => {
+    expect(validateTags([":invalid"]).valid).toBe(false);
+  });
+
+  it("accepts mixed colon and hyphen tags", () => {
+    expect(validateTags(["type:meeting-notes", "client:lofalk-industries"]).valid).toBe(true);
+  });
 });
 
 describe("validateWriteInput", () => {

@@ -15,7 +15,7 @@ const SECRET_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
 
 const NAMESPACE_RE = /^[a-zA-Z0-9][a-zA-Z0-9/_-]*$/;
 const KEY_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
-const TAG_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
+const TAG_RE = /^[a-zA-Z0-9][a-zA-Z0-9_:-]*$/;
 const MAX_TAGS = 20;
 
 export function scanForSecrets(content: string): SecurityResult {
@@ -83,7 +83,7 @@ export function validateTags(tags: unknown): SecurityResult {
     if (typeof tag !== "string" || !TAG_RE.test(tag)) {
       return {
         valid: false,
-        error: `Invalid tag "${tag}". Each tag must start with alphanumeric, then alphanumeric/underscore/hyphen only.`,
+        error: `Invalid tag "${tag}". Each tag must start with alphanumeric, then alphanumeric/underscore/hyphen/colon only.`,
       };
     }
   }
