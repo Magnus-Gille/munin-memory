@@ -167,6 +167,49 @@ Canonical lifecycle tags: `active`, `blocked`, `completed`, `stopped`, `maintena
 ### Legacy workbench
 During the transition period, `memory_orient` includes `legacy_workbench` if `meta/workbench` exists, with a deprecation note. Delete `meta/workbench` when the transition is complete.
 
+### Recognized namespace patterns
+
+| Pattern | Tracked (dashboard) | Purpose |
+|---------|:-------------------:|---------|
+| `projects/<name>` | Yes | Project state and logs |
+| `clients/<name>` | Yes | Client engagement context |
+| `people/<name>` | No | People profiles, contact context |
+| `decisions/<topic>` | No | Cross-cutting decisions |
+| `meta/<topic>` | No | System notes, conventions |
+| `documents/<slug>` | No | Indexed artifacts (summaries + Mímir references) |
+| `reading/<slug>` | No | Reading queue and completed reads |
+| `signals/<source>` | No | Hugin tracking state per source |
+| `digests/<period>` | No | Compiled signal digests |
+
+### Document entry convention
+
+Entries in `documents/*` follow this structure for indexed artifacts:
+
+- **Source:** Mímir URL (`https://mimir.gille.ai/files/<path>`)
+- **Local:** Laptop path (`~/mgc/<path>`)
+- **Type:** PDF | HTML | Markdown | Image
+- **Size, Date, SHA-256** for integrity checking
+- **Summary:** 2-5 sentences (no AI summarization for private/client docs)
+- **Key Points:** Extracted insights
+- **Extracted Text:** First ~10,000 characters (truncated for content limit)
+
+Tags should use the prefixed convention below.
+
+### Prefixed tag convention
+
+Tags support colon-separated prefixes for cross-referencing:
+
+| Prefix | Example | Purpose |
+|--------|---------|---------|
+| `client:<name>` | `client:lofalk` | Links to a client |
+| `person:<name>` | `person:sara` | Links to a person |
+| `topic:<topic>` | `topic:ai-education` | Subject categorization |
+| `type:<artifact>` | `type:pdf`, `type:meeting-notes` | Document/artifact type |
+| `source:external` | `source:external` | Content from outside (Hugin-ingested) |
+| `source:internal` | `source:internal` | Internally produced content |
+
+Unprefixed tags remain valid for lifecycle (`active`, `blocked`, etc.) and category (`decision`, `architecture`, etc.) use.
+
 ## Key design decisions
 
 - SQLite + FTS5 + sqlite-vec for storage, keyword search, and vector search
@@ -304,7 +347,7 @@ See `technical-spec.md` § Security Module for the full pattern list.
 - `namespace`: must match `/^[a-zA-Z0-9][a-zA-Z0-9/_-]*$/`
 - `key`: must match `/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/`
 - `content`: max 100,000 characters
-- `tags`: each tag matches `/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/`, max 20 tags
+- `tags`: each tag matches `/^[a-zA-Z0-9][a-zA-Z0-9_:-]*$/`, max 20 tags. Colons enable prefixed tags (e.g. `client:lofalk`, `topic:ai-education`).
 
 ## Environment variables
 

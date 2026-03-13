@@ -152,7 +152,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_write",
     description:
-      "Store or update a state entry in memory. If an entry with the same namespace+key exists, it will be overwritten. Use this for mutable facts: project status, current decisions, known preferences.\n\nIf this is your first memory operation in this conversation, call memory_orient first.\n\nNamespace conventions: projects/<name> for project state, people/<name> for context about people, decisions/<topic> for cross-cutting decisions, meta/<topic> for system notes.\n\nKey conventions: 'status' = compact resumption summary (Phase / Current work / Blockers / Next — keep brief, move details to other keys like 'architecture', 'workflow', 'research'). 'index' = directory of important keys in this namespace and their purpose.\n\nTag vocabulary: Use canonical lifecycle tags on status entries: active, blocked, completed, stopped, maintenance, archived. Aliases are auto-normalized (done→completed, paused→stopped, inactive→archived). Category tags: decision, architecture, preference, milestone, convention. Type tags: bug, feature, research.\n\nThe project dashboard is computed automatically from status entries with lifecycle tags. No manual workbench maintenance needed. Writing to 'status' in projects/* or clients/* supports compare-and-swap via expected_updated_at.\n\nTo start a new project: (1) write projects/<name>/status with a lifecycle tag (e.g. 'active'), (2) optionally write projects/<name>/index listing the keys.",
+      "Store or update a state entry in memory. If an entry with the same namespace+key exists, it will be overwritten. Use this for mutable facts: project status, current decisions, known preferences.\n\nIf this is your first memory operation in this conversation, call memory_orient first.\n\nNamespace conventions: projects/<name> for project state, people/<name> for context about people, decisions/<topic> for cross-cutting decisions, meta/<topic> for system notes.\n\nKey conventions: 'status' = compact resumption summary (Phase / Current work / Blockers / Next — keep brief, move details to other keys like 'architecture', 'workflow', 'research'). 'index' = directory of important keys in this namespace and their purpose.\n\nTag vocabulary: Use canonical lifecycle tags on status entries: active, blocked, completed, stopped, maintenance, archived. Aliases are auto-normalized (done→completed, paused→stopped, inactive→archived). Category tags: decision, architecture, preference, milestone, convention. Type tags: bug, feature, research. Prefixed tags for cross-referencing: client:<name>, person:<name>, topic:<topic>, type:<artifact> (pdf, presentation, meeting-notes), source:external/internal.\n\nThe project dashboard is computed automatically from status entries with lifecycle tags. No manual workbench maintenance needed. Writing to 'status' in projects/* or clients/* supports compare-and-swap via expected_updated_at.\n\nTo start a new project: (1) write projects/<name>/status with a lifecycle tag (e.g. 'active'), (2) optionally write projects/<name>/index listing the keys.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -175,7 +175,7 @@ const TOOL_DEFINITIONS = [
           type: "array",
           items: { type: "string" },
           description:
-            'Optional freeform tags for cross-cutting queries. Must be a JSON array, e.g. ["decision", "raspberry-pi", "active"]. Do NOT pass as a comma-separated string.',
+            'Optional freeform tags for cross-cutting queries. Must be a JSON array, e.g. ["decision", "active", "client:lofalk"]. Do NOT pass as a comma-separated string.',
         },
         expected_updated_at: {
           type: "string",
@@ -269,7 +269,7 @@ const TOOL_DEFINITIONS = [
           type: "array",
           items: { type: "string" },
           description:
-            'Optional. Filter to entries that have ALL of these tags. Must be a JSON array, e.g. ["decision", "active"].',
+            'Optional. Filter to entries that have ALL of these tags. Must be a JSON array, e.g. ["decision", "active"] or ["client:lofalk", "type:pdf"].',
         },
         limit: {
           type: "number",
@@ -304,7 +304,7 @@ const TOOL_DEFINITIONS = [
         tags: {
           type: "array",
           items: { type: "string" },
-          description: 'Optional tags. Must be a JSON array, e.g. ["decision", "active"].',
+          description: 'Optional tags. Must be a JSON array, e.g. ["decision", "active"] or ["client:lofalk"].',
         },
       },
       required: ["namespace", "content"],
