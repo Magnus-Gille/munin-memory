@@ -1,12 +1,14 @@
+import Database from "better-sqlite3";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
+import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import express from "express";
 import type { Request, Response, NextFunction } from "express";
-import { createServer, IncomingMessage, ServerResponse } from "node:http";
-import { randomUUID } from "node:crypto";
+import { createServer, IncomingMessage } from "node:http";
+import { pathToFileURL } from "node:url";
 import { initDatabase } from "./db.js";
 import { registerTools } from "./tools.js";
 import { initEmbeddings, startEmbeddingWorker, stopEmbeddingWorker } from "./embeddings.js";
@@ -20,34 +22,16 @@ const httpHost = process.env.MUNIN_HTTP_HOST ?? "127.0.0.1";
 const apiKey = process.env.MUNIN_API_KEY;
 const issuerUrl = process.env.MUNIN_OAUTH_ISSUER_URL ?? "http://localhost:3030";
 
-if (transportMode === "http" && !apiKey) {
-  console.error(
-    "Fatal: MUNIN_API_KEY is required when MUNIN_TRANSPORT=http. Generate one with: openssl rand -hex 32",
-  );
-  process.exit(1);
-}
-
 // --- Hardening constants ---
 
 export const MAX_BODY_SIZE = 1 * 1024 * 1024; // 1MB
 const BODY_PARSE_TIMEOUT_MS = 10_000;
-
-export const MAX_SESSIONS = 10;
-const SESSION_IDLE_TTL_MS = parseInt(process.env.MUNIN_SESSION_IDLE_TTL_MS ?? String(30 * 60 * 1000), 10);
-const SESSION_ABSOLUTE_TTL_MS = 4 * 60 * 60 * 1000; // 4hr
-const SESSION_SWEEP_INTERVAL_MS = 60 * 1000;      // 1min
+const OAUTH_CLEANUP_INTERVAL_MS = 60 * 1000;
 
 export const RATE_LIMIT_MAX = 60;
 export const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 
 // --- Types ---
-
-interface SessionMeta {
-  createdAt: number;
-  lastActivityAt: number;
-  transport: StreamableHTTPServerTransport;
-  server: Server;
-}
 
 export type BodyParseResult =
   | { ok: true; body: unknown }
@@ -58,30 +42,39 @@ export interface RateLimiterState {
   lastRefill: number;
 }
 
-interface RequestLogEntry {
+export interface RequestLogEntry {
   timestamp: string;
   method: string;
   path: string;
   rpcMethod?: string;
   toolName?: string;
+  authType: "bearer" | "oauth" | "none";
+  clientId?: string;
   sessionId?: string;
   status: number;
   durationMs: number;
 }
 
-// --- Database ---
+export interface HttpAppOptions {
+  database: Database.Database;
+  apiKey: string;
+  issuerUrl: string;
+  httpHost: string;
+  httpPort: number;
+  requestLogger?: (entry: RequestLogEntry) => void;
+}
 
-const dbPath = process.env.MUNIN_MEMORY_DB_PATH;
-const db = initDatabase(dbPath);
+let cleanupTimerId: ReturnType<typeof setInterval> | undefined;
+let activeDb: Database.Database | undefined;
 
 // --- MCP server factory ---
 
-function createMcpServer(): Server {
+function createMcpServer(database: Database.Database): Server {
   const server = new Server(
     { name: "munin-memory", version: "0.1.0" },
     { capabilities: { tools: {} } },
   );
-  registerTools(server, db);
+  registerTools(server, database);
   return server;
 }
 
@@ -212,62 +205,81 @@ function logRequest(entry: RequestLogEntry): void {
   console.error(JSON.stringify(entry));
 }
 
-// --- Session management ---
+export function getRequestAuthLogContext(auth: AuthInfo | undefined): Pick<RequestLogEntry, "authType" | "clientId"> {
+  if (!auth) {
+    return { authType: "none" };
+  }
 
-let sweepTimerId: ReturnType<typeof setInterval> | undefined;
+  if (auth.clientId === "legacy-bearer") {
+    return {
+      authType: "bearer",
+      clientId: "legacy",
+    };
+  }
 
-function evictSession(sessionId: string, sessions: Map<string, SessionMeta>): void {
-  const meta = sessions.get(sessionId);
-  if (!meta) return;
-  sessions.delete(sessionId);
-  meta.server.close().catch(() => {});
+  return {
+    authType: "oauth",
+    clientId: auth.clientId,
+  };
 }
 
-function sweepSessions(sessions: Map<string, SessionMeta>): void {
-  const now = Date.now();
-  const toEvict: string[] = [];
-
-  for (const [id, meta] of sessions) {
-    if (
-      now - meta.lastActivityAt > SESSION_IDLE_TTL_MS ||
-      now - meta.createdAt > SESSION_ABSOLUTE_TTL_MS
-    ) {
-      toEvict.push(id);
-    }
+function getSessionHeader(req: Request): string | undefined {
+  const header = req.headers["mcp-session-id"];
+  if (Array.isArray(header)) {
+    return header[0];
   }
-
-  for (const id of toEvict) {
-    evictSession(id, sessions);
-  }
+  return header;
 }
 
-function evictOldestIdle(sessions: Map<string, SessionMeta>): boolean {
-  let oldestId: string | undefined;
-  let oldestActivity = Infinity;
+function attachRequestLogger(
+  req: Request,
+  res: Response,
+  requestLogger: (entry: RequestLogEntry) => void,
+): { setBody: (body: unknown) => void } {
+  const startTime = Date.now();
+  const sessionId = getSessionHeader(req);
+  const authContext = getRequestAuthLogContext(req.auth);
+  let rpcMethod: string | undefined;
+  let toolName: string | undefined;
 
-  for (const [id, meta] of sessions) {
-    if (meta.lastActivityAt < oldestActivity) {
-      oldestActivity = meta.lastActivityAt;
-      oldestId = id;
-    }
-  }
+  res.on("finish", () => {
+    requestLogger({
+      timestamp: new Date().toISOString(),
+      method: req.method,
+      path: req.path,
+      rpcMethod,
+      toolName,
+      ...authContext,
+      sessionId,
+      status: res.statusCode,
+      durationMs: Date.now() - startTime,
+    });
+  });
 
-  if (oldestId) {
-    evictSession(oldestId, sessions);
-    return true;
-  }
-  return false;
+  return {
+    setBody(body: unknown) {
+      rpcMethod = extractMethod(body);
+      toolName = extractToolName(body);
+    },
+  };
 }
 
 // --- HTTP transport (Express) ---
 
-async function startHttp() {
-  const sessions = new Map<string, SessionMeta>();
+export function createHttpApp(options: HttpAppOptions): { app: express.Express; oauthProvider: MuninOAuthProvider } {
+  const {
+    database,
+    apiKey,
+    issuerUrl,
+    httpHost,
+    httpPort,
+    requestLogger = logRequest,
+  } = options;
   const allowedHosts = buildAllowedHosts(httpHost, httpPort);
   const rateLimiter = createRateLimiter();
 
   // OAuth provider with dual auth (legacy Bearer + OAuth tokens)
-  const oauthProvider = new MuninOAuthProvider(db, apiKey);
+  const oauthProvider = new MuninOAuthProvider(database, apiKey);
 
   const app = express();
 
@@ -351,10 +363,8 @@ async function startHttp() {
     resourceMetadataUrl: new URL(issuerUrl).href.replace(/\/$/, "") + "/.well-known/oauth-protected-resource",
   });
 
-  // MCP endpoint — all methods (POST, GET, DELETE)
-  app.all("/mcp", bearerAuth, async (req: Request, res: Response) => {
-    const startTime = Date.now();
-    const method = req.method;
+  app.post("/mcp", bearerAuth, async (req: Request, res: Response) => {
+    const requestLog = attachRequestLogger(req, res, requestLogger);
 
     // Rate limiting (after auth)
     if (!checkRateLimit(rateLimiter)) {
@@ -364,99 +374,66 @@ async function startHttp() {
     }
 
     // Parse body for POST — StreamableHTTPServerTransport needs raw body
-    let body: unknown;
-    if (method === "POST") {
-      const result = await parseJsonBody(req);
-      if (!result.ok) {
-        const statusMap = { too_large: 413, timeout: 408, invalid_json: 400, error: 400 } as const;
-        const msgMap = {
-          too_large: "Request body too large",
-          timeout: "Request body read timed out",
-          invalid_json: "Invalid JSON body",
-          error: "Error reading request body",
-        } as const;
-        res.status(statusMap[result.reason]).json({ error: msgMap[result.reason] });
-        return;
-      }
-      body = result.body;
-    }
-
-    const rpcMethod = extractMethod(body);
-    const toolName = extractToolName(body);
-
-    // Route to existing session if present
-    const sessionId = req.headers["mcp-session-id"] as string | undefined;
-    const existingMeta = sessionId ? sessions.get(sessionId) : undefined;
-
-    if (existingMeta) {
-      existingMeta.lastActivityAt = Date.now();
-      await existingMeta.transport.handleRequest(req, res, body);
-      logRequest({
-        timestamp: new Date().toISOString(),
-        method,
-        path: "/mcp",
-        rpcMethod,
-        toolName,
-        sessionId,
-        status: res.statusCode,
-        durationMs: Date.now() - startTime,
-      });
+    const result = await parseJsonBody(req);
+    if (!result.ok) {
+      const statusMap = { too_large: 413, timeout: 408, invalid_json: 400, error: 400 } as const;
+      const msgMap = {
+        too_large: "Request body too large",
+        timeout: "Request body read timed out",
+        invalid_json: "Invalid JSON body",
+        error: "Error reading request body",
+      } as const;
+      res.status(statusMap[result.reason]).json({ error: msgMap[result.reason] });
       return;
     }
+    const body = result.body;
 
-    // New session — create transport + server pair
-    if (method === "POST") {
-      // Enforce session cap
-      if (sessions.size >= MAX_SESSIONS) {
-        sweepSessions(sessions);
-      }
-      if (sessions.size >= MAX_SESSIONS) {
-        evictOldestIdle(sessions);
-      }
-      if (sessions.size >= MAX_SESSIONS) {
-        res.status(503).json({ error: "Too many active sessions" });
-        return;
-      }
+    requestLog.setBody(body);
 
-      let transport: StreamableHTTPServerTransport;
-      transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomUUID(),
-        onsessioninitialized: (id: string) => {
-          const now = Date.now();
-          const server = mcpServer;
-          sessions.set(id, {
-            createdAt: now,
-            lastActivityAt: now,
-            transport,
-            server,
-          });
-        },
-        onsessionclosed: (id: string) => {
-          sessions.delete(id);
-        },
-      });
+    // Stateless mode requires a fresh transport per request to avoid message ID collisions.
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+    });
+    const mcpServer = createMcpServer(database);
 
-      const mcpServer = createMcpServer();
+    try {
       await mcpServer.connect(transport);
       await transport.handleRequest(req, res, body);
-      logRequest({
-        timestamp: new Date().toISOString(),
-        method,
-        path: "/mcp",
-        rpcMethod,
-        toolName,
-        sessionId: undefined,
-        status: res.statusCode,
-        durationMs: Date.now() - startTime,
-      });
-      return;
+    } catch (error) {
+      console.error("MCP request failed:", error);
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Internal server error" });
+      }
+    } finally {
+      await mcpServer.close().catch(() => {});
     }
-
-    // GET/DELETE without a valid session
-    res.status(400).json({ error: "No valid session. Send an initialize request first." });
   });
 
-  // --- Start server ---
+  // Stateless HTTP does not support session-bound GET/DELETE routes.
+  app.all("/mcp", bearerAuth, (req: Request, res: Response) => {
+    attachRequestLogger(req, res, requestLogger);
+    res.setHeader("Allow", "POST");
+    res.status(405).json({ error: "Method not allowed" });
+  });
+
+  return { app, oauthProvider };
+}
+
+async function startHttp(database: Database.Database) {
+  if (!apiKey) {
+    console.error(
+      "Fatal: MUNIN_API_KEY is required when MUNIN_TRANSPORT=http. Generate one with: openssl rand -hex 32",
+    );
+    process.exit(1);
+  }
+
+  const { app, oauthProvider } = createHttpApp({
+    database,
+    apiKey,
+    issuerUrl,
+    httpHost,
+    httpPort,
+  });
 
   const httpServer = createServer(app);
 
@@ -464,23 +441,21 @@ async function startHttp() {
   httpServer.requestTimeout = 30_000;
   httpServer.headersTimeout = 10_000;
 
-  // Session + OAuth token sweep timer
-  sweepTimerId = setInterval(() => {
-    sweepSessions(sessions);
+  cleanupTimerId = setInterval(() => {
     oauthProvider.cleanupExpired();
-  }, SESSION_SWEEP_INTERVAL_MS);
+  }, OAUTH_CLEANUP_INTERVAL_MS);
 
   httpServer.listen(httpPort, httpHost, () => {
     console.error(`Munin-memory HTTP server listening on ${httpHost}:${httpPort}`);
-    console.error(`Allowed hosts: ${[...allowedHosts].join(", ")}`);
+    console.error(`Allowed hosts: ${[...buildAllowedHosts(httpHost, httpPort)].join(", ")}`);
     console.error(`OAuth issuer: ${issuerUrl}`);
   });
 }
 
 // --- Stdio transport ---
 
-async function startStdio() {
-  const server = createMcpServer();
+async function startStdio(database: Database.Database) {
+  const server = createMcpServer(database);
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
@@ -488,42 +463,61 @@ async function startStdio() {
 // --- Entry point ---
 
 async function main() {
+  if (transportMode === "http" && !apiKey) {
+    console.error(
+      "Fatal: MUNIN_API_KEY is required when MUNIN_TRANSPORT=http. Generate one with: openssl rand -hex 32",
+    );
+    process.exit(1);
+  }
+
+  const database = initDatabase(process.env.MUNIN_MEMORY_DB_PATH);
+  activeDb = database;
+
   // Initialize embedding pipeline (soft dependency — server works without it)
   const embeddingsReady = await initEmbeddings();
   if (embeddingsReady) {
-    startEmbeddingWorker(db);
+    startEmbeddingWorker(database);
     console.error("Embedding pipeline initialized, background worker started");
   } else {
     console.error("Embedding pipeline not available — semantic search will degrade to lexical");
   }
 
   if (transportMode === "http") {
-    await startHttp();
+    await startHttp(database);
   } else {
-    await startStdio();
+    await startStdio(database);
   }
 }
 
 // Graceful shutdown
 async function shutdown() {
-  if (sweepTimerId) {
-    clearInterval(sweepTimerId);
-    sweepTimerId = undefined;
+  if (cleanupTimerId) {
+    clearInterval(cleanupTimerId);
+    cleanupTimerId = undefined;
   }
   await stopEmbeddingWorker();
-  db.close();
+  activeDb?.close();
+  activeDb = undefined;
   process.exit(0);
 }
 
-process.on("SIGINT", () => { shutdown(); });
-process.on("SIGTERM", () => { shutdown(); });
+const isMainModule =
+  process.argv[1] !== undefined &&
+  import.meta.url === pathToFileURL(process.argv[1]).href;
 
-main().catch(async (err) => {
-  console.error("Fatal error:", err);
-  if (sweepTimerId) {
-    clearInterval(sweepTimerId);
-  }
-  await stopEmbeddingWorker();
-  db.close();
-  process.exit(1);
-});
+if (isMainModule) {
+  process.on("SIGINT", () => { shutdown(); });
+  process.on("SIGTERM", () => { shutdown(); });
+
+  main().catch(async (err) => {
+    console.error("Fatal error:", err);
+    if (cleanupTimerId) {
+      clearInterval(cleanupTimerId);
+      cleanupTimerId = undefined;
+    }
+    await stopEmbeddingWorker();
+    activeDb?.close();
+    activeDb = undefined;
+    process.exit(1);
+  });
+}
