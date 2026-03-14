@@ -2,6 +2,7 @@
 
 | Date | Topic | Rounds | Key decision | Critique points | Self-review catch rate |
 |------|-------|--------|--------------|----------------|-----------------------|
+| 2026-03-06 | [Claude information handoffs](claude-information-handoffs-summary.md) | 2 | Default to `CLAUDE.md` + Munin; use handoff files only when needed; build `ask-claude` before any routing skill | 7 | 4/7 (57%) |
 | 2026-03-05 | [Usability improvement plan](usability-improvement-summary.md) | synth | All 7 items implemented: log browsing, compact status, key discovery, drift visibility, demo filtering, tag governance, agent-neutral | — | — |
 | 2026-02-09 | [v1 spec review](resolution.md) | 2 | 11 spec amendments adopted | — | — |
 | 2026-02-13 | [Expansion plan (Features 0-5)](expansion-resolution.md) | 2 | Implementation order + debate outcomes | — | — |
@@ -14,3 +15,6 @@
 | 2026-02-25 | [Session orientation & workbench](workbench-summary.md) | 2 | Workbench as rebuildable cache; listNamespaces needs timestamps; read-only handshake; two tiers | 13 | 5/13 (38%) |
 | 2026-02-26 | [Memory conventions & two-layer state model](memory-conventions-summary.md) | 2 | Two data layers + dashboard; read-before-write protocol; structured status template; log-first discipline | 14 | 5/14 (36%) |
 | 2026-02-26 | [Ortelius collaboration opportunity](ortelius-collab-summary.md) | 2 | Proceed to meeting with concrete engagement question; force specificity on scope/ownership | 13 | 0/13 (0%) |
+| 2026-03-05 | [mcp-remote vs native connector](mcp-desktop-summary.md) | 2 | Try stateless HTTP mode first; fix onsessionclosed leak; native connector is fallback | 12 | 4/12 (33%) |
+| 2026-03-12 | [Computed dashboard architecture](computed-dashboard-summary.md) | 2 | Replace manual workbench with computed dashboard; add CAS overwrite protection; drop auto-log; hybrid curated overlay | 16 | 4/16 (25%) |
+| 2026-03-13 | [Jarvis architecture (Munin+Mímir+Hugin)](jarvis-architecture-summary.md) | 2 | Two services + one worker; validate remote fetch first; no AI summary for private docs; fix tag syntax; define document identity | 20 | 4/20 (20%) |
