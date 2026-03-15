@@ -51,7 +51,7 @@ ssh "${USER}@${HOST}" "cd ${REMOTE_DIR} && npm install --production"
 
 if [[ "$MODE" != "--bridge-only" ]]; then
   echo "==> Installing systemd service..."
-  ssh "${USER}@${HOST}" "sudo cp ${REMOTE_DIR}/munin-memory.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable munin-memory"
+  ssh "${USER}@${HOST}" "sed -e 's|<user>|${USER}|g' -e 's|<install-dir>|munin-memory|g' ${REMOTE_DIR}/munin-memory.service | sudo tee /etc/systemd/system/munin-memory.service > /dev/null && sudo systemctl daemon-reload && sudo systemctl enable munin-memory"
 
   echo "==> Checking for .env file..."
   ssh "${USER}@${HOST}" "test -f ${REMOTE_DIR}/.env || (echo 'WARNING: No .env file found at ${REMOTE_DIR}/.env — create one with MUNIN_API_KEY=<key>' && exit 1)"
