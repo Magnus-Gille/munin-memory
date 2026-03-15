@@ -10,6 +10,9 @@ dist/
 STATUS.md
 *.zip
 SECURITY-REMEDIATION.local.md
+PUBLIC-REPO-AUDIT.local/
+tmp/
+docs/
 
 # Debate files — keep only summaries and resolutions
 debate/*
