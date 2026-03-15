@@ -257,9 +257,6 @@ export function queryEntries(
   const { query, namespace, entryType, tags, limit = 10 } = options;
   const clampedLimit = Math.min(Math.max(limit, 1), 50);
 
-  // Over-fetch before tag filtering (debate resolution #4 caveat)
-  const fetchLimit = tags && tags.length > 0 ? clampedLimit * 5 : clampedLimit;
-
   let sql = `
     SELECT e.* FROM entries e
     JOIN entries_fts fts ON e.rowid = fts.rowid
@@ -282,19 +279,20 @@ export function queryEntries(
     params.push(entryType);
   }
 
-  sql += " ORDER BY rank LIMIT ?";
-  params.push(fetchLimit);
-
-  let results = db.prepare(sql).all(...params) as Entry[];
-
-  // Post-filter by tags (debate resolution #4: filter before limit)
+  // Apply tag filtering in SQL before LIMIT so that limit semantics
+  // are truthful — callers expect limit to apply to the filtered set,
+  // not to an internal candidate window that is post-filtered.
   if (tags && tags.length > 0) {
-    results = results.filter((entry) => {
-      const entryTags: string[] = JSON.parse(entry.tags);
-      return tags.every((t) => entryTags.includes(t));
-    });
-    results = results.slice(0, clampedLimit);
+    for (const tag of tags) {
+      sql += " AND EXISTS (SELECT 1 FROM json_each(e.tags) WHERE value = ?)";
+      params.push(tag);
+    }
   }
+
+  sql += " ORDER BY rank LIMIT ?";
+  params.push(clampedLimit);
+
+  const results = db.prepare(sql).all(...params) as Entry[];
 
   return results;
 }
@@ -496,8 +494,10 @@ export function queryEntriesSemantic(
   const { queryEmbedding, namespace, entryType, tags, limit = 10 } = options;
   const clampedLimit = Math.min(Math.max(limit, 1), 50);
 
-  // Over-fetch for post-filtering (5x per Codex finding)
-  const fetchLimit = tags && tags.length > 0 ? clampedLimit * 5 : clampedLimit;
+  // Fetch enough KNN candidates to satisfy clampedLimit after filtering.
+  // vec0 KNN queries can't include tag/namespace predicates, so we
+  // over-fetch and filter inline, stopping once we have enough matches.
+  const knnFetch = Math.min(Math.max(clampedLimit * 10, 100), 500);
 
   // KNN query via vec0
   const vecResults = db
@@ -507,15 +507,18 @@ export function queryEntriesSemantic(
        WHERE v.embedding MATCH ? AND k = ?
        ORDER BY v.distance`,
     )
-    .all(queryEmbedding, fetchLimit * 2) as Array<{ entry_id: string; distance: number }>;
+    .all(queryEmbedding, knnFetch) as Array<{ entry_id: string; distance: number }>;
 
   if (vecResults.length === 0) return [];
 
-  // Fetch full entries and apply filters
+  // Fetch full entries and apply ALL filters (namespace, type, tags)
+  // inline so that clampedLimit applies to the filtered result set.
   const getEntry = db.prepare("SELECT * FROM entries WHERE id = ?");
-  let results: Entry[] = [];
+  const results: Entry[] = [];
 
   for (const { entry_id } of vecResults) {
+    if (results.length >= clampedLimit) break;
+
     const entry = getEntry.get(entry_id) as Entry | undefined;
     if (!entry) continue;
 
@@ -529,19 +532,12 @@ export function queryEntriesSemantic(
 
     if (entryType && entry.entry_type !== entryType) continue;
 
-    results.push(entry);
-    if (results.length >= fetchLimit) break;
-  }
-
-  // Post-filter by tags
-  if (tags && tags.length > 0) {
-    results = results.filter((entry) => {
+    if (tags && tags.length > 0) {
       const entryTags: string[] = JSON.parse(entry.tags);
-      return tags.every((t) => entryTags.includes(t));
-    });
-    results = results.slice(0, clampedLimit);
-  } else {
-    results = results.slice(0, clampedLimit);
+      if (!tags.every((t) => entryTags.includes(t))) continue;
+    }
+
+    results.push(entry);
   }
 
   return results;
