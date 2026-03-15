@@ -138,7 +138,7 @@ Uses `mcp-remote` bridge with Bearer + any reverse proxy auth headers.
 
 **Claude.ai / Claude Mobile (OAuth — via Settings > Connectors):**
 URL: `https://<your-domain>/mcp` — OAuth 2.1 flow handles auth automatically.
-Requires reverse proxy path policies for OAuth endpoints (see OAuth section below).
+Requires reverse proxy path policies for OAuth endpoints and trusted consent-header configuration (see OAuth section below).
 
 **Claude Code (stdio — local dev only):**
 ```bash
@@ -308,7 +308,8 @@ Existing Claude Code and Claude Desktop clients using `MUNIN_API_KEY` continue w
 - Access tokens: configurable TTL (default 1 hour), checked on every request
 - Refresh tokens: configurable TTL (default 30 days), rotation on use (old token revoked)
 - Auth codes: 10-minute TTL, single use
-- Cleanup: expired/revoked tokens swept on a periodic cleanup timer (60s)
+- Access tokens, refresh tokens, and auth codes are stored hashed at rest
+- Cleanup: expired auth codes and expired/revoked tokens swept on a periodic cleanup timer (60s)
 
 ### Reverse proxy path policies
 
@@ -316,6 +317,12 @@ If using a reverse proxy (e.g. Cloudflare Access, nginx), configure path-based a
 - `/.well-known/*`, `/token`, `/register`, `/health` — public (metadata, server-to-server)
 - `/authorize`, `/authorize/approve` — user authentication (browser consent flow)
 - `/mcp` — API authentication (Bearer token or OAuth)
+
+For public issuers, the server now fails closed unless both of these are set:
+- `MUNIN_OAUTH_TRUSTED_USER_HEADER`
+- `MUNIN_OAUTH_TRUSTED_USER_VALUE`
+
+The consent endpoints only proceed when that header/value pair is present, or when the request is loopback-local and `MUNIN_OAUTH_ALLOW_LOCALHOST_CONSENT=true` for development.
 
 ### Key files
 

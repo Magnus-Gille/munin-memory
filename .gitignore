@@ -9,6 +9,7 @@ dist/
 .playwright-mcp/
 STATUS.md
 *.zip
+SECURITY-REMEDIATION.local.md
 
 # Debate files — keep only summaries and resolutions
 debate/*

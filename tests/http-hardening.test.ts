@@ -5,6 +5,9 @@ import {
   parseJsonBody,
   buildAllowedHosts,
   validateHost,
+  getConsentAuthConfig,
+  validateConsentAuthConfig,
+  isTrustedConsentRequest,
   createRateLimiter,
   checkRateLimit,
   extractMethod,
@@ -182,6 +185,96 @@ describe("buildAllowedHosts", () => {
     } finally {
       delete process.env.MUNIN_ALLOWED_HOSTS;
     }
+  });
+});
+
+// --- OAuth consent gating ---
+
+describe("validateConsentAuthConfig", () => {
+  it("allows localhost issuers without extra config", () => {
+    const error = validateConsentAuthConfig(
+      { allowLocalhost: true },
+      new URL("http://localhost:3030"),
+    );
+    expect(error).toBeNull();
+  });
+
+  it("rejects partial trusted-header config", () => {
+    const error = validateConsentAuthConfig(
+      {
+        trustedHeaderName: "x-auth-user",
+        allowLocalhost: false,
+      },
+      new URL("https://munin.example.com"),
+    );
+    expect(error).toContain("must be set together");
+  });
+
+  it("rejects public issuers without trusted-header config", () => {
+    const error = validateConsentAuthConfig(
+      { allowLocalhost: true },
+      new URL("https://munin.example.com"),
+    );
+    expect(error).toContain("Public OAuth consent requires trusted-user header configuration");
+  });
+});
+
+describe("getConsentAuthConfig", () => {
+  it("reads consent config from environment", () => {
+    process.env.MUNIN_OAUTH_TRUSTED_USER_HEADER = "x-auth-user";
+    process.env.MUNIN_OAUTH_TRUSTED_USER_VALUE = "magnus@example.com";
+    process.env.MUNIN_OAUTH_ALLOW_LOCALHOST_CONSENT = "false";
+
+    try {
+      expect(getConsentAuthConfig()).toEqual({
+        trustedHeaderName: "x-auth-user",
+        trustedHeaderValue: "magnus@example.com",
+        allowLocalhost: false,
+      });
+    } finally {
+      delete process.env.MUNIN_OAUTH_TRUSTED_USER_HEADER;
+      delete process.env.MUNIN_OAUTH_TRUSTED_USER_VALUE;
+      delete process.env.MUNIN_OAUTH_ALLOW_LOCALHOST_CONSENT;
+    }
+  });
+});
+
+describe("isTrustedConsentRequest", () => {
+  it("accepts matching trusted-user header", () => {
+    const req = {
+      get: (name: string) => (name === "x-auth-user" ? "magnus@example.com" : undefined),
+      socket: { remoteAddress: "203.0.113.10" },
+    };
+
+    expect(isTrustedConsentRequest(req as any, {
+      trustedHeaderName: "x-auth-user",
+      trustedHeaderValue: "magnus@example.com",
+      allowLocalhost: false,
+    })).toBe(true);
+  });
+
+  it("accepts loopback requests when localhost consent is enabled", () => {
+    const req = {
+      get: () => undefined,
+      socket: { remoteAddress: "::ffff:127.0.0.1" },
+    };
+
+    expect(isTrustedConsentRequest(req as any, {
+      allowLocalhost: true,
+    })).toBe(true);
+  });
+
+  it("rejects untrusted requests", () => {
+    const req = {
+      get: () => undefined,
+      socket: { remoteAddress: "203.0.113.10" },
+    };
+
+    expect(isTrustedConsentRequest(req as any, {
+      trustedHeaderName: "x-auth-user",
+      trustedHeaderValue: "magnus@example.com",
+      allowLocalhost: false,
+    })).toBe(false);
   });
 });
 

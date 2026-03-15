@@ -5,7 +5,7 @@
  * Supports dual auth: legacy Bearer token (MUNIN_API_KEY) + OAuth access tokens.
  */
 
-import { randomUUID, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, randomBytes, timingSafeEqual } from "node:crypto";
 import type { Response } from "express";
 import type Database from "better-sqlite3";
 import type {
@@ -144,6 +144,10 @@ interface PendingAuth {
   expiresAt: number;
 }
 
+function hashOpaqueValue(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
 // --- OAuth Provider ---
 
 export class MuninOAuthProvider implements OAuthServerProvider {
@@ -217,6 +221,7 @@ export class MuninOAuthProvider implements OAuthServerProvider {
     res: Response,
   ): void {
     const code = randomBytes(32).toString("hex");
+    const codeHash = hashOpaqueValue(code);
     const now = nowUTC();
     const expiresAt = Math.floor(Date.now() / 1000) + AUTH_CODE_TTL;
 
@@ -227,7 +232,7 @@ export class MuninOAuthProvider implements OAuthServerProvider {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
-        code,
+        codeHash,
         pending.clientId,
         pending.codeChallenge,
         pending.redirectUri,
@@ -270,11 +275,12 @@ export class MuninOAuthProvider implements OAuthServerProvider {
     _client: OAuthClientInformationFull,
     authorizationCode: string,
   ): Promise<string> {
+    const codeHash = hashOpaqueValue(authorizationCode);
     const row = this.db
       .prepare(
         "SELECT code_challenge FROM oauth_auth_codes WHERE code = ? AND used = 0",
       )
-      .get(authorizationCode) as { code_challenge: string } | undefined;
+      .get(codeHash) as { code_challenge: string } | undefined;
 
     if (!row) {
       throw new Error("Invalid or expired authorization code");
@@ -289,10 +295,12 @@ export class MuninOAuthProvider implements OAuthServerProvider {
     redirectUri?: string,
     resource?: URL,
   ): Promise<OAuthTokens> {
+    const codeHash = hashOpaqueValue(authorizationCode);
+
     // Atomically claim the code: UPDATE ... WHERE used = 0, check changes === 1
     const claimed = this.db
       .prepare("UPDATE oauth_auth_codes SET used = 1 WHERE code = ? AND used = 0")
-      .run(authorizationCode);
+      .run(codeHash);
 
     if (claimed.changes !== 1) {
       throw new Error("Invalid or expired authorization code");
@@ -301,7 +309,7 @@ export class MuninOAuthProvider implements OAuthServerProvider {
     // Now read the code data (already marked used, safe from replay)
     const row = this.db
       .prepare("SELECT * FROM oauth_auth_codes WHERE code = ?")
-      .get(authorizationCode) as OAuthAuthCodeRow | undefined;
+      .get(codeHash) as OAuthAuthCodeRow | undefined;
 
     if (!row) {
       throw new Error("Invalid or expired authorization code");
@@ -334,12 +342,14 @@ export class MuninOAuthProvider implements OAuthServerProvider {
     scopes?: string[],
     resource?: URL,
   ): Promise<OAuthTokens> {
+    const refreshTokenHash = hashOpaqueValue(refreshToken);
+
     // Atomically claim the refresh token: UPDATE WHERE revoked = 0, check changes === 1
     const claimed = this.db
       .prepare(
         "UPDATE oauth_tokens SET revoked = 1 WHERE token = ? AND token_type = 'refresh' AND revoked = 0",
       )
-      .run(refreshToken);
+      .run(refreshTokenHash);
 
     if (claimed.changes !== 1) {
       throw new Error("Invalid refresh token");
@@ -348,7 +358,7 @@ export class MuninOAuthProvider implements OAuthServerProvider {
     // Now read the token data (already revoked, safe from replay)
     const row = this.db
       .prepare("SELECT * FROM oauth_tokens WHERE token = ?")
-      .get(refreshToken) as OAuthTokenRow | undefined;
+      .get(refreshTokenHash) as OAuthTokenRow | undefined;
 
     if (!row) {
       throw new Error("Invalid refresh token");
@@ -390,11 +400,12 @@ export class MuninOAuthProvider implements OAuthServerProvider {
     }
 
     // Check OAuth tokens
+    const accessTokenHash = hashOpaqueValue(token);
     const row = this.db
       .prepare(
         "SELECT * FROM oauth_tokens WHERE token = ? AND token_type = 'access' AND revoked = 0",
       )
-      .get(token) as OAuthTokenRow | undefined;
+      .get(accessTokenHash) as OAuthTokenRow | undefined;
 
     if (!row) {
       throw new InvalidTokenError("Invalid access token");
@@ -418,12 +429,13 @@ export class MuninOAuthProvider implements OAuthServerProvider {
     client: OAuthClientInformationFull,
     request: OAuthTokenRevocationRequest,
   ): Promise<void> {
+    const tokenHash = hashOpaqueValue(request.token);
     // Revoke the token if it belongs to this client
     this.db
       .prepare(
         "UPDATE oauth_tokens SET revoked = 1 WHERE token = ? AND client_id = ?",
       )
-      .run(request.token, client.client_id);
+      .run(tokenHash, client.client_id);
   }
 
   /**
@@ -441,7 +453,7 @@ export class MuninOAuthProvider implements OAuthServerProvider {
 
     const tokensResult = this.db
       .prepare(
-        "DELETE FROM oauth_tokens WHERE (expires_at < ? AND token_type = 'access') OR revoked = 1",
+        "DELETE FROM oauth_tokens WHERE expires_at < ? OR revoked = 1",
       )
       .run(nowSecs);
 
@@ -470,6 +482,8 @@ export class MuninOAuthProvider implements OAuthServerProvider {
 
     const accessToken = randomBytes(32).toString("hex");
     const refreshToken = randomBytes(32).toString("hex");
+    const accessTokenHash = hashOpaqueValue(accessToken);
+    const refreshTokenHash = hashOpaqueValue(refreshToken);
 
     const accessExpiresAt = nowSecs + ACCESS_TOKEN_TTL;
     const refreshExpiresAt = nowSecs + REFRESH_TOKEN_TTL;
@@ -484,7 +498,7 @@ export class MuninOAuthProvider implements OAuthServerProvider {
            (token, token_type, client_id, scopes, resource, expires_at, created_at)
            VALUES (?, 'refresh', ?, ?, ?, ?, ?)`,
         )
-        .run(refreshToken, clientId, scopesJson, resource ?? null, refreshExpiresAt, now);
+        .run(refreshTokenHash, clientId, scopesJson, resource ?? null, refreshExpiresAt, now);
 
       // Insert access token linked to refresh token
       this.db
@@ -494,13 +508,13 @@ export class MuninOAuthProvider implements OAuthServerProvider {
            VALUES (?, 'access', ?, ?, ?, ?, ?, ?)`,
         )
         .run(
-          accessToken,
+          accessTokenHash,
           clientId,
           scopesJson,
           resource ?? null,
           accessExpiresAt,
           now,
-          refreshToken,
+          refreshTokenHash,
         );
     });
 

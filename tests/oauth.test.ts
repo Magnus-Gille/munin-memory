@@ -196,6 +196,22 @@ describe("Authorization code flow", () => {
       provider.exchangeAuthorizationCode(client, code, undefined, "http://evil.com/callback"),
     ).rejects.toThrow("redirect_uri does not match");
   });
+
+  it("stores authorization codes hashed at rest", () => {
+    const res = createMockResponse();
+    provider.completeAuthorization(
+      makePending(client.client_id),
+      res as any,
+    );
+
+    const code = new URL(res.redirectedTo!).searchParams.get("code")!;
+    const stored = db
+      .prepare("SELECT code FROM oauth_auth_codes")
+      .get() as { code: string };
+
+    expect(stored.code).toBeDefined();
+    expect(stored.code).not.toBe(code);
+  });
 });
 
 describe("Server-side authorization transaction binding", () => {
@@ -311,6 +327,25 @@ describe("Token verification", () => {
     expect(info.clientId).toBe(client.client_id);
     expect(info.scopes).toEqual(["mcp:tools"]);
     expect(info.expiresAt).toBeDefined();
+  });
+
+  it("stores OAuth tokens hashed at rest", async () => {
+    const res = createMockResponse();
+    provider.completeAuthorization(
+      makePending(client.client_id),
+      res as any,
+    );
+
+    const code = new URL(res.redirectedTo!).searchParams.get("code")!;
+    const tokens = await provider.exchangeAuthorizationCode(client, code);
+
+    const stored = db
+      .prepare("SELECT token, token_type FROM oauth_tokens ORDER BY token_type")
+      .all() as Array<{ token: string; token_type: string }>;
+
+    expect(stored).toHaveLength(2);
+    expect(stored.some((row) => row.token === tokens.access_token)).toBe(false);
+    expect(stored.some((row) => row.token === tokens.refresh_token)).toBe(false);
   });
 
   it("rejects invalid token", async () => {
@@ -468,6 +503,33 @@ describe("Cleanup", () => {
 
     const result = provider.cleanupExpired();
     expect(result.tokens).toBeGreaterThanOrEqual(1);
+  });
+
+  it("cleans up expired refresh tokens", async () => {
+    const res = createMockResponse();
+    provider.completeAuthorization(
+      makePending(client.client_id),
+      res as any,
+    );
+
+    const code = new URL(res.redirectedTo!).searchParams.get("code")!;
+    const tokens = await provider.exchangeAuthorizationCode(client, code);
+
+    db.prepare(
+      "UPDATE oauth_tokens SET expires_at = 0 WHERE token_type = 'refresh'",
+    ).run();
+
+    const result = provider.cleanupExpired();
+    expect(result.tokens).toBeGreaterThanOrEqual(1);
+
+    const remaining = db
+      .prepare("SELECT COUNT(*) as count FROM oauth_tokens WHERE token_type = 'refresh'")
+      .get() as { count: number };
+    expect(remaining.count).toBe(0);
+
+    await expect(provider.exchangeRefreshToken(client, tokens.refresh_token!)).rejects.toThrow(
+      "Invalid refresh token",
+    );
   });
 });
 

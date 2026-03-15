@@ -42,6 +42,8 @@ let app: ReturnType<typeof createHttpApp>["app"];
 let requestLogs: RequestLogEntry[];
 
 beforeEach(() => {
+  process.env.MUNIN_OAUTH_TRUSTED_USER_HEADER = "x-auth-user";
+  process.env.MUNIN_OAUTH_TRUSTED_USER_VALUE = "magnus@example.com";
   cleanupTestDb();
   db = initDatabase(TEST_DB_PATH);
   requestLogs = [];
@@ -58,6 +60,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  delete process.env.MUNIN_OAUTH_TRUSTED_USER_HEADER;
+  delete process.env.MUNIN_OAUTH_TRUSTED_USER_VALUE;
   db.close();
   cleanupTestDb();
 });

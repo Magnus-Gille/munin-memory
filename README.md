@@ -22,7 +22,7 @@ For the full argument, see [Resilient and Sovereign AI](https://gille.ai/en/blog
 - **Two memory types:** state entries (mutable, current truth) and log entries (append-only, chronological history)
 - **Hierarchical namespaces** (e.g. `projects/website`, `people/alice`, `decisions/tech-stack`)
 - **Three search modes:** keyword (FTS5), semantic (vector embeddings), and hybrid (both combined via Reciprocal Rank Fusion)
-- **Content security:** all writes scanned for secrets — API keys, tokens, passwords are rejected before storage
+- **Content security:** writes are heuristically scanned for common secrets — obvious API keys, tokens, and inline passwords are rejected before storage
 - **Dual auth:** Bearer token (simple) + OAuth 2.1 (for web/mobile clients)
 - **Two transports:** stdio (local) and Streamable HTTP (network)
 
@@ -105,7 +105,7 @@ claude mcp add --transport http \
 
 ### Connect from Claude Web / Mobile (OAuth)
 
-When running in HTTP mode, the server exposes OAuth 2.1 endpoints. Configure your MCP client with the server URL and the OAuth flow handles authentication automatically. See the [OAuth section in CLAUDE.md](CLAUDE.md#oauth-21-feature-3) for endpoint details.
+When running in HTTP mode, the server exposes OAuth 2.1 endpoints. Configure your MCP client with the server URL and the OAuth flow handles authentication automatically. For public deployments, OAuth consent is now fail-closed: you must configure a trusted proxy-authenticated header/value pair for `/authorize` and `/authorize/approve`, or the server will refuse to serve public consent. See the [OAuth section in CLAUDE.md](CLAUDE.md#oauth-21-feature-3) for endpoint details.
 
 ## Configuration
 
@@ -121,6 +121,9 @@ All configuration is via environment variables. Copy `.env.example` for a starti
 | `MUNIN_EMBEDDINGS_ENABLED` | `true` | Enable semantic search |
 | `MUNIN_HYBRID_ENABLED` | `false` | Enable hybrid search (FTS5 + vector) |
 | `MUNIN_OAUTH_ISSUER_URL` | `http://localhost:3030` | OAuth issuer (set to your public URL) |
+| `MUNIN_OAUTH_TRUSTED_USER_HEADER` | — | Trusted header name required for public OAuth consent |
+| `MUNIN_OAUTH_TRUSTED_USER_VALUE` | — | Exact trusted header value required for public OAuth consent |
+| `MUNIN_OAUTH_ALLOW_LOCALHOST_CONSENT` | `true` | Allow consent on loopback-only local development |
 
 See `.env.example` for the full list.
 
@@ -131,7 +134,7 @@ This is how I run it — a Pi 5 on my desk, accessible from anywhere via a Cloud
 1. **Deploy the code** — `./scripts/deploy-rpi.sh <your-pi-hostname>`
 2. **Install the systemd service** — see `munin-memory.service` as a template
 3. **Set up a reverse proxy** — Cloudflare Tunnel, Tailscale, WireGuard, nginx, or whatever fits your setup
-4. **Configure OAuth** — set `MUNIN_OAUTH_ISSUER_URL` to your public domain for web/mobile access
+4. **Configure OAuth** — set `MUNIN_OAUTH_ISSUER_URL` to your public domain and configure `MUNIN_OAUTH_TRUSTED_USER_HEADER` + `MUNIN_OAUTH_TRUSTED_USER_VALUE` so browser consent is only available to your authenticated user
 
 The deploy script and service file are tailored to my setup. You will likely need to adjust paths, usernames, and network configuration for yours.
 

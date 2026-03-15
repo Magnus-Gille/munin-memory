@@ -8,6 +8,7 @@ import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import express from "express";
 import type { Request, Response, NextFunction } from "express";
 import { createServer, IncomingMessage } from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { initDatabase } from "./db.js";
 import { registerTools } from "./tools.js";
@@ -62,6 +63,12 @@ export interface HttpAppOptions {
   httpHost: string;
   httpPort: number;
   requestLogger?: (entry: RequestLogEntry) => void;
+}
+
+export interface ConsentAuthConfig {
+  trustedHeaderName?: string;
+  trustedHeaderValue?: string;
+  allowLocalhost: boolean;
 }
 
 let cleanupTimerId: ReturnType<typeof setInterval> | undefined;
@@ -148,6 +155,71 @@ export function buildAllowedHosts(host: string, port: number): Set<string> {
 export function validateHost(hostHeader: string | undefined, allowedHosts: Set<string>): boolean {
   if (!hostHeader) return false;
   return allowedHosts.has(hostHeader);
+}
+
+function normalizeHostname(hostname: string): string {
+  return hostname.replace(/^\[|\]$/g, "").toLowerCase();
+}
+
+function isLocalHostname(hostname: string): boolean {
+  const normalized = normalizeHostname(hostname);
+  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
+}
+
+function isLoopbackAddress(address: string | undefined): boolean {
+  if (!address) return false;
+  const normalized = address.replace(/^::ffff:/, "").toLowerCase();
+  return normalized === "127.0.0.1" || normalized === "::1";
+}
+
+function safeStringEqual(left: string, right: string): boolean {
+  const leftBuf = Buffer.from(left);
+  const rightBuf = Buffer.from(right);
+  if (leftBuf.length !== rightBuf.length) return false;
+  return timingSafeEqual(leftBuf, rightBuf);
+}
+
+export function getConsentAuthConfig(): ConsentAuthConfig {
+  return {
+    trustedHeaderName: process.env.MUNIN_OAUTH_TRUSTED_USER_HEADER?.trim() || undefined,
+    trustedHeaderValue: process.env.MUNIN_OAUTH_TRUSTED_USER_VALUE?.trim() || undefined,
+    allowLocalhost: (process.env.MUNIN_OAUTH_ALLOW_LOCALHOST_CONSENT ?? "true") === "true",
+  };
+}
+
+export function validateConsentAuthConfig(config: ConsentAuthConfig, issuer: URL): string | null {
+  const hasHeaderName = Boolean(config.trustedHeaderName);
+  const hasHeaderValue = Boolean(config.trustedHeaderValue);
+
+  if (hasHeaderName !== hasHeaderValue) {
+    return "MUNIN_OAUTH_TRUSTED_USER_HEADER and MUNIN_OAUTH_TRUSTED_USER_VALUE must be set together.";
+  }
+
+  if (isLocalHostname(issuer.hostname)) {
+    return null;
+  }
+
+  if (!hasHeaderName || !hasHeaderValue) {
+    return "Public OAuth consent requires trusted-user header configuration. Set MUNIN_OAUTH_TRUSTED_USER_HEADER and MUNIN_OAUTH_TRUSTED_USER_VALUE.";
+  }
+
+  return null;
+}
+
+export function isTrustedConsentRequest(req: Request, config: ConsentAuthConfig): boolean {
+  if (
+    config.trustedHeaderName &&
+    config.trustedHeaderValue &&
+    safeStringEqual(req.get(config.trustedHeaderName) ?? "", config.trustedHeaderValue)
+  ) {
+    return true;
+  }
+
+  if (!config.allowLocalhost) {
+    return false;
+  }
+
+  return isLoopbackAddress(req.socket.remoteAddress);
 }
 
 export function createRateLimiter(): RateLimiterState {
@@ -277,6 +349,13 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
   } = options;
   const allowedHosts = buildAllowedHosts(httpHost, httpPort);
   const rateLimiter = createRateLimiter();
+  const consentAuth = getConsentAuthConfig();
+  const issuer = new URL(issuerUrl);
+  const consentConfigError = validateConsentAuthConfig(consentAuth, issuer);
+
+  if (consentConfigError) {
+    throw new Error(consentConfigError);
+  }
 
   // OAuth provider with dual auth (legacy Bearer + OAuth tokens)
   const oauthProvider = new MuninOAuthProvider(database, apiKey);
@@ -310,13 +389,30 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
     res.json({ status: "ok" });
   });
 
+  // OAuth consent must be protected by a trusted user signal.
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (req.path !== "/authorize" && req.path !== "/authorize/approve") {
+      next();
+      return;
+    }
+
+    if (isTrustedConsentRequest(req, consentAuth)) {
+      next();
+      return;
+    }
+
+    res.status(403).json({
+      error: "Forbidden: OAuth consent requires trusted user authentication",
+    });
+  });
+
   // --- OAuth endpoints (mounted at root) ---
   // mcpAuthRouter handles: /.well-known/oauth-authorization-server,
   // /.well-known/oauth-protected-resource/mcp, /authorize, /token, /register, /revoke
   app.use(
     mcpAuthRouter({
       provider: oauthProvider,
-      issuerUrl: new URL(issuerUrl),
+      issuerUrl: issuer,
       scopesSupported: ["mcp:tools"],
       resourceName: "Munin Memory",
     }),
