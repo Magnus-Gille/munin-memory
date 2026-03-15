@@ -18,3 +18,4 @@
 | 2026-03-05 | [mcp-remote vs native connector](mcp-desktop-summary.md) | 2 | Try stateless HTTP mode first; fix onsessionclosed leak; native connector is fallback | 12 | 4/12 (33%) |
 | 2026-03-12 | [Computed dashboard architecture](computed-dashboard-summary.md) | 2 | Replace manual workbench with computed dashboard; add CAS overwrite protection; drop auto-log; hybrid curated overlay | 16 | 4/16 (25%) |
 | 2026-03-13 | [Jarvis architecture (Munin+Mímir+Hugin)](jarvis-architecture-summary.md) | 2 | Two services + one worker; validate remote fetch first; no AI summary for private docs; fix tag syntax; define document identity | 20 | 4/20 (20%) |
+| 2026-03-15 | [Skills in Munin](skills-in-munin-summary.md) | 2 | Original rejected; start with one sub-artifact experiment, not a system | 17 | 4/17 (24%) |
