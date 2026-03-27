@@ -1,3 +1,5 @@
+import path from "node:path";
+import os from "node:os";
 import type Database from "better-sqlite3";
 import { vecLoaded, storeEmbedding, removeEmbedding } from "./db.js";
 
@@ -75,12 +77,20 @@ export async function initEmbeddings(): Promise<boolean> {
       return true;
     }
 
-    const { pipeline } = await import("@huggingface/transformers");
-    const pipelineOptions: Record<string, unknown> = {};
+    const transformers = await import("@huggingface/transformers");
+
+    // Point model cache to the data directory (writable under systemd sandboxing)
+    const dbDir = process.env.MUNIN_MEMORY_DB_PATH
+      ? path.dirname(process.env.MUNIN_MEMORY_DB_PATH)
+      : path.join(os.homedir(), ".munin-memory");
+    const cacheDir = path.join(dbDir, "hf-cache");
+    transformers.env.cacheDir = cacheDir;
+
+    const pipelineOptions: Record<string, unknown> = { cache_dir: cacheDir };
     if (config.localOnly) {
       pipelineOptions.local_files_only = true;
     }
-    const pipe = await pipeline("feature-extraction", config.model, pipelineOptions);
+    const pipe = await transformers.pipeline("feature-extraction", config.model, pipelineOptions);
     extractor = async (text: string, options: { pooling: PoolingType; normalize: boolean }) => {
       const result = await pipe(text, { pooling: options.pooling, normalize: options.normalize });
       return { data: result.data as Float32Array };
