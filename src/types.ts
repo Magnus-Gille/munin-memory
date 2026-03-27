@@ -63,6 +63,7 @@ export interface LogParams {
 export interface ListParams {
   namespace?: string;
   include_demo?: boolean;
+  include_completed_tasks?: boolean;
 }
 
 export interface DeleteParams {
@@ -95,7 +96,7 @@ export interface DashboardEntry {
 
 export interface MaintenanceItem {
   namespace: string;
-  issue: "active_but_stale" | "missing_status" | "conflicting_lifecycle" | "missing_lifecycle";
+  issue: "active_but_stale" | "missing_status" | "conflicting_lifecycle" | "missing_lifecycle" | "upcoming_event_stale";
   suggestion: string;
 }
 
@@ -104,6 +105,7 @@ export interface TrackedStatusRow {
   namespace: string;
   key: string;
   content_preview: string;
+  content: string;
   tags: string;
   created_at: string;
   updated_at: string;

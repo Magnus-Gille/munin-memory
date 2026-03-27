@@ -20,6 +20,7 @@ import {
   executeDelete,
   getOtherKeysInNamespace,
   getTrackedStatuses,
+  getCompletedTaskNamespaces,
   vecLoaded,
 } from "./db.js";
 import {
@@ -96,9 +97,37 @@ function contentPreview(content: string, maxLen = 500): string {
 }
 
 const STALENESS_THRESHOLD_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
+const EVENT_STALENESS_THRESHOLD_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
+const EVENT_LOOKAHEAD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 function isStale(updatedAt: string): boolean {
   return Date.now() - new Date(updatedAt).getTime() > STALENESS_THRESHOLD_MS;
+}
+
+// Date pattern: YYYY-MM-DD (standalone or in ISO timestamp)
+const DATE_PATTERN = /\b(20\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))\b/g;
+
+/**
+ * Detect if content mentions a date within the next 7 days and the entry
+ * hasn't been updated in 3+ days. Returns the soonest upcoming date or null.
+ */
+function findUpcomingEventDate(content: string, updatedAt: string): string | null {
+  const now = Date.now();
+  const sinceUpdate = now - new Date(updatedAt).getTime();
+  if (sinceUpdate < EVENT_STALENESS_THRESHOLD_MS) return null; // recently updated, no concern
+
+  let soonest: string | null = null;
+  let soonestMs = Infinity;
+  for (const match of content.matchAll(DATE_PATTERN)) {
+    const dateStr = match[1];
+    const dateMs = new Date(dateStr + "T23:59:59Z").getTime();
+    const untilEvent = dateMs - now;
+    if (untilEvent > 0 && untilEvent <= EVENT_LOOKAHEAD_MS && untilEvent < soonestMs) {
+      soonestMs = untilEvent;
+      soonest = dateStr;
+    }
+  }
+  return soonest;
 }
 
 // --- Lifecycle tag management ---
@@ -132,11 +161,43 @@ function getLifecycleTags(tags: string[]): string[] {
   return tags.filter(t => LIFECYCLE_TAGS.has(t));
 }
 
+/**
+ * Extract a compact operational summary from the full conventions document.
+ * Single source of truth: the full conventions in meta/conventions. This
+ * function derives the compact version — nothing is maintained separately.
+ */
+function compactConventions(full: string, updatedAt: string): string {
+  const lines: string[] = [
+    "# Quick Reference (compact)",
+    `Full conventions: memory_read("meta/conventions", "conventions") — last updated ${updatedAt.slice(0, 10)}`,
+    "",
+    "## Key Rules",
+    "- **Handshake:** memory_orient first, then memory_read for specifics, memory_query for search.",
+    "- **State entries** = current truth (mutable). **Log entries** = chronological (append-only).",
+    "- **Write protocol:** Log decisions first (memory_log), then update status with CAS (expected_updated_at).",
+    "- **Lifecycle tags** (required on status): active, blocked, completed, stopped, maintenance, archived.",
+    "- **Tracked namespaces** (dashboard): projects/*, clients/*. Must have status key + lifecycle tag.",
+    "- **Prefixed tags:** client:<name>, person:<name>, topic:<topic>, type:<artifact>, source:external/internal.",
+    "- **No secrets** — API keys, tokens, passwords rejected by server.",
+    "- **CAS for tracked statuses** — pass expected_updated_at to prevent blind overwrites.",
+    "",
+    "## Namespaces",
+    "projects/<name> (tracked) | clients/<name> (tracked) | people/<name> | decisions/<topic>",
+    "meta/<topic> | documents/<slug> | feedback/<project> | reading/<slug>",
+    "signals/<source> | digests/<period> | tasks/<id> (Hugin)",
+    "",
+    "## Tickets",
+    "File: memory_write(\"feedback/<project>\", \"<slug>\", content, tags: [\"bug\"|\"enhancement\"|\"ux\"])",
+    "View: memory_list(\"feedback\") or memory_list(\"feedback/<project>\")",
+  ];
+  return lines.join("\n");
+}
+
 const TOOL_DEFINITIONS = [
   {
     name: "memory_orient",
     description:
-      "START HERE. Call this at the beginning of every conversation before using any other memory tool. Returns conventions, a computed project dashboard (grouped by lifecycle from status entries), optional curated notes, actionable maintenance suggestions, and a namespace overview — everything needed to orient yourself in one call.\n\nThe dashboard is computed automatically from status entries in projects/* and clients/* namespaces. No manual workbench maintenance needed. Demo namespaces are hidden by default; pass `include_demo: true` if you want them in the namespace overview.\n\nIf you are unsure how to use memory_write, memory_read, memory_log, or any other memory tool, the conventions returned by this tool contain the full guide.",
+      "START HERE. Call this at the beginning of every conversation before using any other memory tool. Returns a compact conventions summary, a computed project dashboard (grouped by lifecycle from status entries), optional curated notes, actionable maintenance suggestions, and a namespace overview — everything needed to orient yourself in one call.\n\nThe dashboard is computed automatically from status entries in projects/* and clients/* namespaces. No manual workbench maintenance needed. Demo namespaces and completed task-run namespaces are hidden by default.\n\nConventions are returned in compact form by default. Pass `include_full_conventions: true` for the full guide, or read it via memory_read(\"meta/conventions\", \"conventions\").",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -144,6 +205,16 @@ const TOOL_DEFINITIONS = [
           type: "boolean",
           description:
             "Optional. If true, include demo/* namespaces in the namespace overview. Default: false.",
+        },
+        include_completed_tasks: {
+          type: "boolean",
+          description:
+            "Optional. If true, include completed/failed task-run namespaces (tasks/*) in the namespace overview. Default: false. Active, pending, and special task namespaces (tasks/admin, tasks/_heartbeat) are always shown.",
+        },
+        include_full_conventions: {
+          type: "boolean",
+          description:
+            "Optional. If true, return the full conventions document. Default: false (returns a compact operational summary). Full conventions can also be read via memory_read(\"meta/conventions\", \"conventions\").",
         },
       },
       required: [],
@@ -313,7 +384,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_list",
     description:
-      "Browse memory contents. Without a namespace: shows all namespaces with entry counts and last_activity_at (demo/* namespaces hidden by default). With a namespace: shows all state keys, log count, and the 5 most recent log entry previews.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Browse memory contents. Without a namespace: shows all namespaces with entry counts and last_activity_at (demo/* and completed task-run namespaces hidden by default). With a namespace: shows all state keys, log count, and the 5 most recent log entry previews.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -326,6 +397,11 @@ const TOOL_DEFINITIONS = [
           type: "boolean",
           description:
             "Optional. If true, include demo/* namespaces in the top-level listing. Default: false.",
+        },
+        include_completed_tasks: {
+          type: "boolean",
+          description:
+            "Optional. If true, include completed/failed task-run namespaces in the top-level listing. Default: false.",
         },
       },
       required: [],
@@ -375,20 +451,28 @@ export function registerTools(server: Server, db: Database.Database): void {
       try {
         switch (name) {
           case "memory_orient": {
-            const { include_demo } = (args ?? {}) as ListParams;
+            const { include_demo, include_completed_tasks } = (args ?? {}) as ListParams;
+            const include_full_conventions = ((args ?? {}) as Record<string, unknown>).include_full_conventions === true;
             // Read conventions and namespace list
             const conventions = readState(db, "meta/conventions", "conventions");
             const namespaces = listNamespaces(db);
 
             const response: Record<string, unknown> = {};
 
-            // Conventions
+            // Conventions — compact by default, full on request
             if (conventions) {
               const parsed = parseEntry(conventions);
+              const content = include_full_conventions
+                ? parsed.content
+                : compactConventions(parsed.content, parsed.updated_at);
               const conv: Record<string, unknown> = {
-                content: parsed.content,
+                content,
                 updated_at: parsed.updated_at,
               };
+              if (!include_full_conventions) {
+                conv.compact = true;
+                conv.full_conventions_hint = 'memory_read("meta/conventions", "conventions")';
+              }
               if (isStale(parsed.updated_at)) conv.stale = true;
               response.conventions = conv;
             } else {
@@ -452,6 +536,21 @@ export function registerTools(server: Server, db: Database.Database): void {
                 });
               }
 
+              // Event-aware staleness: flag active entries with upcoming dates that haven't been updated recently
+              if (lifecycle === "active" && !entry.needs_attention) {
+                const upcomingDate = findUpcomingEventDate(row.content, row.updated_at);
+                if (upcomingDate) {
+                  entry.needs_attention = true;
+                  const daysUntil = Math.ceil((new Date(upcomingDate + "T23:59:59Z").getTime() - Date.now()) / (24 * 60 * 60 * 1000));
+                  const daysSinceUpdate = Math.floor((Date.now() - new Date(row.updated_at).getTime()) / (24 * 60 * 60 * 1000));
+                  maintenanceNeeded.push({
+                    namespace: row.namespace,
+                    issue: "upcoming_event_stale",
+                    suggestion: `Event date ${upcomingDate} is ${daysUntil} day${daysUntil === 1 ? "" : "s"} away but status was last updated ${daysSinceUpdate} days ago. Verify status is current.`,
+                  });
+                }
+              }
+
               const group = dashboard[lifecycle] ?? dashboard.uncategorized;
               group.push(entry);
             }
@@ -492,12 +591,13 @@ export function registerTools(server: Server, db: Database.Database): void {
               };
             }
 
-            // Namespace overview
-            response.namespaces = include_demo
-              ? namespaces
-              : namespaces.filter(
-                  (ns) => !ns.namespace.startsWith("demo/") && ns.namespace !== "demo"
-                );
+            // Namespace overview — filter demo and completed task-run namespaces by default
+            const completedTasks = include_completed_tasks ? new Set<string>() : getCompletedTaskNamespaces(db);
+            response.namespaces = namespaces.filter((ns) => {
+              if (!include_demo && (ns.namespace.startsWith("demo/") || ns.namespace === "demo")) return false;
+              if (!include_completed_tasks && completedTasks.has(ns.namespace)) return false;
+              return true;
+            });
 
             return {
               content: [{
@@ -840,12 +940,15 @@ export function registerTools(server: Server, db: Database.Database): void {
           }
 
           case "memory_list": {
-            const { namespace, include_demo } = (args ?? {}) as ListParams;
+            const { namespace, include_demo, include_completed_tasks } = (args ?? {}) as ListParams;
             if (!namespace) {
-              let namespaces = listNamespaces(db);
-              if (!include_demo) {
-                namespaces = namespaces.filter((ns) => !ns.namespace.startsWith("demo/") && ns.namespace !== "demo");
-              }
+              const allNamespaces = listNamespaces(db);
+              const completedTasks = include_completed_tasks ? new Set<string>() : getCompletedTaskNamespaces(db);
+              const namespaces = allNamespaces.filter((ns) => {
+                if (!include_demo && (ns.namespace.startsWith("demo/") || ns.namespace === "demo")) return false;
+                if (!include_completed_tasks && completedTasks.has(ns.namespace)) return false;
+                return true;
+              });
               return {
                 content: [{
                   type: "text",

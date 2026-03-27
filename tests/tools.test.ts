@@ -411,10 +411,31 @@ describe("memory_orient", () => {
       namespaces: Array<{ namespace: string }>;
     };
 
-    expect(result.conventions.content).toContain("# Conventions");
+    // Default is compact conventions
+    expect(result.conventions.content).toContain("# Quick Reference");
+    expect(result.conventions.content).toContain("memory_read");
     expect(result.conventions.updated_at).toBeTruthy();
+    expect((result.conventions as any).compact).toBe(true);
     expect(result.dashboard).toBeDefined();
     expect(result.dashboard.active).toHaveLength(1);
+  });
+
+  it("returns full conventions when include_full_conventions is true", async () => {
+    await callTool("memory_write", {
+      namespace: "meta/conventions",
+      key: "conventions",
+      content: "# Full Conventions Document\n\nThis is the full version with all details.",
+      tags: ["governance"],
+    });
+
+    const raw = await callTool("memory_orient", { include_full_conventions: true });
+    const result = parseToolResponse(raw) as {
+      conventions: { content: string; compact?: boolean; full_conventions_hint?: string };
+    };
+
+    expect(result.conventions.content).toContain("# Full Conventions Document");
+    expect(result.conventions.compact).toBeUndefined();
+    expect(result.conventions.full_conventions_hint).toBeUndefined();
   });
 
   it("returns empty dashboard when no projects exist", async () => {
@@ -883,6 +904,54 @@ describe("memory_list demo filtering", () => {
   });
 });
 
+describe("completed task filtering", () => {
+  it("memory_list hides completed task namespaces by default", async () => {
+    await callTool("memory_write", { namespace: "projects/real", key: "status", content: "active", tags: ["active"] });
+    await callTool("memory_write", { namespace: "tasks/20260327-done", key: "status", content: "done", tags: ["completed"] });
+    await callTool("memory_write", { namespace: "tasks/20260327-active", key: "status", content: "running", tags: ["pending"] });
+    await callTool("memory_write", { namespace: "tasks/admin", key: "index", content: "task index", tags: ["completed"] });
+
+    const raw = await callTool("memory_list", {});
+    const result = parseToolResponse(raw) as { namespaces: Array<{ namespace: string }> };
+    const names = result.namespaces.map((n) => n.namespace);
+
+    expect(names).toContain("projects/real");
+    expect(names).toContain("tasks/20260327-active");
+    expect(names).toContain("tasks/admin");
+    expect(names).not.toContain("tasks/20260327-done");
+  });
+
+  it("memory_list shows completed tasks when include_completed_tasks is true", async () => {
+    await callTool("memory_write", { namespace: "tasks/20260327-done", key: "status", content: "done", tags: ["completed"] });
+
+    const raw = await callTool("memory_list", { include_completed_tasks: true });
+    const result = parseToolResponse(raw) as { namespaces: Array<{ namespace: string }> };
+    const names = result.namespaces.map((n) => n.namespace);
+    expect(names).toContain("tasks/20260327-done");
+  });
+
+  it("memory_orient hides completed task namespaces by default", async () => {
+    await callTool("memory_write", { namespace: "tasks/20260327-done", key: "status", content: "done", tags: ["completed"] });
+    await callTool("memory_write", { namespace: "tasks/20260327-running", key: "status", content: "running", tags: ["pending"] });
+
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as { namespaces: Array<{ namespace: string }> };
+    const names = result.namespaces.map((n) => n.namespace);
+
+    expect(names).not.toContain("tasks/20260327-done");
+    expect(names).toContain("tasks/20260327-running");
+  });
+
+  it("memory_list hides failed task namespaces by default", async () => {
+    await callTool("memory_write", { namespace: "tasks/20260327-fail", key: "status", content: "error", tags: ["failed"] });
+
+    const raw = await callTool("memory_list", {});
+    const result = parseToolResponse(raw) as { namespaces: Array<{ namespace: string }> };
+    const names = result.namespaces.map((n) => n.namespace);
+    expect(names).not.toContain("tasks/20260327-fail");
+  });
+});
+
 describe("maintenance suggestions (memory_orient)", () => {
   it("flags active-but-stale entries", async () => {
     await callTool("memory_write", { namespace: "projects/old", key: "status", content: "Stale", tags: ["active"] });
@@ -943,6 +1012,54 @@ describe("maintenance suggestions (memory_orient)", () => {
       maintenance_needed?: unknown[];
     };
     expect(result.maintenance_needed).toBeUndefined();
+  });
+
+  it("flags upcoming event with stale status", async () => {
+    // Create a project with a date 3 days from now but updated 5 days ago
+    const futureDate = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const content = `**Phase:** Active — event ${futureDate}\n\n**Current work:** Preparing for the event.`;
+    await callTool("memory_write", { namespace: "projects/event-test", key: "status", content, tags: ["active"] });
+    // Backdate the updated_at to 5 days ago
+    const fiveDaysAgo = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString();
+    db.prepare("UPDATE entries SET updated_at = ? WHERE namespace = 'projects/event-test' AND key = 'status'").run(fiveDaysAgo);
+
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as {
+      maintenance_needed: Array<{ namespace: string; issue: string; suggestion: string }>;
+    };
+    const eventStale = result.maintenance_needed?.find(m => m.issue === "upcoming_event_stale");
+    expect(eventStale).toBeDefined();
+    expect(eventStale!.namespace).toBe("projects/event-test");
+    expect(eventStale!.suggestion).toContain(futureDate);
+  });
+
+  it("does not flag upcoming event if recently updated", async () => {
+    const futureDate = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const content = `**Phase:** Active — event ${futureDate}`;
+    await callTool("memory_write", { namespace: "projects/event-fresh", key: "status", content, tags: ["active"] });
+    // Entry was just written, so updated_at is now — should NOT be flagged
+
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as {
+      maintenance_needed?: Array<{ namespace: string; issue: string }>;
+    };
+    const eventStale = (result.maintenance_needed ?? []).find(m => m.issue === "upcoming_event_stale" && m.namespace === "projects/event-fresh");
+    expect(eventStale).toBeUndefined();
+  });
+
+  it("does not flag dates in the past", async () => {
+    const pastDate = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const content = `**Phase:** Active — event ${pastDate}`;
+    await callTool("memory_write", { namespace: "projects/past-event", key: "status", content, tags: ["active"] });
+    const fourDaysAgo = new Date(Date.now() - 4 * 24 * 60 * 60 * 1000).toISOString();
+    db.prepare("UPDATE entries SET updated_at = ? WHERE namespace = 'projects/past-event' AND key = 'status'").run(fourDaysAgo);
+
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as {
+      maintenance_needed?: Array<{ namespace: string; issue: string }>;
+    };
+    const eventStale = (result.maintenance_needed ?? []).find(m => m.issue === "upcoming_event_stale" && m.namespace === "projects/past-event");
+    expect(eventStale).toBeUndefined();
   });
 
   it("does not flag non-tracked namespaces", async () => {

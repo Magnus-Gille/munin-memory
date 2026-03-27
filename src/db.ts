@@ -96,7 +96,7 @@ export function rebuildFTS(db: Database.Database): void {
 export function getTrackedStatuses(db: Database.Database): TrackedStatusRow[] {
   return db
     .prepare(
-      `SELECT id, namespace, key, substr(content, 1, 300) as content_preview, tags, created_at, updated_at
+      `SELECT id, namespace, key, substr(content, 1, 300) as content_preview, content, tags, created_at, updated_at
        FROM entries
        WHERE entry_type = 'state' AND key = 'status'
          AND (namespace LIKE 'projects/%' ESCAPE '\\' OR namespace LIKE 'clients/%' ESCAPE '\\')
@@ -628,6 +628,29 @@ export function removeEmbedding(
   entryId: string,
 ): void {
   db.prepare("DELETE FROM entries_vec WHERE entry_id = ?").run(entryId);
+}
+
+// --- Task filtering ---
+
+/**
+ * Returns the set of `tasks/*` namespaces (excluding `tasks`, `tasks/admin`,
+ * `tasks/_heartbeat`) where the `status` state entry has a `completed` or
+ * `failed` tag.  Used to suppress finished task-run namespaces from default
+ * listings.
+ */
+export function getCompletedTaskNamespaces(db: Database.Database): Set<string> {
+  const rows = db
+    .prepare(
+      `SELECT e.namespace FROM entries e, json_each(e.tags) t
+       WHERE e.namespace LIKE 'tasks/%'
+         AND e.namespace NOT IN ('tasks/admin', 'tasks/_heartbeat')
+         AND e.entry_type = 'state'
+         AND e.key = 'status'
+         AND t.value IN ('completed', 'failed')
+       GROUP BY e.namespace`,
+    )
+    .all() as Array<{ namespace: string }>;
+  return new Set(rows.map((r) => r.namespace));
 }
 
 // --- Hint helpers ---

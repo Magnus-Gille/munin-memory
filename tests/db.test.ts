@@ -13,6 +13,7 @@ import {
   previewDelete,
   executeDelete,
   getOtherKeysInNamespace,
+  getCompletedTaskNamespaces,
   rebuildFTS,
 } from "../src/db.js";
 
@@ -280,6 +281,55 @@ describe("listNamespaces", () => {
     const t2 = ns2.find((n) => n.namespace === "projects/a")!.last_activity_at;
 
     expect(t2 >= t1).toBe(true);
+  });
+});
+
+describe("getCompletedTaskNamespaces", () => {
+  it("returns empty set when no tasks exist", () => {
+    expect(getCompletedTaskNamespaces(db).size).toBe(0);
+  });
+
+  it("returns completed task namespaces", () => {
+    writeState(db, "tasks/20260327-test-a", "status", "done", ["completed"]);
+    writeState(db, "tasks/20260327-test-b", "status", "done", ["failed"]);
+    writeState(db, "tasks/20260327-test-c", "status", "running", ["pending"]);
+
+    const completed = getCompletedTaskNamespaces(db);
+    expect(completed.has("tasks/20260327-test-a")).toBe(true);
+    expect(completed.has("tasks/20260327-test-b")).toBe(true);
+    expect(completed.has("tasks/20260327-test-c")).toBe(false);
+  });
+
+  it("excludes tasks/admin and tasks/_heartbeat", () => {
+    writeState(db, "tasks/admin", "status", "index", ["completed"]);
+    writeState(db, "tasks/_heartbeat", "last", "ok", ["completed"]);
+    writeState(db, "tasks/20260327-real", "status", "done", ["completed"]);
+
+    const completed = getCompletedTaskNamespaces(db);
+    expect(completed.has("tasks/admin")).toBe(false);
+    expect(completed.has("tasks/_heartbeat")).toBe(false);
+    expect(completed.has("tasks/20260327-real")).toBe(true);
+  });
+
+  it("does not match non-tasks namespaces", () => {
+    writeState(db, "projects/foo", "status", "done", ["completed"]);
+    writeState(db, "tasks/20260327-bar", "status", "done", ["completed"]);
+
+    const completed = getCompletedTaskNamespaces(db);
+    expect(completed.has("projects/foo")).toBe(false);
+    expect(completed.has("tasks/20260327-bar")).toBe(true);
+  });
+
+  it("only matches status key", () => {
+    writeState(db, "tasks/20260327-x", "result", "DONE", ["completed"]);
+    // No status key with completed tag
+    const completed = getCompletedTaskNamespaces(db);
+    expect(completed.has("tasks/20260327-x")).toBe(false);
+
+    // Now add the status key
+    writeState(db, "tasks/20260327-x", "status", "done", ["completed"]);
+    const completed2 = getCompletedTaskNamespaces(db);
+    expect(completed2.has("tasks/20260327-x")).toBe(true);
   });
 });
 

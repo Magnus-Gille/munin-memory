@@ -27,13 +27,13 @@ Part of the Hugin & Munin personal AI system. See `prd.md` for full product cont
 
 | Tool | Purpose |
 |------|---------|
-| `memory_orient` | **Start here.** Returns conventions, computed project dashboard (grouped by lifecycle), curated notes, maintenance suggestions, and namespace overview in one call |
+| `memory_orient` | **Start here.** Returns compact conventions, computed project dashboard (grouped by lifecycle), curated notes, maintenance suggestions, and namespace overview in one call. Hides completed task namespaces by default. Pass `include_full_conventions: true` for the full guide. |
 | `memory_write` | Store/update a state entry (namespace + key + content). Supports compare-and-swap via `expected_updated_at` for tracked statuses. Auto-canonicalizes lifecycle tags. |
 | `memory_read` | Retrieve a specific state entry by namespace + key |
 | `memory_get` | Retrieve any entry (state or log) by UUID |
 | `memory_query` | Search memories (lexical/semantic/hybrid) with filters |
 | `memory_log` | Append a chronological log entry to a namespace |
-| `memory_list` | Browse namespaces and their contents (with recent log previews and demo filtering) |
+| `memory_list` | Browse namespaces and their contents (with recent log previews; demo and completed task namespaces hidden by default) |
 | `memory_delete` | Delete entries (with token-based confirmation) |
 
 ## Project structure
@@ -162,7 +162,7 @@ Canonical lifecycle tags: `active`, `blocked`, `completed`, `stopped`, `maintena
 `meta/workbench-notes` is a freeform entry for items not backed by namespaces (obligations, cross-cutting notes). Read by `memory_orient` as a `notes` field alongside the computed dashboard.
 
 ### Maintenance suggestions
-`memory_orient` returns `maintenance_needed` when it detects: active-but-stale entries (>14 days), tracked namespaces missing a status key, conflicting lifecycle tags, or missing lifecycle tags.
+`memory_orient` returns `maintenance_needed` when it detects: active-but-stale entries (>14 days), upcoming event staleness (date within 7 days but status not updated in 3+ days), tracked namespaces missing a status key, conflicting lifecycle tags, or missing lifecycle tags.
 
 ### Legacy workbench
 During the transition period, `memory_orient` includes `legacy_workbench` if `meta/workbench` exists, with a deprecation note. Delete `meta/workbench` when the transition is complete.
