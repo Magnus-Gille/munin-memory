@@ -366,6 +366,51 @@ describe("memory_query", () => {
     }));
   });
 
+  it("injects canonical orientation entries for broad catch-up queries", async () => {
+    await callTool("memory_write", {
+      namespace: "meta",
+      key: "reference-index",
+      content: "Session-start reference index for Magnus profile and conventions",
+      tags: ["convention"],
+    });
+    await callTool("memory_write", {
+      namespace: "people/magnus",
+      key: "profile",
+      content: "Magnus profile with collaboration context and working style",
+      tags: ["profile", "person:magnus"],
+    });
+    await callTool("memory_write", {
+      namespace: "clients/daniel-norin",
+      key: "status",
+      content: "Magnus is working on a proposal and hackathon follow-up for Photowall",
+      tags: ["active", "client"],
+    });
+    await callTool("memory_write", {
+      namespace: "projects/gille-ai",
+      key: "status",
+      content: "Current work includes website updates and new case studies",
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_query", {
+      query: "orient me to what Magnus is working on and what I should know",
+      search_mode: "hybrid",
+      limit: 5,
+    });
+    const result = parseToolResponse(raw) as {
+      results: Array<{ namespace: string; key: string | null }>;
+    };
+
+    expect(result.results.slice(0, 2)).toContainEqual(expect.objectContaining({
+      namespace: "meta",
+      key: "reference-index",
+    }));
+    expect(result.results.slice(0, 2)).toContainEqual(expect.objectContaining({
+      namespace: "people/magnus",
+      key: "profile",
+    }));
+  });
+
   it("prioritizes project status entries over tombstones and logs in project-scoped queries", async () => {
     await callTool("memory_write", {
       namespace: "projects/hugin",

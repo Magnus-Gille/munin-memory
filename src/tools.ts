@@ -108,6 +108,17 @@ const RELAXED_QUERY_STOPWORDS = new Set([
   "a", "an", "and", "are", "for", "how", "i", "important", "is", "it",
   "my", "myself", "of", "or", "should", "the", "to", "what",
 ]);
+const ORIENTATION_QUERY_PHRASES = [
+  "orient me",
+  "orientation",
+  "catch me up",
+  "catch-up",
+  "brief me",
+  "what should i know",
+  "what's magnus working on",
+  "what is magnus working on",
+  "what magnus is working on",
+];
 
 function isStale(updatedAt: string): boolean {
   return Date.now() - new Date(updatedAt).getTime() > STALENESS_THRESHOLD_MS;
@@ -173,6 +184,27 @@ function shouldApplyDefaultQuerySuppression(params: QueryParams): boolean {
   return !params.namespace && !params.entry_type && (!params.tags || params.tags.length === 0);
 }
 
+function isBroadOrientationQuery(query: string, params: QueryParams): boolean {
+  if (!shouldApplyDefaultQuerySuppression(params)) return false;
+
+  const normalized = query.toLowerCase();
+  if (ORIENTATION_QUERY_PHRASES.some((phrase) => normalized.includes(phrase))) {
+    return true;
+  }
+
+  const hasOrientationVerb = queryMentionsAny(normalized, ["orient", "orientation", "brief"]);
+  const hasSummaryIntent = queryMentionsAny(normalized, [
+    "working on",
+    "current work",
+    "active work",
+    "what should i know",
+    "context",
+    "catch up",
+  ]);
+
+  return hasOrientationVerb && hasSummaryIntent;
+}
+
 function looksLikeTombstone(content: string): boolean {
   return /\bTOMBSTONE\b/i.test(content);
 }
@@ -184,6 +216,7 @@ function queryMentionsAny(query: string, terms: string[]): boolean {
 function getQueryHeuristicScore(entry: Entry, queryLower: string): number {
   const tags = parseTags(entry.tags);
   let score = 0;
+  const orientationQuery = isBroadOrientationQuery(queryLower, { query: queryLower });
 
   if (entry.entry_type === "state") score += 6;
 
@@ -192,12 +225,18 @@ function getQueryHeuristicScore(entry: Entry, queryLower: string): number {
     if (queryMentionsAny(queryLower, ["active", "work", "blocker", "blockers", "next", "steps", "project"])) {
       score += 4;
     }
+    if (orientationQuery) {
+      score += 2;
+    }
   }
 
   if (entry.namespace.startsWith("people/") && entry.key === "profile") {
     score += 18;
     if (queryMentionsAny(queryLower, ["personal", "profile", "collaboration", "style", "preference", "preferences", "context"])) {
       score += 10;
+    }
+    if (queryMentionsAny(queryLower, ["magnus", "working on", "what should i know"])) {
+      score += 12;
     }
   }
 
@@ -210,6 +249,9 @@ function getQueryHeuristicScore(entry: Entry, queryLower: string): number {
 
   if (entry.namespace === "meta" && entry.key === "reference-index") {
     score += 10;
+    if (orientationQuery) {
+      score += 18;
+    }
   }
 
   if (entry.entry_type === "log") {
@@ -231,6 +273,31 @@ function getQueryHeuristicScore(entry: Entry, queryLower: string): number {
   }
 
   return score;
+}
+
+function injectCanonicalQueryEntries(
+  db: Database.Database,
+  results: Entry[],
+  params: QueryParams,
+): Entry[] {
+  if (!isBroadOrientationQuery(params.query, params)) return results;
+
+  const injected = [
+    readState(db, "meta", "reference-index"),
+    readState(db, "people/magnus", "profile"),
+    readState(db, "meta/conventions", "conventions"),
+  ].filter((entry): entry is Entry => entry !== null);
+
+  if (injected.length === 0) return results;
+
+  const seen = new Set(results.map((entry) => entry.id));
+  const merged = [...results];
+  for (const entry of injected) {
+    if (seen.has(entry.id)) continue;
+    seen.add(entry.id);
+    merged.push(entry);
+  }
+  return merged;
 }
 
 function rerankQueryResults(
@@ -1055,6 +1122,7 @@ export function registerTools(server: Server, db: Database.Database): void {
               }
             }
 
+            results = injectCanonicalQueryEntries(db, results!, queryParams);
             const completedTasks = shouldApplyDefaultQuerySuppression(queryParams)
               ? getCompletedTaskNamespaces(db)
               : new Set<string>();
