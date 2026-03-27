@@ -1,6 +1,6 @@
 import { mkdirSync, existsSync } from "node:fs";
 import type Database from "better-sqlite3";
-import { getDataDir, vecLoaded, storeEmbedding, removeEmbedding } from "./db.js";
+import { getDataDir, vecLoaded, storeEmbedding } from "./db.js";
 
 // --- Configuration from env vars ---
 
@@ -9,7 +9,6 @@ const config = {
   semanticEnabled: (process.env.MUNIN_SEMANTIC_ENABLED ?? "true") === "true",
   hybridEnabled: (process.env.MUNIN_HYBRID_ENABLED ?? "true") === "true",
   model: process.env.MUNIN_EMBEDDINGS_MODEL ?? "Xenova/all-MiniLM-L6-v2",
-  backfill: (process.env.MUNIN_EMBEDDINGS_BACKFILL ?? "true") === "true",
   batchSize: parseInt(process.env.MUNIN_EMBEDDINGS_BATCH_SIZE ?? "25", 10) || 25,
   batchDelayMs: parseInt(process.env.MUNIN_EMBEDDINGS_BATCH_DELAY_MS ?? "200", 10) || 200,
   maxFailures: parseInt(process.env.MUNIN_EMBEDDINGS_MAX_FAILURES ?? "5", 10) || 5,

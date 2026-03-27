@@ -215,6 +215,7 @@ Unprefixed tags remain valid for lifecycle (`active`, `blocked`, etc.) and categ
 - SQLite + FTS5 + sqlite-vec for storage, keyword search, and vector search
 - `better-sqlite3` for synchronous database access (simpler with MCP stdio model)
 - All writes validated against secret patterns before storage (API keys, tokens, passwords rejected)
+- Confidential OAuth client secrets encrypted at rest (AES-256-GCM; key derived from `MUNIN_OAUTH_CLIENT_SECRET_KEY` or `MUNIN_API_KEY`)
 - State entries (mutable) and log entries (append-only) are the two fundamental types
 - Namespaces are hierarchical strings separated by `/`
 - Database location configurable via `MUNIN_MEMORY_DB_PATH` env var (default: `~/.munin-memory/memory.db`)
@@ -361,7 +362,6 @@ See `technical-spec.md` § Security Module for the full pattern list.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MUNIN_MEMORY_DB_PATH` | `~/.munin-memory/memory.db` | Database file location |
-| `MUNIN_MEMORY_LOG_LEVEL` | `info` | Log level (debug/info/warn/error) |
 | `MUNIN_MEMORY_MAX_CONTENT_SIZE` | `100000` | Max content size in characters |
 | `MUNIN_TRANSPORT` | `stdio` | Transport mode: `stdio` or `http` |
 | `MUNIN_HTTP_PORT` | `3030` | HTTP server port (http mode only) |
@@ -369,9 +369,8 @@ See `technical-spec.md` § Security Module for the full pattern list.
 | `MUNIN_API_KEY` | — | Bearer token for auth (required in http mode) |
 | `MUNIN_EMBEDDINGS_ENABLED` | `true` | Load embedding model + run worker |
 | `MUNIN_SEMANTIC_ENABLED` | `true` | Gate 1: accept `search_mode: "semantic"` |
-| `MUNIN_HYBRID_ENABLED` | `false` | Gate 2: accept `search_mode: "hybrid"` |
+| `MUNIN_HYBRID_ENABLED` | `true` | Gate 2: accept `search_mode: "hybrid"` |
 | `MUNIN_EMBEDDINGS_MODEL` | `Xenova/all-MiniLM-L6-v2` | HuggingFace model for embeddings |
-| `MUNIN_EMBEDDINGS_BACKFILL` | `true` | Backfill existing entries on startup |
 | `MUNIN_EMBEDDINGS_BATCH_SIZE` | `25` | Entries per worker batch |
 | `MUNIN_EMBEDDINGS_BATCH_DELAY_MS` | `200` | Delay between worker batches |
 | `MUNIN_EMBEDDINGS_MAX_FAILURES` | `5` | Circuit breaker failure threshold |
@@ -380,6 +379,7 @@ See `technical-spec.md` § Security Module for the full pattern list.
 | `MUNIN_OAUTH_ISSUER_URL` | `http://localhost:3030` | OAuth issuer URL (set to your public domain in production) |
 | `MUNIN_OAUTH_ACCESS_TOKEN_TTL` | `3600` | Access token lifetime (seconds) |
 | `MUNIN_OAUTH_REFRESH_TOKEN_TTL` | `2592000` | Refresh token lifetime (30 days, seconds) |
+| `MUNIN_OAUTH_CLIENT_SECRET_KEY` | — | Optional dedicated wrapping key for encrypting confidential OAuth client secrets at rest; defaults to `MUNIN_API_KEY` |
 
 ## Spec amendments from adversarial review
 

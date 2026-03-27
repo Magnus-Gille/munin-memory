@@ -5,7 +5,13 @@
  * Supports dual auth: legacy Bearer token (MUNIN_API_KEY) + OAuth access tokens.
  */
 
-import { createHash, randomUUID, randomBytes, timingSafeEqual } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  randomBytes,
+  timingSafeEqual,
+} from "node:crypto";
 import type { Response } from "express";
 import type Database from "better-sqlite3";
 import type {
@@ -34,6 +40,7 @@ const REFRESH_TOKEN_TTL = parseInt(
   10,
 );
 const AUTH_CODE_TTL = 600; // 10 minutes
+const CLIENT_SECRET_WRAP_PREFIX = "enc:v1:";
 
 // --- DB row types ---
 
@@ -83,7 +90,12 @@ interface OAuthTokenRow {
 // --- Clients Store ---
 
 export class MuninClientsStore implements OAuthRegisteredClientsStore {
-  constructor(private db: Database.Database) {}
+  constructor(
+    private db: Database.Database,
+    private clientSecretWrapKey?: Buffer,
+  ) {
+    this.upgradeLegacyClientSecrets();
+  }
 
   async getClient(
     clientId: string,
@@ -93,13 +105,16 @@ export class MuninClientsStore implements OAuthRegisteredClientsStore {
       .get(clientId) as OAuthClientRow | undefined;
 
     if (!row) return undefined;
-    return rowToClientInfo(row);
+    return rowToClientInfo(row, this.clientSecretWrapKey);
   }
 
   async registerClient(
     client: OAuthClientInformationFull,
   ): Promise<OAuthClientInformationFull> {
     const now = nowUTC();
+    const storedClientSecret = client.client_secret
+      ? encryptClientSecret(client.client_secret, this.clientSecretWrapKey)
+      : null;
 
     this.db
       .prepare(
@@ -112,7 +127,7 @@ export class MuninClientsStore implements OAuthRegisteredClientsStore {
       )
       .run(
         client.client_id,
-        client.client_secret ?? null,
+        storedClientSecret,
         client.client_id_issued_at ?? null,
         client.client_secret_expires_at ?? null,
         JSON.stringify(client.redirect_uris.map((u) => u.toString())),
@@ -129,6 +144,22 @@ export class MuninClientsStore implements OAuthRegisteredClientsStore {
       );
 
     return client;
+  }
+
+  private upgradeLegacyClientSecrets(): void {
+    if (!this.clientSecretWrapKey) return;
+
+    const rows = this.db
+      .prepare("SELECT client_id, client_secret FROM oauth_clients WHERE client_secret IS NOT NULL")
+      .all() as Array<{ client_id: string; client_secret: string }>;
+
+    for (const row of rows) {
+      if (isEncryptedClientSecret(row.client_secret)) continue;
+      const encrypted = encryptClientSecret(row.client_secret, this.clientSecretWrapKey);
+      this.db
+        .prepare("UPDATE oauth_clients SET client_secret = ?, updated_at = ? WHERE client_id = ?")
+        .run(encrypted, nowUTC(), row.client_id);
+    }
   }
 }
 
@@ -154,15 +185,17 @@ export class MuninOAuthProvider implements OAuthServerProvider {
   public readonly clientsStore: MuninClientsStore;
   private readonly legacyApiKey: string | undefined;
   private readonly legacyApiKeyBuf: Buffer | undefined;
+  private readonly clientSecretWrapKey: Buffer | undefined;
   private readonly pendingAuths = new Map<string, PendingAuth>();
 
   constructor(
     private db: Database.Database,
     legacyApiKey?: string,
   ) {
-    this.clientsStore = new MuninClientsStore(db);
     this.legacyApiKey = legacyApiKey;
     this.legacyApiKeyBuf = legacyApiKey ? Buffer.from(legacyApiKey) : undefined;
+    this.clientSecretWrapKey = getClientSecretWrapKey(legacyApiKey);
+    this.clientsStore = new MuninClientsStore(db, this.clientSecretWrapKey);
   }
 
   async authorize(
@@ -532,11 +565,73 @@ export class MuninOAuthProvider implements OAuthServerProvider {
 
 // --- Helpers ---
 
-function rowToClientInfo(row: OAuthClientRow): OAuthClientInformationFull {
+function getClientSecretWrapKey(legacyApiKey?: string): Buffer | undefined {
+  const configuredKey = process.env.MUNIN_OAUTH_CLIENT_SECRET_KEY?.trim() || legacyApiKey;
+  if (!configuredKey) return undefined;
+  return createHash("sha256").update(configuredKey).digest();
+}
+
+function isEncryptedClientSecret(value: string): boolean {
+  return value.startsWith(CLIENT_SECRET_WRAP_PREFIX);
+}
+
+function encryptClientSecret(secret: string, wrapKey?: Buffer): string {
+  if (!wrapKey) {
+    throw new Error(
+      "Confidential OAuth clients require MUNIN_API_KEY or MUNIN_OAUTH_CLIENT_SECRET_KEY so client secrets can be encrypted at rest.",
+    );
+  }
+
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", wrapKey, iv);
+  const ciphertext = Buffer.concat([cipher.update(secret, "utf8"), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  return [
+    CLIENT_SECRET_WRAP_PREFIX.slice(0, -1),
+    iv.toString("base64url"),
+    authTag.toString("base64url"),
+    ciphertext.toString("base64url"),
+  ].join(":");
+}
+
+function decryptClientSecret(storedSecret: string, wrapKey?: Buffer): string {
+  if (!isEncryptedClientSecret(storedSecret)) {
+    return storedSecret;
+  }
+
+  if (!wrapKey) {
+    throw new Error(
+      "Encrypted OAuth client secrets require MUNIN_API_KEY or MUNIN_OAUTH_CLIENT_SECRET_KEY to decrypt.",
+    );
+  }
+
+  const parts = storedSecret.split(":");
+  if (parts.length !== 5 || parts[0] !== "enc" || parts[1] !== "v1") {
+    throw new Error("Invalid encrypted OAuth client_secret format");
+  }
+
+  const [, , ivEncoded, authTagEncoded, ciphertextEncoded] = parts;
+  const decipher = createDecipheriv(
+    "aes-256-gcm",
+    wrapKey,
+    Buffer.from(ivEncoded, "base64url"),
+  );
+  decipher.setAuthTag(Buffer.from(authTagEncoded, "base64url"));
+  const plaintext = Buffer.concat([
+    decipher.update(Buffer.from(ciphertextEncoded, "base64url")),
+    decipher.final(),
+  ]);
+  return plaintext.toString("utf8");
+}
+
+function rowToClientInfo(
+  row: OAuthClientRow,
+  wrapKey?: Buffer,
+): OAuthClientInformationFull {
   const metadata = JSON.parse(row.metadata);
   return {
     client_id: row.client_id,
-    client_secret: row.client_secret ?? undefined,
+    client_secret: row.client_secret ? decryptClientSecret(row.client_secret, wrapKey) : undefined,
     client_id_issued_at: row.client_id_issued_at ?? undefined,
     client_secret_expires_at: row.client_secret_expires_at ?? undefined,
     // Return as strings, not URL objects. The SDK's authorize handler uses

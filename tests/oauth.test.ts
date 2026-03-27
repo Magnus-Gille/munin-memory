@@ -77,6 +77,22 @@ describe("MuninClientsStore", () => {
     expect(retrieved!.redirect_uris[0].toString()).toBe("http://localhost:3000/callback");
   });
 
+  it("encrypts confidential client secrets at rest", async () => {
+    const client = makeTestClient();
+    await provider.clientsStore.registerClient!(client);
+
+    const stored = db
+      .prepare("SELECT client_secret FROM oauth_clients WHERE client_id = ?")
+      .get(client.client_id) as { client_secret: string };
+
+    expect(stored.client_secret).toBeDefined();
+    expect(stored.client_secret).not.toBe(client.client_secret);
+    expect(stored.client_secret.startsWith("enc:v1:")).toBe(true);
+
+    const retrieved = await provider.clientsStore.getClient(client.client_id);
+    expect(retrieved!.client_secret).toBe(client.client_secret);
+  });
+
   it("returns undefined for unknown client", async () => {
     const result = await provider.clientsStore.getClient("nonexistent");
     expect(result).toBeUndefined();
@@ -92,6 +108,48 @@ describe("MuninClientsStore", () => {
     const retrieved = await provider.clientsStore.getClient(client.client_id);
     expect(retrieved).toBeDefined();
     expect(retrieved!.client_secret).toBeUndefined();
+  });
+
+  it("upgrades legacy plaintext client secrets when a wrapping key is available", async () => {
+    const now = new Date().toISOString();
+    db.prepare(
+      `INSERT INTO oauth_clients
+       (client_id, client_secret, client_id_issued_at, client_secret_expires_at,
+        redirect_uris, client_name, token_endpoint_auth_method, grant_types, response_types, metadata,
+        created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      "legacy-client",
+      "legacy-secret",
+      Math.floor(Date.now() / 1000),
+      Math.floor(Date.now() / 1000) + 86400,
+      JSON.stringify(["http://localhost:3000/callback"]),
+      "Legacy Client",
+      "client_secret_post",
+      JSON.stringify(["authorization_code", "refresh_token"]),
+      JSON.stringify(["code"]),
+      JSON.stringify({}),
+      now,
+      now,
+    );
+
+    const upgradedProvider = new MuninOAuthProvider(db, LEGACY_API_KEY);
+    const stored = db
+      .prepare("SELECT client_secret FROM oauth_clients WHERE client_id = ?")
+      .get("legacy-client") as { client_secret: string };
+
+    expect(stored.client_secret).not.toBe("legacy-secret");
+    expect(stored.client_secret.startsWith("enc:v1:")).toBe(true);
+
+    const retrieved = await upgradedProvider.clientsStore.getClient("legacy-client");
+    expect(retrieved!.client_secret).toBe("legacy-secret");
+  });
+
+  it("rejects confidential client registration without a wrapping key", async () => {
+    const providerWithoutKey = new MuninOAuthProvider(db);
+    await expect(
+      providerWithoutKey.clientsStore.registerClient!(makeTestClient({ client_id: "no-wrap" })),
+    ).rejects.toThrow("client secrets can be encrypted at rest");
   });
 });
 

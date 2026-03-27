@@ -23,6 +23,7 @@ For the full argument, see [Resilient and Sovereign AI](https://gille.ai/en/blog
 - **Hierarchical namespaces** (e.g. `projects/website`, `people/alice`, `decisions/tech-stack`)
 - **Three search modes:** keyword (FTS5), semantic (vector embeddings), and hybrid (both combined via Reciprocal Rank Fusion)
 - **Content security:** writes are heuristically scanned for common secrets — obvious API keys, tokens, and inline passwords are rejected before storage
+- **OAuth secret hygiene:** confidential OAuth client secrets are encrypted at rest
 - **Dual auth:** Bearer token (simple) + OAuth 2.1 (for web/mobile clients)
 - **Two transports:** stdio (local) and Streamable HTTP (network)
 
@@ -119,8 +120,10 @@ All configuration is via environment variables. Copy `.env.example` for a starti
 | `MUNIN_API_KEY` | — | Bearer token (required for HTTP mode) |
 | `MUNIN_MEMORY_DB_PATH` | `~/.munin-memory/memory.db` | Database file location |
 | `MUNIN_EMBEDDINGS_ENABLED` | `true` | Enable semantic search |
-| `MUNIN_HYBRID_ENABLED` | `false` | Enable hybrid search (FTS5 + vector) |
+| `MUNIN_SEMANTIC_ENABLED` | `true` | Allow semantic search requests |
+| `MUNIN_HYBRID_ENABLED` | `true` | Enable hybrid search (FTS5 + vector) |
 | `MUNIN_OAUTH_ISSUER_URL` | `http://localhost:3030` | OAuth issuer (set to your public URL) |
+| `MUNIN_OAUTH_CLIENT_SECRET_KEY` | — | Optional dedicated key for encrypting confidential OAuth client secrets at rest; defaults to `MUNIN_API_KEY` |
 | `MUNIN_OAUTH_TRUSTED_USER_HEADER` | — | Trusted header name required for public OAuth consent |
 | `MUNIN_OAUTH_TRUSTED_USER_VALUE` | — | Exact trusted header value required for public OAuth consent |
 | `MUNIN_OAUTH_ALLOW_LOCALHOST_CONSENT` | `true` | Allow consent on loopback-only local development |
@@ -154,17 +157,22 @@ See `CLAUDE.md` for the full technical reference, including architecture details
 ## Tests
 
 ```bash
-npm test              # 255 tests, single run
+npm test              # Run the full Vitest suite
 npm run test:watch    # Watch mode
 ```
 
 ## Status
 
-This is a personal project. It works well for my use case — Claude across 4 platforms (CLI, Desktop, Web, Mobile) sharing persistent memory through a Raspberry Pi on my desk.
+This is an early-stage open-source project. It works well for my use case — Claude across 4 platforms (CLI, Desktop, Web, Mobile) sharing persistent memory through a Raspberry Pi on my desk.
 
-It is **not** designed as a polished product for general consumption. The deployment scripts assume my hardware, the security model assumes a single user, and the documentation assumes familiarity with MCP, systemd, and reverse proxies. You are welcome to use it, fork it, or learn from it — but expect to adapt it to your own setup.
+It is usable today, but it is still optimized for a technically comfortable self-hoster rather than a polished mass-market product. The deployment scripts assume Linux/systemd familiarity, the security model is primarily single-user, and you should expect to adapt parts of the setup to your own environment.
 
 Built by Claude (Opus 4.6) and Magnus Gille, adversarially reviewed by Codex (GPT-5.3).
+
+## Project docs
+
+- [CONTRIBUTING.md](CONTRIBUTING.md)
+- [SECURITY.md](SECURITY.md)
 
 ## License
 

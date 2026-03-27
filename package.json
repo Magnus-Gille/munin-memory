@@ -1,7 +1,7 @@
 {
   "name": "munin-memory",
   "version": "0.1.0",
-  "description": "MCP server providing persistent memory for Claude across conversations",
+  "description": "MCP server providing persistent memory across conversations",
   "author": "Magnus Gille",
   "license": "MIT",
   "repository": {
@@ -9,6 +9,9 @@
     "url": "https://github.com/Magnus-Gille/munin-memory"
   },
   "homepage": "https://github.com/Magnus-Gille/munin-memory#readme",
+  "bugs": {
+    "url": "https://github.com/Magnus-Gille/munin-memory/issues"
+  },
   "keywords": [
     "mcp",
     "memory",
