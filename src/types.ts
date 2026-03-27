@@ -3,6 +3,7 @@
 export type EntryType = "state" | "log";
 export type EmbeddingStatus = "pending" | "processing" | "generated" | "failed";
 export type SearchMode = "lexical" | "semantic" | "hybrid";
+export type OrientDetail = "compact" | "standard" | "full";
 
 export interface Entry {
   id: string;
@@ -52,6 +53,15 @@ export interface QueryParams {
   tags?: string[];
   limit?: number;
   search_mode?: SearchMode;
+  explain?: boolean;
+}
+
+export interface OrientParams extends ListParams {
+  detail?: OrientDetail;
+  include_full_conventions?: boolean;
+  dashboard_limit_per_group?: number;
+  namespace_limit?: number;
+  include_namespaces?: boolean;
 }
 
 export interface LogParams {
@@ -71,6 +81,17 @@ export interface DeleteParams {
   key?: string;
   confirm?: boolean;
   delete_token?: string;
+}
+
+export interface AttentionParams {
+  namespace_prefix?: string;
+  include_blocked?: boolean;
+  include_stale?: boolean;
+  include_upcoming_events?: boolean;
+  include_missing_status?: boolean;
+  include_conflicting_lifecycle?: boolean;
+  include_missing_lifecycle?: boolean;
+  limit?: number;
 }
 
 // Tool response types
@@ -146,6 +167,15 @@ export interface QueryResult {
   tags: string[];
   created_at: string;
   updated_at: string;
+  match?: {
+    heuristic_score: number;
+    lexical_rank?: number;
+    lexical_score?: number;
+    semantic_rank?: number;
+    semantic_distance?: number;
+    hybrid_score?: number;
+    reasons: string[];
+  };
 }
 
 export interface QueryResponse {
@@ -155,6 +185,11 @@ export interface QueryResponse {
   search_mode: SearchMode;
   search_mode_actual?: SearchMode;
   warning?: string;
+  retrieval?: {
+    reranked: boolean;
+    relaxed_lexical: boolean;
+    fallback_reason: string | null;
+  };
 }
 
 export interface LogResponse {
@@ -222,6 +257,27 @@ export interface DeleteConfirmation {
 }
 
 export type DeleteResponse = DeletePreview | DeleteConfirmation;
+
+export interface AttentionItem {
+  namespace: string;
+  category: MaintenanceItem["issue"] | "blocked";
+  severity: "high" | "medium" | "low";
+  updated_at: string;
+  preview: string;
+  reason: string;
+  suggested_action: string;
+}
+
+export interface AttentionResponse {
+  generated_at: string;
+  summary: {
+    high: number;
+    medium: number;
+    low: number;
+    total: number;
+  };
+  items: AttentionItem[];
+}
 
 // Security types
 

@@ -12,8 +12,11 @@ import {
   getById,
   appendLog,
   queryEntries,
+  queryEntriesLexicalScored,
   queryEntriesSemantic,
+  queryEntriesSemanticScored,
   queryEntriesHybrid,
+  queryEntriesHybridScored,
   listNamespaces,
   listNamespaceContents,
   previewDelete,
@@ -42,14 +45,19 @@ import type {
   ReadBatchParams,
   GetParams,
   QueryParams,
+  OrientParams,
   LogParams,
   ListParams,
   DeleteParams,
+  AttentionParams,
   Entry,
   SearchMode,
+  OrientDetail,
   DashboardEntry,
   MaintenanceItem,
   TrackedStatusRow,
+  QueryResult,
+  AttentionItem,
 } from "./types.js";
 
 // In-memory delete token store (debate resolution #9)
@@ -514,6 +522,130 @@ function rerankQueryResults(
     .map((item) => item.entry);
 }
 
+function clampOptionalLimit(value: unknown, max: number): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  return Math.min(Math.max(Math.floor(value), 1), max);
+}
+
+function resolveOrientDetail(params: OrientParams): OrientDetail {
+  if (params.detail === "compact" || params.detail === "standard" || params.detail === "full") {
+    return params.detail;
+  }
+  if (params.include_full_conventions) return "full";
+  return "standard";
+}
+
+function matchesNamespacePrefix(namespace: string, prefix?: string): boolean {
+  if (!prefix) return true;
+  if (prefix.endsWith("/")) return namespace.startsWith(prefix);
+  return namespace === prefix;
+}
+
+function getAttentionSeverity(category: AttentionItem["category"]): AttentionItem["severity"] {
+  switch (category) {
+    case "blocked":
+    case "upcoming_event_stale":
+    case "conflicting_lifecycle":
+      return "high";
+    case "active_but_stale":
+    case "missing_status":
+    case "missing_lifecycle":
+      return "medium";
+    default:
+      return "low";
+  }
+}
+
+function getQueryExplainReasons(
+  entry: Entry,
+  queryLower: string,
+  trackedStatus: TrackedStatusAssessment | undefined,
+  match: NonNullable<QueryResult["match"]>,
+): string[] {
+  const reasons: string[] = [];
+
+  if (match.lexical_rank !== undefined) reasons.push("matched lexical terms");
+  if (match.semantic_rank !== undefined) reasons.push("matched semantic similarity");
+  if (match.hybrid_score !== undefined && match.lexical_rank !== undefined && match.semantic_rank !== undefined) {
+    reasons.push("combined lexical and semantic signals");
+  }
+  if (isTrackedNamespace(entry.namespace) && entry.key === "status") reasons.push("tracked status");
+  if (trackedStatus?.lifecycle === "blocked") reasons.push("blocked item");
+  else if (trackedStatus?.needsAttention) reasons.push("needs attention");
+  if (entry.namespace.startsWith("people/") && entry.key === "profile") reasons.push("profile entry");
+  if (entry.namespace === "meta/conventions" && entry.key === "conventions") reasons.push("conventions reference");
+  if (entry.namespace === "meta" && entry.key === "reference-index") reasons.push("reference index");
+
+  const queryTerms = queryLower
+    .split(/[^a-z0-9_-]+/i)
+    .map((term) => term.trim())
+    .filter((term) => term.length >= 4 && !RELAXED_QUERY_STOPWORDS.has(term));
+  const contentLower = entry.content.toLowerCase();
+  const matchedTerm = queryTerms.find((term) => contentLower.includes(term) || entry.namespace.toLowerCase().includes(term) || (entry.key?.toLowerCase().includes(term) ?? false));
+  if (matchedTerm) reasons.push(`matched term: ${matchedTerm}`);
+
+  return [...new Set(reasons)];
+}
+
+function buildAttentionItem(
+  namespace: string,
+  category: AttentionItem["category"],
+  updatedAt: string,
+  preview: string,
+  suggestion: string,
+): AttentionItem {
+  let reason: string;
+  switch (category) {
+    case "blocked":
+      reason = "Lifecycle tag is blocked.";
+      break;
+    case "active_but_stale":
+      reason = "Active status looks stale.";
+      break;
+    case "upcoming_event_stale":
+      reason = "Upcoming event is close and the status is stale.";
+      break;
+    case "missing_status":
+      reason = "Tracked namespace has entries but no status key.";
+      break;
+    case "conflicting_lifecycle":
+      reason = "Status has conflicting lifecycle tags.";
+      break;
+    case "missing_lifecycle":
+      reason = "Status is missing a lifecycle tag.";
+      break;
+    default:
+      reason = suggestion;
+      break;
+  }
+
+  return {
+    namespace,
+    category,
+    severity: getAttentionSeverity(category),
+    updated_at: updatedAt,
+    preview,
+    reason,
+    suggested_action: suggestion,
+  };
+}
+
+function compareAttentionItems(a: AttentionItem, b: AttentionItem): number {
+  const severityRank: Record<AttentionItem["severity"], number> = {
+    high: 3,
+    medium: 2,
+    low: 1,
+  };
+
+  if (severityRank[b.severity] !== severityRank[a.severity]) {
+    return severityRank[b.severity] - severityRank[a.severity];
+  }
+  if (a.updated_at !== b.updated_at) {
+    return a.updated_at.localeCompare(b.updated_at);
+  }
+  return a.namespace.localeCompare(b.namespace);
+}
+
 function canonicalizeTags(tags: string[]): { canonical: string[]; normalized: string[] } {
   const normalized: string[] = [];
   const canonical = tags.map(t => {
@@ -568,10 +700,16 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_orient",
     description:
-      "START HERE. Call this at the beginning of every conversation before using any other memory tool. Returns a compact conventions summary, a computed project dashboard (grouped by lifecycle from status entries), optional curated notes, actionable maintenance suggestions, and a namespace overview — everything needed to orient yourself in one call.\n\nThe dashboard is computed automatically from status entries in projects/* and clients/* namespaces. No manual workbench maintenance needed. Demo namespaces and completed task-run namespaces are hidden by default.\n\nConventions are returned in compact form by default. Pass `include_full_conventions: true` for the full guide, or read it via memory_read(\"meta/conventions\", \"conventions\").",
+      "START HERE. Call this at the beginning of every conversation before using any other memory tool. Returns conventions, a computed project dashboard (grouped by lifecycle from status entries), optional curated notes, actionable maintenance suggestions, and optionally a namespace overview — everything needed to orient yourself in one call.\n\nThe dashboard is computed automatically from status entries in projects/* and clients/* namespaces. No manual workbench maintenance needed. Demo namespaces and completed task-run namespaces are hidden by default.\n\nUse `detail` to control response size. `standard` preserves the current default behavior, `compact` trims dashboard/namespaces for token-sensitive environments, and `full` includes the full conventions document.",
     inputSchema: {
       type: "object" as const,
       properties: {
+        detail: {
+          type: "string",
+          enum: ["compact", "standard", "full"],
+          description:
+            "Optional. Controls response size. `standard` is the default, `compact` trims dashboard/namespaces, and `full` returns the full conventions document.",
+        },
         include_demo: {
           type: "boolean",
           description:
@@ -585,7 +723,22 @@ const TOOL_DEFINITIONS = [
         include_full_conventions: {
           type: "boolean",
           description:
-            "Optional. If true, return the full conventions document. Default: false (returns a compact operational summary). Full conventions can also be read via memory_read(\"meta/conventions\", \"conventions\").",
+            "Deprecated alias for `detail: \"full\"`.",
+        },
+        dashboard_limit_per_group: {
+          type: "integer",
+          description:
+            "Optional. Maximum entries to return per lifecycle group in the dashboard. `compact` defaults to 5; other detail levels return all entries unless this is set.",
+        },
+        namespace_limit: {
+          type: "integer",
+          description:
+            "Optional. Maximum namespaces to return in the namespace overview. `compact` defaults to 20; other detail levels return all namespaces unless this is set.",
+        },
+        include_namespaces: {
+          type: "boolean",
+          description:
+            "Optional. If false, omit the namespace overview entirely. By default `compact` omits it and other detail levels include it.",
         },
       },
       required: [],
@@ -688,7 +841,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_query",
     description:
-      "Search across memories. Supports lexical (FTS5 keyword), semantic (vector similarity), and hybrid (RRF fusion of both) search modes. Filters by namespace prefix, entry type, and tags.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Search across memories. Supports lexical (FTS5 keyword), semantic (vector similarity), and hybrid (RRF fusion of both) search modes. Filters by namespace prefix, entry type, and tags. Pass `explain: true` to include retrieval metadata and per-result match explanations.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -723,8 +876,55 @@ const TOOL_DEFINITIONS = [
           description:
             "Search mode. Default: hybrid (RRF fusion of keyword + vector). Lexical: FTS5 keyword search. Semantic: vector KNN similarity. Degrades to lexical if embeddings unavailable.",
         },
+        explain: {
+          type: "boolean",
+          description: "Optional. If true, include retrieval metadata and per-result match explanations.",
+        },
       },
       required: ["query"],
+    },
+  },
+  {
+    name: "memory_attention",
+    description:
+      "Return deterministic triage items for tracked work. Surfaces blocked statuses, stale active work, near-term event staleness, and tracked namespaces missing status or lifecycle structure. Use this instead of broad natural-language search when you explicitly want what needs attention.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        namespace_prefix: {
+          type: "string",
+          description: "Optional. Restrict attention items to a namespace prefix such as `projects/` or `clients/`.",
+        },
+        include_blocked: {
+          type: "boolean",
+          description: "Optional. Include blocked statuses. Default: true.",
+        },
+        include_stale: {
+          type: "boolean",
+          description: "Optional. Include active-but-stale statuses. Default: true.",
+        },
+        include_upcoming_events: {
+          type: "boolean",
+          description: "Optional. Include stale statuses with near-term event dates. Default: true.",
+        },
+        include_missing_status: {
+          type: "boolean",
+          description: "Optional. Include tracked namespaces that have entries but no status key. Default: true.",
+        },
+        include_conflicting_lifecycle: {
+          type: "boolean",
+          description: "Optional. Include statuses with conflicting lifecycle tags. Default: true.",
+        },
+        include_missing_lifecycle: {
+          type: "boolean",
+          description: "Optional. Include statuses missing a lifecycle tag. Default: true.",
+        },
+        limit: {
+          type: "integer",
+          description: "Optional. Maximum number of attention items to return. Default: 20, max 50.",
+        },
+      },
+      required: [],
     },
   },
   {
@@ -822,8 +1022,12 @@ export function registerTools(server: Server, db: Database.Database): void {
       try {
         switch (name) {
           case "memory_orient": {
-            const { include_demo, include_completed_tasks } = (args ?? {}) as ListParams;
-            const include_full_conventions = ((args ?? {}) as Record<string, unknown>).include_full_conventions === true;
+            const orientArgs = (args ?? {}) as OrientParams;
+            const { include_demo, include_completed_tasks } = orientArgs;
+            const detail = resolveOrientDetail(orientArgs);
+            const includeNamespaces = orientArgs.include_namespaces ?? detail !== "compact";
+            const dashboardLimit = clampOptionalLimit(orientArgs.dashboard_limit_per_group, 50) ?? (detail === "compact" ? 5 : undefined);
+            const namespaceLimit = clampOptionalLimit(orientArgs.namespace_limit, 200) ?? (detail === "compact" ? 20 : undefined);
             // Read conventions and namespace list
             const conventions = readState(db, "meta/conventions", "conventions");
             const namespaces = listNamespaces(db);
@@ -833,14 +1037,14 @@ export function registerTools(server: Server, db: Database.Database): void {
             // Conventions — compact by default, full on request
             if (conventions) {
               const parsed = parseEntry(conventions);
-              const content = include_full_conventions
+              const content = detail === "full"
                 ? parsed.content
                 : compactConventions(parsed.updated_at);
               const conv: Record<string, unknown> = {
                 content,
                 updated_at: parsed.updated_at,
               };
-              if (!include_full_conventions) {
+              if (detail !== "full") {
                 conv.compact = true;
                 conv.full_conventions_hint = 'memory_read("meta/conventions", "conventions")';
               }
@@ -895,7 +1099,21 @@ export function registerTools(server: Server, db: Database.Database): void {
               }
             }
 
+            const dashboardCounts: Record<string, number> = {};
+            const truncatedGroups: string[] = [];
+            for (const [groupName, entries] of Object.entries(dashboard)) {
+              dashboardCounts[groupName] = entries.length;
+              if (dashboardLimit !== undefined && entries.length > dashboardLimit) {
+                dashboard[groupName] = entries.slice(0, dashboardLimit);
+                truncatedGroups.push(groupName);
+              }
+            }
+
             response.dashboard = dashboard;
+            response.dashboard_meta = {
+              counts: dashboardCounts,
+              truncated_groups: truncatedGroups,
+            };
 
             // Curated overlay (meta/workbench-notes)
             const notes = readState(db, "meta", "workbench-notes");
@@ -946,11 +1164,22 @@ export function registerTools(server: Server, db: Database.Database): void {
 
             // Namespace overview — filter demo and completed task-run namespaces by default
             const completedTasks = include_completed_tasks ? new Set<string>() : getCompletedTaskNamespaces(db);
-            response.namespaces = namespaces.filter((ns) => {
+            const filteredNamespaces = namespaces.filter((ns) => {
               if (!include_demo && (ns.namespace.startsWith("demo/") || ns.namespace === "demo")) return false;
               if (!include_completed_tasks && completedTasks.has(ns.namespace)) return false;
               return true;
             });
+            if (includeNamespaces) {
+              const limitedNamespaces = namespaceLimit !== undefined
+                ? filteredNamespaces.slice(0, namespaceLimit)
+                : filteredNamespaces;
+              response.namespaces = limitedNamespaces;
+              response.namespaces_meta = {
+                total: filteredNamespaces.length,
+                returned: limitedNamespaces.length,
+                truncated: limitedNamespaces.length < filteredNamespaces.length,
+              };
+            }
 
             return {
               content: [{
@@ -1175,8 +1404,9 @@ export function registerTools(server: Server, db: Database.Database): void {
           }
 
           case "memory_query": {
-            const { query, namespace, entry_type, tags, limit, search_mode } =
-              args as unknown as QueryParams;
+            const queryArgs = (args ?? {}) as unknown as QueryParams;
+            const { query, namespace, entry_type, tags, limit, search_mode } = queryArgs;
+            const explain = queryArgs.explain === true;
             if (!query || typeof query !== "string") {
               return { content: [{ type: "text", text: JSON.stringify({ error: "validation_error", message: "Query string is required." }) }] };
             }
@@ -1190,21 +1420,29 @@ export function registerTools(server: Server, db: Database.Database): void {
               tags,
               limit: requestedLimit,
               search_mode,
+              explain,
             };
             const requestedMode: SearchMode = search_mode ?? "hybrid";
             let actualMode: SearchMode = requestedMode;
             let warning: string | undefined;
-            let results: Entry[];
+            let fallbackReason: string | null = null;
+            let relaxedLexical = false;
+            let results: Entry[] = [];
+            let lexicalResults: ReturnType<typeof queryEntriesLexicalScored> = [];
+            let semanticResults: ReturnType<typeof queryEntriesSemanticScored> = [];
+            let hybridResults: ReturnType<typeof queryEntriesHybridScored> = [];
 
             if (requestedMode === "semantic") {
               if (!isSemanticEnabled() || !vecLoaded()) {
                 actualMode = "lexical";
                 warning = `Semantic search unavailable (${getSearchModeUnavailableReason("semantic")}). Falling back to lexical search.`;
+                fallbackReason = "semantic_unavailable";
               }
             } else if (requestedMode === "hybrid") {
               if (!isHybridEnabled() || !vecLoaded()) {
                 actualMode = "lexical";
                 warning = `Hybrid search unavailable (${getSearchModeUnavailableReason("hybrid")}). Falling back to lexical search.`;
+                fallbackReason = "hybrid_unavailable";
               }
             }
 
@@ -1213,15 +1451,17 @@ export function registerTools(server: Server, db: Database.Database): void {
               if (!queryEmb) {
                 actualMode = "lexical";
                 warning = "Failed to generate query embedding. Falling back to lexical search.";
+                fallbackReason = "embedding_generation_failed";
               } else {
                 const buf = embeddingToBuffer(queryEmb);
-                results = queryEntriesSemantic(db, {
+                semanticResults = queryEntriesSemanticScored(db, {
                   queryEmbedding: buf,
                   namespace,
                   entryType: entry_type,
                   tags,
                   limit: internalLimit,
                 });
+                results = semanticResults.map((result) => result.entry);
               }
             }
 
@@ -1230,65 +1470,112 @@ export function registerTools(server: Server, db: Database.Database): void {
               if (!queryEmb) {
                 actualMode = "lexical";
                 warning = "Failed to generate query embedding. Falling back to lexical search.";
+                fallbackReason = "embedding_generation_failed";
               } else {
                 const buf = embeddingToBuffer(queryEmb);
-                results = queryEntriesHybrid(db, {
+                hybridResults = queryEntriesHybridScored(db, {
                   ftsOptions: { query, namespace, entryType: entry_type, tags, limit: internalLimit },
                   semanticOptions: { queryEmbedding: buf, namespace, entryType: entry_type, tags, limit: internalLimit },
                 });
+                results = hybridResults.map((result) => result.entry);
               }
             }
 
             // Lexical fallback (or original mode)
             if (actualMode === "lexical") {
-              results = queryEntries(db, {
+              lexicalResults = queryEntriesLexicalScored(db, {
                 query,
                 namespace,
                 entryType: entry_type,
                 tags,
                 limit: internalLimit,
               });
+              results = lexicalResults.map((result) => result.entry);
 
               if (results.length === 0) {
                 const relaxedQuery = buildRelaxedLexicalQuery(query);
                 if (relaxedQuery) {
-                  results = queryEntries(db, {
+                  lexicalResults = queryEntriesLexicalScored(db, {
                     query: relaxedQuery,
                     namespace,
                     entryType: entry_type,
                     tags,
                     limit: internalLimit,
                   });
+                  results = lexicalResults.map((result) => result.entry);
                   if (results.length > 0 && !warning) {
                     warning = "No exact lexical matches found. Used relaxed token matching for natural-language query.";
+                    relaxedLexical = true;
                   }
                 }
               }
             }
 
-            const trackedStatuses = shouldApplyDefaultQuerySuppression(queryParams)
+            const trackedStatuses = (shouldApplyDefaultQuerySuppression(queryParams) || explain)
               ? getTrackedStatusAssessments(db)
               : undefined;
 
-            results = injectCanonicalQueryEntries(db, results!, queryParams);
+            results = injectCanonicalQueryEntries(db, results, queryParams);
             if (trackedStatuses) {
               results = injectAttentionQueryEntries(results, queryParams, trackedStatuses);
             }
             const completedTasks = shouldApplyDefaultQuerySuppression(queryParams)
               ? getCompletedTaskNamespaces(db)
               : new Set<string>();
-            results = rerankQueryResults(results!, queryParams, completedTasks, trackedStatuses).slice(0, requestedLimit);
+            results = rerankQueryResults(results, queryParams, completedTasks, trackedStatuses).slice(0, requestedLimit);
 
-            const formatted = results!.map((entry) => ({
-              id: entry.id,
-              namespace: entry.namespace,
-              key: entry.key,
-              entry_type: entry.entry_type,
-              content_preview: contentPreview(entry.content),
-              tags: parseTags(entry.tags),
-              created_at: entry.created_at,
-              updated_at: entry.updated_at,
-            }));
+            const lexicalById = new Map(lexicalResults.map((result) => [result.entry.id, result] as const));
+            const semanticById = new Map(semanticResults.map((result) => [result.entry.id, result] as const));
+            const hybridById = new Map(hybridResults.map((result) => [result.entry.id, result] as const));
+
+            const formatted = results.map((entry) => {
+              const result: QueryResult = {
+                id: entry.id,
+                namespace: entry.namespace,
+                key: entry.key,
+                entry_type: entry.entry_type,
+                content_preview: contentPreview(entry.content),
+                tags: parseTags(entry.tags),
+                created_at: entry.created_at,
+                updated_at: entry.updated_at,
+              };
+
+              if (explain) {
+                const heuristicScore = getQueryHeuristicScore(entry, query.toLowerCase(), trackedStatuses);
+                const match: NonNullable<QueryResult["match"]> = {
+                  heuristic_score: heuristicScore,
+                  reasons: [],
+                };
+
+                if (actualMode === "lexical") {
+                  const lexical = lexicalById.get(entry.id);
+                  if (lexical) {
+                    match.lexical_rank = lexical.rank;
+                    match.lexical_score = lexical.score;
+                  }
+                } else if (actualMode === "semantic") {
+                  const semantic = semanticById.get(entry.id);
+                  if (semantic) {
+                    match.semantic_rank = semantic.rank;
+                    match.semantic_distance = semantic.distance;
+                  }
+                } else if (actualMode === "hybrid") {
+                  const hybrid = hybridById.get(entry.id);
+                  if (hybrid) {
+                    match.hybrid_score = hybrid.score;
+                    if (hybrid.lexicalRank !== undefined) match.lexical_rank = hybrid.lexicalRank;
+                    if (hybrid.lexicalScore !== undefined) match.lexical_score = hybrid.lexicalScore;
+                    if (hybrid.semanticRank !== undefined) match.semantic_rank = hybrid.semanticRank;
+                    if (hybrid.semanticDistance !== undefined) match.semantic_distance = hybrid.semanticDistance;
+                  }
+                }
+
+                match.reasons = getQueryExplainReasons(entry, query.toLowerCase(), trackedStatuses?.get(entry.id), match);
+                result.match = match;
+              }
+
+              return result;
+            });
 
             const response: Record<string, unknown> = {
               results: formatted,
@@ -1302,11 +1589,100 @@ export function registerTools(server: Server, db: Database.Database): void {
             if (warning) {
               response.warning = warning;
             }
+            if (explain) {
+              response.retrieval = {
+                reranked: true,
+                relaxed_lexical: relaxedLexical,
+                fallback_reason: fallbackReason,
+              };
+            }
 
             return {
               content: [{
                 type: "text",
                 text: JSON.stringify(response),
+              }],
+            };
+          }
+
+          case "memory_attention": {
+            const attentionArgs = (args ?? {}) as AttentionParams;
+            const includeBlocked = attentionArgs.include_blocked !== false;
+            const includeStale = attentionArgs.include_stale !== false;
+            const includeUpcomingEvents = attentionArgs.include_upcoming_events !== false;
+            const includeMissingStatus = attentionArgs.include_missing_status !== false;
+            const includeConflictingLifecycle = attentionArgs.include_conflicting_lifecycle !== false;
+            const includeMissingLifecycle = attentionArgs.include_missing_lifecycle !== false;
+            const limit = clampOptionalLimit(attentionArgs.limit, 50) ?? 20;
+
+            const trackedStatusAssessments = [...getTrackedStatusAssessments(db).values()];
+            const namespaces = listNamespaces(db);
+            const attentionItems: AttentionItem[] = [];
+
+            for (const assessment of trackedStatusAssessments) {
+              if (!matchesNamespacePrefix(assessment.row.namespace, attentionArgs.namespace_prefix)) continue;
+
+              if (includeBlocked && assessment.lifecycle === "blocked") {
+                attentionItems.push(buildAttentionItem(
+                  assessment.row.namespace,
+                  "blocked",
+                  assessment.row.updated_at,
+                  assessment.row.content_preview.slice(0, 150),
+                  "Review blocker and update status.",
+                ));
+              }
+
+              for (const item of assessment.maintenanceItems) {
+                if (item.issue === "active_but_stale" && !includeStale) continue;
+                if (item.issue === "upcoming_event_stale" && !includeUpcomingEvents) continue;
+                if (item.issue === "conflicting_lifecycle" && !includeConflictingLifecycle) continue;
+                if (item.issue === "missing_lifecycle" && !includeMissingLifecycle) continue;
+                if (item.issue === "missing_status") continue;
+
+                attentionItems.push(buildAttentionItem(
+                  item.namespace,
+                  item.issue,
+                  assessment.row.updated_at,
+                  assessment.row.content_preview.slice(0, 150),
+                  item.suggestion,
+                ));
+              }
+            }
+
+            if (includeMissingStatus) {
+              const trackedNsWithStatus = new Set(trackedStatusAssessments.map((assessment) => assessment.row.namespace));
+              for (const ns of namespaces) {
+                if (!isTrackedNamespace(ns.namespace)) continue;
+                if (trackedNsWithStatus.has(ns.namespace)) continue;
+                if (!matchesNamespacePrefix(ns.namespace, attentionArgs.namespace_prefix)) continue;
+
+                attentionItems.push(buildAttentionItem(
+                  ns.namespace,
+                  "missing_status",
+                  ns.last_activity_at,
+                  "Tracked namespace has entries but no status key.",
+                  "Has entries but no 'status' key. Write a status entry with a lifecycle tag.",
+                ));
+              }
+            }
+
+            attentionItems.sort(compareAttentionItems);
+            const limitedItems = attentionItems.slice(0, limit);
+            const summary = {
+              high: limitedItems.filter((item) => item.severity === "high").length,
+              medium: limitedItems.filter((item) => item.severity === "medium").length,
+              low: limitedItems.filter((item) => item.severity === "low").length,
+              total: limitedItems.length,
+            };
+
+            return {
+              content: [{
+                type: "text",
+                text: JSON.stringify({
+                  generated_at: new Date().toISOString(),
+                  summary,
+                  items: limitedItems,
+                }),
               }],
             };
           }

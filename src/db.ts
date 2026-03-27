@@ -254,15 +254,43 @@ export interface QueryOptions {
   limit?: number;
 }
 
+export interface LexicalQueryResult {
+  entry: Entry;
+  score: number;
+  rank: number;
+}
+
+export interface SemanticQueryResult {
+  entry: Entry;
+  distance: number;
+  rank: number;
+}
+
+export interface HybridQueryResult {
+  entry: Entry;
+  score: number;
+  lexicalRank?: number;
+  lexicalScore?: number;
+  semanticRank?: number;
+  semanticDistance?: number;
+}
+
 export function queryEntries(
   db: Database.Database,
   options: QueryOptions,
 ): Entry[] {
+  return queryEntriesLexicalScored(db, options).map((result) => result.entry);
+}
+
+export function queryEntriesLexicalScored(
+  db: Database.Database,
+  options: QueryOptions,
+): LexicalQueryResult[] {
   const { query, namespace, entryType, tags, limit = 10 } = options;
   const clampedLimit = Math.min(Math.max(limit, 1), 50);
 
   let sql = `
-    SELECT e.* FROM entries e
+    SELECT e.*, bm25(entries_fts) as lexical_score FROM entries e
     JOIN entries_fts fts ON e.rowid = fts.rowid
     WHERE entries_fts MATCH ?
   `;
@@ -293,12 +321,19 @@ export function queryEntries(
     }
   }
 
-  sql += " ORDER BY rank LIMIT ?";
+  sql += " ORDER BY lexical_score LIMIT ?";
   params.push(clampedLimit);
 
-  const results = db.prepare(sql).all(...params) as Entry[];
+  const rows = db.prepare(sql).all(...params) as Array<Entry & { lexical_score: number }>;
 
-  return results;
+  return rows.map((row, index) => {
+    const { lexical_score, ...entry } = row;
+    return {
+      entry,
+      score: lexical_score,
+      rank: index + 1,
+    };
+  });
 }
 
 // --- List operations ---
@@ -495,6 +530,13 @@ export function queryEntriesSemantic(
   db: Database.Database,
   options: SemanticQueryOptions,
 ): Entry[] {
+  return queryEntriesSemanticScored(db, options).map((result) => result.entry);
+}
+
+export function queryEntriesSemanticScored(
+  db: Database.Database,
+  options: SemanticQueryOptions,
+): SemanticQueryResult[] {
   const { queryEmbedding, namespace, entryType, tags, limit = 10 } = options;
   const clampedLimit = Math.min(Math.max(limit, 1), 50);
 
@@ -518,9 +560,9 @@ export function queryEntriesSemantic(
   // Fetch full entries and apply ALL filters (namespace, type, tags)
   // inline so that clampedLimit applies to the filtered result set.
   const getEntry = db.prepare("SELECT * FROM entries WHERE id = ?");
-  const results: Entry[] = [];
+  const results: SemanticQueryResult[] = [];
 
-  for (const { entry_id } of vecResults) {
+  for (const { entry_id, distance } of vecResults) {
     if (results.length >= clampedLimit) break;
 
     const entry = getEntry.get(entry_id) as Entry | undefined;
@@ -541,7 +583,11 @@ export function queryEntriesSemantic(
       if (!tags.every((t) => entryTags.includes(t))) continue;
     }
 
-    results.push(entry);
+    results.push({
+      entry,
+      distance,
+      rank: results.length + 1,
+    });
   }
 
   return results;
@@ -556,33 +602,48 @@ export function queryEntriesHybrid(
   db: Database.Database,
   options: HybridQueryOptions,
 ): Entry[] {
+  return queryEntriesHybridScored(db, options).map((result) => result.entry);
+}
+
+export function queryEntriesHybridScored(
+  db: Database.Database,
+  options: HybridQueryOptions,
+): HybridQueryResult[] {
   const { ftsOptions, semanticOptions } = options;
   const limit = Math.min(Math.max(ftsOptions.limit ?? 10, 1), 50);
 
   // Over-fetch from both sources (5x limit per Codex finding)
   const overFetchLimit = limit * 5;
 
-  const ftsResults = queryEntries(db, { ...ftsOptions, limit: overFetchLimit });
-  const vecResults = queryEntriesSemantic(db, { ...semanticOptions, limit: overFetchLimit });
+  const ftsResults = queryEntriesLexicalScored(db, { ...ftsOptions, limit: overFetchLimit });
+  const vecResults = queryEntriesSemanticScored(db, { ...semanticOptions, limit: overFetchLimit });
 
   // Build 1-indexed rank maps
   const ftsRanks = new Map<string, number>();
-  ftsResults.forEach((entry, i) => ftsRanks.set(entry.id, i + 1));
+  const ftsScores = new Map<string, number>();
+  ftsResults.forEach((result) => {
+    ftsRanks.set(result.entry.id, result.rank);
+    ftsScores.set(result.entry.id, result.score);
+  });
 
   const vecRanks = new Map<string, number>();
-  vecResults.forEach((entry, i) => vecRanks.set(entry.id, i + 1));
+  const vecDistances = new Map<string, number>();
+  vecResults.forEach((result) => {
+    vecRanks.set(result.entry.id, result.rank);
+    vecDistances.set(result.entry.id, result.distance);
+  });
 
   // Collect all unique entry IDs
   const allIds = new Set<string>([...ftsRanks.keys(), ...vecRanks.keys()]);
 
   // RRF scoring (k = 60)
   const k = 60;
-  const scored: Array<{ id: string; score: number; entry: Entry }> = [];
+  const scored: HybridQueryResult[] = [];
 
   // Build entry map for quick lookup
   const entryMap = new Map<string, Entry>();
-  for (const entry of ftsResults) entryMap.set(entry.id, entry);
-  for (const entry of vecResults) entryMap.set(entry.id, entry);
+  for (const result of ftsResults) entryMap.set(result.entry.id, result.entry);
+  for (const result of vecResults) entryMap.set(result.entry.id, result.entry);
 
   for (const id of allIds) {
     const entry = entryMap.get(id)!;
@@ -599,13 +660,20 @@ export function queryEntriesHybrid(
       score += 1 / (k + vecRank);
     }
 
-    scored.push({ id, score, entry });
+    scored.push({
+      entry,
+      score,
+      lexicalRank: ftsRank,
+      lexicalScore: ftsScores.get(id),
+      semanticRank: vecRank,
+      semanticDistance: vecDistances.get(id),
+    });
   }
 
   // Sort by score descending
   scored.sort((a, b) => b.score - a.score);
 
-  return scored.slice(0, limit).map((s) => s.entry);
+  return scored.slice(0, limit);
 }
 
 // --- Vec helpers (used by embeddings.ts) ---

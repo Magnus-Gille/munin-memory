@@ -543,6 +543,40 @@ describe("memory_query", () => {
       key: "status",
     }));
   });
+
+  it("returns explainability metadata when explain is true", async () => {
+    const raw = await callTool("memory_query", {
+      query: "SQLite memory",
+      search_mode: "lexical",
+      explain: true,
+    });
+    const result = parseToolResponse(raw) as {
+      retrieval: { reranked: boolean; relaxed_lexical: boolean; fallback_reason: string | null };
+      results: Array<{ match?: { heuristic_score: number; lexical_rank?: number; reasons: string[] } }>;
+    };
+
+    expect(result.retrieval.reranked).toBe(true);
+    expect(result.retrieval.relaxed_lexical).toBe(false);
+    expect(result.retrieval.fallback_reason).toBeNull();
+    expect(result.results[0].match?.heuristic_score).toBeTypeOf("number");
+    expect(result.results[0].match?.lexical_rank).toBe(1);
+    expect(result.results[0].match?.reasons).toContain("matched lexical terms");
+  });
+
+  it("reports fallback reason in explain mode when semantic search degrades", async () => {
+    const raw = await callTool("memory_query", {
+      query: "SQLite",
+      search_mode: "semantic",
+      explain: true,
+    });
+    const result = parseToolResponse(raw) as {
+      search_mode_actual?: string;
+      retrieval?: { fallback_reason: string | null };
+    };
+
+    expect(result.search_mode_actual).toBe("lexical");
+    expect(result.retrieval?.fallback_reason).toBeTruthy();
+  });
 });
 
 describe("memory_log", () => {
@@ -846,6 +880,130 @@ describe("memory_orient", () => {
     expect(result.conventions).toBeDefined();
     expect(result.dashboard).toBeDefined();
     expect(result.namespaces).toBeDefined();
+  });
+
+  it("supports compact detail with dashboard truncation and no namespaces by default", async () => {
+    await callTool("memory_write", {
+      namespace: "meta/conventions",
+      key: "conventions",
+      content: "# Conventions\nUse memory_orient first.",
+    });
+    for (let i = 0; i < 6; i++) {
+      await callTool("memory_write", {
+        namespace: `projects/compact-${i}`,
+        key: "status",
+        content: `Active project ${i}`,
+        tags: ["active"],
+      });
+    }
+
+    const raw = await callTool("memory_orient", { detail: "compact" });
+    const result = parseToolResponse(raw) as {
+      namespaces?: Array<unknown>;
+      dashboard: { active: Array<unknown> };
+      dashboard_meta: { counts: Record<string, number>; truncated_groups: string[] };
+      conventions: { compact?: boolean };
+    };
+
+    expect(result.conventions.compact).toBe(true);
+    expect(result.namespaces).toBeUndefined();
+    expect(result.dashboard.active).toHaveLength(5);
+    expect(result.dashboard_meta.counts.active).toBe(6);
+    expect(result.dashboard_meta.truncated_groups).toContain("active");
+  });
+
+  it("honors namespace_limit when namespaces are included", async () => {
+    await callTool("memory_write", { namespace: "projects/a", key: "status", content: "A", tags: ["active"] });
+    await callTool("memory_write", { namespace: "projects/b", key: "status", content: "B", tags: ["active"] });
+
+    const raw = await callTool("memory_orient", {
+      detail: "compact",
+      include_namespaces: true,
+      namespace_limit: 1,
+    });
+    const result = parseToolResponse(raw) as {
+      namespaces: Array<{ namespace: string }>;
+      namespaces_meta: { total: number; returned: number; truncated: boolean };
+    };
+
+    expect(result.namespaces).toHaveLength(1);
+    expect(result.namespaces_meta.total).toBeGreaterThan(1);
+    expect(result.namespaces_meta.returned).toBe(1);
+    expect(result.namespaces_meta.truncated).toBe(true);
+  });
+});
+
+describe("memory_attention", () => {
+  it("surfaces blocked, stale, and missing-status work in priority order", async () => {
+    const upcomingDate = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+    await callTool("memory_write", {
+      namespace: "projects/release-train",
+      key: "status",
+      content: "Waiting on vendor approval.",
+      tags: ["blocked"],
+    });
+    await callTool("memory_write", {
+      namespace: "projects/hackathon-web",
+      key: "status",
+      content: `Event ${upcomingDate} and venue logistics need review.`,
+      tags: ["active"],
+    });
+    db.prepare(
+      "UPDATE entries SET updated_at = ? WHERE namespace = ? AND key = 'status' AND entry_type = 'state'",
+    ).run(new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString(), "projects/hackathon-web");
+    await callTool("memory_write", {
+      namespace: "projects/no-status",
+      key: "notes",
+      content: "This namespace has work but no status entry.",
+    });
+
+    const raw = await callTool("memory_attention", {});
+    const result = parseToolResponse(raw) as {
+      summary: { high: number; medium: number; total: number };
+      items: Array<{ namespace: string; category: string; severity: string }>;
+    };
+
+    expect(result.summary.total).toBeGreaterThanOrEqual(3);
+    expect(result.summary.high).toBeGreaterThanOrEqual(2);
+    expect(result.items[0]).toEqual(expect.objectContaining({
+      namespace: "projects/hackathon-web",
+      category: "upcoming_event_stale",
+      severity: "high",
+    }));
+    expect(result.items.slice(0, 2)).toContainEqual(expect.objectContaining({
+      namespace: "projects/release-train",
+      category: "blocked",
+      severity: "high",
+    }));
+    expect(result.items).toContainEqual(expect.objectContaining({
+      namespace: "projects/no-status",
+      category: "missing_status",
+      severity: "medium",
+    }));
+  });
+
+  it("supports namespace prefix filtering", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/release-train",
+      key: "status",
+      content: "Blocked on infra.",
+      tags: ["blocked"],
+    });
+    await callTool("memory_write", {
+      namespace: "clients/acme",
+      key: "status",
+      content: "Blocked on approval.",
+      tags: ["blocked"],
+    });
+
+    const raw = await callTool("memory_attention", { namespace_prefix: "clients/" });
+    const result = parseToolResponse(raw) as {
+      items: Array<{ namespace: string }>;
+    };
+
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0].namespace).toBe("clients/acme");
   });
 });
 
