@@ -249,7 +249,7 @@ Embedding pipeline runs asynchronously: writes are never blocked by embedding ge
 |------|---------|---------|----------|
 | Infra | `MUNIN_EMBEDDINGS_ENABLED` | `true` | Load model, run worker |
 | Gate 1 | `MUNIN_SEMANTIC_ENABLED` | `true` | Accept `search_mode: "semantic"` |
-| Gate 2 | `MUNIN_HYBRID_ENABLED` | `false` | Accept `search_mode: "hybrid"` |
+| Gate 2 | `MUNIN_HYBRID_ENABLED` | `true` | Accept `search_mode: "hybrid"` |
 
 When a requested mode is unavailable, `memory_query` degrades to lexical search with a `warning` and `search_mode_actual` in the response.
 

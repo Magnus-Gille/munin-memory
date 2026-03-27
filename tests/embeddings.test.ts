@@ -179,8 +179,8 @@ describe("feature gates", () => {
   });
 
   it.skipIf(!vecAvailable)("isHybridEnabled reflects config", () => {
-    // Default config has hybrid disabled
-    expect(isHybridEnabled()).toBe(false);
+    // Default config has hybrid enabled
+    expect(isHybridEnabled()).toBe(true);
   });
 });
 

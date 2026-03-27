@@ -6,7 +6,7 @@ import { vecLoaded, storeEmbedding, removeEmbedding } from "./db.js";
 const config = {
   embeddingsEnabled: (process.env.MUNIN_EMBEDDINGS_ENABLED ?? "true") === "true",
   semanticEnabled: (process.env.MUNIN_SEMANTIC_ENABLED ?? "true") === "true",
-  hybridEnabled: (process.env.MUNIN_HYBRID_ENABLED ?? "false") === "true",
+  hybridEnabled: (process.env.MUNIN_HYBRID_ENABLED ?? "true") === "true",
   model: process.env.MUNIN_EMBEDDINGS_MODEL ?? "Xenova/all-MiniLM-L6-v2",
   backfill: (process.env.MUNIN_EMBEDDINGS_BACKFILL ?? "true") === "true",
   batchSize: parseInt(process.env.MUNIN_EMBEDDINGS_BATCH_SIZE ?? "25", 10) || 25,
@@ -138,6 +138,13 @@ export function getEmbeddingStatusReason(): string {
   if (!extractor) return "Embedding model failed to load";
   if (circuitBreakerDisabled) return `Circuit breaker tripped after ${config.maxFailures} consecutive failures`;
   return "Embedding system operational";
+}
+
+export function getSearchModeUnavailableReason(mode: "semantic" | "hybrid"): string {
+  if (!isEmbeddingAvailable()) return getEmbeddingStatusReason();
+  if (mode === "semantic" && !config.semanticEnabled) return "Semantic search disabled via MUNIN_SEMANTIC_ENABLED=false";
+  if (mode === "hybrid" && !config.hybridEnabled) return "Hybrid search disabled via MUNIN_HYBRID_ENABLED=false";
+  return getEmbeddingStatusReason();
 }
 
 export function resetCircuitBreaker(): void {

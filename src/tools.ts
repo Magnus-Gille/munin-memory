@@ -33,7 +33,7 @@ import {
   embeddingToBuffer,
   isSemanticEnabled,
   isHybridEnabled,
-  getEmbeddingStatusReason,
+  getSearchModeUnavailableReason,
 } from "./embeddings.js";
 import type {
   WriteParams,
@@ -736,12 +736,12 @@ export function registerTools(server: Server, db: Database.Database): void {
             if (requestedMode === "semantic") {
               if (!isSemanticEnabled() || !vecLoaded()) {
                 actualMode = "lexical";
-                warning = `Semantic search unavailable (${getEmbeddingStatusReason()}). Falling back to lexical search.`;
+                warning = `Semantic search unavailable (${getSearchModeUnavailableReason("semantic")}). Falling back to lexical search.`;
               }
             } else if (requestedMode === "hybrid") {
               if (!isHybridEnabled() || !vecLoaded()) {
                 actualMode = "lexical";
-                warning = `Hybrid search unavailable (${getEmbeddingStatusReason()}). Falling back to lexical search.`;
+                warning = `Hybrid search unavailable (${getSearchModeUnavailableReason("hybrid")}). Falling back to lexical search.`;
               }
             }
 
