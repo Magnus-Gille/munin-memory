@@ -87,8 +87,12 @@ setInterval(() => {
 function parseEntry(entry: Entry) {
   return {
     ...entry,
-    tags: JSON.parse(entry.tags) as string[],
+    tags: parseTags(entry.tags),
   };
+}
+
+function parseTags(tags: string): string[] {
+  return JSON.parse(tags) as string[];
 }
 
 function contentPreview(content: string, maxLen = 500): string {
@@ -99,6 +103,11 @@ function contentPreview(content: string, maxLen = 500): string {
 const STALENESS_THRESHOLD_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
 const EVENT_STALENESS_THRESHOLD_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
 const EVENT_LOOKAHEAD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const QUERY_RERANK_OVERFETCH_MULTIPLIER = 5;
+const RELAXED_QUERY_STOPWORDS = new Set([
+  "a", "an", "and", "are", "for", "how", "i", "important", "is", "it",
+  "my", "myself", "of", "or", "should", "the", "to", "what",
+]);
 
 function isStale(updatedAt: string): boolean {
   return Date.now() - new Date(updatedAt).getTime() > STALENESS_THRESHOLD_MS;
@@ -142,6 +151,113 @@ const TAG_ALIASES: Record<string, string> = {
 
 function isTrackedNamespace(namespace: string): boolean {
   return namespace.startsWith("projects/") || namespace.startsWith("clients/");
+}
+
+function buildRelaxedLexicalQuery(query: string): string | null {
+  if (query.includes("\"")) return null;
+  if (/\b(AND|OR|NOT|NEAR)\b|[:()*]/.test(query)) return null;
+
+  const terms = query
+    .toLowerCase()
+    .split(/[^a-z0-9_-]+/i)
+    .map((term) => term.trim())
+    .filter((term) => term.length >= 3 && !RELAXED_QUERY_STOPWORDS.has(term));
+
+  const uniqueTerms = [...new Set(terms)];
+  if (uniqueTerms.length < 2) return null;
+
+  return uniqueTerms.map((term) => `"${term}"`).join(" OR ");
+}
+
+function shouldApplyDefaultQuerySuppression(params: QueryParams): boolean {
+  return !params.namespace && !params.entry_type && (!params.tags || params.tags.length === 0);
+}
+
+function looksLikeTombstone(content: string): boolean {
+  return /\bTOMBSTONE\b/i.test(content);
+}
+
+function queryMentionsAny(query: string, terms: string[]): boolean {
+  return terms.some((term) => query.includes(term));
+}
+
+function getQueryHeuristicScore(entry: Entry, queryLower: string): number {
+  const tags = parseTags(entry.tags);
+  let score = 0;
+
+  if (entry.entry_type === "state") score += 6;
+
+  if (isTrackedNamespace(entry.namespace) && entry.key === "status") {
+    score += 20;
+    if (queryMentionsAny(queryLower, ["active", "work", "blocker", "blockers", "next", "steps", "project"])) {
+      score += 4;
+    }
+  }
+
+  if (entry.namespace.startsWith("people/") && entry.key === "profile") {
+    score += 18;
+    if (queryMentionsAny(queryLower, ["personal", "profile", "collaboration", "style", "preference", "preferences", "context"])) {
+      score += 10;
+    }
+  }
+
+  if (entry.namespace === "meta/conventions" && entry.key === "conventions") {
+    score += 16;
+    if (queryMentionsAny(queryLower, ["convention", "handshake", "cas", "lifecycle", "write protocol"])) {
+      score += 8;
+    }
+  }
+
+  if (entry.namespace === "meta" && entry.key === "reference-index") {
+    score += 10;
+  }
+
+  if (entry.entry_type === "log") {
+    score -= 3;
+  }
+
+  if (looksLikeTombstone(entry.content)) {
+    score -= 30;
+  }
+
+  if (entry.key === "status") {
+    if (tags.includes("archived")) score -= 12;
+    if (tags.includes("completed")) score -= 8;
+    if (tags.includes("stopped")) score -= 8;
+  }
+
+  if (entry.namespace.startsWith("tasks/")) {
+    score -= 8;
+  }
+
+  return score;
+}
+
+function rerankQueryResults(
+  results: Entry[],
+  params: QueryParams,
+  completedTasks: Set<string>,
+): Entry[] {
+  const queryLower = params.query.toLowerCase();
+  const suppressDefaults = shouldApplyDefaultQuerySuppression(params);
+  const filtered = results.filter((entry) => {
+    if (!suppressDefaults) return true;
+    if (entry.namespace === "demo" || entry.namespace.startsWith("demo/")) return false;
+    if (completedTasks.has(entry.namespace)) return false;
+    return true;
+  });
+
+  return filtered
+    .map((entry, index) => ({
+      entry,
+      index,
+      heuristic: getQueryHeuristicScore(entry, queryLower),
+    }))
+    .sort((a, b) => {
+      if (b.heuristic !== a.heuristic) return b.heuristic - a.heuristic;
+      return a.index - b.index;
+    })
+    .map((item) => item.entry);
 }
 
 function canonicalizeTags(tags: string[]): { canonical: string[]; normalized: string[] } {
@@ -854,6 +970,16 @@ export function registerTools(server: Server, db: Database.Database): void {
               return { content: [{ type: "text", text: JSON.stringify({ error: "validation_error", message: "Query string is required." }) }] };
             }
 
+            const requestedLimit = Math.min(Math.max(limit ?? 10, 1), 50);
+            const internalLimit = Math.min(requestedLimit * QUERY_RERANK_OVERFETCH_MULTIPLIER, 50);
+            const queryParams: QueryParams = {
+              query,
+              namespace,
+              entry_type,
+              tags,
+              limit: requestedLimit,
+              search_mode,
+            };
             const requestedMode: SearchMode = search_mode ?? "hybrid";
             let actualMode: SearchMode = requestedMode;
             let warning: string | undefined;
@@ -883,7 +1009,7 @@ export function registerTools(server: Server, db: Database.Database): void {
                   namespace,
                   entryType: entry_type,
                   tags,
-                  limit,
+                  limit: internalLimit,
                 });
               }
             }
@@ -896,8 +1022,8 @@ export function registerTools(server: Server, db: Database.Database): void {
               } else {
                 const buf = embeddingToBuffer(queryEmb);
                 results = queryEntriesHybrid(db, {
-                  ftsOptions: { query, namespace, entryType: entry_type, tags, limit },
-                  semanticOptions: { queryEmbedding: buf, namespace, entryType: entry_type, tags, limit },
+                  ftsOptions: { query, namespace, entryType: entry_type, tags, limit: internalLimit },
+                  semanticOptions: { queryEmbedding: buf, namespace, entryType: entry_type, tags, limit: internalLimit },
                 });
               }
             }
@@ -909,9 +1035,30 @@ export function registerTools(server: Server, db: Database.Database): void {
                 namespace,
                 entryType: entry_type,
                 tags,
-                limit,
+                limit: internalLimit,
               });
+
+              if (results.length === 0) {
+                const relaxedQuery = buildRelaxedLexicalQuery(query);
+                if (relaxedQuery) {
+                  results = queryEntries(db, {
+                    query: relaxedQuery,
+                    namespace,
+                    entryType: entry_type,
+                    tags,
+                    limit: internalLimit,
+                  });
+                  if (results.length > 0 && !warning) {
+                    warning = "No exact lexical matches found. Used relaxed token matching for natural-language query.";
+                  }
+                }
+              }
             }
+
+            const completedTasks = shouldApplyDefaultQuerySuppression(queryParams)
+              ? getCompletedTaskNamespaces(db)
+              : new Set<string>();
+            results = rerankQueryResults(results!, queryParams, completedTasks).slice(0, requestedLimit);
 
             const formatted = results!.map((entry) => ({
               id: entry.id,
@@ -919,7 +1066,7 @@ export function registerTools(server: Server, db: Database.Database): void {
               key: entry.key,
               entry_type: entry.entry_type,
               content_preview: contentPreview(entry.content),
-              tags: JSON.parse(entry.tags) as string[],
+              tags: parseTags(entry.tags),
               created_at: entry.created_at,
               updated_at: entry.updated_at,
             }));

@@ -242,6 +242,168 @@ describe("memory_query", () => {
     const result = parseToolResponse(raw) as { total: number };
     expect(result.total).toBe(0);
   });
+
+  it("suppresses demo namespaces for broad queries by default", async () => {
+    await callTool("memory_write", {
+      namespace: "demo/test-person",
+      key: "status",
+      content: "Orientation notes for a demo profile",
+      tags: ["demo"],
+    });
+    await callTool("memory_write", {
+      namespace: "people/magnus",
+      key: "profile",
+      content: "Orientation notes for the real profile",
+      tags: ["profile"],
+    });
+
+    const raw = await callTool("memory_query", { query: "orientation notes profile" });
+    const result = parseToolResponse(raw) as { results: Array<{ namespace: string }> };
+    const namespaces = result.results.map((r) => r.namespace);
+
+    expect(namespaces).toContain("people/magnus");
+    expect(namespaces).not.toContain("demo/test-person");
+  });
+
+  it("suppresses completed task namespaces for broad queries by default", async () => {
+    await callTool("memory_write", {
+      namespace: "tasks/20260327-done",
+      key: "status",
+      content: "Parser rollout completed successfully",
+      tags: ["completed"],
+    });
+    await callTool("memory_write", {
+      namespace: "projects/hugin",
+      key: "status",
+      content: "Parser rollout active and evolving",
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_query", { query: "parser rollout" });
+    const result = parseToolResponse(raw) as { results: Array<{ namespace: string }> };
+    const namespaces = result.results.map((r) => r.namespace);
+
+    expect(namespaces).toContain("projects/hugin");
+    expect(namespaces).not.toContain("tasks/20260327-done");
+  });
+
+  it("boosts profile entries above secondary person records", async () => {
+    await callTool("memory_write", {
+      namespace: "people/magnus",
+      key: "employment",
+      content: "Magnus employment and collaboration details",
+      tags: ["employment"],
+    });
+    await callTool("memory_write", {
+      namespace: "people/magnus",
+      key: "profile",
+      content: "Magnus profile with collaboration style and working preferences",
+      tags: ["profile"],
+    });
+
+    const raw = await callTool("memory_query", {
+      query: "Magnus collaboration style",
+      namespace: "people/",
+    });
+    const result = parseToolResponse(raw) as { results: Array<{ key: string | null }> };
+
+    expect(result.results[0].key).toBe("profile");
+  });
+
+  it("prioritizes live project status and profile context for broad orientation queries", async () => {
+    await callTool("memory_write", {
+      namespace: "people/magnus",
+      key: "profile",
+      content: "Magnus profile with personal context, collaboration style, decision-making, and practical working preferences",
+      tags: ["profile", "person:magnus"],
+    });
+    await callTool("memory_write", {
+      namespace: "projects/grimnir",
+      key: "status",
+      content: "## Vision\nSystem architecture\n\n## Current Work\nActive work and current blockers are tracked here.\n\n## Blockers\nOne blocker.\n\n## Next Steps\nTwo next steps.",
+      tags: ["active"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/munin-memory",
+      content: "Usability-priority debate round 2 about compact conventions and context tax",
+      tags: ["decision"],
+    });
+    await callTool("memory_write", {
+      namespace: "demo/people/astrid-lindqvist",
+      key: "status",
+      content: "Demo profile with collaboration style and orientation notes",
+      tags: ["demo", "person"],
+    });
+    await callTool("memory_write", {
+      namespace: "tasks/20260327-dream-project",
+      key: "status",
+      content: "Important personal context and active work from a completed task",
+      tags: ["completed"],
+    });
+
+    const raw = await callTool("memory_query", {
+      query: "How should I orient myself to active work and important personal context?",
+      search_mode: "hybrid",
+      limit: 6,
+    });
+    const result = parseToolResponse(raw) as {
+      results: Array<{ namespace: string; key: string | null }>;
+    };
+
+    expect(result.results.slice(0, 2)).toContainEqual(expect.objectContaining({
+      namespace: "projects/grimnir",
+      key: "status",
+    }));
+    expect(result.results.slice(0, 2)).toContainEqual(expect.objectContaining({
+      namespace: "people/magnus",
+      key: "profile",
+    }));
+    expect(result.results).not.toContainEqual(expect.objectContaining({
+      namespace: "demo/people/astrid-lindqvist",
+    }));
+    expect(result.results).not.toContainEqual(expect.objectContaining({
+      namespace: "tasks/20260327-dream-project",
+    }));
+  });
+
+  it("prioritizes project status entries over tombstones and logs in project-scoped queries", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/hugin",
+      key: "status",
+      content: "## Vision\nTask dispatcher\n\n## Current Work\nEnhanced task parser shipped.\n\n## Blockers\nNone.\n\n## Next Steps\nProgress streaming.",
+      tags: ["active"],
+    });
+    await callTool("memory_write", {
+      namespace: "projects/hackathon-2026",
+      key: "status",
+      content: "**TOMBSTONE** — Active work moved elsewhere.",
+      tags: ["archived"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/hugin",
+      content: "Morning session: task parser and task logging updates",
+      tags: ["milestone"],
+    });
+
+    const raw = await callTool("memory_query", {
+      query: "active work current blockers next steps",
+      namespace: "projects/",
+      search_mode: "hybrid",
+      limit: 5,
+    });
+    const result = parseToolResponse(raw) as {
+      results: Array<{ namespace: string; key: string | null }>;
+    };
+
+    expect(result.results[0]).toEqual(expect.objectContaining({
+      namespace: "projects/hugin",
+      key: "status",
+    }));
+    expect(result.results.at(-1)).not.toEqual(expect.objectContaining({
+      namespace: "projects/hackathon-2026",
+      key: "status",
+    }));
+  });
 });
 
 describe("memory_log", () => {
