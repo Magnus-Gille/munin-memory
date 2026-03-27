@@ -725,6 +725,307 @@ export function getCompletedTaskNamespaces(db: Database.Database): Set<string> {
   return new Set(rows.map((r) => r.namespace));
 }
 
+// --- Retrieval analytics ---
+
+// Correlation window: 5 minutes
+const RETRIEVAL_CORRELATION_WINDOW_MS = 5 * 60 * 1000;
+
+// Retention period for sessions cursor cache: 7 days
+const RETRIEVAL_SESSION_RETENTION_DAYS = 7;
+
+export interface RetrievalEventInput {
+  sessionId: string;
+  toolName: "memory_query" | "memory_orient" | "memory_attention";
+  queryText?: string;
+  requestedMode?: string;
+  actualMode?: string;
+  resultIds: string[];
+  resultNamespaces: string[];
+  resultRanks: number[];
+  detail?: Record<string, unknown>;
+}
+
+export interface RetrievalOutcomeInput {
+  outcomeType:
+    | "opened_result"
+    | "opened_namespace_context"
+    | "write_in_result_namespace"
+    | "log_in_result_namespace"
+    | "query_reformulated"
+    | "no_followup_timeout";
+  entryId?: string;
+  namespace?: string;
+  detail?: Record<string, unknown>;
+}
+
+export interface EntryInsightRow {
+  entry_id: string;
+  namespace: string;
+  impressions: number;
+  opens: number;
+  write_outcomes: number;
+  log_outcomes: number;
+  opened_when_stale_count: number;
+  updated_at: string;
+}
+
+/**
+ * Log a retrieval event and update the session cursor.
+ * Also checks for query_reformulated: if there is a prior event in the same
+ * session within the correlation window that has zero positive outcomes, records
+ * a query_reformulated outcome on it before inserting the new event.
+ * Never throws — all errors are silently swallowed.
+ */
+export function logRetrievalEvent(
+  db: Database.Database,
+  input: RetrievalEventInput,
+): string | null {
+  try {
+    const now = nowUTC();
+    const eventId = randomUUID();
+
+    const txn = db.transaction(() => {
+      // Look up the prior event via the session cursor (O(1) — no range scan)
+      const sessionRow = db
+        .prepare(
+          "SELECT last_event_id, last_event_timestamp FROM retrieval_sessions WHERE session_id = ?",
+        )
+        .get(input.sessionId) as
+        | { last_event_id: string | null; last_event_timestamp: string }
+        | undefined;
+
+      if (sessionRow?.last_event_id) {
+        const priorTs = new Date(sessionRow.last_event_timestamp).getTime();
+        const nowMs = new Date(now).getTime();
+        const withinWindow = nowMs - priorTs <= RETRIEVAL_CORRELATION_WINDOW_MS;
+
+        if (withinWindow) {
+          // Check for query_reformulated: prior event has no positive outcomes
+          const positiveOutcomeCount = (
+            db
+              .prepare(
+                `SELECT COUNT(*) as cnt FROM retrieval_outcomes
+                 WHERE retrieval_event_id = ?
+                   AND outcome_type IN (
+                     'opened_result','opened_namespace_context',
+                     'write_in_result_namespace','log_in_result_namespace'
+                   )`,
+              )
+              .get(sessionRow.last_event_id) as { cnt: number }
+          ).cnt;
+
+          if (positiveOutcomeCount === 0) {
+            db.prepare(
+              `INSERT INTO retrieval_outcomes
+                 (id, retrieval_event_id, timestamp, outcome_type, entry_id, namespace, detail)
+               VALUES (?, ?, ?, 'query_reformulated', NULL, NULL, NULL)`,
+            ).run(randomUUID(), sessionRow.last_event_id, now);
+          }
+        }
+      }
+
+      // Insert the new retrieval event
+      db.prepare(
+        `INSERT INTO retrieval_events
+           (id, session_id, timestamp, tool_name, query_text, requested_mode, actual_mode,
+            result_ids, result_namespaces, result_ranks, detail)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        eventId,
+        input.sessionId,
+        now,
+        input.toolName,
+        input.queryText ?? null,
+        input.requestedMode ?? null,
+        input.actualMode ?? null,
+        JSON.stringify(input.resultIds),
+        JSON.stringify(input.resultNamespaces),
+        JSON.stringify(input.resultRanks),
+        input.detail ? JSON.stringify(input.detail) : null,
+      );
+
+      // Upsert the session cursor
+      db.prepare(
+        `INSERT INTO retrieval_sessions (session_id, last_event_id, last_event_timestamp, created_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(session_id) DO UPDATE SET
+           last_event_id = excluded.last_event_id,
+           last_event_timestamp = excluded.last_event_timestamp`,
+      ).run(input.sessionId, eventId, now, now);
+    });
+
+    txn();
+    return eventId;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Log a retrieval outcome tied to the most recent retrieval event in this session
+ * within the correlation window.
+ * Never throws — all errors are silently swallowed.
+ */
+export function logRetrievalOutcome(
+  db: Database.Database,
+  sessionId: string,
+  input: RetrievalOutcomeInput,
+): void {
+  try {
+    const now = nowUTC();
+    const nowMs = new Date(now).getTime();
+
+    // Look up the prior event via the session cursor (O(1))
+    const sessionRow = db
+      .prepare(
+        "SELECT last_event_id, last_event_timestamp FROM retrieval_sessions WHERE session_id = ?",
+      )
+      .get(sessionId) as
+      | { last_event_id: string | null; last_event_timestamp: string }
+      | undefined;
+
+    if (!sessionRow?.last_event_id) return;
+
+    const priorTs = new Date(sessionRow.last_event_timestamp).getTime();
+    if (nowMs - priorTs > RETRIEVAL_CORRELATION_WINDOW_MS) return;
+
+    db.prepare(
+      `INSERT INTO retrieval_outcomes
+         (id, retrieval_event_id, timestamp, outcome_type, entry_id, namespace, detail)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      randomUUID(),
+      sessionRow.last_event_id,
+      now,
+      input.outcomeType,
+      input.entryId ?? null,
+      input.namespace ?? null,
+      input.detail ? JSON.stringify(input.detail) : null,
+    );
+  } catch {
+    // Never interrupt tool execution
+  }
+}
+
+/**
+ * Compute per-entry insight aggregates.
+ * Impressions counted only from memory_query and memory_attention events
+ * (result_ids non-empty). staleness_pressure = fraction of opened_result outcomes
+ * where the entry was older than 14 days at the time of opening.
+ */
+export function getInsightsByEntry(
+  db: Database.Database,
+  namespace?: string,
+  minImpressions = 3,
+  limit = 20,
+): EntryInsightRow[] {
+  const clampedLimit = Math.min(Math.max(limit, 1), 50);
+
+  // Build namespace filter clause (applies to nl.namespace from namespace_lookup CTE)
+  let nsFilter = "";
+  const nsParams: unknown[] = [];
+  if (namespace) {
+    if (namespace.endsWith("/")) {
+      nsFilter = "AND nl.namespace LIKE ? ESCAPE '\\'";
+      nsParams.push(namespace.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_") + "%");
+    } else {
+      nsFilter = "AND nl.namespace = ?";
+      nsParams.push(namespace);
+    }
+  }
+
+  const sql = `
+    WITH impressions_cte AS (
+      -- One row per (entry_id, event_id) from query/attention events with results
+      SELECT
+        e_json.value AS entry_id,
+        rev.id AS event_id
+      FROM retrieval_events rev,
+           json_each(rev.result_ids) AS e_json
+      WHERE rev.tool_name IN ('memory_query', 'memory_attention')
+        AND json_array_length(rev.result_ids) > 0
+    ),
+    opens_cte AS (
+      SELECT ro.entry_id, ro.retrieval_event_id
+      FROM retrieval_outcomes ro
+      WHERE ro.outcome_type = 'opened_result'
+        AND ro.entry_id IS NOT NULL
+    ),
+    namespace_lookup AS (
+      -- Map entry_id to namespace via the entries table
+      SELECT id AS entry_id, namespace, updated_at
+      FROM entries
+    )
+    SELECT
+      imp.entry_id,
+      nl.namespace,
+      COUNT(DISTINCT imp.event_id) AS impressions,
+      COUNT(DISTINCT op.retrieval_event_id) AS opens,
+      COUNT(DISTINCT CASE WHEN ro_w.outcome_type = 'write_in_result_namespace' THEN ro_w.retrieval_event_id END) AS write_outcomes,
+      COUNT(DISTINCT CASE WHEN ro_l.outcome_type = 'log_in_result_namespace' THEN ro_l.retrieval_event_id END) AS log_outcomes,
+      COUNT(DISTINCT CASE
+        WHEN op.retrieval_event_id IS NOT NULL
+          AND nl.updated_at IS NOT NULL
+          AND (julianday(ro_open.timestamp) - julianday(nl.updated_at)) > 14
+        THEN op.retrieval_event_id
+      END) AS opened_when_stale_count,
+      COALESCE(nl.updated_at, '') AS updated_at
+    FROM impressions_cte imp
+    LEFT JOIN namespace_lookup nl ON nl.entry_id = imp.entry_id
+    LEFT JOIN opens_cte op ON op.entry_id = imp.entry_id AND op.retrieval_event_id = imp.event_id
+    LEFT JOIN retrieval_outcomes ro_open ON ro_open.entry_id = imp.entry_id
+      AND ro_open.outcome_type = 'opened_result'
+      AND ro_open.retrieval_event_id = imp.event_id
+    LEFT JOIN retrieval_outcomes ro_w ON ro_w.retrieval_event_id = imp.event_id
+      AND ro_w.outcome_type = 'write_in_result_namespace'
+    LEFT JOIN retrieval_outcomes ro_l ON ro_l.retrieval_event_id = imp.event_id
+      AND ro_l.outcome_type = 'log_in_result_namespace'
+    WHERE nl.entry_id IS NOT NULL
+      ${nsFilter}
+    GROUP BY imp.entry_id, nl.namespace, nl.updated_at
+    HAVING COUNT(DISTINCT imp.event_id) >= ?
+    ORDER BY impressions DESC
+    LIMIT ?
+  `;
+
+  return db
+    .prepare(sql)
+    .all(...nsParams, minImpressions, clampedLimit) as EntryInsightRow[];
+}
+
+/**
+ * Prune old retrieval analytics data.
+ * Events/outcomes: delete where timestamp < now - retentionDays.
+ * Sessions: delete where last_event_timestamp < now - 7 days.
+ * Never throws.
+ */
+export function pruneRetrievalAnalytics(
+  db: Database.Database,
+  retentionDays: number,
+): void {
+  try {
+    const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+    const sessionCutoff = new Date(
+      Date.now() - RETRIEVAL_SESSION_RETENTION_DAYS * 24 * 60 * 60 * 1000,
+    ).toISOString();
+
+    const txn = db.transaction(() => {
+      // Outcomes are cascade-deleted when their event is deleted
+      db.prepare(
+        "DELETE FROM retrieval_events WHERE timestamp < ?",
+      ).run(cutoff);
+
+      db.prepare(
+        "DELETE FROM retrieval_sessions WHERE last_event_timestamp < ?",
+      ).run(sessionCutoff);
+    });
+
+    txn();
+  } catch {
+    // Never interrupt startup or cleanup
+  }
+}
+
 // --- Hint helpers ---
 
 export function getOtherKeysInNamespace(

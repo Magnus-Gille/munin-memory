@@ -161,6 +161,58 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 4,
+    description: "Add retrieval analytics tables (events, outcomes, sessions)",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE retrieval_events (
+          id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL,
+          timestamp TEXT NOT NULL,
+          tool_name TEXT NOT NULL CHECK(tool_name IN ('memory_query', 'memory_orient', 'memory_attention')),
+          query_text TEXT,
+          requested_mode TEXT,
+          actual_mode TEXT,
+          result_ids TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(result_ids)),
+          result_namespaces TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(result_namespaces)),
+          result_ranks TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(result_ranks)),
+          detail TEXT CHECK(detail IS NULL OR json_valid(detail))
+        );
+
+        CREATE INDEX idx_retrieval_events_session ON retrieval_events(session_id, timestamp);
+        CREATE INDEX idx_retrieval_events_timestamp ON retrieval_events(timestamp);
+
+        CREATE TABLE retrieval_outcomes (
+          id TEXT PRIMARY KEY,
+          retrieval_event_id TEXT NOT NULL REFERENCES retrieval_events(id) ON DELETE CASCADE,
+          timestamp TEXT NOT NULL,
+          outcome_type TEXT NOT NULL CHECK(outcome_type IN (
+            'opened_result','opened_namespace_context','write_in_result_namespace',
+            'log_in_result_namespace','query_reformulated','no_followup_timeout'
+          )),
+          entry_id TEXT,
+          namespace TEXT,
+          detail TEXT CHECK(detail IS NULL OR json_valid(detail))
+        );
+
+        CREATE INDEX idx_retrieval_outcomes_event ON retrieval_outcomes(retrieval_event_id);
+        CREATE INDEX idx_retrieval_outcomes_entry ON retrieval_outcomes(entry_id)
+          WHERE entry_id IS NOT NULL;
+        CREATE INDEX idx_retrieval_outcomes_timestamp ON retrieval_outcomes(timestamp);
+
+        CREATE TABLE retrieval_sessions (
+          session_id TEXT PRIMARY KEY,
+          last_event_id TEXT,
+          last_event_timestamp TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX idx_retrieval_sessions_timestamp
+          ON retrieval_sessions(last_event_timestamp);
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

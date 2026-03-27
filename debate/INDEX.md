@@ -22,3 +22,4 @@
 | 2026-03-27 | [Usability fix priority](usability-priority-summary.md) | 2 | Compact conventions (#3) before task noise (#1); single-source-of-truth constraint | 6 | 1/6 (17%) |
 | 2026-03-27 | [Munin discoverability](munin-discoverability-summary.md) | 2 | Data-driven reference index in orient, not hardcoded in compactConventions(); conditional loading | 7 | 2/7 (29%) |
 | 2026-03-27 | [Docs location: where does "way of working" live?](docs-location-summary.md) | 2 | 3-layer structure: README framing + repo concepts (durable only) + Munin runtime conventions | 10 | 3/10 (30%) |
+| 2026-03-27 | [Feature wishlist (memory_history, since filter, flags, compact)](feature-wishlist-summary.md) | 2 | Ship memory_history (audit_log MCP tool) first; caller context plumbing prerequisite for orient diff; attention via meta/attention convention | 14 | 4/14 (29%) |

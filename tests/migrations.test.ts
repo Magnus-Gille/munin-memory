@@ -290,7 +290,7 @@ describe("initDatabase uses migrations", () => {
     const db = initDatabase(TEST_DB_PATH);
 
     // schema_version exists and has latest version
-    expect(getSchemaVersion(db)).toBe(3);
+    expect(getSchemaVersion(db)).toBe(4);
 
     // Full CRUD works
     const result = writeState(db, "test/ns", "key1", "hello from migrations", ["test"]);

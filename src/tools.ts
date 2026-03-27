@@ -25,6 +25,9 @@ import {
   getTrackedStatuses,
   getCompletedTaskNamespaces,
   vecLoaded,
+  logRetrievalEvent,
+  logRetrievalOutcome,
+  getInsightsByEntry,
 } from "./db.js";
 import {
   validateWriteInput,
@@ -50,6 +53,8 @@ import type {
   ListParams,
   DeleteParams,
   AttentionParams,
+  InsightsParams,
+  EntryInsight,
   Entry,
   SearchMode,
   OrientDetail,
@@ -1003,6 +1008,32 @@ const TOOL_DEFINITIONS = [
       required: ["namespace"],
     },
   },
+  {
+    name: "memory_insights",
+    description:
+      "Return per-entry retrieval analytics: how often each entry was retrieved (impressions), opened (opens), followed by writes or logs, and whether it was stale when opened. Useful for understanding which memories are most actionable and which are frequently stale. Requires at least min_impressions retrieval events to appear in results.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        namespace: {
+          type: "string",
+          description:
+            "Optional. Restrict results to a specific namespace or namespace prefix (e.g. 'projects/' for all project namespaces).",
+        },
+        min_impressions: {
+          type: "integer",
+          description:
+            "Optional. Minimum number of retrieval impressions for an entry to appear in results. Default: 3.",
+        },
+        limit: {
+          type: "integer",
+          description:
+            "Optional. Maximum number of entries to return. Default: 20, max: 50.",
+        },
+      },
+      required: [],
+    },
+  },
 ];
 
 export function getMaxContentSize(): number {
@@ -1010,7 +1041,62 @@ export function getMaxContentSize(): number {
   return envVal ? parseInt(envVal, 10) || 100_000 : 100_000;
 }
 
-export function registerTools(server: Server, db: Database.Database): void {
+// --- Retrieval analytics signal thresholds ---
+const SIGNAL_OPENS_RATE_THRESHOLD = 0.3;
+const SIGNAL_WRITE_RATE_THRESHOLD = 0.15;
+const SIGNAL_LOG_RATE_THRESHOLD = 0.1;
+const SIGNAL_STALENESS_PRESSURE_THRESHOLD = 0.5;
+const SIGNAL_NO_FOLLOWTHROUGH_THRESHOLD = 0.05;
+const SIGNAL_NO_FOLLOWTHROUGH_MIN_IMPRESSIONS = 5;
+
+function computeEntryInsight(row: {
+  entry_id: string;
+  namespace: string;
+  impressions: number;
+  opens: number;
+  write_outcomes: number;
+  log_outcomes: number;
+  opened_when_stale_count: number;
+  updated_at: string;
+}): EntryInsight {
+  const { entry_id, namespace, impressions, opens, write_outcomes, log_outcomes, opened_when_stale_count } = row;
+  const follthrough = impressions > 0
+    ? (opens + write_outcomes + log_outcomes) / impressions
+    : 0;
+  const stalenessPresure = opens > 0 ? opened_when_stale_count / opens : 0;
+
+  const signals: string[] = [];
+  if (impressions > 0 && opens / impressions > SIGNAL_OPENS_RATE_THRESHOLD) {
+    signals.push("frequently opened after retrieval");
+  }
+  if (impressions > 0 && write_outcomes / impressions > SIGNAL_WRITE_RATE_THRESHOLD) {
+    signals.push("often followed by writes");
+  }
+  if (impressions > 0 && log_outcomes / impressions > SIGNAL_LOG_RATE_THRESHOLD) {
+    signals.push("often followed by logs");
+  }
+  if (stalenessPresure > SIGNAL_STALENESS_PRESSURE_THRESHOLD) {
+    signals.push("frequently stale when opened");
+  }
+  if (
+    follthrough < SIGNAL_NO_FOLLOWTHROUGH_THRESHOLD &&
+    impressions >= SIGNAL_NO_FOLLOWTHROUGH_MIN_IMPRESSIONS
+  ) {
+    signals.push("no follow-through");
+  }
+
+  return {
+    entry_id,
+    namespace,
+    impressions,
+    opens,
+    followthrough_rate: follthrough,
+    staleness_pressure: stalenessPresure,
+    learned_signals: signals,
+  };
+}
+
+export function registerTools(server: Server, db: Database.Database, sessionId?: string): void {
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: TOOL_DEFINITIONS,
   }));
@@ -1181,6 +1267,17 @@ export function registerTools(server: Server, db: Database.Database): void {
               };
             }
 
+            // Analytics: log orient event (no result IDs — orient has no specific entries)
+            if (sessionId) {
+              logRetrievalEvent(db, {
+                sessionId,
+                toolName: "memory_orient",
+                resultIds: [],
+                resultNamespaces: [],
+                resultRanks: [],
+              });
+            }
+
             return {
               content: [{
                 type: "text",
@@ -1260,6 +1357,14 @@ export function registerTools(server: Server, db: Database.Database): void {
               response.warnings = warnings;
             }
 
+            // Analytics: log write outcome correlated to prior retrieval in this session
+            if (sessionId) {
+              logRetrievalOutcome(db, sessionId, {
+                outcomeType: "write_in_result_namespace",
+                namespace,
+              });
+            }
+
             return {
               content: [{
                 type: "text",
@@ -1293,6 +1398,14 @@ export function registerTools(server: Server, db: Database.Database): void {
               };
               if (isStale(parsed.updated_at)) {
                 response.stale = true;
+              }
+              // Analytics: log opened_result outcome
+              if (sessionId) {
+                logRetrievalOutcome(db, sessionId, {
+                  outcomeType: "opened_result",
+                  entryId: parsed.id,
+                  namespace: parsed.namespace,
+                });
               }
               return {
                 content: [{
@@ -1384,6 +1497,14 @@ export function registerTools(server: Server, db: Database.Database): void {
               };
               if (isStale(parsed.updated_at)) {
                 response.stale = true;
+              }
+              // Analytics: log opened_result outcome
+              if (sessionId) {
+                logRetrievalOutcome(db, sessionId, {
+                  outcomeType: "opened_result",
+                  entryId: parsed.id,
+                  namespace: parsed.namespace,
+                });
               }
               return {
                 content: [{
@@ -1597,6 +1718,23 @@ export function registerTools(server: Server, db: Database.Database): void {
               };
             }
 
+            // Analytics: log retrieval event with result IDs and ranks
+            if (sessionId) {
+              const resultIds = formatted.map((r) => r.id);
+              const resultNamespaces = formatted.map((r) => r.namespace);
+              const resultRanks = formatted.map((_, i) => i + 1);
+              logRetrievalEvent(db, {
+                sessionId,
+                toolName: "memory_query",
+                queryText: query,
+                requestedMode: requestedMode,
+                actualMode,
+                resultIds,
+                resultNamespaces,
+                resultRanks,
+              });
+            }
+
             return {
               content: [{
                 type: "text",
@@ -1675,6 +1813,18 @@ export function registerTools(server: Server, db: Database.Database): void {
               total: limitedItems.length,
             };
 
+            // Analytics: log attention event — use namespace IDs of returned items as result_ids
+            if (sessionId) {
+              const resultNamespaces = [...new Set(limitedItems.map((item) => item.namespace))];
+              logRetrievalEvent(db, {
+                sessionId,
+                toolName: "memory_attention",
+                resultIds: [],
+                resultNamespaces,
+                resultRanks: resultNamespaces.map((_, i) => i + 1),
+              });
+            }
+
             return {
               content: [{
                 type: "text",
@@ -1694,6 +1844,13 @@ export function registerTools(server: Server, db: Database.Database): void {
               return { content: [{ type: "text", text: JSON.stringify({ error: "validation_error", message: validation.error }) }] };
             }
             const result = appendLog(db, namespace, content, tags ?? []);
+            // Analytics: log log outcome correlated to prior retrieval in this session
+            if (sessionId) {
+              logRetrievalOutcome(db, sessionId, {
+                outcomeType: "log_in_result_namespace",
+                namespace,
+              });
+            }
             return {
               content: [{
                 type: "text",
@@ -1817,6 +1974,28 @@ export function registerTools(server: Server, db: Database.Database): void {
                   },
                   delete_token: token,
                   message: `Will delete ${info.stateCount} state entries and ${info.logCount} log entries (${target}). Call again with delete_token to confirm.`,
+                }),
+              }],
+            };
+          }
+
+          case "memory_insights": {
+            const insightsArgs = (args ?? {}) as InsightsParams;
+            const minImpressions = typeof insightsArgs.min_impressions === "number"
+              ? Math.max(1, Math.floor(insightsArgs.min_impressions))
+              : 3;
+            const insightsLimit = clampOptionalLimit(insightsArgs.limit, 50) ?? 20;
+
+            const rows = getInsightsByEntry(db, insightsArgs.namespace, minImpressions, insightsLimit);
+            const entries: EntryInsight[] = rows.map(computeEntryInsight);
+
+            return {
+              content: [{
+                type: "text",
+                text: JSON.stringify({
+                  entries,
+                  total: entries.length,
+                  min_impressions: minImpressions,
                 }),
               }],
             };

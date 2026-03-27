@@ -8,12 +8,18 @@ import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import express from "express";
 import type { Request, Response, NextFunction } from "express";
 import { createServer, IncomingMessage } from "node:http";
-import { timingSafeEqual } from "node:crypto";
+import { timingSafeEqual, randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
-import { initDatabase } from "./db.js";
+import { initDatabase, pruneRetrievalAnalytics } from "./db.js";
 import { registerTools } from "./tools.js";
 import { initEmbeddings, startEmbeddingWorker, stopEmbeddingWorker } from "./embeddings.js";
 import { MuninOAuthProvider } from "./oauth.js";
+
+// Analytics retention (default 90 days)
+function getAnalyticsRetentionDays(): number {
+  const val = parseInt(process.env.MUNIN_ANALYTICS_RETENTION_DAYS ?? "90", 10);
+  return Number.isFinite(val) && val > 0 ? val : 90;
+}
 
 // --- Configuration ---
 
@@ -76,12 +82,12 @@ let activeDb: Database.Database | undefined;
 
 // --- MCP server factory ---
 
-function createMcpServer(database: Database.Database): Server {
+function createMcpServer(database: Database.Database, sessionId?: string): Server {
   const server = new Server(
     { name: "munin-memory", version: "0.1.0" },
     { capabilities: { tools: {} } },
   );
-  registerTools(server, database);
+  registerTools(server, database, sessionId);
   return server;
 }
 
@@ -490,7 +496,9 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });
-    const mcpServer = createMcpServer(database);
+    // Use mcp-session-id header for correlation, fall back to a per-request UUID
+    const mcpSessionId = getSessionHeader(req) ?? randomUUID();
+    const mcpServer = createMcpServer(database, mcpSessionId);
 
     try {
       await mcpServer.connect(transport);
@@ -539,6 +547,7 @@ async function startHttp(database: Database.Database) {
 
   cleanupTimerId = setInterval(() => {
     oauthProvider.cleanupExpired();
+    pruneRetrievalAnalytics(database, getAnalyticsRetentionDays());
   }, OAUTH_CLEANUP_INTERVAL_MS);
 
   httpServer.listen(httpPort, httpHost, () => {
@@ -551,7 +560,9 @@ async function startHttp(database: Database.Database) {
 // --- Stdio transport ---
 
 async function startStdio(database: Database.Database) {
-  const server = createMcpServer(database);
+  // One session ID per stdio process — all tool calls in this process are correlated
+  const stdioSessionId = randomUUID();
+  const server = createMcpServer(database, stdioSessionId);
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
@@ -568,6 +579,9 @@ async function main() {
 
   const database = initDatabase(process.env.MUNIN_MEMORY_DB_PATH);
   activeDb = database;
+
+  // Prune old analytics data at startup
+  pruneRetrievalAnalytics(database, getAnalyticsRetentionDays());
 
   // Initialize embedding pipeline (soft dependency — server works without it)
   const embeddingsReady = await initEmbeddings();

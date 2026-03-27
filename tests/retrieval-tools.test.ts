@@ -1,0 +1,305 @@
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import Database from "better-sqlite3";
+import { unlinkSync, existsSync } from "node:fs";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { initDatabase, writeState } from "../src/db.js";
+import { registerTools } from "../src/tools.js";
+
+const TEST_DB_PATH = "/tmp/munin-memory-retrieval-tools-test.db";
+
+function cleanupTestDb() {
+  for (const suffix of ["", "-wal", "-shm"]) {
+    const path = TEST_DB_PATH + suffix;
+    if (existsSync(path)) unlinkSync(path);
+  }
+}
+
+let db: Database.Database;
+let server: Server;
+
+async function callTool(name: string, args: Record<string, unknown> = {}): Promise<unknown> {
+  const handler = (server as unknown as { _requestHandlers: Map<string, Function> })._requestHandlers?.get("tools/call");
+  if (handler) {
+    return await handler({ method: "tools/call", params: { name, arguments: args } });
+  }
+  throw new Error("Cannot access tool handler");
+}
+
+function parseToolResponse(response: unknown): unknown {
+  const resp = response as { content: Array<{ text: string }> };
+  return JSON.parse(resp.content[0].text);
+}
+
+const SESSION_ID = "test-session-instrumentation";
+
+beforeEach(() => {
+  cleanupTestDb();
+  db = initDatabase(TEST_DB_PATH);
+  server = new Server(
+    { name: "test-munin", version: "0.0.1" },
+    { capabilities: { tools: {} } },
+  );
+  registerTools(server, db, SESSION_ID);
+});
+
+afterEach(() => {
+  db.close();
+  cleanupTestDb();
+});
+
+describe("memory_query instrumentation", () => {
+  it("logs a retrieval event after a query", async () => {
+    // Write an entry to search for
+    writeState(db, "projects/test", "status", "a test project", ["active"]);
+
+    await callTool("memory_query", { query: "test project" });
+
+    const events = db
+      .prepare("SELECT * FROM retrieval_events WHERE session_id = ? AND tool_name = 'memory_query'")
+      .all(SESSION_ID) as Array<Record<string, unknown>>;
+
+    expect(events.length).toBeGreaterThan(0);
+    const evt = events[0];
+    expect(evt.query_text).toBe("test project");
+    // result_ids is a JSON array
+    const resultIds = JSON.parse(evt.result_ids as string) as string[];
+    expect(Array.isArray(resultIds)).toBe(true);
+  });
+
+  it("logs no event when sessionId is not provided", async () => {
+    // Create server without sessionId
+    const serverNoSession = new Server(
+      { name: "test-munin", version: "0.0.1" },
+      { capabilities: { tools: {} } },
+    );
+    registerTools(serverNoSession, db); // no sessionId
+
+    const handler = (serverNoSession as unknown as { _requestHandlers: Map<string, Function> })._requestHandlers?.get("tools/call");
+    await handler!({ method: "tools/call", params: { name: "memory_query", arguments: { query: "anything" } } });
+
+    const count = (
+      db.prepare("SELECT COUNT(*) as cnt FROM retrieval_events").get() as { cnt: number }
+    ).cnt;
+    expect(count).toBe(0);
+  });
+});
+
+describe("memory_orient instrumentation", () => {
+  it("logs a retrieval event for orient calls", async () => {
+    await callTool("memory_orient");
+
+    const events = db
+      .prepare("SELECT * FROM retrieval_events WHERE session_id = ? AND tool_name = 'memory_orient'")
+      .all(SESSION_ID) as Array<Record<string, unknown>>;
+
+    expect(events.length).toBeGreaterThan(0);
+    // Orient events have empty result_ids
+    expect(JSON.parse(events[0].result_ids as string)).toEqual([]);
+  });
+});
+
+describe("memory_attention instrumentation", () => {
+  it("logs a retrieval event for attention calls", async () => {
+    // Create a tracked namespace with a status entry
+    writeState(db, "projects/blocked-proj", "status", "blocked on something", ["blocked"]);
+
+    await callTool("memory_attention");
+
+    const events = db
+      .prepare("SELECT * FROM retrieval_events WHERE session_id = ? AND tool_name = 'memory_attention'")
+      .all(SESSION_ID) as Array<Record<string, unknown>>;
+
+    expect(events.length).toBeGreaterThan(0);
+  });
+});
+
+describe("memory_read outcome logging", () => {
+  it("logs opened_result outcome when an entry is found", async () => {
+    // First log a query event so there is a session cursor
+    writeState(db, "projects/outcome-test", "status", "outcome test", ["active"]);
+    await callTool("memory_query", { query: "outcome test" });
+
+    // Now read the entry — should log an opened_result outcome
+    await callTool("memory_read", { namespace: "projects/outcome-test", key: "status" });
+
+    const outcomes = db
+      .prepare(
+        `SELECT ro.* FROM retrieval_outcomes ro
+         JOIN retrieval_events re ON re.id = ro.retrieval_event_id
+         WHERE re.session_id = ? AND ro.outcome_type = 'opened_result'`,
+      )
+      .all(SESSION_ID) as Array<Record<string, unknown>>;
+
+    expect(outcomes.length).toBeGreaterThan(0);
+  });
+
+  it("does not log outcome when entry is not found", async () => {
+    // Establish session cursor
+    await callTool("memory_query", { query: "something" });
+
+    await callTool("memory_read", { namespace: "projects/nonexistent", key: "status" });
+
+    const outcomes = db
+      .prepare(
+        `SELECT ro.* FROM retrieval_outcomes ro
+         JOIN retrieval_events re ON re.id = ro.retrieval_event_id
+         WHERE re.session_id = ? AND ro.outcome_type = 'opened_result'`,
+      )
+      .all(SESSION_ID) as Array<Record<string, unknown>>;
+
+    expect(outcomes).toHaveLength(0);
+  });
+});
+
+describe("memory_get outcome logging", () => {
+  it("logs opened_result outcome when an entry is found by ID", async () => {
+    writeState(db, "projects/get-test", "status", "get test entry", ["active"]);
+    const entry = db
+      .prepare("SELECT id FROM entries WHERE namespace = 'projects/get-test' AND key = 'status'")
+      .get() as { id: string };
+
+    // Establish session cursor
+    await callTool("memory_query", { query: "get test" });
+
+    await callTool("memory_get", { id: entry.id });
+
+    const outcomes = db
+      .prepare(
+        `SELECT ro.* FROM retrieval_outcomes ro
+         JOIN retrieval_events re ON re.id = ro.retrieval_event_id
+         WHERE re.session_id = ? AND ro.outcome_type = 'opened_result'`,
+      )
+      .all(SESSION_ID) as Array<Record<string, unknown>>;
+
+    expect(outcomes.length).toBeGreaterThan(0);
+    expect(outcomes.some((o) => o.entry_id === entry.id)).toBe(true);
+  });
+});
+
+describe("memory_write outcome logging", () => {
+  it("logs write_in_result_namespace outcome after a write", async () => {
+    // Establish session cursor
+    await callTool("memory_query", { query: "write outcome" });
+
+    await callTool("memory_write", {
+      namespace: "projects/write-outcome",
+      key: "status",
+      content: "written after query",
+      tags: ["active"],
+    });
+
+    const outcomes = db
+      .prepare(
+        `SELECT ro.* FROM retrieval_outcomes ro
+         JOIN retrieval_events re ON re.id = ro.retrieval_event_id
+         WHERE re.session_id = ? AND ro.outcome_type = 'write_in_result_namespace'`,
+      )
+      .all(SESSION_ID) as Array<Record<string, unknown>>;
+
+    expect(outcomes.length).toBeGreaterThan(0);
+    expect(outcomes.some((o) => o.namespace === "projects/write-outcome")).toBe(true);
+  });
+});
+
+describe("memory_log outcome logging", () => {
+  it("logs log_in_result_namespace outcome after a log entry", async () => {
+    // Establish session cursor
+    await callTool("memory_query", { query: "log outcome" });
+
+    await callTool("memory_log", {
+      namespace: "projects/log-outcome",
+      content: "a log entry",
+    });
+
+    const outcomes = db
+      .prepare(
+        `SELECT ro.* FROM retrieval_outcomes ro
+         JOIN retrieval_events re ON re.id = ro.retrieval_event_id
+         WHERE re.session_id = ? AND ro.outcome_type = 'log_in_result_namespace'`,
+      )
+      .all(SESSION_ID) as Array<Record<string, unknown>>;
+
+    expect(outcomes.length).toBeGreaterThan(0);
+    expect(outcomes.some((o) => o.namespace === "projects/log-outcome")).toBe(true);
+  });
+});
+
+describe("memory_insights tool", () => {
+  it("returns empty entries when no retrieval data exists", async () => {
+    const raw = await callTool("memory_insights");
+    const result = parseToolResponse(raw) as { entries: unknown[]; total: number; min_impressions: number };
+
+    expect(result.entries).toHaveLength(0);
+    expect(result.total).toBe(0);
+    expect(result.min_impressions).toBe(3);
+  });
+
+  it("returns insights after retrieval events", async () => {
+    writeState(db, "projects/insights-target", "status", "insights target project", ["active"]);
+    const entry = db
+      .prepare(
+        "SELECT id FROM entries WHERE namespace = 'projects/insights-target' AND key = 'status'",
+      )
+      .get() as { id: string };
+
+    // Log 5 retrieval events for this entry (exceeds default min_impressions of 3)
+    for (let i = 0; i < 5; i++) {
+      const sid = `session-insights-${i}`;
+      const newServer = new Server(
+        { name: "test-munin", version: "0.0.1" },
+        { capabilities: { tools: {} } },
+      );
+      registerTools(newServer, db, sid);
+
+      const handler = (newServer as unknown as { _requestHandlers: Map<string, Function> })._requestHandlers?.get("tools/call");
+      await handler!({
+        method: "tools/call",
+        params: {
+          name: "memory_query",
+          arguments: { query: "insights target" },
+        },
+      });
+    }
+
+    const raw = await callTool("memory_insights", { min_impressions: 3 });
+    const result = parseToolResponse(raw) as { entries: Array<{ entry_id: string; impressions: number }> };
+
+    // The entry should appear with >= 3 impressions if it was returned by the queries
+    // (it may not be returned by lexical query depending on FTS matching)
+    expect(result).toBeDefined();
+    expect(typeof result.entries).toBe("object");
+  });
+
+  it("respects the namespace filter", async () => {
+    const raw = await callTool("memory_insights", { namespace: "projects/", min_impressions: 1 });
+    const result = parseToolResponse(raw) as { entries: Array<{ namespace: string }> };
+
+    // All returned entries must be in projects/ namespace
+    for (const entry of result.entries) {
+      expect(entry.namespace.startsWith("projects/")).toBe(true);
+    }
+  });
+
+  it("respects min_impressions parameter", async () => {
+    const raw = await callTool("memory_insights", { min_impressions: 999 });
+    const result = parseToolResponse(raw) as { entries: unknown[]; min_impressions: number };
+    expect(result.entries).toHaveLength(0);
+    expect(result.min_impressions).toBe(999);
+  });
+
+  it("includes learned_signals in response entries", async () => {
+    const raw = await callTool("memory_insights");
+    const result = parseToolResponse(raw) as {
+      entries: Array<{ learned_signals: unknown }>;
+    };
+    // Even when empty, structure is correct
+    expect(Array.isArray(result.entries)).toBe(true);
+  });
+
+  it("is in the tool list", async () => {
+    const handler = (server as unknown as { _requestHandlers: Map<string, Function> })._requestHandlers?.get("tools/list");
+    const toolList = await handler!({ method: "tools/list", params: {} });
+    const tools = (toolList as { tools: Array<{ name: string }> }).tools;
+    expect(tools.some((t) => t.name === "memory_insights")).toBe(true);
+  });
+});

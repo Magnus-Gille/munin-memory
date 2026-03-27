@@ -279,6 +279,30 @@ export interface AttentionResponse {
   items: AttentionItem[];
 }
 
+// Retrieval insights types
+
+export interface InsightsParams {
+  namespace?: string;
+  min_impressions?: number;
+  limit?: number;
+}
+
+export interface EntryInsight {
+  entry_id: string;
+  namespace: string;
+  impressions: number;
+  opens: number;
+  followthrough_rate: number;
+  staleness_pressure: number;
+  learned_signals: string[];
+}
+
+export interface InsightsResponse {
+  entries: EntryInsight[];
+  total: number;
+  min_impressions: number;
+}
+
 // Security types
 
 export interface SecurityResult {
