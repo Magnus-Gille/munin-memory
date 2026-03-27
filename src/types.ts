@@ -310,6 +310,14 @@ export interface SecurityResult {
   error?: string;
 }
 
+// Audit history tool params
+export interface AuditHistoryParams {
+  namespace?: string;
+  since?: string;
+  action?: string;
+  limit?: number;
+}
+
 // Audit log entry
 export interface AuditEntry {
   id?: number;

@@ -1026,6 +1026,74 @@ export function pruneRetrievalAnalytics(
   }
 }
 
+// --- Audit history ---
+
+export interface AuditHistoryOptions {
+  namespace?: string;   // exact or prefix match (with trailing /)
+  since?: string;       // ISO 8601 — filter timestamp >= since
+  action?: string;      // filter by action type
+  limit?: number;       // default 20, max 100
+}
+
+export interface AuditHistoryEntry {
+  id: number;
+  timestamp: string;
+  agent_id: string;
+  action: string;
+  namespace: string;
+  key: string | null;
+  detail: string | null;
+}
+
+export function getAuditHistory(
+  db: Database.Database,
+  options: AuditHistoryOptions,
+): AuditHistoryEntry[] {
+  const { namespace, since, action, limit = 20 } = options;
+
+  // Clamp limit to 1–100
+  const clampedLimit = Math.min(Math.max(limit, 1), 100);
+
+  // Validate since as ISO 8601 if provided
+  if (since !== undefined) {
+    const d = new Date(since);
+    if (isNaN(d.getTime())) {
+      throw new Error(`Invalid "since" value: "${since}". Must be a valid ISO 8601 timestamp.`);
+    }
+  }
+
+  let sql = "SELECT id, timestamp, agent_id, action, namespace, key, detail FROM audit_log WHERE 1=1";
+  const params: unknown[] = [];
+
+  if (namespace !== undefined) {
+    if (namespace.endsWith("/")) {
+      // Prefix match: e.g. "projects/" → namespace LIKE 'projects/%'
+      sql += " AND (namespace LIKE ? ESCAPE '\\')";
+      params.push(escapeForLike(namespace) + "%");
+    } else {
+      // Exact OR prefix match: e.g. "projects/foo" → exact OR starts with 'projects/foo/'
+      sql += " AND (namespace = ? OR namespace LIKE ? ESCAPE '\\')";
+      params.push(namespace);
+      params.push(escapeForLike(namespace) + "/%");
+    }
+  }
+
+  if (since !== undefined) {
+    sql += " AND timestamp >= ?";
+    params.push(since);
+  }
+
+  if (action !== undefined) {
+    sql += " AND action = ?";
+    params.push(action);
+  }
+
+  sql += " ORDER BY timestamp DESC LIMIT ?";
+  params.push(clampedLimit);
+
+  return db.prepare(sql).all(...params) as AuditHistoryEntry[];
+}
+
 // --- Hint helpers ---
 
 export function getOtherKeysInNamespace(

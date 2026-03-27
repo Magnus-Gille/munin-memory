@@ -28,6 +28,7 @@ import {
   logRetrievalEvent,
   logRetrievalOutcome,
   getInsightsByEntry,
+  getAuditHistory,
 } from "./db.js";
 import {
   validateWriteInput,
@@ -55,6 +56,7 @@ import type {
   AttentionParams,
   InsightsParams,
   EntryInsight,
+  AuditHistoryParams,
   Entry,
   SearchMode,
   OrientDetail,
@@ -978,6 +980,36 @@ const TOOL_DEFINITIONS = [
           type: "boolean",
           description:
             "Optional. If true, include completed/failed task-run namespaces in the top-level listing. Default: false.",
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "memory_history",
+    description:
+      "View the chronological audit trail of changes to memory. Returns a timeline of writes, updates, deletes, and log appends. Use this to answer 'what changed recently?' or 'what happened in this namespace?' — unlike memory_query (which is relevance-based search), this is a pure change feed ordered by time.\n\nKnown limitations: audit rows do not contain entry_id (can't link to specific entries across renames/deletes), detail field is sparse (can't reconstruct full content changes), and agent_id is currently not differentiated across environments.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        namespace: {
+          type: "string",
+          description:
+            "Optional. Filter to a namespace or namespace prefix. E.g. 'projects/munin-memory' returns changes in that namespace and its children.",
+        },
+        since: {
+          type: "string",
+          description:
+            "Optional. ISO 8601 timestamp. Only return changes after this time. E.g. '2026-03-20T00:00:00Z' for the last week.",
+        },
+        action: {
+          type: "string",
+          enum: ["write", "update", "delete", "namespace_delete", "log_append"],
+          description: "Optional. Filter by action type.",
+        },
+        limit: {
+          type: "integer",
+          description: "Optional. Maximum entries to return. Default: 20, max: 100.",
         },
       },
       required: [],
@@ -1996,6 +2028,43 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                   entries,
                   total: entries.length,
                   min_impressions: minImpressions,
+                }),
+              }],
+            };
+          }
+
+          case "memory_history": {
+            const { namespace, since, action, limit } = (args ?? {}) as AuditHistoryParams;
+
+            // Validate action enum if provided
+            const validActions = ["write", "update", "delete", "namespace_delete", "log_append", "delete_namespace", "log"];
+            if (action !== undefined && !validActions.includes(action)) {
+              return {
+                content: [{
+                  type: "text",
+                  text: JSON.stringify({
+                    error: "validation_error",
+                    message: `Invalid action "${action}". Must be one of: write, update, delete, namespace_delete, log_append.`,
+                  }),
+                }],
+              };
+            }
+
+            // getAuditHistory validates since and clamps limit; let errors propagate as internal_error
+            const historyEntries = getAuditHistory(db, {
+              namespace,
+              since,
+              action,
+              limit,
+            });
+
+            return {
+              content: [{
+                type: "text",
+                text: JSON.stringify({
+                  generated_at: new Date().toISOString(),
+                  count: historyEntries.length,
+                  entries: historyEntries,
                 }),
               }],
             };
