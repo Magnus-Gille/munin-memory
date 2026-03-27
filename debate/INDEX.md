@@ -19,3 +19,6 @@
 | 2026-03-12 | [Computed dashboard architecture](computed-dashboard-summary.md) | 2 | Replace manual workbench with computed dashboard; add CAS overwrite protection; drop auto-log; hybrid curated overlay | 16 | 4/16 (25%) |
 | 2026-03-13 | [Jarvis architecture (Munin+Mímir+Hugin)](jarvis-architecture-summary.md) | 2 | Two services + one worker; validate remote fetch first; no AI summary for private docs; fix tag syntax; define document identity | 20 | 4/20 (20%) |
 | 2026-03-15 | [Skills in Munin](skills-in-munin-summary.md) | 2 | Original rejected; start with one sub-artifact experiment, not a system | 17 | 4/17 (24%) |
+| 2026-03-27 | [Usability fix priority](usability-priority-summary.md) | 2 | Compact conventions (#3) before task noise (#1); single-source-of-truth constraint | 6 | 1/6 (17%) |
+| 2026-03-27 | [Munin discoverability](munin-discoverability-summary.md) | 2 | Data-driven reference index in orient, not hardcoded in compactConventions(); conditional loading | 7 | 2/7 (29%) |
+| 2026-03-27 | [Docs location: where does "way of working" live?](docs-location-summary.md) | 2 | 3-layer structure: README framing + repo concepts (durable only) + Munin runtime conventions | 10 | 3/10 (30%) |

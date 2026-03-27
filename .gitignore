@@ -12,7 +12,9 @@ STATUS.md
 SECURITY-REMEDIATION.local.md
 PUBLIC-REPO-AUDIT.local/
 tmp/
-docs/
+docs/*
+!docs/usage-model.md
+!docs/claude-md-template.md
 
 # Debate files — keep only summaries and resolutions
 debate/*

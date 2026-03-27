@@ -411,6 +411,100 @@ describe("memory_query", () => {
     }));
   });
 
+  it("injects blocked and needs-attention statuses for triage queries", async () => {
+    const upcomingDate = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+    await callTool("memory_write", {
+      namespace: "projects/release-train",
+      key: "status",
+      content: "## Current Work\nWaiting on external approval before launch.\n\n## Blockers\nVendor sign-off is missing.\n\n## Next Steps\nFollow up and unblock rollout.",
+      tags: ["blocked"],
+    });
+    await callTool("memory_write", {
+      namespace: "projects/hackathon-web",
+      key: "status",
+      content: `**Phase:** Active — event ${upcomingDate}\n\n**Current work:** Final venue logistics and attendee messaging.\n\n**Blockers:** None`,
+      tags: ["active", "event"],
+    });
+    db.prepare(
+      "UPDATE entries SET updated_at = ? WHERE namespace = ? AND key = 'status' AND entry_type = 'state'",
+    ).run(new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString(), "projects/hackathon-web");
+    await callTool("memory_write", {
+      namespace: "projects/gille-ai",
+      key: "status",
+      content: "## Current Work\nStable website work with no blockers.\n\n## Next Steps\nPublish another blog post.",
+      tags: ["active"],
+    });
+    await callTool("memory_write", {
+      namespace: "tasks",
+      key: "index",
+      content: "Project list and operational checklist index",
+      tags: ["tasks", "active"],
+    });
+
+    const raw = await callTool("memory_query", {
+      query: "what projects are blocked or need attention right now",
+      search_mode: "hybrid",
+      limit: 5,
+    });
+    const result = parseToolResponse(raw) as {
+      results: Array<{ namespace: string; key: string | null }>;
+    };
+
+    expect(result.results.slice(0, 2)).toContainEqual(expect.objectContaining({
+      namespace: "projects/release-train",
+      key: "status",
+    }));
+    expect(result.results.slice(0, 2)).toContainEqual(expect.objectContaining({
+      namespace: "projects/hackathon-web",
+      key: "status",
+    }));
+  });
+
+  it("prioritizes attention-worthy statuses above generic task and active-project noise", async () => {
+    const upcomingDate = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+    await callTool("memory_write", {
+      namespace: "projects/hackathon-web",
+      key: "status",
+      content: `**Phase:** Active — event ${upcomingDate}\n\n**Current work:** Final venue logistics and attendee messaging.\n\n**Blockers:** None`,
+      tags: ["active", "event"],
+    });
+    db.prepare(
+      "UPDATE entries SET updated_at = ? WHERE namespace = ? AND key = 'status' AND entry_type = 'state'",
+    ).run(new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString(), "projects/hackathon-web");
+    await callTool("memory_write", {
+      namespace: "projects/gille-ai",
+      key: "status",
+      content: "Attention is on routine content updates, but nothing is at risk.",
+      tags: ["active"],
+    });
+    await callTool("memory_write", {
+      namespace: "tasks",
+      key: "index",
+      content: "Attention checklist and task categories",
+      tags: ["tasks", "active"],
+    });
+
+    const raw = await callTool("memory_query", {
+      query: "what needs attention",
+      search_mode: "hybrid",
+      limit: 5,
+    });
+    const result = parseToolResponse(raw) as {
+      results: Array<{ namespace: string; key: string | null }>;
+    };
+
+    expect(result.results[0]).toEqual(expect.objectContaining({
+      namespace: "projects/hackathon-web",
+      key: "status",
+    }));
+    expect(result.results[0]).not.toEqual(expect.objectContaining({
+      namespace: "tasks",
+      key: "index",
+    }));
+  });
+
   it("prioritizes project status entries over tombstones and logs in project-scoped queries", async () => {
     await callTool("memory_write", {
       namespace: "projects/hugin",

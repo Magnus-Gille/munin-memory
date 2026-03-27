@@ -49,6 +49,7 @@ import type {
   SearchMode,
   DashboardEntry,
   MaintenanceItem,
+  TrackedStatusRow,
 } from "./types.js";
 
 // In-memory delete token store (debate resolution #9)
@@ -119,6 +120,28 @@ const ORIENTATION_QUERY_PHRASES = [
   "what is magnus working on",
   "what magnus is working on",
 ];
+const ATTENTION_TRIAGE_QUERY_PHRASES = [
+  "what needs attention",
+  "need attention",
+  "needs attention",
+  "blocked projects",
+  "blocked project",
+  "what is blocked",
+  "what's blocked",
+  "at risk",
+  "stale",
+  "urgent",
+  "what should i look at",
+];
+
+interface TrackedStatusAssessment {
+  row: TrackedStatusRow;
+  entry: Entry;
+  lifecycle: string;
+  needsAttention: boolean;
+  attentionReason?: "blocked" | MaintenanceItem["issue"];
+  maintenanceItems: MaintenanceItem[];
+}
 
 function isStale(updatedAt: string): boolean {
   return Date.now() - new Date(updatedAt).getTime() > STALENESS_THRESHOLD_MS;
@@ -205,6 +228,30 @@ function isBroadOrientationQuery(query: string, params: QueryParams): boolean {
   return hasOrientationVerb && hasSummaryIntent;
 }
 
+function isAttentionTriageQuery(query: string, params: QueryParams): boolean {
+  if (!shouldApplyDefaultQuerySuppression(params)) return false;
+
+  const normalized = query.toLowerCase();
+  if (ATTENTION_TRIAGE_QUERY_PHRASES.some((phrase) => normalized.includes(phrase))) {
+    return true;
+  }
+
+  const hasBlockedIntent = /\bblocked\b/.test(normalized);
+  const hasAttentionIntent = normalized.includes("attention");
+  const hasRiskIntent = queryMentionsAny(normalized, ["at risk", "stale", "urgent"]);
+  const hasWorkScope = queryMentionsAny(normalized, [
+    "project",
+    "projects",
+    "client",
+    "clients",
+    "work",
+    "right now",
+    "current",
+  ]);
+
+  return hasBlockedIntent || (hasAttentionIntent && hasWorkScope) || hasRiskIntent;
+}
+
 function looksLikeTombstone(content: string): boolean {
   return /\bTOMBSTONE\b/i.test(content);
 }
@@ -213,10 +260,105 @@ function queryMentionsAny(query: string, terms: string[]): boolean {
   return terms.some((term) => query.includes(term));
 }
 
-function getQueryHeuristicScore(entry: Entry, queryLower: string): number {
+function trackedStatusRowToEntry(row: TrackedStatusRow): Entry {
+  return {
+    id: row.id,
+    namespace: row.namespace,
+    key: row.key,
+    entry_type: "state",
+    content: row.content,
+    tags: row.tags,
+    agent_id: "default",
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    embedding_status: "pending",
+    embedding_model: null,
+  };
+}
+
+function assessTrackedStatus(row: TrackedStatusRow): TrackedStatusAssessment {
+  const maintenanceItems: MaintenanceItem[] = [];
+  const tags = parseTags(row.tags);
+  const { canonical } = canonicalizeTags(tags);
+  const lifecycleTags = getLifecycleTags(canonical);
+
+  let lifecycle: string;
+  if (lifecycleTags.length === 0) {
+    lifecycle = "uncategorized";
+    maintenanceItems.push({
+      namespace: row.namespace,
+      issue: "missing_lifecycle",
+      suggestion: `Status has no lifecycle tag. Add one of: ${[...LIFECYCLE_TAGS].join(", ")}.`,
+    });
+  } else if (lifecycleTags.length > 1) {
+    lifecycle = lifecycleTags[0];
+    maintenanceItems.push({
+      namespace: row.namespace,
+      issue: "conflicting_lifecycle",
+      suggestion: `Status has tags [${lifecycleTags.join(", ")}]. Use exactly one.`,
+    });
+  } else {
+    lifecycle = lifecycleTags[0];
+  }
+
+  let needsAttention = false;
+  let attentionReason: TrackedStatusAssessment["attentionReason"];
+
+  if (lifecycle === "blocked") {
+    attentionReason = "blocked";
+  }
+
+  if (lifecycle === "active" && isStale(row.updated_at)) {
+    needsAttention = true;
+    attentionReason = "active_but_stale";
+    const daysSince = Math.floor((Date.now() - new Date(row.updated_at).getTime()) / (24 * 60 * 60 * 1000));
+    maintenanceItems.push({
+      namespace: row.namespace,
+      issue: "active_but_stale",
+      suggestion: `Last updated ${daysSince} days ago. Update status or change lifecycle to maintenance/archived.`,
+    });
+  }
+
+  if (lifecycle === "active" && !needsAttention) {
+    const upcomingDate = findUpcomingEventDate(row.content, row.updated_at);
+    if (upcomingDate) {
+      needsAttention = true;
+      attentionReason = "upcoming_event_stale";
+      const daysUntil = Math.ceil((new Date(upcomingDate + "T23:59:59Z").getTime() - Date.now()) / (24 * 60 * 60 * 1000));
+      const daysSinceUpdate = Math.floor((Date.now() - new Date(row.updated_at).getTime()) / (24 * 60 * 60 * 1000));
+      maintenanceItems.push({
+        namespace: row.namespace,
+        issue: "upcoming_event_stale",
+        suggestion: `Event date ${upcomingDate} is ${daysUntil} day${daysUntil === 1 ? "" : "s"} away but status was last updated ${daysSinceUpdate} days ago. Verify status is current.`,
+      });
+    }
+  }
+
+  return {
+    row,
+    entry: trackedStatusRowToEntry(row),
+    lifecycle,
+    needsAttention,
+    attentionReason,
+    maintenanceItems,
+  };
+}
+
+function getTrackedStatusAssessments(db: Database.Database): Map<string, TrackedStatusAssessment> {
+  const assessments = getTrackedStatuses(db).map(assessTrackedStatus);
+  return new Map(assessments.map((assessment) => [assessment.entry.id, assessment]));
+}
+
+function getQueryHeuristicScore(
+  entry: Entry,
+  queryLower: string,
+  trackedStatuses?: Map<string, TrackedStatusAssessment>,
+): number {
   const tags = parseTags(entry.tags);
   let score = 0;
   const orientationQuery = isBroadOrientationQuery(queryLower, { query: queryLower });
+  const triageQuery = isAttentionTriageQuery(queryLower, { query: queryLower });
+  const trackedStatus = trackedStatuses?.get(entry.id);
 
   if (entry.entry_type === "state") score += 6;
 
@@ -227,6 +369,9 @@ function getQueryHeuristicScore(entry: Entry, queryLower: string): number {
     }
     if (orientationQuery) {
       score += 2;
+    }
+    if (triageQuery) {
+      score += 6;
     }
   }
 
@@ -256,6 +401,7 @@ function getQueryHeuristicScore(entry: Entry, queryLower: string): number {
 
   if (entry.entry_type === "log") {
     score -= 3;
+    if (triageQuery) score -= 6;
   }
 
   if (looksLikeTombstone(entry.content)) {
@@ -270,6 +416,23 @@ function getQueryHeuristicScore(entry: Entry, queryLower: string): number {
 
   if (entry.namespace.startsWith("tasks/")) {
     score -= 8;
+    if (triageQuery) score -= 14;
+  }
+
+  if (triageQuery && entry.key === "index") {
+    score -= 10;
+  }
+
+  if (triageQuery && trackedStatus) {
+    if (trackedStatus.lifecycle === "blocked") {
+      score += 36;
+    } else if (trackedStatus.needsAttention) {
+      score += 28;
+      if (trackedStatus.attentionReason === "upcoming_event_stale") score += 4;
+      if (trackedStatus.attentionReason === "active_but_stale") score += 2;
+    } else if (trackedStatus.lifecycle === "active") {
+      score -= 8;
+    }
   }
 
   return score;
@@ -300,10 +463,34 @@ function injectCanonicalQueryEntries(
   return merged;
 }
 
+function injectAttentionQueryEntries(
+  results: Entry[],
+  params: QueryParams,
+  trackedStatuses: Map<string, TrackedStatusAssessment>,
+): Entry[] {
+  if (!isAttentionTriageQuery(params.query, params)) return results;
+
+  const injected = [...trackedStatuses.values()]
+    .filter((assessment) => assessment.lifecycle === "blocked" || assessment.needsAttention)
+    .map((assessment) => assessment.entry);
+
+  if (injected.length === 0) return results;
+
+  const seen = new Set(results.map((entry) => entry.id));
+  const merged = [...results];
+  for (const entry of injected) {
+    if (seen.has(entry.id)) continue;
+    seen.add(entry.id);
+    merged.push(entry);
+  }
+  return merged;
+}
+
 function rerankQueryResults(
   results: Entry[],
   params: QueryParams,
   completedTasks: Set<string>,
+  trackedStatuses?: Map<string, TrackedStatusAssessment>,
 ): Entry[] {
   const queryLower = params.query.toLowerCase();
   const suppressDefaults = shouldApplyDefaultQuerySuppression(params);
@@ -318,7 +505,7 @@ function rerankQueryResults(
     .map((entry, index) => ({
       entry,
       index,
-      heuristic: getQueryHeuristicScore(entry, queryLower),
+      heuristic: getQueryHeuristicScore(entry, queryLower, trackedStatuses),
     }))
     .sort((a, b) => {
       if (b.heuristic !== a.heuristic) return b.heuristic - a.heuristic;
@@ -667,7 +854,7 @@ export function registerTools(server: Server, db: Database.Database): void {
             }
 
             // Computed dashboard from tracked status entries
-            const trackedStatuses = getTrackedStatuses(db);
+            const trackedStatusAssessments = [...getTrackedStatusAssessments(db).values()];
             const dashboard: Record<string, DashboardEntry[]> = {
               active: [],
               blocked: [],
@@ -679,68 +866,25 @@ export function registerTools(server: Server, db: Database.Database): void {
             };
             const maintenanceNeeded: MaintenanceItem[] = [];
 
-            for (const row of trackedStatuses) {
-              const tags: string[] = JSON.parse(row.tags);
-              const { canonical } = canonicalizeTags(tags);
-              const lifecycleTags = getLifecycleTags(canonical);
-
-              let lifecycle: string;
-              if (lifecycleTags.length === 0) {
-                lifecycle = "uncategorized";
-                maintenanceNeeded.push({
-                  namespace: row.namespace,
-                  issue: "missing_lifecycle",
-                  suggestion: `Status has no lifecycle tag. Add one of: ${[...LIFECYCLE_TAGS].join(", ")}.`,
-                });
-              } else if (lifecycleTags.length > 1) {
-                lifecycle = lifecycleTags[0]; // use first, but flag it
-                maintenanceNeeded.push({
-                  namespace: row.namespace,
-                  issue: "conflicting_lifecycle",
-                  suggestion: `Status has tags [${lifecycleTags.join(", ")}]. Use exactly one.`,
-                });
-              } else {
-                lifecycle = lifecycleTags[0];
-              }
-
+            for (const assessment of trackedStatusAssessments) {
               const entry: DashboardEntry = {
-                namespace: row.namespace,
-                summary: row.content_preview.slice(0, 150),
-                updated_at: row.updated_at,
-                lifecycle,
+                namespace: assessment.row.namespace,
+                summary: assessment.row.content_preview.slice(0, 150),
+                updated_at: assessment.row.updated_at,
+                lifecycle: assessment.lifecycle,
               };
 
-              if (lifecycle === "active" && isStale(row.updated_at)) {
+              if (assessment.needsAttention) {
                 entry.needs_attention = true;
-                const daysSince = Math.floor((Date.now() - new Date(row.updated_at).getTime()) / (24 * 60 * 60 * 1000));
-                maintenanceNeeded.push({
-                  namespace: row.namespace,
-                  issue: "active_but_stale",
-                  suggestion: `Last updated ${daysSince} days ago. Update status or change lifecycle to maintenance/archived.`,
-                });
               }
+              maintenanceNeeded.push(...assessment.maintenanceItems);
 
-              // Event-aware staleness: flag active entries with upcoming dates that haven't been updated recently
-              if (lifecycle === "active" && !entry.needs_attention) {
-                const upcomingDate = findUpcomingEventDate(row.content, row.updated_at);
-                if (upcomingDate) {
-                  entry.needs_attention = true;
-                  const daysUntil = Math.ceil((new Date(upcomingDate + "T23:59:59Z").getTime() - Date.now()) / (24 * 60 * 60 * 1000));
-                  const daysSinceUpdate = Math.floor((Date.now() - new Date(row.updated_at).getTime()) / (24 * 60 * 60 * 1000));
-                  maintenanceNeeded.push({
-                    namespace: row.namespace,
-                    issue: "upcoming_event_stale",
-                    suggestion: `Event date ${upcomingDate} is ${daysUntil} day${daysUntil === 1 ? "" : "s"} away but status was last updated ${daysSinceUpdate} days ago. Verify status is current.`,
-                  });
-                }
-              }
-
-              const group = dashboard[lifecycle] ?? dashboard.uncategorized;
+              const group = dashboard[assessment.lifecycle] ?? dashboard.uncategorized;
               group.push(entry);
             }
 
             // Check for tracked namespaces that have entries but no status key
-            const trackedNsWithStatus = new Set(trackedStatuses.map(r => r.namespace));
+            const trackedNsWithStatus = new Set(trackedStatusAssessments.map((assessment) => assessment.row.namespace));
             for (const ns of namespaces) {
               if (isTrackedNamespace(ns.namespace) && !trackedNsWithStatus.has(ns.namespace)) {
                 maintenanceNeeded.push({
@@ -1122,11 +1266,18 @@ export function registerTools(server: Server, db: Database.Database): void {
               }
             }
 
+            const trackedStatuses = shouldApplyDefaultQuerySuppression(queryParams)
+              ? getTrackedStatusAssessments(db)
+              : undefined;
+
             results = injectCanonicalQueryEntries(db, results!, queryParams);
+            if (trackedStatuses) {
+              results = injectAttentionQueryEntries(results, queryParams, trackedStatuses);
+            }
             const completedTasks = shouldApplyDefaultQuerySuppression(queryParams)
               ? getCompletedTaskNamespaces(db)
               : new Set<string>();
-            results = rerankQueryResults(results!, queryParams, completedTasks).slice(0, requestedLimit);
+            results = rerankQueryResults(results!, queryParams, completedTasks, trackedStatuses).slice(0, requestedLimit);
 
             const formatted = results!.map((entry) => ({
               id: entry.id,

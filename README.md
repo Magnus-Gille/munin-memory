@@ -154,6 +154,14 @@ The summaries of these debates are in the `debate/` directory:
 
 See `CLAUDE.md` for the full technical reference, including architecture details, spec amendments from the debates, and implementation notes.
 
+## Opinionated workflow
+
+Munin works best with an explicit operating model — one where you define what goes into state entries versus log entries, which namespaces track project health, and when each environment writes versus just reads. Without that model, memory tends to drift: redundant state, lost history, stale dashboards.
+
+The conventions that govern live Claude sessions are stored in Munin itself (in `meta/conventions`, surfaced by `memory_orient`). That is the canonical runtime contract — it wins in any conflict.
+
+For the underlying concepts — why the two entry types exist, what tracked statuses are for, and how to think about the two data layers — see [docs/usage-model.md](docs/usage-model.md).
+
 ## Tests
 
 ```bash
