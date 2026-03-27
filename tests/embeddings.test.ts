@@ -1,8 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
+import { homedir } from "node:os";
 import {
   initDatabase,
+  resolveDbPath,
+  getDataDir,
   writeState,
   appendLog,
   queryEntriesSemantic,
@@ -24,6 +27,7 @@ import {
   startEmbeddingWorker,
   stopEmbeddingWorker,
   _embeddingConfig,
+  getEmbeddingCacheDir,
 } from "../src/embeddings.js";
 
 const TEST_DB_PATH = "/tmp/munin-memory-embeddings-test.db";
@@ -181,6 +185,38 @@ describe("feature gates", () => {
   it.skipIf(!vecAvailable)("isHybridEnabled reflects config", () => {
     // Default config has hybrid enabled
     expect(isHybridEnabled()).toBe(true);
+  });
+});
+
+describe("path resolution", () => {
+  it("expands tilde in DB path", () => {
+    expect(resolveDbPath("~/.munin-memory/memory.db")).toBe(
+      `${homedir()}/.munin-memory/memory.db`,
+    );
+  });
+
+  it("derives data dir from resolved DB path", () => {
+    expect(getDataDir("~/.munin-memory/memory.db")).toBe(
+      `${homedir()}/.munin-memory`,
+    );
+  });
+
+  it("derives embedding cache dir from tilde DB path", () => {
+    expect(getEmbeddingCacheDir("~/.munin-memory/memory.db")).toBe(
+      `${homedir()}/.munin-memory/hf-cache`,
+    );
+  });
+
+  it("derives embedding cache dir from default DB path when unset", () => {
+    expect(getEmbeddingCacheDir(undefined)).toBe(
+      `${homedir()}/.munin-memory/hf-cache`,
+    );
+  });
+
+  it("derives embedding cache dir from absolute DB path", () => {
+    expect(getEmbeddingCacheDir("/var/lib/munin-memory/memory.db")).toBe(
+      "/var/lib/munin-memory/hf-cache",
+    );
   });
 });
 

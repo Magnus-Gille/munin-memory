@@ -1,7 +1,6 @@
-import path from "node:path";
-import os from "node:os";
+import { mkdirSync, existsSync } from "node:fs";
 import type Database from "better-sqlite3";
-import { vecLoaded, storeEmbedding, removeEmbedding } from "./db.js";
+import { getDataDir, vecLoaded, storeEmbedding, removeEmbedding } from "./db.js";
 
 // --- Configuration from env vars ---
 
@@ -62,6 +61,10 @@ export function embeddingToBuffer(f32: Float32Array): Buffer {
 
 // --- Initialization ---
 
+export function getEmbeddingCacheDir(configuredDbPath = process.env.MUNIN_MEMORY_DB_PATH): string {
+  return `${getDataDir(configuredDbPath)}/hf-cache`;
+}
+
 export async function initEmbeddings(): Promise<boolean> {
   if (!config.embeddingsEnabled) {
     return false;
@@ -80,10 +83,10 @@ export async function initEmbeddings(): Promise<boolean> {
     const transformers = await import("@huggingface/transformers");
 
     // Point model cache to the data directory (writable under systemd sandboxing)
-    const dbDir = process.env.MUNIN_MEMORY_DB_PATH
-      ? path.dirname(process.env.MUNIN_MEMORY_DB_PATH)
-      : path.join(os.homedir(), ".munin-memory");
-    const cacheDir = path.join(dbDir, "hf-cache");
+    const cacheDir = getEmbeddingCacheDir();
+    if (!existsSync(cacheDir)) {
+      mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
+    }
     transformers.env.cacheDir = cacheDir;
 
     const pipelineOptions: Record<string, unknown> = { cache_dir: cacheDir };

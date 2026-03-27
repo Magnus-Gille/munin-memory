@@ -13,14 +13,18 @@ export function nowUTC(): string {
   return new Date().toISOString();
 }
 
-function resolveDbPath(configuredPath?: string): string {
+export function resolveDbPath(configuredPath?: string): string {
   const raw = configuredPath || "~/.munin-memory/memory.db";
   return raw.replace(/^~/, homedir());
 }
 
+export function getDataDir(configuredDbPath?: string): string {
+  return dirname(resolveDbPath(configuredDbPath));
+}
+
 export function initDatabase(dbPath?: string): Database.Database {
   const resolvedPath = resolveDbPath(dbPath);
-  const dir = dirname(resolvedPath);
+  const dir = getDataDir(dbPath);
 
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
