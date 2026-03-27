@@ -162,11 +162,12 @@ function getLifecycleTags(tags: string[]): string[] {
 }
 
 /**
- * Extract a compact operational summary from the full conventions document.
- * Single source of truth: the full conventions in meta/conventions. This
- * function derives the compact version — nothing is maintained separately.
+ * Hand-maintained compact operational summary. NOT derived from the full
+ * conventions — this is a separate, concise reference for the orient
+ * handshake. Full conventions live in meta/conventions and should be
+ * read via memory_read when the complete guide is needed.
  */
-function compactConventions(full: string, updatedAt: string): string {
+function compactConventions(updatedAt: string): string {
   const lines: string[] = [
     "# Quick Reference (compact)",
     `Full conventions: memory_read("meta/conventions", "conventions") — last updated ${updatedAt.slice(0, 10)}`,
@@ -464,7 +465,7 @@ export function registerTools(server: Server, db: Database.Database): void {
               const parsed = parseEntry(conventions);
               const content = include_full_conventions
                 ? parsed.content
-                : compactConventions(parsed.content, parsed.updated_at);
+                : compactConventions(parsed.updated_at);
               const conv: Record<string, unknown> = {
                 content,
                 updated_at: parsed.updated_at,
@@ -573,6 +574,31 @@ export function registerTools(server: Server, db: Database.Database): void {
             const notes = readState(db, "meta", "workbench-notes");
             if (notes) {
               response.notes = notes.content;
+            }
+
+            // Reference index — data-driven discoverability for key entries
+            const refIndex = readState(db, "meta", "reference-index");
+            if (refIndex) {
+              try {
+                const parsed = JSON.parse(refIndex.content);
+                if (parsed && Array.isArray(parsed.references)) {
+                  const validEntries = parsed.references.filter(
+                    (r: Record<string, unknown>) =>
+                      typeof r.namespace === "string" &&
+                      typeof r.key === "string" &&
+                      typeof r.title === "string" &&
+                      typeof r.when_to_load === "string",
+                  );
+                  if (validEntries.length > 0) {
+                    response.references = {
+                      entries: validEntries,
+                      updated_at: refIndex.updated_at,
+                    };
+                  }
+                }
+              } catch {
+                // Malformed JSON — skip silently, don't break orient
+              }
             }
 
             // Maintenance suggestions

@@ -1074,6 +1074,77 @@ describe("maintenance suggestions (memory_orient)", () => {
   });
 });
 
+describe("reference index (memory_orient)", () => {
+  it("returns references when meta/reference-index exists", async () => {
+    const refIndex = JSON.stringify({
+      version: 1,
+      references: [
+        { namespace: "people/magnus", key: "profile", title: "Magnus profile", when_to_load: "collaboration style" },
+        { namespace: "meta", key: "mgc-soul", title: "MGC soul", when_to_load: "proposals and positioning" },
+      ],
+    });
+    await callTool("memory_write", { namespace: "meta", key: "reference-index", content: refIndex });
+
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as {
+      references: { entries: Array<{ namespace: string; key: string; title: string; when_to_load: string }>; updated_at: string };
+    };
+
+    expect(result.references).toBeDefined();
+    expect(result.references.entries).toHaveLength(2);
+    expect(result.references.entries[0].title).toBe("Magnus profile");
+    expect(result.references.updated_at).toBeTruthy();
+  });
+
+  it("omits references when meta/reference-index is missing", async () => {
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as { references?: unknown };
+    expect(result.references).toBeUndefined();
+  });
+
+  it("omits references when meta/reference-index has invalid JSON", async () => {
+    await callTool("memory_write", { namespace: "meta", key: "reference-index", content: "not json {{{" });
+
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as { references?: unknown };
+    expect(result.references).toBeUndefined();
+  });
+
+  it("filters out malformed entries but keeps valid ones", async () => {
+    const refIndex = JSON.stringify({
+      version: 1,
+      references: [
+        { namespace: "people/magnus", key: "profile", title: "Magnus profile", when_to_load: "always" },
+        { namespace: "bad", title: "Missing key field" },
+        { key: "bad", title: "Missing namespace" },
+      ],
+    });
+    await callTool("memory_write", { namespace: "meta", key: "reference-index", content: refIndex });
+
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as {
+      references: { entries: Array<{ namespace: string }> };
+    };
+
+    expect(result.references.entries).toHaveLength(1);
+    expect(result.references.entries[0].namespace).toBe("people/magnus");
+  });
+
+  it("omits references when references array is empty after filtering", async () => {
+    const refIndex = JSON.stringify({
+      version: 1,
+      references: [
+        { bad: "entry" },
+      ],
+    });
+    await callTool("memory_write", { namespace: "meta", key: "reference-index", content: refIndex });
+
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as { references?: unknown };
+    expect(result.references).toBeUndefined();
+  });
+});
+
 describe("unknown tool", () => {
   it("returns error for unknown tool name", async () => {
     const raw = await callTool("memory_nonexistent", {});
