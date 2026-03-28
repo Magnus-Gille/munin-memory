@@ -1561,7 +1561,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             const { query, namespace, entry_type, tags, limit, search_mode } = queryArgs;
             const explain = queryArgs.explain === true;
             if (!query || typeof query !== "string") {
-              return { content: [{ type: "text", text: JSON.stringify({ error: "validation_error", message: "Query string is required." }) }] };
+              return { content: [{ type: "text", text: JSON.stringify({ error: "validation_error", message: "Missing required parameter: query (string). Pass a search string in the 'query' field, e.g. {\"query\": \"your search terms\"}." }) }] };
             }
 
             const requestedLimit = Math.min(Math.max(limit ?? 10, 1), 50);
