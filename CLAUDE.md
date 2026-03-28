@@ -35,6 +35,7 @@ Part of the Hugin & Munin personal AI system. See `prd.md` for full product cont
 | `memory_log` | Append a chronological log entry to a namespace |
 | `memory_list` | Browse namespaces and their contents (with recent log previews; demo and completed task namespaces hidden by default) |
 | `memory_delete` | Delete entries (with token-based confirmation) |
+| `memory_insights` | Inspect retrieval usage signals per entry: impressions, open rate, follow-through rate, staleness pressure, learned signals. Phase 1 of outcome-aware retrieval (observe only, no ranking changes). |
 
 ## Project structure
 
@@ -272,6 +273,47 @@ After `MUNIN_EMBEDDINGS_MAX_FAILURES` (default 5) consecutive embedding failures
 - Over-fetch 5x limit from each source for RRF (not 3x)
 - Vec0 tables don't have an `id` column — use `entry_id TEXT` metadata column instead
 
+## Outcome-aware retrieval (Feature 4 — Phase 1)
+
+### Overview
+
+Passive observation layer that records what Claude does after retrieval, building implicit relevance signals over time. Phase 1 = observe only; Phase 2 (not yet implemented) will use signals for learned reranking.
+
+### Schema (migration v4)
+
+- **`retrieval_events`** — what each retrieval tool showed: session_id, tool_name, query_text, result_ids (JSON), result_namespaces (JSON), result_ranks (JSON)
+- **`retrieval_outcomes`** — what happened next: outcome_type (opened_result, opened_namespace_context, write_in_result_namespace, log_in_result_namespace, query_reformulated, no_followup_timeout), linked to event via retrieval_event_id
+- **`retrieval_sessions`** — SQLite-backed session cursor for O(1) correlation lookup (not in-memory Map)
+
+### Correlation
+
+- 5-minute session-scoped window: outcomes within window are tied to the most recent retrieval event in the same session
+- `query_reformulated` auto-detected: second `memory_query` arrives within window and the first event had zero positive outcomes
+- All outcome logging wrapped in try/catch — never interrupts tool execution
+
+### Session ID threading
+
+- `registerTools(server, db, sessionId)` — session ID threaded from transport layer
+- stdio: one `randomUUID()` per process startup (stable for process lifetime)
+- HTTP: uses `mcp-session-id` header if present, otherwise per-request UUID (graceful degradation)
+
+### `memory_insights` tool
+
+Inspects accumulated signals per entry: impressions, opens, follow-through rate, staleness pressure, learned signal labels. Use to verify signal quality before enabling Phase 2.
+
+### Pruning
+
+- `MUNIN_ANALYTICS_RETENTION_DAYS` (default 90) controls retention for retrieval_events/outcomes
+- retrieval_sessions pruned at 7 days
+- Piggybacked on existing OAuth cleanup interval + called once at startup
+
+### Phase 2 boundary (NOT YET IMPLEMENTED)
+
+- No ranking behavior changes
+- No `MUNIN_LEARNED_RANKING_ENABLED` env flag
+- No RRF boost from outcome signals
+- No `retrieval_insights_rollup` aggregation table
+
 ## OAuth 2.1 (Feature 3)
 
 ### Overview
@@ -380,6 +422,7 @@ See `technical-spec.md` § Security Module for the full pattern list.
 | `MUNIN_OAUTH_ACCESS_TOKEN_TTL` | `3600` | Access token lifetime (seconds) |
 | `MUNIN_OAUTH_REFRESH_TOKEN_TTL` | `2592000` | Refresh token lifetime (30 days, seconds) |
 | `MUNIN_OAUTH_CLIENT_SECRET_KEY` | — | Optional dedicated wrapping key for encrypting confidential OAuth client secrets at rest; defaults to `MUNIN_API_KEY` |
+| `MUNIN_ANALYTICS_RETENTION_DAYS` | `90` | Retention period for retrieval analytics (retrieval_events/outcomes). Sessions pruned at 7 days. |
 
 ## Spec amendments from adversarial review
 
