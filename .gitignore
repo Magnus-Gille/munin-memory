@@ -15,6 +15,7 @@ tmp/
 docs/*
 !docs/usage-model.md
 !docs/claude-md-template.md
+!docs/authorization-matrix.md
 
 # Debate files — keep only summaries and resolutions
 debate/*
