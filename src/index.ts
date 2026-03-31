@@ -8,7 +8,7 @@ import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import express from "express";
 import type { Request, Response, NextFunction } from "express";
 import { createServer, IncomingMessage } from "node:http";
-import { timingSafeEqual, randomUUID } from "node:crypto";
+import { timingSafeEqual, randomUUID, createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { initDatabase, pruneRetrievalAnalytics } from "./db.js";
 import { registerTools } from "./tools.js";
@@ -309,6 +309,18 @@ function getSessionHeader(req: Request): string | undefined {
   return header;
 }
 
+/**
+ * Derive a stable session ID from the caller's identity and a time bucket.
+ * When the client doesn't send mcp-session-id, this ensures all requests from
+ * the same caller within a 30-minute window share a session ID, so retrieval
+ * analytics can correlate queries with outcomes.
+ */
+function deriveSessionId(clientId: string): string {
+  const bucketMs = 30 * 60 * 1000;
+  const bucket = Math.floor(Date.now() / bucketMs);
+  return createHash("sha256").update(`${clientId}:${bucket}`).digest("hex").slice(0, 32);
+}
+
 function attachRequestLogger(
   req: Request,
   res: Response,
@@ -496,8 +508,8 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });
-    // Use mcp-session-id header for correlation, fall back to a per-request UUID
-    const mcpSessionId = getSessionHeader(req) ?? randomUUID();
+    // Use mcp-session-id header for correlation, fall back to caller-derived stable ID
+    const mcpSessionId = getSessionHeader(req) ?? deriveSessionId(req.auth?.clientId ?? "anonymous");
     const mcpServer = createMcpServer(database, mcpSessionId);
 
     try {
