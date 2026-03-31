@@ -516,14 +516,25 @@ node dist/index.js
 
 No need to publish to npm for v1. Install locally, point Claude Code at the compiled output.
 
-## Migration Path to Raspberry Pi
+## Raspberry Pi Profiles
 
-When moving to the Pi:
+Munin Memory keeps the same MCP contract and SQLite portability across machines, but Raspberry Pi deployment should no longer be described as a single trivial migration path.
 
-1. `git clone` the repo on the Pi
-2. `npm install` (better-sqlite3 compiles native bindings for ARM64)
-3. Copy `~/.munin-memory/memory.db` from laptop to Pi
-4. Update the MCP config to point at the new location
-5. Optionally: switch from stdio transport to HTTP/SSE transport if agents connect over the network
+Current direction:
 
-The only change needed for network mode is swapping `StdioServerTransport` for an HTTP transport in `index.ts`. The tools, database, and all logic remain identical.
+- `zero-appliance` — Raspberry Pi Zero 2 W class hardware, core memory and lexical search first
+- `full-node` — Raspberry Pi 4/5 or stronger hardware, public-remote deployment and local semantic features
+
+What remains stable across profiles:
+
+1. the database format
+2. the MCP tool contract
+3. local-first storage semantics
+
+What may differ by profile:
+
+1. deployment packaging
+2. public-remote surface area
+3. whether semantic and hybrid search are enabled locally
+
+The historical "clone the repo, install dependencies, copy the DB, and optionally swap transports" path is still a reasonable developer migration or stronger-hardware deployment story. It is not the right description of a Pi Zero appliance product. For that direction, the project is explicitly treating Pi Zero 2 W as a constrained profile that needs hardware validation before promising feature parity.

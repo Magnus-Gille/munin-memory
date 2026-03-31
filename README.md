@@ -21,7 +21,7 @@ For the full argument, see [Resilient and Sovereign AI](https://gille.ai/en/blog
 - **9 MCP tools** for reading, writing, searching, and organizing memories
 - **Two memory types:** state entries (mutable, current truth) and log entries (append-only, chronological history)
 - **Hierarchical namespaces** (e.g. `projects/website`, `people/alice`, `decisions/tech-stack`)
-- **Three search modes:** keyword (FTS5), semantic (vector embeddings), and hybrid (both combined via Reciprocal Rank Fusion)
+- **Three search modes:** keyword (FTS5), semantic (vector embeddings), and hybrid (both combined via Reciprocal Rank Fusion). Semantic modes are optional and profile-dependent.
 - **Content security:** writes are heuristically scanned for common secrets — obvious API keys, tokens, and inline passwords are rejected before storage
 - **OAuth secret hygiene:** confidential OAuth client secrets are encrypted at rest
 - **Dual auth:** Bearer token (simple) + OAuth 2.1 (for web/mobile clients)
@@ -48,7 +48,7 @@ For the full argument, see [Resilient and Sovereign AI](https://gille.ai/en/blog
 │  Node.js · TypeScript · Express · HTTP transport    │
 ├─────────────────────────────────────────────────────┤
 │  SQLite + FTS5 (keyword search)                     │
-│  sqlite-vec + Transformers.js (semantic search)     │
+│  Optional: sqlite-vec + embedding backend           │
 └─────────────────────────────────────────────────────┘
 Also supports stdio transport for local use (Claude Code
 or Claude Desktop running on the same machine as the server).
@@ -57,9 +57,20 @@ or Claude Desktop running on the same machine as the server).
 Key technology choices:
 - **SQLite** — single-file database, no server process, runs everywhere including ARM64
 - **FTS5** — built-in full-text search, no external service needed
-- **sqlite-vec** — vector similarity search for semantic queries
-- **Transformers.js** — local embedding generation (all-MiniLM-L6-v2), no API calls
+- **sqlite-vec** — optional vector similarity search for semantic queries
+- **Embedding backend** — local embedding generation is supported today, but it is not assumed for every hardware profile
 - **MCP** — open protocol, not locked to any provider
+
+## Hardware Profiles
+
+Munin Memory now has an explicit tiered appliance direction instead of assuming every Raspberry Pi deployment should run the same feature set.
+
+| Profile | Target | Default expectations |
+|---------|--------|----------------------|
+| `zero-appliance` | Raspberry Pi Zero 2 W class hardware | Core memory and lexical search first; semantic search is not ruled out, but it is not assumed in the default Zero experience. |
+| `full-node` | Raspberry Pi 4/5, mini PC, VPS, or stronger hardware | Full public-remote deployment, OAuth, and local semantic/hybrid search. |
+
+No full rewrite is recommended as the first move. The current direction is to keep the MCP and SQLite contract stable, validate the constrained profile on real hardware, and only then decide whether local semantic search on Zero is worth supporting. See [docs/appliance-profiles.md](docs/appliance-profiles.md) for the full rationale and the real-hardware spike plan.
 
 ## Getting started
 
@@ -132,7 +143,7 @@ See `.env.example` for the full list.
 
 ## Deploying to a Raspberry Pi
 
-This is how I run it — a Pi 5 on my desk, accessible from anywhere via a Cloudflare Tunnel. The general pattern:
+This is how I run it today — a `full-node` deployment on a Pi 5 on my desk, accessible from anywhere via a Cloudflare Tunnel. The general pattern:
 
 1. **Deploy the code** — `./scripts/deploy-rpi.sh <your-pi-hostname>`
 2. **Install the systemd service** — see `munin-memory.service` as a template
@@ -140,6 +151,8 @@ This is how I run it — a Pi 5 on my desk, accessible from anywhere via a Cloud
 4. **Configure OAuth** — set `MUNIN_OAUTH_ISSUER_URL` to your public domain and configure `MUNIN_OAUTH_TRUSTED_USER_HEADER` + `MUNIN_OAUTH_TRUSTED_USER_VALUE` so browser consent is only available to your authenticated user
 
 The deploy script and service file are tailored to my setup. You will likely need to adjust paths, usernames, and network configuration for yours.
+
+For the broader appliance direction, the project now distinguishes between `full-node` and `zero-appliance` deployments. A Pi Zero 2 W is being treated as a constrained profile that needs explicit hardware validation rather than assumed feature parity. See [docs/appliance-profiles.md](docs/appliance-profiles.md).
 
 ## Design process
 
@@ -173,12 +186,14 @@ npm run test:watch    # Watch mode
 
 This is an early-stage open-source project. It works well for my use case — Claude across 4 platforms (CLI, Desktop, Web, Mobile) sharing persistent memory through a Raspberry Pi on my desk.
 
-It is usable today, but it is still optimized for a technically comfortable self-hoster rather than a polished mass-market product. The deployment scripts assume Linux/systemd familiarity, the security model is primarily single-user, and you should expect to adapt parts of the setup to your own environment.
+It is usable today, but it is still optimized for a technically comfortable self-hoster rather than a polished mass-market product. The deployment scripts assume Linux/systemd familiarity, the security model is primarily single-user, and you should expect to adapt parts of the setup to your own environment. The Pi Zero 2 W appliance direction is documented, but not yet validated on hardware.
 
 Built by Claude (Opus 4.6) and Magnus Gille, adversarially reviewed by Codex (GPT-5.3).
 
 ## Project docs
 
+- [docs/appliance-profiles.md](docs/appliance-profiles.md)
+- [docs/usage-model.md](docs/usage-model.md)
 - [CONTRIBUTING.md](CONTRIBUTING.md)
 - [SECURITY.md](SECURITY.md)
 

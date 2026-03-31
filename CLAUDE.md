@@ -12,7 +12,7 @@ Part of the Hugin & Munin personal AI system. See `prd.md` for full product cont
 - **Database:** SQLite via `better-sqlite3` with FTS5 full-text search + sqlite-vec vector search
 - **Protocol:** MCP over stdio (local) or stateless Streamable HTTP (network, Express-based)
 - **Auth:** Dual auth — legacy Bearer token (MUNIN_API_KEY) + OAuth 2.1 (dynamic client registration, PKCE)
-- **Platforms:** macOS (dev), Linux ARM64 (Raspberry Pi 5 target)
+- **Platforms:** macOS (dev), Linux ARM64 with tiered deployment targets (`zero-appliance` and `full-node`)
 
 ### Core concepts
 
@@ -20,8 +20,8 @@ Part of the Hugin & Munin personal AI system. See `prd.md` for full product cont
 - **Log entries** — append-only, timestamped, no key. Represent chronological history. Never modified.
 - **Namespaces** — hierarchical strings with `/` separator (e.g. `projects/hugin-munin`). Created implicitly.
 - **FTS5 search** — keyword search across all entries (lexical mode).
-- **Vector search** — sqlite-vec KNN over 384-dim embeddings from Transformers.js (semantic mode).
-- **Hybrid search** — Reciprocal Rank Fusion (RRF) of FTS5 + vector results.
+- **Vector search** — sqlite-vec KNN over optional embeddings (semantic mode). Treat as profile-dependent, not universal.
+- **Hybrid search** — Reciprocal Rank Fusion (RRF) of FTS5 + vector results when semantic mode is available.
 
 ### MCP tools exposed
 
@@ -67,7 +67,10 @@ munin-memory/
 │   ├── tools.test.ts
 │   └── security.test.ts
 ├── docs/
-│   └── agentic-dev-days-munin-memory.md   # Presentation case study for the stateless HTTP incident
+│   ├── appliance-profiles.md              # Tiered hardware/appliance direction and Pi Zero spike plan
+│   ├── authorization-matrix.md            # Multi-principal authorization policy reference
+│   ├── claude-md-template.md              # Reusable CLAUDE.md guidance template
+│   └── usage-model.md                     # Durable design concepts and two-layer model
 ├── munin-memory.service   # systemd unit file for RPi deployment
 ├── scripts/
 │   ├── deploy-rpi.sh      # Deploy to Raspberry Pi
@@ -122,6 +125,13 @@ MUNIN_API_KEY=<generate with: openssl rand -hex 32>
 MUNIN_OAUTH_ISSUER_URL=https://<your-domain>
 MUNIN_ALLOWED_HOSTS=<your-domain>,<your-domain>:443
 ```
+
+Treat this as the current `full-node` deployment path. The project now distinguishes between:
+
+- `zero-appliance` — constrained Pi Zero 2 W class target, core memory first
+- `full-node` — Pi 4/5 or stronger hardware for public-remote deployment and local semantic features
+
+See `docs/appliance-profiles.md` for the recommendation and validation plan.
 
 ## MCP client configuration
 
@@ -446,6 +456,6 @@ When `technical-spec.md` and `debate/resolution.md` conflict, the resolution tak
 
 - The spec files (`prd.md`, `technical-spec.md`) are the source of truth, **amended by `debate/resolution.md`**.
 - v1 is local-only, single-user. Multi-agent auth and encryption are v2 concerns.
-- Semantic search (sqlite-vec + Transformers.js) available via `memory_query` with `search_mode` parameter. Three-tier gating: infra + semantic gate + hybrid gate.
+- Semantic search is available in the current codebase via `memory_query` with `search_mode` parameters, but should be treated as `full-node` capability by default until the `zero-appliance` profile is validated on real hardware.
 - No memory decay or scoring — everything persists until explicitly deleted.
-- The design must not preclude future deployment on Raspberry Pi 5 (ARM64).
+- No full rewrite is recommended as the first move for Pi Zero support; keep the MCP and SQLite contract stable and validate hardware constraints first.

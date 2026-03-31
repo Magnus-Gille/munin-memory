@@ -25,8 +25,8 @@ A local-first MCP server backed by SQLite that exposes simple read/write/query t
 1. **Simplicity over sophistication** — No Hebbian learning, no decay curves, no vector embeddings. FTS5 keyword search is sufficient for v1. Fancy retrieval is a v2 concern.
 2. **Reliability over features** — If Claude writes something, it must be there next time. Period.
 3. **Low cognitive overhead for Claude** — Tool names should be obvious. Parameters should be minimal. Claude should never have to think about "how do I use this tool?" — it should be as natural as thinking "I should write this down."
-4. **Portability** — Single SQLite file. Runs on macOS (laptop), Linux x86_64, Linux ARM64 (Raspberry Pi). Moving the system = copying one database file and the server code.
-5. **Designed for the Hugin & Munin ecosystem** — This server will eventually become the memory backend for a dual-agent system running on a Raspberry Pi 5. Design choices should not preclude that future.
+4. **Portability** — Single SQLite file. Runs on macOS (laptop), Linux x86_64, and Linux ARM64. The data model should remain portable even if deployment packaging diverges across hardware profiles.
+5. **Designed for the Hugin & Munin ecosystem** — This server should support a tiered hardware story: a constrained `zero-appliance` profile for Pi Zero 2 W class hardware, and a `full-node` profile for Pi 4/5 or stronger hardware. Design choices should not force a full rewrite before that hardware split is validated.
 
 ## Core Concepts
 
@@ -272,7 +272,14 @@ Tool responses should be formatted for easy LLM consumption:
 
 ### v2+ (Raspberry Pi / Multi-Agent)
 
-When munin-memory moves to the Pi and serves multiple agents, the security model changes:
+When munin-memory moves beyond laptop-local usage and serves multiple agents, the security model changes. Hardware should be treated as tiered rather than assuming every Raspberry Pi target runs the same profile:
+
+- `zero-appliance` — constrained Pi Zero 2 W class target, core memory first
+- `full-node` — Pi 4/5 or stronger hardware for public-remote deployment and local semantic features
+
+No full rewrite is recommended as the first move. The preferred path is to keep the MCP and SQLite contract stable, then validate the constrained profile on real hardware.
+
+Under that model, the security requirements for networked multi-agent use remain:
 
 - **Agent identity and access control:** Each agent (Hugin, Munin, or future agents) should authenticate with a token/key and have a defined access policy:
   - Read-only agents (can query but not write)
@@ -303,6 +310,8 @@ The existing Hugin/Munin architecture spec includes a Permission Guardian compon
 ## Future Considerations (v2+)
 
 - Vector embeddings for semantic search (sqlite-vec or similar)
+- Profile-aware packaging for `zero-appliance` and `full-node`
+- Real-hardware validation for local semantic search on Pi Zero 2 W class hardware
 - Integration with Hugin (planner agent) for automatic state management
 - Backup/sync to NAS RPi
 - Memory import from conversation exports
@@ -313,7 +322,7 @@ The existing Hugin/Munin architecture spec includes a Permission Guardian compon
 - **Runtime:** Node.js (aligns with Clawdbot/MCP ecosystem)
 - **Database:** SQLite with FTS5 extension
 - **Protocol:** MCP (Model Context Protocol) over stdio
-- **Platforms:** macOS (development), Linux ARM64 (Raspberry Pi 5 target)
+- **Platforms:** macOS (development), Linux ARM64 with tiered targets (`zero-appliance` and `full-node`)
 - **Dependencies:** Minimal. better-sqlite3 (or similar) + MCP SDK. No ORMs, no frameworks.
 - **Data location:** Configurable via environment variable, default `~/.munin-memory/memory.db`
 
@@ -326,4 +335,4 @@ This tool is successful if:
 3. Project context survives between sessions without manual re-briefing
 4. Decision rationale is preserved and retrievable
 5. The system runs unattended with zero maintenance
-6. Migration to Raspberry Pi is trivial (copy files, install, run)
+6. The system can be packaged for Raspberry Pi deployment without changing the core SQLite/MCP contract, while making realistic promises about `zero-appliance` versus `full-node`
