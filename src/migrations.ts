@@ -213,6 +213,46 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 5,
+    description: "Add intake gate columns for advisory write evaluation",
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE entries ADD COLUMN intake_status TEXT NOT NULL DEFAULT 'none'
+          CHECK(intake_status IN ('none', 'accepted', 'flagged'));
+        ALTER TABLE entries ADD COLUMN intake_flags TEXT NOT NULL DEFAULT '[]'
+          CHECK(json_valid(intake_flags) AND json_type(intake_flags) = 'array');
+      `);
+    },
+  },
+  {
+    version: 6,
+    description: "Extend intake metadata: score, mode, related_keys, redundancy_flag, intake_timestamp",
+    up: (db) => {
+      // Use a try/catch per column to be idempotent (in case of partial v5→v6 migration)
+      const columns: Array<[string, string]> = [
+        ["intake_score", "ALTER TABLE entries ADD COLUMN intake_score REAL NOT NULL DEFAULT 1.0"],
+        ["intake_mode", "ALTER TABLE entries ADD COLUMN intake_mode TEXT NOT NULL DEFAULT 'passthrough' CHECK(intake_mode IN ('strict', 'advisory', 'passthrough'))"],
+        ["related_keys", "ALTER TABLE entries ADD COLUMN related_keys TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(related_keys) AND json_type(related_keys) = 'array')"],
+        ["redundancy_flag", "ALTER TABLE entries ADD COLUMN redundancy_flag TEXT DEFAULT NULL CHECK(redundancy_flag IS NULL OR json_valid(redundancy_flag))"],
+        ["intake_timestamp", "ALTER TABLE entries ADD COLUMN intake_timestamp TEXT DEFAULT NULL"],
+      ];
+
+      for (const [colName, sql] of columns) {
+        // Check if column already exists
+        const exists = db.prepare(
+          `SELECT COUNT(*) as cnt FROM pragma_table_info('entries') WHERE name = ?`,
+        ).get(colName) as { cnt: number };
+        if (exists.cnt === 0) {
+          db.exec(sql);
+        }
+      }
+
+      // Also update the CHECK constraint on intake_status to allow 'rejected'
+      // SQLite doesn't support ALTER CHECK, but new rows will be validated by app logic.
+      // Existing data is compatible since 'rejected' entries are never stored.
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

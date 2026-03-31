@@ -29,6 +29,8 @@ import {
   logRetrievalOutcome,
   getInsightsByEntry,
   getAuditHistory,
+  getNamespaceTagVocabulary,
+  getNamespaceStateEntries,
 } from "./db.js";
 import {
   validateWriteInput,
@@ -57,6 +59,8 @@ import type {
   InsightsParams,
   EntryInsight,
   AuditHistoryParams,
+  AuditParams,
+  AuditFinding,
   Entry,
   SearchMode,
   OrientDetail,
@@ -66,6 +70,8 @@ import type {
   QueryResult,
   AttentionItem,
 } from "./types.js";
+import { evaluateIntake, auditEntry } from "./intake.js";
+import type { IntakeMode } from "./types.js";
 
 // In-memory delete token store (debate resolution #9)
 const deleteTokens = new Map<string, { namespace: string; key?: string; expiresAt: number }>();
@@ -288,6 +294,13 @@ function trackedStatusRowToEntry(row: TrackedStatusRow): Entry {
     updated_at: row.updated_at,
     embedding_status: "pending",
     embedding_model: null,
+    intake_status: "none",
+    intake_flags: "[]",
+    intake_score: 1.0,
+    intake_mode: "passthrough",
+    related_keys: "[]",
+    redundancy_flag: null,
+    intake_timestamp: null,
   };
 }
 
@@ -784,6 +797,17 @@ const TOOL_DEFINITIONS = [
           description:
             "Optional. For tracked status writes (projects/*, clients/*): pass the updated_at from your last read to prevent blind overwrites. Returns conflict error if the entry was modified since.",
         },
+        intake: {
+          type: "boolean",
+          description:
+            "Optional. Legacy toggle — if false, skips intake evaluation (equivalent to intake_mode: 'passthrough'). Superseded by intake_mode. Default: true.",
+        },
+        intake_mode: {
+          type: "string",
+          enum: ["strict", "advisory", "passthrough"],
+          description:
+            "Optional. Controls intake gate behavior. 'strict': reject redundant/low-relevance entries with explanation. 'advisory' (default): always writes, response includes audit report with intake_score, related_keys, redundancy_flag. 'passthrough': no evaluation.",
+        },
       },
       required: ["namespace", "key", "content"],
     },
@@ -955,6 +979,12 @@ const TOOL_DEFINITIONS = [
           items: { type: "string" },
           description: 'Optional tags. Must be a JSON array, e.g. ["decision", "active"] or ["client:lofalk"].',
         },
+        intake_mode: {
+          type: "string",
+          enum: ["strict", "advisory", "passthrough"],
+          description:
+            "Optional. Controls intake gate behavior for log entries. Default: 'passthrough' (no evaluation). Set to 'advisory' or 'strict' to evaluate log entries before appending.",
+        },
       },
       required: ["namespace", "content"],
     },
@@ -1064,6 +1094,37 @@ const TOOL_DEFINITIONS = [
         },
       },
       required: [],
+    },
+  },
+  {
+    name: "memory_audit",
+    description:
+      "Analyze a namespace for consolidation candidates. Flags content overlap between entries, stale entries (30+ days without update), and tag drift (entries with tags inconsistent with the namespace's established vocabulary). Use this to identify cleanup opportunities before a namespace grows unwieldy.\n\nThis is a read-only analysis tool — it does not modify any entries.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        namespace: {
+          type: "string",
+          description: "The namespace to audit. Must be an exact namespace (not a prefix).",
+        },
+        include_overlap: {
+          type: "boolean",
+          description: "Optional. Check for content overlap between state entries. Default: true.",
+        },
+        include_stale: {
+          type: "boolean",
+          description: "Optional. Flag entries not updated in 30+ days. Default: true.",
+        },
+        include_tag_drift: {
+          type: "boolean",
+          description: "Optional. Flag entries with tags inconsistent with the namespace's established vocabulary. Default: true.",
+        },
+        limit: {
+          type: "integer",
+          description: "Optional. Maximum number of findings to return. Default: 20, max: 50.",
+        },
+      },
+      required: ["namespace"],
     },
   },
 ];
@@ -1319,7 +1380,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
           }
 
           case "memory_write": {
-            const { namespace, key, content, tags, expected_updated_at } =
+            const { namespace, key, content, tags, expected_updated_at, intake, intake_mode: rawIntakeMode } =
               args as unknown as WriteParams & { expected_updated_at?: string };
             const validation = validateWriteInput(namespace, key, content, tags, maxContentSize);
             if (!validation.valid) {
@@ -1349,7 +1410,48 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               }
             }
 
-            const result = writeState(db, namespace, key, content, effectiveTags, "default", expected_updated_at);
+            // Resolve intake mode: intake_mode param takes precedence, then legacy intake boolean
+            let resolvedMode: IntakeMode;
+            if (rawIntakeMode && ["strict", "advisory", "passthrough"].includes(rawIntakeMode)) {
+              resolvedMode = rawIntakeMode as IntakeMode;
+            } else if (intake === false) {
+              resolvedMode = "passthrough";
+            } else {
+              resolvedMode = "advisory"; // default for memory_write
+            }
+
+            // Intake gate evaluation
+            const intakeResult = resolvedMode !== "passthrough"
+              ? evaluateIntake(db, namespace, key, content, effectiveTags, { mode: resolvedMode })
+              : undefined;
+
+            // Strict mode rejection — do not write
+            if (intakeResult && intakeResult.status === "rejected") {
+              return {
+                content: [{
+                  type: "text",
+                  text: JSON.stringify({
+                    status: "rejected",
+                    namespace,
+                    key,
+                    message: intakeResult.rejection_reason ?? "Entry rejected by intake gate.",
+                    intake: intakeResult,
+                  }),
+                }],
+              };
+            }
+
+            // Surface intake flags as human-readable warnings
+            if (intakeResult) {
+              for (const flag of intakeResult.flags) {
+                warnings.push(`[intake:${flag.check}] ${flag.message}`);
+              }
+            }
+
+            const result = writeState(
+              db, namespace, key, content, effectiveTags, "default", expected_updated_at,
+              intakeResult?.status, intakeResult?.flags, intakeResult?.metadata,
+            );
 
             if (result.status === "conflict") {
               return {
@@ -1387,6 +1489,10 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
 
             if (warnings.length > 0) {
               response.warnings = warnings;
+            }
+
+            if (intakeResult) {
+              response.intake = intakeResult;
             }
 
             // Analytics: log write outcome correlated to prior retrieval in this session
@@ -1876,12 +1982,50 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
           }
 
           case "memory_log": {
-            const { namespace, content, tags } = args as unknown as LogParams;
+            const { namespace, content, tags, intake_mode: rawLogIntakeMode } = args as unknown as LogParams;
             const validation = validateLogInput(namespace, content, tags, maxContentSize);
             if (!validation.valid) {
               return { content: [{ type: "text", text: JSON.stringify({ error: "validation_error", message: validation.error }) }] };
             }
-            const result = appendLog(db, namespace, content, tags ?? []);
+
+            // Log entries default to passthrough; allow override via intake_mode
+            const logIntakeMode: IntakeMode =
+              rawLogIntakeMode && ["strict", "advisory", "passthrough"].includes(rawLogIntakeMode)
+                ? rawLogIntakeMode as IntakeMode
+                : "passthrough";
+
+            let logIntakeResult;
+            if (logIntakeMode !== "passthrough") {
+              // For log entries, use empty key — logs don't have keys
+              logIntakeResult = evaluateIntake(db, namespace, "", content, tags ?? [], {
+                mode: logIntakeMode,
+                isLog: true,
+              });
+
+              // Strict mode rejection
+              if (logIntakeResult.status === "rejected") {
+                return {
+                  content: [{
+                    type: "text",
+                    text: JSON.stringify({
+                      status: "rejected",
+                      namespace,
+                      message: logIntakeResult.rejection_reason ?? "Log entry rejected by intake gate.",
+                      intake: logIntakeResult,
+                    }),
+                  }],
+                };
+              }
+            }
+
+            const intakeData = logIntakeResult ? {
+              status: logIntakeResult.status,
+              flags: logIntakeResult.flags,
+              metadata: logIntakeResult.metadata,
+            } : undefined;
+
+            const result = appendLog(db, namespace, content, tags ?? [], "default", intakeData);
+
             // Analytics: log log outcome correlated to prior retrieval in this session
             if (sessionId) {
               logRetrievalOutcome(db, sessionId, {
@@ -1889,15 +2033,22 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                 namespace,
               });
             }
+
+            const logResponse: Record<string, unknown> = {
+              status: "logged",
+              id: result.id,
+              namespace,
+              timestamp: result.timestamp,
+            };
+
+            if (logIntakeResult) {
+              logResponse.intake = logIntakeResult;
+            }
+
             return {
               content: [{
                 type: "text",
-                text: JSON.stringify({
-                  status: "logged",
-                  id: result.id,
-                  namespace,
-                  timestamp: result.timestamp,
-                }),
+                text: JSON.stringify(logResponse),
               }],
             };
           }
@@ -2071,6 +2222,154 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                   generated_at: new Date().toISOString(),
                   count: historyEntries.length,
                   entries: historyEntries,
+                }),
+              }],
+            };
+          }
+
+          case "memory_audit": {
+            const auditArgs = (args ?? {}) as unknown as AuditParams;
+            const { namespace } = auditArgs;
+            if (!namespace || typeof namespace !== "string") {
+              return { content: [{ type: "text", text: JSON.stringify({ error: "validation_error", message: "namespace is required." }) }] };
+            }
+            const nsCheck = validateNamespace(namespace);
+            if (!nsCheck.valid) {
+              return { content: [{ type: "text", text: JSON.stringify({ error: "validation_error", message: nsCheck.error }) }] };
+            }
+
+            const includeOverlap = auditArgs.include_overlap !== false;
+            const includeStaleEntries = auditArgs.include_stale !== false;
+            const includeTagDrift = auditArgs.include_tag_drift !== false;
+            const auditLimit = clampOptionalLimit(auditArgs.limit, 50) ?? 20;
+
+            const stateEntries = getNamespaceStateEntries(db, namespace);
+            const findings: AuditFinding[] = [];
+
+            // 1. Content overlap detection via FTS5
+            if (includeOverlap && stateEntries.length >= 2) {
+              const overlapPairsSeen = new Set<string>();
+
+              for (const entry of stateEntries) {
+                if (findings.length >= auditLimit) break;
+
+                // Extract tokens from this entry's content for FTS5 query
+                const tokens = entry.content
+                  .toLowerCase()
+                  .split(/[^a-z0-9_-]+/)
+                  .filter((t) => t.length >= 3)
+                  .slice(0, 8);
+
+                if (tokens.length < 2) continue;
+
+                const queryStr = tokens.map((t) => `"${t}"`).join(" OR ");
+                try {
+                  const results = queryEntriesLexicalScored(db, {
+                    query: queryStr,
+                    namespace,
+                    limit: 5,
+                  });
+
+                  for (const result of results) {
+                    if (result.entry.id === entry.id) continue;
+                    // Deduplicate pairs
+                    const pairKey = [entry.id, result.entry.id].sort().join(":");
+                    if (overlapPairsSeen.has(pairKey)) continue;
+                    overlapPairsSeen.add(pairKey);
+
+                    if (result.score < -5.0) {
+                      findings.push({
+                        category: "overlap",
+                        severity: result.score < -10.0 ? "high" : "medium",
+                        entries: [
+                          { id: entry.id, key: entry.key, preview: entry.content.slice(0, 100) },
+                          { id: result.entry.id, key: result.entry.key, preview: result.entry.content.slice(0, 100) },
+                        ],
+                        message: `Entries "${entry.key}" and "${result.entry.key}" have significant content overlap.`,
+                        suggested_action: "Consider consolidating into a single entry or splitting along clearer boundaries.",
+                      });
+                    }
+                  }
+                } catch {
+                  // FTS5 query failure — skip overlap check for this entry
+                }
+              }
+            }
+
+            // 2. Stale entry detection (30+ days)
+            if (includeStaleEntries) {
+              const AUDIT_STALENESS_MS = 30 * 24 * 60 * 60 * 1000;
+              const now = Date.now();
+
+              for (const entry of stateEntries) {
+                if (findings.length >= auditLimit) break;
+                const age = now - new Date(entry.updated_at).getTime();
+                if (age > AUDIT_STALENESS_MS) {
+                  const daysSince = Math.floor(age / (24 * 60 * 60 * 1000));
+                  findings.push({
+                    category: "stale",
+                    severity: daysSince > 90 ? "high" : daysSince > 60 ? "medium" : "low",
+                    entries: [{ id: entry.id, key: entry.key, preview: entry.content.slice(0, 100) }],
+                    message: `Entry "${entry.key}" has not been updated in ${daysSince} days.`,
+                    suggested_action: "Review and update, archive, or delete if no longer relevant.",
+                  });
+                }
+              }
+            }
+
+            // 3. Tag drift detection
+            if (includeTagDrift && stateEntries.length >= 2) {
+              const vocabulary = getNamespaceTagVocabulary(db, namespace);
+              if (vocabulary.length > 0) {
+                // Count tag frequency across entries
+                const tagFreq = new Map<string, number>();
+                for (const entry of stateEntries) {
+                  const entryTags: string[] = JSON.parse(entry.tags);
+                  for (const tag of entryTags) {
+                    tagFreq.set(tag, (tagFreq.get(tag) ?? 0) + 1);
+                  }
+                }
+
+                // Flag entries where most tags appear only on that entry
+                for (const entry of stateEntries) {
+                  if (findings.length >= auditLimit) break;
+                  const entryTags: string[] = JSON.parse(entry.tags);
+                  if (entryTags.length === 0) continue;
+
+                  const uniqueTags = entryTags.filter((t) => (tagFreq.get(t) ?? 0) <= 1);
+                  if (uniqueTags.length > 0 && uniqueTags.length / entryTags.length >= 0.5) {
+                    findings.push({
+                      category: "tag_drift",
+                      severity: "low",
+                      entries: [{ id: entry.id, key: entry.key, preview: entry.content.slice(0, 100) }],
+                      message: `Entry "${entry.key}" has tags [${uniqueTags.join(", ")}] not used by other entries in this namespace.`,
+                      suggested_action: "Review tag consistency. Align with namespace conventions or keep if intentionally unique.",
+                    });
+                  }
+                }
+              }
+            }
+
+            // Sort findings by severity
+            const severityOrder = { high: 0, medium: 1, low: 2 };
+            findings.sort((a, b) => severityOrder[a.severity] - severityOrder[b.severity]);
+            const limitedFindings = findings.slice(0, auditLimit);
+
+            const summary = {
+              high: limitedFindings.filter((f) => f.severity === "high").length,
+              medium: limitedFindings.filter((f) => f.severity === "medium").length,
+              low: limitedFindings.filter((f) => f.severity === "low").length,
+              total: limitedFindings.length,
+            };
+
+            return {
+              content: [{
+                type: "text",
+                text: JSON.stringify({
+                  namespace,
+                  generated_at: new Date().toISOString(),
+                  findings: limitedFindings,
+                  summary,
                 }),
               }],
             };

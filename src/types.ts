@@ -4,6 +4,41 @@ export type EntryType = "state" | "log";
 export type EmbeddingStatus = "pending" | "processing" | "generated" | "failed";
 export type SearchMode = "lexical" | "semantic" | "hybrid";
 export type OrientDetail = "compact" | "standard" | "full";
+export type IntakeStatus = "none" | "accepted" | "flagged" | "rejected";
+export type IntakeMode = "strict" | "advisory" | "passthrough";
+
+export interface IntakeFlag {
+  check: "duplicate_key" | "content_overlap" | "tag_inconsistency" | "namespace_depth" | "low_relevance" | "consolidation_candidate";
+  severity: "info" | "warning" | "error";
+  message: string;
+  related_entry_id?: string;
+}
+
+export interface RelatedKeyRef {
+  namespace: string;
+  key: string | null;
+  relationship: "content_overlap" | "same_tags" | "same_namespace";
+}
+
+export interface RedundancyInfo {
+  existing_key: string | null;
+  similarity: number;
+}
+
+export interface IntakeMetadata {
+  intake_score: number; // 0.0–1.0 relevance score
+  intake_mode: IntakeMode;
+  related_keys: RelatedKeyRef[];
+  redundancy_flag: RedundancyInfo | null;
+  intake_timestamp: string; // ISO8601
+}
+
+export interface IntakeResult {
+  status: IntakeStatus;
+  flags: IntakeFlag[];
+  metadata: IntakeMetadata;
+  rejection_reason?: string; // only set in strict mode when rejected
+}
 
 export interface Entry {
   id: string;
@@ -17,6 +52,13 @@ export interface Entry {
   updated_at: string;
   embedding_status: EmbeddingStatus;
   embedding_model: string | null;
+  intake_status: IntakeStatus;
+  intake_flags: string; // JSON array string
+  intake_score: number;
+  intake_mode: IntakeMode;
+  related_keys: string; // JSON array string of RelatedKeyRef
+  redundancy_flag: string | null; // JSON string of RedundancyInfo or null
+  intake_timestamp: string | null; // ISO8601
 }
 
 // Parsed entry with tags as array
@@ -31,6 +73,8 @@ export interface WriteParams {
   key: string;
   content: string;
   tags?: string[];
+  intake?: boolean;
+  intake_mode?: IntakeMode;
 }
 
 export interface ReadParams {
@@ -68,6 +112,7 @@ export interface LogParams {
   namespace: string;
   content: string;
   tags?: string[];
+  intake_mode?: IntakeMode;
 }
 
 export interface ListParams {
@@ -97,7 +142,7 @@ export interface AttentionParams {
 // Tool response types
 
 export interface WriteResponse {
-  status: "created" | "updated" | "conflict";
+  status: "created" | "updated" | "conflict" | "rejected";
   id?: string;
   namespace: string;
   key: string;
@@ -105,6 +150,32 @@ export interface WriteResponse {
   message?: string;
   current_updated_at?: string;
   warnings?: string[];
+  intake?: IntakeResult;
+}
+
+// Intake audit tool types
+
+export interface AuditParams {
+  namespace: string;
+  include_overlap?: boolean;
+  include_stale?: boolean;
+  include_tag_drift?: boolean;
+  limit?: number;
+}
+
+export interface AuditFinding {
+  category: "overlap" | "stale" | "tag_drift";
+  severity: "high" | "medium" | "low";
+  entries: Array<{ id: string; key: string | null; preview: string }>;
+  message: string;
+  suggested_action: string;
+}
+
+export interface AuditResponse {
+  namespace: string;
+  generated_at: string;
+  findings: AuditFinding[];
+  summary: { high: number; medium: number; low: number; total: number };
 }
 
 export interface DashboardEntry {
@@ -193,10 +264,12 @@ export interface QueryResponse {
 }
 
 export interface LogResponse {
-  status: "logged";
-  id: string;
+  status: "logged" | "rejected";
+  id?: string;
   namespace: string;
-  timestamp: string;
+  timestamp?: string;
+  intake?: IntakeResult;
+  message?: string;
 }
 
 export interface NamespaceSummary {

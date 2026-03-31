@@ -18,7 +18,7 @@ For the full argument, see [Resilient and Sovereign AI](https://gille.ai/en/blog
 
 ## What it does
 
-- **9 MCP tools** for reading, writing, searching, and organizing memories
+- **10 MCP tools** for reading, writing, searching, auditing, and organizing memories
 - **Two memory types:** state entries (mutable, current truth) and log entries (append-only, chronological history)
 - **Hierarchical namespaces** (e.g. `projects/website`, `people/alice`, `decisions/tech-stack`)
 - **Three search modes:** keyword (FTS5), semantic (vector embeddings), and hybrid (both combined via Reciprocal Rank Fusion)
@@ -153,6 +153,37 @@ The summaries of these debates are in the `debate/` directory:
 - `debate/conventions-summary.md` — memory conventions and session protocol
 
 See `CLAUDE.md` for the full technical reference, including architecture details, spec amendments from the debates, and implementation notes.
+
+## Intake gate
+
+Memory writes include an advisory intake gate that evaluates entries against local heuristics before storing them. This helps maintain memory hygiene without blocking writes.
+
+### How it works
+
+When `memory_write` is called, the intake gate runs four checks:
+
+1. **Duplicate key detection** — flags when overwriting an existing entry, showing how long ago it was last updated
+2. **Content overlap** — uses FTS5 to detect significant overlap with other entries in the same namespace, suggesting consolidation
+3. **Tag consistency** — warns when most of the entry's tags are new to the namespace, helping maintain consistent tag vocabulary
+4. **Namespace depth** — flags namespaces deeper than 3 levels, recommending flatter structure
+
+The gate is advisory: it always writes the entry, but includes flags in the response so the caller can act on them.
+
+### Controlling intake
+
+- Intake runs by default on every `memory_write` call
+- Pass `intake: false` to skip evaluation
+- Flags appear both in the `intake` response field (structured) and in `warnings` (human-readable)
+
+### memory_audit
+
+The `memory_audit` tool analyzes an entire namespace for consolidation opportunities:
+
+- **Content overlap** — finds pairs of entries with significant content similarity
+- **Stale entries** — flags entries not updated in 30+ days
+- **Tag drift** — identifies entries with tags inconsistent with the namespace's established vocabulary
+
+This is a read-only analysis tool — it never modifies entries.
 
 ## Opinionated workflow
 

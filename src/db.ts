@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, chmodSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { homedir } from "node:os";
-import type { Entry, AuditEntry, EntryType, TrackedStatusRow } from "./types.js";
+import type { Entry, AuditEntry, EntryType, TrackedStatusRow, IntakeStatus, IntakeFlag, IntakeMode, IntakeMetadata, RelatedKeyRef, RedundancyInfo } from "./types.js";
 import { runMigrations } from "./migrations.js";
 
 let _vecLoaded = false;
@@ -118,6 +118,12 @@ export interface WriteStateResult {
   current_updated_at?: string;
 }
 
+export interface WriteStateIntakeData {
+  status: IntakeStatus;
+  flags: IntakeFlag[];
+  metadata?: IntakeMetadata;
+}
+
 export function writeState(
   db: Database.Database,
   namespace: string,
@@ -126,9 +132,19 @@ export function writeState(
   tags: string[],
   agentId = "default",
   expectedUpdatedAt?: string,
+  intakeStatus?: IntakeStatus,
+  intakeFlags?: IntakeFlag[],
+  intakeMetadata?: IntakeMetadata,
 ): WriteStateResult {
   const now = nowUTC();
   const tagsJson = JSON.stringify(tags);
+  const effectiveIntakeStatus = intakeStatus ?? "none";
+  const intakeFlagsJson = JSON.stringify(intakeFlags ?? []);
+  const intakeScore = intakeMetadata?.intake_score ?? 1.0;
+  const intakeMode = intakeMetadata?.intake_mode ?? "passthrough";
+  const relatedKeysJson = JSON.stringify(intakeMetadata?.related_keys ?? []);
+  const redundancyJson = intakeMetadata?.redundancy_flag ? JSON.stringify(intakeMetadata.redundancy_flag) : null;
+  const intakeTimestamp = intakeMetadata?.intake_timestamp ?? null;
 
   // Check if exists
   const existing = db.prepare(
@@ -148,9 +164,13 @@ export function writeState(
     if (existing) {
       db.prepare(
         `UPDATE entries SET content = ?, tags = ?, updated_at = ?, agent_id = ?,
-         embedding_status = 'pending', embedding_model = NULL
+         embedding_status = 'pending', embedding_model = NULL,
+         intake_status = ?, intake_flags = ?,
+         intake_score = ?, intake_mode = ?, related_keys = ?, redundancy_flag = ?, intake_timestamp = ?
          WHERE namespace = ? AND key = ? AND entry_type = 'state'`,
-      ).run(content, tagsJson, now, agentId, namespace, key);
+      ).run(content, tagsJson, now, agentId, effectiveIntakeStatus, intakeFlagsJson,
+        intakeScore, intakeMode, relatedKeysJson, redundancyJson, intakeTimestamp,
+        namespace, key);
 
       db.prepare(
         "INSERT INTO audit_log (timestamp, agent_id, action, namespace, key, detail) VALUES (?, ?, ?, ?, ?, ?)",
@@ -160,9 +180,12 @@ export function writeState(
     } else {
       const id = randomUUID();
       db.prepare(
-        `INSERT INTO entries (id, namespace, key, entry_type, content, tags, agent_id, created_at, updated_at)
-         VALUES (?, ?, ?, 'state', ?, ?, ?, ?, ?)`,
-      ).run(id, namespace, key, content, tagsJson, agentId, now, now);
+        `INSERT INTO entries (id, namespace, key, entry_type, content, tags, agent_id, created_at, updated_at,
+         intake_status, intake_flags, intake_score, intake_mode, related_keys, redundancy_flag, intake_timestamp)
+         VALUES (?, ?, ?, 'state', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(id, namespace, key, content, tagsJson, agentId, now, now,
+        effectiveIntakeStatus, intakeFlagsJson,
+        intakeScore, intakeMode, relatedKeysJson, redundancyJson, intakeTimestamp);
 
       db.prepare(
         "INSERT INTO audit_log (timestamp, agent_id, action, namespace, key, detail) VALUES (?, ?, ?, ?, ?, ?)",
@@ -203,16 +226,28 @@ export function appendLog(
   content: string,
   tags: string[],
   agentId = "default",
+  intakeData?: WriteStateIntakeData,
 ): { id: string; timestamp: string } {
   const now = nowUTC();
   const id = randomUUID();
   const tagsJson = JSON.stringify(tags);
 
+  const intakeStatus = intakeData?.status ?? "none";
+  const intakeFlagsJson = JSON.stringify(intakeData?.flags ?? []);
+  const intakeScore = intakeData?.metadata?.intake_score ?? 1.0;
+  const intakeMode = intakeData?.metadata?.intake_mode ?? "passthrough";
+  const relatedKeysJson = JSON.stringify(intakeData?.metadata?.related_keys ?? []);
+  const redundancyJson = intakeData?.metadata?.redundancy_flag ? JSON.stringify(intakeData.metadata.redundancy_flag) : null;
+  const intakeTimestamp = intakeData?.metadata?.intake_timestamp ?? null;
+
   const txn = db.transaction(() => {
     db.prepare(
-      `INSERT INTO entries (id, namespace, key, entry_type, content, tags, agent_id, created_at, updated_at)
-       VALUES (?, ?, NULL, 'log', ?, ?, ?, ?, ?)`,
-    ).run(id, namespace, content, tagsJson, agentId, now, now);
+      `INSERT INTO entries (id, namespace, key, entry_type, content, tags, agent_id, created_at, updated_at,
+       intake_status, intake_flags, intake_score, intake_mode, related_keys, redundancy_flag, intake_timestamp)
+       VALUES (?, ?, NULL, 'log', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(id, namespace, content, tagsJson, agentId, now, now,
+      intakeStatus, intakeFlagsJson,
+      intakeScore, intakeMode, relatedKeysJson, redundancyJson, intakeTimestamp);
 
     db.prepare(
       "INSERT INTO audit_log (timestamp, agent_id, action, namespace, key, detail) VALUES (?, ?, ?, ?, ?, ?)",
@@ -1107,4 +1142,29 @@ export function getOtherKeysInNamespace(
     )
     .all(namespace, excludeKey ?? "") as Array<{ key: string }>;
   return rows.map((r) => r.key);
+}
+
+// --- Intake gate helpers ---
+
+export function getNamespaceTagVocabulary(
+  db: Database.Database,
+  namespace: string,
+): string[] {
+  const rows = db
+    .prepare(
+      "SELECT DISTINCT je.value FROM entries, json_each(entries.tags) je WHERE namespace = ?",
+    )
+    .all(namespace) as Array<{ value: string }>;
+  return rows.map((r) => r.value);
+}
+
+export function getNamespaceStateEntries(
+  db: Database.Database,
+  namespace: string,
+): Entry[] {
+  return db
+    .prepare(
+      "SELECT * FROM entries WHERE namespace = ? AND entry_type = 'state' ORDER BY key",
+    )
+    .all(namespace) as Entry[];
 }
