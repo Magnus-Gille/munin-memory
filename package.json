@@ -22,8 +22,12 @@
   ],
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "munin-admin": "dist/admin-cli.js"
+  },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && chmod +x dist/admin-cli.js",
+    "admin": "tsx src/admin-cli.ts",
     "dev": "tsx watch src/index.ts",
     "test": "vitest run",
     "test:watch": "vitest"
