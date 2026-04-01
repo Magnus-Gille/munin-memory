@@ -64,7 +64,7 @@ describe("getAuditHistory — basic retrieval", () => {
     // Most recent first
     const actions = result.map((e) => e.action);
     expect(actions).toContain("write");
-    expect(actions).toContain("log");
+    expect(actions).toContain("log_append");
   });
 
   it("audit rows have expected fields", () => {
@@ -107,7 +107,7 @@ describe("getAuditHistory — basic retrieval", () => {
 
     const result = getAuditHistory(db, {});
     const actions = result.map((e) => e.action);
-    expect(actions).toContain("delete_namespace");
+    expect(actions).toContain("namespace_delete");
   });
 });
 
@@ -193,10 +193,16 @@ describe("getAuditHistory — action filter", () => {
     expect(result[0].action).toBe("update");
   });
 
-  it("filters to only 'log' actions", () => {
+  it("filters to only 'log_append' actions", () => {
+    const result = getAuditHistory(db, { action: "log_append" });
+    expect(result.length).toBe(1);
+    expect(result[0].action).toBe("log_append");
+  });
+
+  it("accepts legacy log alias and normalizes to canonical action", () => {
     const result = getAuditHistory(db, { action: "log" });
     expect(result.length).toBe(1);
-    expect(result[0].action).toBe("log");
+    expect(result[0].action).toBe("log_append");
   });
 });
 
@@ -298,12 +304,17 @@ describe("memory_history tool handler", () => {
     const result = parseToolResponse(raw) as {
       generated_at: string;
       count: number;
-      entries: unknown[];
+      entries: Array<{ provenance: { principal_id: string } }>;
+      next_cursor: number | null;
+      has_more: boolean;
     };
 
     expect(result.generated_at).toBeTypeOf("string");
     expect(result.count).toBe(1);
     expect(result.entries).toHaveLength(1);
+    expect(result.entries[0].provenance.principal_id).toBe("default");
+    expect(typeof result.next_cursor).toBe("number");
+    expect(result.has_more).toBe(false);
   });
 
   it("returns empty result when no writes have been made", async () => {
@@ -387,5 +398,43 @@ describe("memory_history tool handler", () => {
     const result = parseToolResponse(raw) as { count: number; entries: unknown[] };
     expect(result.count).toBe(3);
     expect(result.entries).toHaveLength(3);
+  });
+
+  it("supports cursor-based forward sync with canonical actions", async () => {
+    writeState(db, "projects/sync", "status", "v1", []);
+    appendLog(db, "projects/sync", "progress", []);
+
+    const firstRaw = await callTool(server, "memory_history", {
+      namespace: "projects/sync",
+      cursor: 0,
+      limit: 10,
+    });
+    const first = parseToolResponse(firstRaw) as {
+      entries: Array<{ id: number; action: string }>;
+      next_cursor: number | null;
+      has_more: boolean;
+    };
+
+    expect(first.entries).toHaveLength(2);
+    expect(first.entries[0].action).toBe("write");
+    expect(first.entries[1].action).toBe("log");
+    expect(first.next_cursor).toBe(first.entries[1].id);
+    expect(first.has_more).toBe(false);
+
+    writeState(db, "projects/sync", "status", "v2", []);
+
+    const secondRaw = await callTool(server, "memory_history", {
+      namespace: "projects/sync",
+      cursor: first.next_cursor,
+      limit: 10,
+    });
+    const second = parseToolResponse(secondRaw) as {
+      entries: Array<{ action: string }>;
+      next_cursor: number | null;
+    };
+
+    expect(second.entries).toHaveLength(1);
+    expect(second.entries[0].action).toBe("update");
+    expect(second.next_cursor).not.toBe(first.next_cursor);
   });
 });

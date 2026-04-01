@@ -317,7 +317,7 @@ export class MuninOAuthProvider implements OAuthServerProvider {
           // Cross-principal conflict — log and fail hard
           this.db
             .prepare(
-              "INSERT INTO audit_log (timestamp, agent_id, action, namespace, key, detail) VALUES (?, ?, ?, ?, ?, ?)",
+              "INSERT INTO audit_log (timestamp, agent_id, action, namespace, key, detail, entry_id) VALUES (?, ?, ?, ?, ?, ?, NULL)",
             )
             .run(
               now,

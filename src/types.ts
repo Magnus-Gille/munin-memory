@@ -4,6 +4,11 @@ export type EntryType = "state" | "log";
 export type EmbeddingStatus = "pending" | "processing" | "generated" | "failed";
 export type SearchMode = "lexical" | "semantic" | "hybrid";
 export type OrientDetail = "compact" | "standard" | "full";
+export type AuditAction = "write" | "update" | "delete" | "namespace_delete" | "log_append";
+
+export interface EntryProvenance {
+  principal_id: string;
+}
 
 export interface Entry {
   id: string;
@@ -33,6 +38,17 @@ export interface WriteParams {
   tags?: string[];
 }
 
+export interface StatusUpdateParams {
+  namespace: string;
+  phase?: string;
+  current_work?: string;
+  blockers?: string;
+  next_steps?: string[];
+  notes?: string;
+  lifecycle?: "active" | "blocked" | "completed" | "stopped" | "maintenance" | "archived";
+  expected_updated_at?: string;
+}
+
 export interface ReadParams {
   namespace: string;
   key: string;
@@ -47,7 +63,7 @@ export interface GetParams {
 }
 
 export interface QueryParams {
-  query: string;
+  query?: string;
   namespace?: string;
   entry_type?: EntryType;
   tags?: string[];
@@ -98,6 +114,13 @@ export interface AttentionParams {
   limit?: number;
 }
 
+export interface AuditSyncParams {
+  namespace?: string;
+  action?: AuditAction | "delete_namespace" | "log";
+  cursor?: number;
+  limit?: number;
+}
+
 // Tool response types
 
 export interface WriteResponse {
@@ -109,6 +132,18 @@ export interface WriteResponse {
   message?: string;
   current_updated_at?: string;
   warnings?: string[];
+}
+
+export interface StatusUpdateResponse extends WriteResponse {
+  content?: string;
+  updated_at?: string;
+  structured_status?: {
+    phase: string;
+    current_work: string;
+    blockers: string;
+    next_steps: string[];
+    notes?: string;
+  };
 }
 
 export interface DashboardEntry {
@@ -132,6 +167,7 @@ export interface TrackedStatusRow {
   content_preview: string;
   content: string;
   tags: string;
+  agent_id: string;
   created_at: string;
   updated_at: string;
 }
@@ -145,6 +181,7 @@ export interface ReadResponse {
   tags?: string[];
   created_at?: string;
   updated_at?: string;
+  provenance?: EntryProvenance;
   message?: string;
   hint?: string;
 }
@@ -159,6 +196,7 @@ export interface GetResponse {
   tags?: string[];
   created_at?: string;
   updated_at?: string;
+  provenance?: EntryProvenance;
   message?: string;
 }
 
@@ -171,6 +209,7 @@ export interface QueryResult {
   tags: string[];
   created_at: string;
   updated_at: string;
+  provenance?: EntryProvenance;
   match?: {
     heuristic_score: number;
     lexical_rank?: number;
@@ -185,8 +224,8 @@ export interface QueryResult {
 export interface QueryResponse {
   results: QueryResult[];
   total: number;
-  query: string;
-  search_mode: SearchMode;
+  query?: string;
+  search_mode: SearchMode | "filter";
   search_mode_actual?: SearchMode;
   warning?: string;
   retrieval?: {
@@ -201,6 +240,7 @@ export interface LogResponse {
   id: string;
   namespace: string;
   timestamp: string;
+  provenance?: EntryProvenance;
 }
 
 export interface NamespaceSummary {
@@ -215,14 +255,17 @@ export interface LogPreview {
   content_preview: string;
   tags: string[];
   created_at: string;
+  provenance?: EntryProvenance;
 }
 
 export interface NamespaceDetail {
   state_entries: Array<{
+    id: string;
     key: string;
     preview: string;
     tags: string[];
     updated_at: string;
+    provenance?: EntryProvenance;
   }>;
   log_summary: {
     log_count: number;
@@ -318,17 +361,28 @@ export interface SecurityResult {
 export interface AuditHistoryParams {
   namespace?: string;
   since?: string;
-  action?: string;
+  action?: AuditAction | "delete_namespace" | "log";
   limit?: number;
+  cursor?: number;
 }
 
 // Audit log entry
 export interface AuditEntry {
-  id?: number;
+  id: number;
   timestamp: string;
   agent_id: string;
-  action: "write" | "update" | "delete" | "delete_namespace" | "log";
+  action: AuditAction;
   namespace: string;
   key: string | null;
+  entry_id: string | null;
   detail: string | null;
+  provenance?: EntryProvenance;
+}
+
+export interface AuditHistoryResponse {
+  generated_at: string;
+  count: number;
+  entries: AuditEntry[];
+  next_cursor: number | null;
+  has_more: boolean;
 }

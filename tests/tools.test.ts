@@ -246,6 +246,71 @@ describe("memory_write patch", () => {
   });
 });
 
+describe("memory_update_status", () => {
+  it("creates a canonical tracked status from structured fields", async () => {
+    const raw = await callTool("memory_update_status", {
+      namespace: "projects/status-tool",
+      phase: "Active",
+      current_work: "Implementing structured status updates",
+      blockers: "None.",
+      next_steps: ["Add tests", "Update docs"],
+      lifecycle: "active",
+    });
+    const result = parseToolResponse(raw) as {
+      status: string;
+      key: string;
+      content: string;
+      structured_status: { next_steps: string[] };
+    };
+
+    expect(result.status).toBe("created");
+    expect(result.key).toBe("status");
+    expect(result.content).toContain("## Phase");
+    expect(result.content).toContain("## Current Work");
+    expect(result.content).toContain("## Blockers");
+    expect(result.content).toContain("## Next Steps");
+    expect(result.structured_status.next_steps).toEqual(["Add tests", "Update docs"]);
+  });
+
+  it("patches only the requested sections and preserves existing values", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/status-tool",
+      phase: "Active",
+      current_work: "Initial work",
+      blockers: "Blocked on review.",
+      next_steps: ["Do the first thing"],
+      notes: "Carry forward",
+      lifecycle: "blocked",
+    });
+
+    const raw = await callTool("memory_update_status", {
+      namespace: "projects/status-tool",
+      blockers: "None.",
+      next_steps: ["Ship it"],
+      lifecycle: "active",
+    });
+    const result = parseToolResponse(raw) as {
+      status: string;
+      structured_status: {
+        phase: string;
+        current_work: string;
+        blockers: string;
+        next_steps: string[];
+        notes?: string;
+      };
+      content: string;
+    };
+
+    expect(result.status).toBe("updated");
+    expect(result.structured_status.phase).toBe("Active");
+    expect(result.structured_status.current_work).toBe("Initial work");
+    expect(result.structured_status.blockers).toBe("None.");
+    expect(result.structured_status.next_steps).toEqual(["Ship it"]);
+    expect(result.structured_status.notes).toBe("Carry forward");
+    expect(result.content).toContain("- Ship it");
+  });
+});
+
 describe("memory_read", () => {
   it("reads an existing entry", async () => {
     await callTool("memory_write", {
@@ -258,10 +323,16 @@ describe("memory_read", () => {
       namespace: "projects/test",
       key: "status",
     });
-    const result = parseToolResponse(raw) as { found: boolean; content: string; tags: string[] };
+    const result = parseToolResponse(raw) as {
+      found: boolean;
+      content: string;
+      tags: string[];
+      provenance: { principal_id: string };
+    };
     expect(result.found).toBe(true);
     expect(result.content).toBe("All good");
     expect(result.tags).toEqual(["active"]);
+    expect(result.provenance.principal_id).toBe("owner");
   });
 
   it("returns not found for missing entry", async () => {
@@ -334,8 +405,14 @@ describe("memory_query", () => {
 
   it("searches by keyword", async () => {
     const raw = await callTool("memory_query", { query: "SQLite" });
-    const result = parseToolResponse(raw) as { results: unknown[]; total: number; search_mode: string };
+    const result = parseToolResponse(raw) as {
+      results: Array<{ id: string; provenance: { principal_id: string } }>;
+      total: number;
+      search_mode: string;
+    };
     expect(result.total).toBeGreaterThanOrEqual(2);
+    expect(result.results[0].id).toBeTruthy();
+    expect(result.results[0].provenance.principal_id).toBe("owner");
   });
 
   it("defaults search_mode to hybrid (degrades to lexical in test env)", async () => {
@@ -766,11 +843,14 @@ describe("memory_list", () => {
 
     const raw = await callTool("memory_list", { namespace: "projects/test" });
     const result = parseToolResponse(raw) as {
-      state_entries: Array<{ key: string }>;
-      log_summary: { count: number };
+      state_entries: Array<{ id: string; key: string; provenance: { principal_id: string } }>;
+      log_summary: { log_count: number; recent: Array<{ id: string; provenance: { principal_id: string } }> };
     };
     expect(result.state_entries).toHaveLength(2);
+    expect(result.state_entries[0].id).toBeTruthy();
+    expect(result.state_entries[0].provenance.principal_id).toBe("owner");
     expect(result.log_summary.log_count).toBe(1);
+    expect(result.log_summary.recent[0].provenance.principal_id).toBe("owner");
   });
 });
 

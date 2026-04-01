@@ -18,10 +18,12 @@ For the full argument, see [Resilient and Sovereign AI](https://gille.ai/en/blog
 
 ## What it does
 
-- **12 MCP tools** for reading, writing, searching, and organizing memories
+- **14 MCP tools** for reading, writing, searching, syncing, introspecting, and organizing memories
 - **Two memory types:** state entries (mutable, current truth) and log entries (append-only, chronological history)
+- **Structured tracked-status updates:** a first-class tool can patch `projects/*` and `clients/*` statuses without read-modify-write on markdown blobs
 - **Hierarchical namespaces** (e.g. `projects/website`, `people/alice`, `decisions/tech-stack`)
 - **Three search modes:** keyword (FTS5), semantic (vector embeddings), and hybrid (both combined via Reciprocal Rank Fusion). Semantic modes are optional and profile-dependent.
+- **Cursorable change feed + provenance:** audit history can be paged forward for multi-agent sync, and entry/audit responses carry actor provenance
 - **Content security:** writes are heuristically scanned for common secrets — obvious API keys, tokens, and inline passwords are rejected before storage
 - **OAuth secret hygiene:** confidential OAuth client secrets are encrypted at rest
 - **Dual auth:** Bearer token (simple) + OAuth 2.1 (for web/mobile clients)

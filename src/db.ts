@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, chmodSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { homedir } from "node:os";
-import type { Entry, AuditEntry, EntryType, TrackedStatusRow } from "./types.js";
+import type { Entry, AuditAction, AuditEntry, EntryType, TrackedStatusRow } from "./types.js";
 import { runMigrations } from "./migrations.js";
 import { scanForSecrets } from "./security.js";
 
@@ -101,7 +101,7 @@ export function rebuildFTS(db: Database.Database): void {
 export function getTrackedStatuses(db: Database.Database): TrackedStatusRow[] {
   return db
     .prepare(
-      `SELECT id, namespace, key, substr(content, 1, 300) as content_preview, content, tags, created_at, updated_at
+      `SELECT id, namespace, key, substr(content, 1, 300) as content_preview, content, tags, agent_id, created_at, updated_at
        FROM entries
        WHERE entry_type = 'state' AND key = 'status'
          AND (namespace LIKE 'projects/%' ESCAPE '\\' OR namespace LIKE 'clients/%' ESCAPE '\\')
@@ -115,8 +115,24 @@ export function getTrackedStatuses(db: Database.Database): TrackedStatusRow[] {
 export interface WriteStateResult {
   status: "created" | "updated" | "conflict";
   id?: string;
+  updated_at?: string;
   message?: string;
   current_updated_at?: string;
+}
+
+function insertAuditRow(
+  db: Database.Database,
+  timestamp: string,
+  agentId: string,
+  action: AuditAction | string,
+  namespace: string,
+  key: string | null,
+  detail: string | null,
+  entryId: string | null = null,
+): void {
+  db.prepare(
+    "INSERT INTO audit_log (timestamp, agent_id, action, namespace, key, detail, entry_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  ).run(timestamp, agentId, action, namespace, key, detail, entryId);
 }
 
 export function writeState(
@@ -154,11 +170,9 @@ export function writeState(
       ).run(content, tagsJson, now, agentId, namespace, key);
 
       const updateDetail = `updated (${existing.content.length} → ${content.length} chars)`;
-      db.prepare(
-        "INSERT INTO audit_log (timestamp, agent_id, action, namespace, key, detail) VALUES (?, ?, ?, ?, ?, ?)",
-      ).run(now, agentId, "update", namespace, key, updateDetail);
+      insertAuditRow(db, now, agentId, "update", namespace, key, updateDetail, existing.id);
 
-      return { status: "updated" as const, id: existing.id };
+      return { status: "updated" as const, id: existing.id, updated_at: now };
     } else {
       const id = randomUUID();
       db.prepare(
@@ -167,11 +181,9 @@ export function writeState(
       ).run(id, namespace, key, content, tagsJson, agentId, now, now);
 
       const writePreview = content.length > 80 ? content.slice(0, 80) + "..." : content;
-      db.prepare(
-        "INSERT INTO audit_log (timestamp, agent_id, action, namespace, key, detail) VALUES (?, ?, ?, ?, ?, ?)",
-      ).run(now, agentId, "write", namespace, key, writePreview);
+      insertAuditRow(db, now, agentId, "write", namespace, key, writePreview, id);
 
-      return { status: "created" as const, id };
+      return { status: "created" as const, id, updated_at: now };
     }
   });
 
@@ -312,9 +324,7 @@ export function appendLog(
     ).run(id, namespace, content, tagsJson, agentId, now, now);
 
     const logPreview = content.length > 80 ? content.slice(0, 80) + "..." : content;
-    db.prepare(
-      "INSERT INTO audit_log (timestamp, agent_id, action, namespace, key, detail) VALUES (?, ?, ?, ?, ?, ?)",
-    ).run(now, agentId, "log", namespace, null, logPreview);
+    insertAuditRow(db, now, agentId, "log_append", namespace, null, logPreview, id);
   });
 
   txn();
@@ -547,9 +557,11 @@ export function listNamespacesPaged(
 }
 
 export interface StateEntryPreview {
+  id: string;
   key: string;
   preview: string;
   tags: string;
+  agent_id: string;
   updated_at: string;
 }
 
@@ -557,6 +569,7 @@ export interface LogPreview {
   id: string;
   content_preview: string;
   tags: string;
+  agent_id: string;
   created_at: string;
 }
 
@@ -573,7 +586,7 @@ export function listNamespaceContents(
 ): { stateEntries: StateEntryPreview[]; logSummary: LogSummary } {
   const stateEntries = db
     .prepare(
-      `SELECT key, substr(content, 1, 100) as preview, tags, updated_at
+      `SELECT id, key, substr(content, 1, 100) as preview, tags, agent_id, updated_at
        FROM entries WHERE namespace = ? AND entry_type = 'state' ORDER BY key`,
     )
     .all(namespace) as StateEntryPreview[];
@@ -587,7 +600,7 @@ export function listNamespaceContents(
 
   const recentLogs = db
     .prepare(
-      `SELECT id, substr(content, 1, 200) as content_preview, tags, created_at
+      `SELECT id, substr(content, 1, 200) as content_preview, tags, agent_id, created_at
        FROM entries WHERE namespace = ? AND entry_type = 'log'
        ORDER BY rowid DESC LIMIT 5`,
     )
@@ -678,23 +691,22 @@ export function executeDelete(
     let deletedCount: number;
 
     if (key) {
+      const entry = db
+        .prepare("SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'")
+        .get(namespace, key) as { id: string } | undefined;
       const result = db
         .prepare("DELETE FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'")
         .run(namespace, key);
       deletedCount = result.changes;
 
-      db.prepare(
-        "INSERT INTO audit_log (timestamp, agent_id, action, namespace, key, detail) VALUES (?, ?, ?, ?, ?, ?)",
-      ).run(now, agentId, "delete", namespace, key, null);
+      insertAuditRow(db, now, agentId, "delete", namespace, key, null, entry?.id ?? null);
     } else {
       const result = db
         .prepare("DELETE FROM entries WHERE namespace = ?")
         .run(namespace);
       deletedCount = result.changes;
 
-      db.prepare(
-        "INSERT INTO audit_log (timestamp, agent_id, action, namespace, key, detail) VALUES (?, ?, ?, ?, ?, ?)",
-      ).run(now, agentId, "delete_namespace", namespace, null, `deleted ${deletedCount} entries`);
+      insertAuditRow(db, now, agentId, "namespace_delete", namespace, null, `deleted ${deletedCount} entries`);
     }
 
     return deletedCount;
@@ -1225,16 +1237,37 @@ export interface AuditHistoryOptions {
   since?: string;       // ISO 8601 — filter timestamp >= since
   action?: string;      // filter by action type
   limit?: number;       // default 20, max 100
+  cursor?: number;      // exclusive lower bound on audit_log.id for sync
 }
 
 export interface AuditHistoryEntry {
   id: number;
   timestamp: string;
   agent_id: string;
-  action: string;
+  action: AuditAction;
   namespace: string;
   key: string | null;
+  entry_id: string | null;
   detail: string | null;
+}
+
+export interface AuditHistoryPage {
+  entries: AuditHistoryEntry[];
+  hasMore: boolean;
+  nextCursor: number | null;
+}
+
+function normalizeAuditAction(action: string): AuditAction {
+  if (action === "log") return "log_append";
+  if (action === "delete_namespace") return "namespace_delete";
+  return action as AuditAction;
+}
+
+function normalizeAuditActionFilter(action?: string): string | undefined {
+  if (!action) return undefined;
+  if (action === "log") return "log_append";
+  if (action === "delete_namespace") return "namespace_delete";
+  return action;
 }
 
 export function getAuditHistory(
@@ -1254,7 +1287,7 @@ export function getAuditHistory(
     }
   }
 
-  let sql = "SELECT id, timestamp, agent_id, action, namespace, key, detail FROM audit_log WHERE 1=1";
+  let sql = "SELECT id, timestamp, agent_id, action, namespace, key, detail, entry_id FROM audit_log WHERE 1=1";
   const params: unknown[] = [];
 
   if (namespace !== undefined) {
@@ -1275,15 +1308,86 @@ export function getAuditHistory(
     params.push(since);
   }
 
-  if (action !== undefined) {
+  const normalizedAction = normalizeAuditActionFilter(action);
+  if (normalizedAction !== undefined) {
     sql += " AND action = ?";
-    params.push(action);
+    params.push(normalizedAction);
   }
 
   sql += " ORDER BY timestamp DESC LIMIT ?";
   params.push(clampedLimit);
 
-  return db.prepare(sql).all(...params) as AuditHistoryEntry[];
+  const rows = db.prepare(sql).all(...params) as Array<AuditHistoryEntry & { action: string }>;
+  return rows.map((row) => ({
+    ...row,
+    action: normalizeAuditAction(row.action),
+  }));
+}
+
+export function getAuditHistoryPage(
+  db: Database.Database,
+  options: AuditHistoryOptions,
+): AuditHistoryPage {
+  const { namespace, since, action, limit = 20, cursor } = options;
+  const clampedLimit = Math.min(Math.max(limit, 1), 100);
+
+  if (since !== undefined) {
+    const d = new Date(since);
+    if (isNaN(d.getTime())) {
+      throw new Error(`Invalid "since" value: "${since}". Must be a valid ISO 8601 timestamp.`);
+    }
+  }
+
+  if (cursor !== undefined && (!Number.isInteger(cursor) || cursor < 0)) {
+    throw new Error(`Invalid "cursor" value: "${cursor}". Must be a non-negative integer.`);
+  }
+
+  let sql = "SELECT id, timestamp, agent_id, action, namespace, key, detail, entry_id FROM audit_log WHERE 1=1";
+  const params: unknown[] = [];
+
+  if (namespace !== undefined) {
+    if (namespace.endsWith("/")) {
+      sql += " AND (namespace LIKE ? ESCAPE '\\')";
+      params.push(escapeForLike(namespace) + "%");
+    } else {
+      sql += " AND (namespace = ? OR namespace LIKE ? ESCAPE '\\')";
+      params.push(namespace);
+      params.push(escapeForLike(namespace) + "/%");
+    }
+  }
+
+  if (since !== undefined) {
+    sql += " AND timestamp >= ?";
+    params.push(since);
+  }
+
+  const normalizedAction = normalizeAuditActionFilter(action);
+  if (normalizedAction !== undefined) {
+    sql += " AND action = ?";
+    params.push(normalizedAction);
+  }
+
+  if (cursor !== undefined) {
+    sql += " AND id > ?";
+    params.push(cursor);
+    sql += " ORDER BY id ASC LIMIT ?";
+  } else {
+    sql += " ORDER BY timestamp DESC LIMIT ?";
+  }
+  params.push(clampedLimit + 1);
+
+  const rawRows = db.prepare(sql).all(...params) as Array<AuditHistoryEntry & { action: string }>;
+  const hasMore = rawRows.length > clampedLimit;
+  const rows = rawRows.slice(0, clampedLimit).map((row) => ({
+    ...row,
+    action: normalizeAuditAction(row.action),
+  }));
+
+  return {
+    entries: rows,
+    hasMore,
+    nextCursor: rows.length > 0 ? rows[rows.length - 1].id : cursor ?? null,
+  };
 }
 
 // --- Hint helpers ---
