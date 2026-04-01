@@ -31,7 +31,7 @@ Part of the Hugin & Munin personal AI system. See `prd.md` for full product cont
 | `memory_write` | Store/update a state entry (namespace + key + content). Supports compare-and-swap via `expected_updated_at` for tracked statuses. Auto-canonicalizes lifecycle tags. |
 | `memory_read` | Retrieve a specific state entry by namespace + key |
 | `memory_get` | Retrieve any entry (state or log) by UUID |
-| `memory_query` | Search memories (lexical/semantic/hybrid) with filters |
+| `memory_query` | Search and filter memories (lexical/semantic/hybrid). Supports `since`/`until` temporal filters. Query string optional — can browse by filters alone (tags, namespace, time range). |
 | `memory_log` | Append a chronological log entry to a namespace |
 | `memory_list` | Browse namespaces and their contents (with recent log previews; demo and completed task namespaces hidden by default) |
 | `memory_delete` | Delete entries (with token-based confirmation) |
@@ -448,9 +448,10 @@ OAuth 2.1 support enables Claude.ai and Claude mobile to connect to Munin Memory
 
 The `verifyAccessToken()` method checks in order:
 1. **Legacy Bearer token** — if token matches `MUNIN_API_KEY`, returns immediately (backward compat)
-2. **OAuth access token** — looks up in `oauth_tokens` table
+2. **Agent service token** — SHA-256 hash lookup in `principals.token_hash` (for agents created via `munin-admin`)
+3. **OAuth access token** — looks up in `oauth_tokens` table
 
-Existing Claude Code and Claude Desktop clients using `MUNIN_API_KEY` continue working unchanged.
+Existing Claude Code and Claude Desktop clients using `MUNIN_API_KEY` continue working unchanged. Agent principals (e.g. Gemini CLI) use service tokens issued by `munin-admin principals add`.
 
 ### OAuth endpoints (served by MCP SDK auth router)
 
