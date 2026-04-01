@@ -252,6 +252,8 @@ export interface QueryOptions {
   entryType?: EntryType;
   tags?: string[];
   limit?: number;
+  since?: string;
+  until?: string;
 }
 
 export interface LexicalQueryResult {
@@ -286,7 +288,7 @@ export function queryEntriesLexicalScored(
   db: Database.Database,
   options: QueryOptions,
 ): LexicalQueryResult[] {
-  const { query, namespace, entryType, tags, limit = 10 } = options;
+  const { query, namespace, entryType, tags, limit = 10, since, until } = options;
   const clampedLimit = Math.min(Math.max(limit, 1), 50);
 
   let sql = `
@@ -321,6 +323,16 @@ export function queryEntriesLexicalScored(
     }
   }
 
+  if (since) {
+    sql += " AND e.updated_at >= ?";
+    params.push(since);
+  }
+
+  if (until) {
+    sql += " AND e.updated_at <= ?";
+    params.push(until);
+  }
+
   sql += " ORDER BY lexical_score LIMIT ?";
   params.push(clampedLimit);
 
@@ -334,6 +346,67 @@ export function queryEntriesLexicalScored(
       rank: index + 1,
     };
   });
+}
+
+export interface FilterOptions {
+  namespace?: string;
+  entryType?: EntryType;
+  tags?: string[];
+  limit?: number;
+  since?: string;
+  until?: string;
+}
+
+/**
+ * Query entries by filters only (no FTS search text). Results ordered by updated_at DESC.
+ * Used when memory_query is called without a query string — pure browse-by-filter.
+ */
+export function queryEntriesByFilter(
+  db: Database.Database,
+  options: FilterOptions,
+): Entry[] {
+  const { namespace, entryType, tags, limit = 10, since, until } = options;
+  const clampedLimit = Math.min(Math.max(limit, 1), 50);
+
+  let sql = "SELECT * FROM entries WHERE 1=1";
+  const params: unknown[] = [];
+
+  if (namespace) {
+    if (namespace.endsWith("/")) {
+      sql += " AND namespace LIKE ? ESCAPE '\\'";
+      params.push(escapeForLike(namespace) + "%");
+    } else {
+      sql += " AND namespace = ?";
+      params.push(namespace);
+    }
+  }
+
+  if (entryType) {
+    sql += " AND entry_type = ?";
+    params.push(entryType);
+  }
+
+  if (tags && tags.length > 0) {
+    for (const tag of tags) {
+      sql += " AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)";
+      params.push(tag);
+    }
+  }
+
+  if (since) {
+    sql += " AND updated_at >= ?";
+    params.push(since);
+  }
+
+  if (until) {
+    sql += " AND updated_at <= ?";
+    params.push(until);
+  }
+
+  sql += " ORDER BY updated_at DESC LIMIT ?";
+  params.push(clampedLimit);
+
+  return db.prepare(sql).all(...params) as Entry[];
 }
 
 // --- List operations ---
@@ -524,6 +597,8 @@ export interface SemanticQueryOptions {
   entryType?: EntryType;
   tags?: string[];
   limit?: number;
+  since?: string;
+  until?: string;
 }
 
 export function queryEntriesSemantic(
@@ -537,7 +612,7 @@ export function queryEntriesSemanticScored(
   db: Database.Database,
   options: SemanticQueryOptions,
 ): SemanticQueryResult[] {
-  const { queryEmbedding, namespace, entryType, tags, limit = 10 } = options;
+  const { queryEmbedding, namespace, entryType, tags, limit = 10, since, until } = options;
   const clampedLimit = Math.min(Math.max(limit, 1), 50);
 
   // Fetch enough KNN candidates to satisfy clampedLimit after filtering.
@@ -582,6 +657,9 @@ export function queryEntriesSemanticScored(
       const entryTags: string[] = JSON.parse(entry.tags);
       if (!tags.every((t) => entryTags.includes(t))) continue;
     }
+
+    if (since && entry.updated_at < since) continue;
+    if (until && entry.updated_at > until) continue;
 
     results.push({
       entry,

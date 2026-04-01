@@ -498,6 +498,34 @@ export class MuninOAuthProvider implements OAuthServerProvider {
       }
     }
 
+    // Check agent service tokens (principals.token_hash)
+    const serviceTokenHash = createHash("sha256").update(token).digest("hex");
+    const principalRow = this.db
+      .prepare(
+        `SELECT principal_id, principal_type, revoked_at, expires_at
+         FROM principals
+         WHERE token_hash = ?`,
+      )
+      .get(serviceTokenHash) as
+      | { principal_id: string; principal_type: string; revoked_at: string | null; expires_at: string | null }
+      | undefined;
+
+    if (principalRow) {
+      if (principalRow.revoked_at !== null) {
+        throw new InvalidTokenError("Agent token has been revoked");
+      }
+      if (principalRow.expires_at !== null && principalRow.expires_at < new Date().toISOString()) {
+        throw new InvalidTokenError("Agent token has expired");
+      }
+      const farFuture = Math.floor(Date.now() / 1000) + 365 * 24 * 3600;
+      return {
+        token,
+        clientId: `principal:${principalRow.principal_id}`,
+        scopes: [],
+        expiresAt: farFuture,
+      };
+    }
+
     // Check OAuth tokens
     const accessTokenHash = hashOpaqueValue(token);
     const row = this.db

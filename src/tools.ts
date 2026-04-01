@@ -18,6 +18,7 @@ import {
   queryEntriesSemanticScored,
   queryEntriesHybrid,
   queryEntriesHybridScored,
+  queryEntriesByFilter,
   listNamespaces,
   listNamespaceContents,
   previewDelete,
@@ -849,14 +850,14 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_query",
     description:
-      "Search across memories. Supports lexical (FTS5 keyword), semantic (vector similarity), and hybrid (RRF fusion of both) search modes. Filters by namespace prefix, entry type, and tags. Pass `explain: true` to include retrieval metadata and per-result match explanations.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Search and filter memories. Supports lexical (FTS5 keyword), semantic (vector similarity), and hybrid (RRF fusion of both) search modes. Filters by namespace prefix, entry type, tags, and time range (since/until). Can be used without a query to browse by filters alone (e.g. all entries with a specific tag, or all entries updated today). Pass `explain: true` to include retrieval metadata and per-result match explanations.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
     inputSchema: {
       type: "object" as const,
       properties: {
         query: {
           type: "string",
           description:
-            "Search terms. For lexical mode, FTS5 syntax supported. For semantic/hybrid, natural language works best.",
+            "Search terms. For lexical mode, FTS5 syntax supported. For semantic/hybrid, natural language works best. Optional — omit to browse by filters alone (tags, namespace, time range).",
         },
         namespace: {
           type: "string",
@@ -888,8 +889,16 @@ const TOOL_DEFINITIONS = [
           type: "boolean",
           description: "Optional. If true, include retrieval metadata and per-result match explanations.",
         },
+        since: {
+          type: "string",
+          description: "Optional. ISO 8601 timestamp. Only return entries updated at or after this time. E.g. '2026-04-01T00:00:00Z'.",
+        },
+        until: {
+          type: "string",
+          description: "Optional. ISO 8601 timestamp. Only return entries updated at or before this time.",
+        },
       },
-      required: ["query"],
+      required: [],
     },
   },
   {
@@ -1592,16 +1601,58 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
 
           case "memory_query": {
             const queryArgs = (args ?? {}) as unknown as QueryParams;
-            const { query, namespace, entry_type, tags, limit, search_mode } = queryArgs;
+            const { query, namespace, entry_type, tags, limit, search_mode, since, until } = queryArgs;
             const explain = queryArgs.explain === true;
+
+            // Filter-only mode: no query text, just browse by filters
             if (!query || typeof query !== "string") {
-              const receivedKeys = Object.keys(args ?? {});
-              const detail = query === undefined || query === null
-                ? `missing required field 'query'`
-                : typeof query !== "string"
-                  ? `'query' must be a string, got ${typeof query}`
-                  : `'query' must be non-empty`;
-              return { content: [{ type: "text", text: JSON.stringify({ error: "validation_error", message: `Invalid arguments for memory_query: ${detail}. Received keys: [${receivedKeys.join(", ")}]. Example: {"query": "your search terms"}.` }) }] };
+              // Must have at least one filter to avoid returning everything
+              if (!namespace && (!tags || tags.length === 0) && !since && !until && !entry_type) {
+                return { content: [{ type: "text", text: JSON.stringify({ error: "validation_error", message: "Provide either a 'query' string for search, or at least one filter (namespace, tags, entry_type, since, until) to browse." }) }] };
+              }
+              const requestedLimit = Math.min(Math.max(limit ?? 10, 1), 50);
+              let filterResults = queryEntriesByFilter(db, {
+                namespace,
+                entryType: entry_type,
+                tags,
+                limit: requestedLimit,
+                since,
+                until,
+              });
+              filterResults = filterByAccess(ctx, filterResults);
+              const formatted = filterResults.map((entry) => ({
+                id: entry.id,
+                namespace: entry.namespace,
+                key: entry.key,
+                entry_type: entry.entry_type,
+                content_preview: contentPreview(entry.content),
+                tags: parseTags(entry.tags),
+                created_at: entry.created_at,
+                updated_at: entry.updated_at,
+              }));
+
+              // Analytics
+              if (sessionId) {
+                const resultIds = formatted.map((r) => r.id);
+                const resultNamespaces = formatted.map((r) => r.namespace);
+                const resultRanks = formatted.map((_, i) => i + 1);
+                logRetrievalEvent(db, {
+                  sessionId,
+                  toolName: "memory_query",
+                  queryText: `[filter-only] ns=${namespace ?? "*"} tags=${tags?.join(",") ?? "*"} since=${since ?? "*"} until=${until ?? "*"}`,
+                  requestedMode: "lexical",
+                  actualMode: "lexical",
+                  resultIds,
+                  resultNamespaces,
+                  resultRanks,
+                });
+              }
+
+              return { content: [{ type: "text", text: JSON.stringify({
+                results: formatted,
+                total: formatted.length,
+                search_mode: "filter",
+              }) }] };
             }
 
             const requestedLimit = Math.min(Math.max(limit ?? 10, 1), 50);
@@ -1614,6 +1665,8 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               limit: requestedLimit,
               search_mode,
               explain,
+              since,
+              until,
             };
             const requestedMode: SearchMode = search_mode ?? "hybrid";
             let actualMode: SearchMode = requestedMode;
@@ -1653,6 +1706,8 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                   entryType: entry_type,
                   tags,
                   limit: internalLimit,
+                  since,
+                  until,
                 });
                 results = semanticResults.map((result) => result.entry);
               }
@@ -1667,8 +1722,8 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               } else {
                 const buf = embeddingToBuffer(queryEmb);
                 hybridResults = queryEntriesHybridScored(db, {
-                  ftsOptions: { query, namespace, entryType: entry_type, tags, limit: internalLimit },
-                  semanticOptions: { queryEmbedding: buf, namespace, entryType: entry_type, tags, limit: internalLimit },
+                  ftsOptions: { query, namespace, entryType: entry_type, tags, limit: internalLimit, since, until },
+                  semanticOptions: { queryEmbedding: buf, namespace, entryType: entry_type, tags, limit: internalLimit, since, until },
                 });
                 results = hybridResults.map((result) => result.entry);
               }
@@ -1682,6 +1737,8 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                 entryType: entry_type,
                 tags,
                 limit: internalLimit,
+                since,
+                until,
               });
               results = lexicalResults.map((result) => result.entry);
 
@@ -1694,6 +1751,8 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                     entryType: entry_type,
                     tags,
                     limit: internalLimit,
+                    since,
+                    until,
                   });
                   results = lexicalResults.map((result) => result.entry);
                   if (results.length > 0 && !warning) {

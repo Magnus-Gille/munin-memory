@@ -54,6 +54,8 @@ export interface QueryParams {
   limit?: number;
   search_mode?: SearchMode;
   explain?: boolean;
+  since?: string;
+  until?: string;
 }
 
 export interface OrientParams extends ListParams {
