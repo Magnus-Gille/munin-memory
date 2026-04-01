@@ -332,6 +332,7 @@ const STALENESS_THRESHOLD_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
 const EVENT_STALENESS_THRESHOLD_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
 const EVENT_LOOKAHEAD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const QUERY_RERANK_OVERFETCH_MULTIPLIER = 5;
+const DEFAULT_ORIENT_DETAIL: OrientDetail = "compact";
 const RELAXED_QUERY_STOPWORDS = new Set([
   "a", "an", "and", "are", "for", "how", "i", "important", "is", "it",
   "my", "myself", "of", "or", "should", "the", "to", "what",
@@ -754,7 +755,7 @@ function resolveOrientDetail(params: OrientParams): OrientDetail {
     return params.detail;
   }
   if (params.include_full_conventions) return "full";
-  return "compact";
+  return DEFAULT_ORIENT_DETAIL;
 }
 
 function matchesNamespacePrefix(namespace: string, prefix?: string): boolean {
@@ -898,7 +899,9 @@ function compactConventions(updatedAt: string): string {
     "",
     "## Key Rules",
     "- **Handshake:** memory_orient first, then memory_read for specifics, memory_query for search.",
+    "- **Read vs get:** `memory_read` uses namespace+key. `memory_get` uses an entry UUID from query results.",
     "- **State entries** = current truth (mutable). **Log entries** = chronological (append-only).",
+    "- **Write vs update_status:** use `memory_update_status` for tracked `projects/*`/`clients/*` status entries; use `memory_write` for other state.",
     "- **Write protocol:** Log decisions first (memory_log), then update status with CAS (expected_updated_at).",
     "- **Lifecycle tags** (required on status): active, blocked, completed, stopped, maintenance, archived.",
     "- **Tracked namespaces** (dashboard): projects/*, clients/*. Must have status key + lifecycle tag.",
@@ -922,7 +925,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_orient",
     description:
-      "START HERE. Call this at the beginning of every conversation before using any other memory tool. Returns conventions, a computed project dashboard (grouped by lifecycle from status entries), optional curated notes, actionable maintenance suggestions, and optionally a namespace overview — everything needed to orient yourself in one call.\n\nThe dashboard is computed automatically from status entries in projects/* and clients/* namespaces. No manual workbench maintenance needed. Demo namespaces and completed task-run namespaces are hidden by default.\n\nUse `detail` to control response size. `standard` preserves the current default behavior, `compact` trims dashboard/namespaces for token-sensitive environments, and `full` includes the full conventions document.",
+      `START HERE. Call this at the beginning of every conversation before using any other memory tool. Returns conventions, a computed project dashboard (grouped by lifecycle from status entries), optional curated notes, actionable maintenance suggestions, and optionally a namespace overview — everything needed to orient yourself in one call.\n\nThe dashboard is computed automatically from status entries in projects/* and clients/* namespaces. No manual workbench maintenance needed. Demo namespaces and completed task-run namespaces are hidden by default.\n\nUse \`detail\` to control response size. \`${DEFAULT_ORIENT_DETAIL}\` is the default for token-sensitive handshakes, \`standard\` includes the full dashboard and namespace overview, and \`full\` includes the full conventions document.`,
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -930,7 +933,7 @@ const TOOL_DEFINITIONS = [
           type: "string",
           enum: ["compact", "standard", "full"],
           description:
-            "Optional. Controls response size. `standard` is the default, `compact` trims dashboard/namespaces, and `full` returns the full conventions document.",
+            `Optional. Controls response size. \`${DEFAULT_ORIENT_DETAIL}\` is the default, \`compact\` trims dashboard/namespaces, \`standard\` includes the full dashboard and namespace overview, and \`full\` returns the full conventions document.`,
         },
         include_demo: {
           type: "boolean",
@@ -969,7 +972,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_write",
     description:
-      "Store or update a state entry in memory. If an entry with the same namespace+key exists, it will be overwritten. Use this for mutable facts: project status, current decisions, known preferences.\n\nIf this is your first memory operation in this conversation, call memory_orient first.\n\nNamespace conventions: projects/<name> for project state, people/<name> for context about people, decisions/<topic> for cross-cutting decisions, meta/<topic> for system notes.\n\nKey conventions: 'status' = compact resumption summary (Phase / Current work / Blockers / Next — keep brief, move details to other keys like 'architecture', 'workflow', 'research'). 'index' = directory of important keys in this namespace and their purpose.\n\nTag vocabulary: Use canonical lifecycle tags on status entries: active, blocked, completed, stopped, maintenance, archived. Aliases are auto-normalized (done→completed, paused→stopped, inactive→archived). Category tags: decision, architecture, preference, milestone, convention. Type tags: bug, feature, research. Prefixed tags for cross-referencing: client:<name>, person:<name>, topic:<topic>, type:<artifact> (pdf, presentation, meeting-notes), source:external/internal.\n\nThe project dashboard is computed automatically from status entries with lifecycle tags. No manual workbench maintenance needed. Writing to 'status' in projects/* or clients/* supports compare-and-swap via expected_updated_at.\n\nTo start a new project: (1) write projects/<name>/status with a lifecycle tag (e.g. 'active'), (2) optionally write projects/<name>/index listing the keys.",
+      "Store or update a state entry in memory. If an entry with the same namespace+key exists, it will be overwritten. Use this for mutable facts and non-tracked state. For `status` entries under `projects/*` or `clients/*`, prefer `memory_update_status`.\n\nIf this is your first memory operation in this conversation, call memory_orient first.\n\nNamespace conventions: projects/<name> for project state, people/<name> for context about people, decisions/<topic> for cross-cutting decisions, meta/<topic> for system notes.\n\nKey conventions: 'status' = compact resumption summary (Phase / Current work / Blockers / Next — keep brief, move details to other keys like 'architecture', 'workflow', 'research'). 'index' = directory of important keys in this namespace and their purpose.\n\nTag vocabulary: Use canonical lifecycle tags on status entries: active, blocked, completed, stopped, maintenance, archived. Aliases are auto-normalized (done→completed, paused→stopped, inactive→archived). Category tags: decision, architecture, preference, milestone, convention. Type tags: bug, feature, research. Prefixed tags for cross-referencing: client:<name>, person:<name>, topic:<topic>, type:<artifact> (pdf, presentation, meeting-notes), source:external/internal.\n\nThe project dashboard is computed automatically from status entries with lifecycle tags. No manual workbench maintenance needed. Writing to 'status' in projects/* or clients/* supports compare-and-swap via expected_updated_at.\n\nTo start a new project: (1) write projects/<name>/status with a lifecycle tag (e.g. 'active'), (2) optionally write projects/<name>/index listing the keys.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -1016,7 +1019,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_update_status",
     description:
-      "Create or patch a tracked `status` entry using a server-enforced structure. Use this for `projects/*` and `clients/*` when you want reliable partial updates instead of read-modify-write on markdown blobs. The server rewrites the content into canonical sections: Phase, Current Work, Blockers, Next Steps, and optional Notes.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Create or patch a tracked `status` entry using a server-enforced structure. Use this for `projects/*` and `clients/*` status updates instead of `memory_write` when you want reliable partial updates instead of read-modify-write on markdown blobs. The server rewrites the content into canonical sections: Phase, Current Work, Blockers, Next Steps, and optional Notes. Status changes are not auto-logged; call `memory_log` separately when recording a decision or milestone.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -1061,7 +1064,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_read",
     description:
-      "Retrieve a specific state entry by namespace and key. Returns the full content, tags, and timestamps. Returns a clear 'not found' message if the entry doesn't exist (not an error).\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Retrieve a specific state entry by namespace and key. Use this when you already know both. Returns the full content, tags, and timestamps. Returns a clear 'not found' message if the entry doesn't exist (not an error).\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -1103,7 +1106,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_get",
     description:
-      "Retrieve the full content of a single memory entry by its UUID. Use this after memory_query returns truncated previews — copy the entry's ID from the query result and call this to get the complete content. Works for both state and log entries. Unlike memory_read (which looks up by namespace+key), memory_get requires the entry's UUID.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Retrieve the full content of a single memory entry by its UUID. Use this after `memory_query` returns truncated previews and you have an entry ID. If you already know namespace+key, use `memory_read` instead. Works for both state and log entries.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -2014,15 +2017,18 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                 return errResult("query", "validation_error", "Provide either a 'query' string for search, or at least one filter (namespace, tags, entry_type, since, until) to browse.");
               }
               const requestedLimit = Math.min(Math.max(limit ?? 10, 1), 50);
+              const internalFilterLimit = ctx.principalType === "owner"
+                ? requestedLimit
+                : Math.min(requestedLimit * QUERY_RERANK_OVERFETCH_MULTIPLIER, 50);
               let filterResults = queryEntriesByFilter(db, {
                 namespace,
                 entryType: entry_type,
                 tags,
-                limit: requestedLimit,
+                limit: internalFilterLimit,
                 since,
                 until,
               });
-              filterResults = filterByAccess(ctx, filterResults);
+              filterResults = filterByAccess(ctx, filterResults).slice(0, requestedLimit);
               const formatted = filterResults.map((entry) => ({
                 id: entry.id,
                 namespace: entry.namespace,
@@ -2175,11 +2181,11 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             if (trackedStatuses) {
               results = injectAttentionQueryEntries(results, queryParams, trackedStatuses);
             }
+            results = filterByAccess(ctx, results);
             const completedTasks = shouldApplyDefaultQuerySuppression(queryParams)
               ? getCompletedTaskNamespaces(db)
               : new Set<string>();
             results = rerankQueryResults(results, queryParams, completedTasks, trackedStatuses).slice(0, requestedLimit);
-            results = filterByAccess(ctx, results);
 
             const lexicalById = new Map(lexicalResults.map((result) => [result.entry.id, result] as const));
             const semanticById = new Map(semanticResults.map((result) => [result.entry.id, result] as const));

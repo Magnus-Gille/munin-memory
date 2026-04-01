@@ -13,6 +13,13 @@ SECURITY-REMEDIATION.local.md
 PUBLIC-REPO-AUDIT.local/
 tmp/
 docs/*
+!docs/vision.md
+!docs/roadmap.md
+!docs/phase-1-engineering-plan.md
+!docs/phase-2-engineering-plan.md
+!docs/phase-3-engineering-plan.md
+!docs/phase-4-engineering-plan.md
+!docs/platform-validation-plan.md
 !docs/usage-model.md
 !docs/claude-md-template.md
 !docs/authorization-matrix.md

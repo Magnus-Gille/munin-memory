@@ -194,6 +194,8 @@ Built by Claude (Opus 4.6) and Magnus Gille, adversarially reviewed by Codex (GP
 
 ## Project docs
 
+- [docs/vision.md](docs/vision.md)
+- [docs/roadmap.md](docs/roadmap.md)
 - [docs/appliance-profiles.md](docs/appliance-profiles.md)
 - [docs/usage-model.md](docs/usage-model.md)
 - [CONTRIBUTING.md](CONTRIBUTING.md)

@@ -413,6 +413,41 @@ describe("memory_query — access enforcement", () => {
     }
   });
 
+  it("family search fills limit from accessible results even when top reranked hit is inaccessible", async () => {
+    const raw = await familyCall("memory_query", {
+      query: "moonbeam",
+      search_mode: "lexical",
+      limit: 1,
+    });
+    const result = parse(raw) as { total: number; results: Array<{ namespace: string }> };
+
+    expect(result.total).toBe(1);
+    expect(result.results[0].namespace).not.toBe("projects/foo");
+    expect(
+      result.results[0].namespace.startsWith("users/sara/") ||
+        result.results[0].namespace.startsWith("shared/family/"),
+    ).toBe(true);
+  });
+
+  it("family filter-only browse fills limit from accessible results when newest entry is inaccessible", async () => {
+    db.prepare("UPDATE entries SET updated_at = ? WHERE namespace = 'projects/foo'").run("2026-03-03T00:00:00.000Z");
+    db.prepare("UPDATE entries SET updated_at = ? WHERE namespace = 'users/sara/notes'").run("2026-03-02T00:00:00.000Z");
+    db.prepare("UPDATE entries SET updated_at = ? WHERE namespace = 'shared/family/calendar'").run("2026-03-01T00:00:00.000Z");
+
+    const raw = await familyCall("memory_query", {
+      entry_type: "state",
+      limit: 1,
+    });
+    const result = parse(raw) as { total: number; results: Array<{ namespace: string }> };
+
+    expect(result.total).toBe(1);
+    expect(result.results[0].namespace).not.toBe("projects/foo");
+    expect(
+      result.results[0].namespace.startsWith("users/sara/") ||
+        result.results[0].namespace.startsWith("shared/family/"),
+    ).toBe(true);
+  });
+
   it("owner queries → sees all results including restricted namespaces", async () => {
     const raw = await ownerCall("memory_query", { query: "moonbeam" });
     const result = parse(raw) as { results: Array<{ namespace: string }> };
