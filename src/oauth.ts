@@ -73,6 +73,7 @@ interface OAuthAuthCodeRow {
   expires_at: number;
   used: number;
   created_at: string;
+  principal_id: string | null;
 }
 
 interface OAuthTokenRow {
@@ -85,6 +86,7 @@ interface OAuthTokenRow {
   revoked: number;
   created_at: string;
   refresh_token_ref: string | null;
+  principal_id: string | null;
 }
 
 // --- Clients Store ---
@@ -173,6 +175,10 @@ interface PendingAuth {
   state?: string;
   resource?: string;
   expiresAt: number;
+  /** Principal resolved at consent time. Set by the consent flow when identity is known. */
+  resolvedPrincipalId?: string;
+  /** Email verified at consent time. Used for TOCTOU check on POST. */
+  resolvedEmail?: string;
 }
 
 function hashOpaqueValue(value: string): string {
@@ -187,6 +193,7 @@ export class MuninOAuthProvider implements OAuthServerProvider {
   private readonly legacyApiKeyBuf: Buffer | undefined;
   private readonly clientSecretWrapKey: Buffer | undefined;
   private readonly pendingAuths = new Map<string, PendingAuth>();
+  private lastResolvedIdentity: { email: string; principalId: string | null } | undefined;
 
   constructor(
     private db: Database.Database,
@@ -207,7 +214,7 @@ export class MuninOAuthProvider implements OAuthServerProvider {
     // The consent page only receives the nonce — no security-critical
     // params in hidden form fields.
     const nonce = randomBytes(32).toString("hex");
-    this.pendingAuths.set(nonce, {
+    const pending: PendingAuth = {
       clientId: client.client_id,
       redirectUri: params.redirectUri,
       codeChallenge: params.codeChallenge,
@@ -215,17 +222,36 @@ export class MuninOAuthProvider implements OAuthServerProvider {
       state: params.state,
       resource: params.resource?.toString(),
       expiresAt: Math.floor(Date.now() / 1000) + AUTH_CODE_TTL,
-    });
+    };
+
+    // If identity was resolved before authorize (set via setLastResolvedIdentity),
+    // bind it to the pending auth
+    if (this.lastResolvedIdentity) {
+      pending.resolvedPrincipalId = this.lastResolvedIdentity.principalId ?? undefined;
+      pending.resolvedEmail = this.lastResolvedIdentity.email;
+      this.lastResolvedIdentity = undefined;
+    }
+
+    this.pendingAuths.set(nonce, pending);
 
     const html = renderConsentPage({
       clientName: client.client_name ?? client.client_id,
       scopes: params.scopes ?? [],
       nonce,
+      principalName: pending.resolvedPrincipalId ?? undefined,
     });
 
     res.setHeader("Content-Type", "text/html");
     res.setHeader("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'");
     res.send(html);
+  }
+
+  /**
+   * Set the resolved identity for the next authorize() call.
+   * Called by the consent middleware before the SDK's authorize handler.
+   */
+  setLastResolvedIdentity(identity: { email: string; principalId: string | null } | undefined): void {
+    this.lastResolvedIdentity = identity;
   }
 
   /**
@@ -258,23 +284,63 @@ export class MuninOAuthProvider implements OAuthServerProvider {
     const now = nowUTC();
     const expiresAt = Math.floor(Date.now() / 1000) + AUTH_CODE_TTL;
 
-    this.db
-      .prepare(
-        `INSERT INTO oauth_auth_codes
-         (code, client_id, code_challenge, redirect_uri, scopes, resource, state, expires_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        codeHash,
-        pending.clientId,
-        pending.codeChallenge,
-        pending.redirectUri,
-        JSON.stringify(pending.scopes),
-        pending.resource ?? null,
-        pending.state ?? null,
-        expiresAt,
-        now,
-      );
+    const txn = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO oauth_auth_codes
+           (code, client_id, code_challenge, redirect_uri, scopes, resource, state, expires_at, created_at, principal_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          codeHash,
+          pending.clientId,
+          pending.codeChallenge,
+          pending.redirectUri,
+          JSON.stringify(pending.scopes),
+          pending.resource ?? null,
+          pending.state ?? null,
+          expiresAt,
+          now,
+          pending.resolvedPrincipalId ?? null,
+        );
+
+      // Auto-map OAuth client to principal (device inventory)
+      if (pending.resolvedPrincipalId) {
+        // Check for cross-principal conflicts
+        const existing = this.db
+          .prepare(
+            "SELECT principal_id FROM principal_oauth_clients WHERE oauth_client_id = ? AND revoked_at IS NULL",
+          )
+          .get(pending.clientId) as { principal_id: string } | undefined;
+
+        if (existing && existing.principal_id !== pending.resolvedPrincipalId) {
+          // Cross-principal conflict — log and fail hard
+          this.db
+            .prepare(
+              "INSERT INTO audit_log (timestamp, agent_id, action, namespace, key, detail) VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .run(
+              now,
+              "oauth",
+              "mapping_conflict",
+              "admin/oauth-clients",
+              pending.clientId,
+              `client_id already mapped to "${existing.principal_id}", attempted remap to "${pending.resolvedPrincipalId}"`,
+            );
+          // Don't create the mapping, but still issue the code (the token will carry principal_id)
+        } else if (!existing) {
+          this.db
+            .prepare(
+              `INSERT INTO principal_oauth_clients (oauth_client_id, principal_id, mapped_at, mapped_by)
+               VALUES (?, ?, ?, 'consent')`,
+            )
+            .run(pending.clientId, pending.resolvedPrincipalId, now);
+        }
+        // If same principal — no-op (already mapped)
+      }
+    });
+
+    txn();
 
     const targetUrl = new URL(pending.redirectUri);
     targetUrl.searchParams.set("code", code);
@@ -366,7 +432,7 @@ export class MuninOAuthProvider implements OAuthServerProvider {
     const scopes: string[] = JSON.parse(row.scopes);
     const resourceStr = resource?.toString() ?? row.resource ?? undefined;
 
-    return this.issueTokenPair(client.client_id, scopes, resourceStr);
+    return this.issueTokenPair(client.client_id, scopes, resourceStr, row.principal_id ?? undefined);
   }
 
   async exchangeRefreshToken(
@@ -409,7 +475,7 @@ export class MuninOAuthProvider implements OAuthServerProvider {
     const tokenScopes: string[] = scopes ?? JSON.parse(row.scopes);
     const resourceStr = resource?.toString() ?? row.resource ?? undefined;
 
-    return this.issueTokenPair(client.client_id, tokenScopes, resourceStr);
+    return this.issueTokenPair(client.client_id, tokenScopes, resourceStr, row.principal_id ?? undefined);
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
@@ -449,13 +515,20 @@ export class MuninOAuthProvider implements OAuthServerProvider {
       throw new InvalidTokenError("Access token has expired");
     }
 
-    return {
+    const authInfo: AuthInfo = {
       token,
       clientId: row.client_id,
       scopes: JSON.parse(row.scopes),
       expiresAt: row.expires_at,
       resource: row.resource ? new URL(row.resource) : undefined,
     };
+
+    // Attach principal_id for token-bound principal resolution (v6+)
+    if (row.principal_id) {
+      (authInfo as AuthInfo & { principalId?: string }).principalId = row.principal_id;
+    }
+
+    return authInfo;
   }
 
   async revokeToken(
@@ -509,6 +582,7 @@ export class MuninOAuthProvider implements OAuthServerProvider {
     clientId: string,
     scopes: string[],
     resource?: string,
+    principalId?: string,
   ): OAuthTokens {
     const now = nowUTC();
     const nowSecs = Math.floor(Date.now() / 1000);
@@ -528,17 +602,17 @@ export class MuninOAuthProvider implements OAuthServerProvider {
       this.db
         .prepare(
           `INSERT INTO oauth_tokens
-           (token, token_type, client_id, scopes, resource, expires_at, created_at)
-           VALUES (?, 'refresh', ?, ?, ?, ?, ?)`,
+           (token, token_type, client_id, scopes, resource, expires_at, created_at, principal_id)
+           VALUES (?, 'refresh', ?, ?, ?, ?, ?, ?)`,
         )
-        .run(refreshTokenHash, clientId, scopesJson, resource ?? null, refreshExpiresAt, now);
+        .run(refreshTokenHash, clientId, scopesJson, resource ?? null, refreshExpiresAt, now, principalId ?? null);
 
       // Insert access token linked to refresh token
       this.db
         .prepare(
           `INSERT INTO oauth_tokens
-           (token, token_type, client_id, scopes, resource, expires_at, created_at, refresh_token_ref)
-           VALUES (?, 'access', ?, ?, ?, ?, ?, ?)`,
+           (token, token_type, client_id, scopes, resource, expires_at, created_at, refresh_token_ref, principal_id)
+           VALUES (?, 'access', ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           accessTokenHash,
@@ -548,6 +622,7 @@ export class MuninOAuthProvider implements OAuthServerProvider {
           accessExpiresAt,
           now,
           refreshTokenHash,
+          principalId ?? null,
         );
     });
 

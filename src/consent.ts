@@ -11,8 +11,9 @@ export function renderConsentPage(params: {
   clientName: string;
   scopes: string[];
   nonce: string;
+  principalName?: string;
 }): string {
-  const { clientName, scopes, nonce } = params;
+  const { clientName, scopes, nonce, principalName } = params;
   const scopeList = scopes.length > 0
     ? scopes.map((s) => `<li>${escapeHtml(s)}</li>`).join("\n            ")
     : "<li>Full access to memory tools</li>";
@@ -78,7 +79,7 @@ export function renderConsentPage(params: {
     <h1>Authorize Access</h1>
     <p class="subtitle">
       <span class="client-name">${escapeHtml(clientName)}</span>
-      wants to access your Munin Memory.
+      wants to access ${principalName ? `<strong>${escapeHtml(principalName)}</strong>'s` : "your"} Munin Memory.
     </p>
     <div class="scopes">
       <h2>Requested permissions:</h2>

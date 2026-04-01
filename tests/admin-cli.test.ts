@@ -47,8 +47,11 @@ describe("listPrincipals", () => {
   let db: Database.Database;
   beforeEach(() => { db = makeDb(); });
 
-  it("returns empty array for no principals", () => {
-    expect(listPrincipals(db)).toEqual([]);
+  it("returns only owner (auto-created by migration v6) for fresh db", () => {
+    const result = listPrincipals(db);
+    expect(result).toHaveLength(1);
+    expect(result[0].principalId).toBe("owner");
+    expect(result[0].principalType).toBe("owner");
   });
 
   it("returns principals with correct status derivation", () => {
@@ -72,7 +75,8 @@ describe("listPrincipals", () => {
     revokePrincipal(db, "agent-skuld");
 
     const result = listPrincipals(db);
-    expect(result).toHaveLength(3);
+    // 3 added + 1 auto-created owner = 4
+    expect(result).toHaveLength(4);
 
     const byId = Object.fromEntries(result.map((r) => [r.principalId, r]));
     expect(byId["sara"].status).toBe("active");
@@ -294,10 +298,10 @@ describe("updatePrincipal", () => {
     expect(showPrincipal(db, "sara")!.namespaceRules).toEqual(newRules);
   });
 
-  it("updates oauth-client-id", () => {
+  it("updates email", () => {
     addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
-    updatePrincipal(db, "sara", { oauthClientId: "client-sara-456" });
-    expect(showPrincipal(db, "sara")!.oauthClientId).toBe("client-sara-456");
+    updatePrincipal(db, "sara", { email: "sara@example.com" });
+    expect(showPrincipal(db, "sara")!.email).toBe("sara@example.com");
   });
 
   it("updates expires-at", () => {

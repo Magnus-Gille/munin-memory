@@ -288,26 +288,33 @@ After `MUNIN_EMBEDDINGS_MAX_FAILURES` (default 5) consecutive embedding failures
 - Over-fetch 5x limit from each source for RRF (not 3x)
 - Vec0 tables don't have an `id` column — use `entry_id TEXT` metadata column instead
 
-## Multi-principal access control (Feature 5 — Phase 1)
+## Multi-principal access control (Feature 5)
 
 ### Overview
 
 Server-enforced namespace isolation. Each authenticated principal has scoped namespace rules; owner retains full access with zero overhead. All 12 MCP tools enforce access rules via `AccessContext`.
 
-### Schema (migration v5)
+### Schema
 
-- **`principals`** — maps tokens/OAuth clients to principals with namespace rules
+- **`principals`** (migration v5) — maps tokens/OAuth clients to principals with namespace rules
   - `principal_id` (unique, human-readable: "sara", "agent:skuld")
   - `principal_type` (owner/family/agent/external)
-  - `oauth_client_id` (for OAuth client → principal mapping)
+  - `email`, `email_lower` (v6 — for consent-time identity resolution)
+  - `oauth_client_id` (legacy, pre-v6 compat — will be dropped in v7)
   - `token_hash` (SHA-256, for agent service tokens)
   - `namespace_rules` (JSON: `[{"pattern": "users/sara/*", "permissions": "rw"}]`)
   - `revoked_at`, `expires_at` for lifecycle management
+- **`principal_oauth_clients`** (migration v6) — many-to-one device inventory
+  - `oauth_client_id` (PK, FK to `oauth_clients`)
+  - `principal_id` (which principal this device belongs to)
+  - `mapped_at`, `mapped_by` (consent/admin/migration)
+  - `revoked_at`, `last_used_at`
+- **Token-bound principals** (migration v6) — `principal_id` column on `oauth_auth_codes` and `oauth_tokens`. Set at consent time, carried forward on refresh. The token itself knows its principal.
 
 ### AccessContext threading
 
 ```
-HTTP: req.auth → resolveAccessContext(db, clientId, token) → AccessContext
+HTTP: req.auth → resolveAccessContext(db, clientId, token, tokenPrincipalId) → AccessContext
 Stdio: always ownerContext()
 → createMcpServer(db, sessionId, ctx) → registerTools(server, db, sessionId, ctx)
 → ctx captured in closure, checked in every tool handler
@@ -317,9 +324,28 @@ Stdio: always ownerContext()
 
 1. `clientId === "legacy-bearer"` → owner (no DB hit)
 2. `clientId.startsWith("principal:")` → lookup by `principal_id`
-3. Lookup `principals.oauth_client_id = clientId`
-4. Hash token → lookup `principals.token_hash`
-5. Not found / revoked / expired / error → zero-access context
+3. `tokenPrincipalId` (v6+) → token carries its own principal_id, lookup directly
+4. `clientId` → JOIN `principal_oauth_clients` → `principals` (v6+), fallback to `principals.oauth_client_id` (pre-v6)
+5. Hash token → lookup `principals.token_hash`
+6. Not found / revoked / expired / error → zero-access context
+
+### Multi-user OAuth auto-mapping (Phase 2)
+
+When a user goes through OAuth consent from any device (mobile, web):
+1. CF Access header provides their email
+2. Server looks up `principals` by `email_lower` — must be active, non-revoked, non-expired
+3. Resolved principal bound to PendingAuth, then written into auth code and tokens
+4. OAuth client auto-mapped to principal in `principal_oauth_clients`
+5. New device = new client_id, same auto-mapping flow. No manual intervention.
+
+**Identity resolution layers:**
+- `MUNIN_OAUTH_TRUSTED_USER_HEADER` + `VALUE` — gate check (is request trusted?) + owner fallback
+- `MUNIN_OAUTH_IDENTITY_HEADER` — identity claim (who is this user?) → DB lookup
+- Localhost → owner (dev mode)
+
+**TOCTOU protection:** Identity verified on both GET `/authorize` and POST `/authorize/approve`. Principal re-checked (not revoked/expired) in same transaction that creates auth code and mapping.
+
+**Conflict handling:** If a client_id is already mapped to a different principal, the mapping is NOT overwritten. A security event is logged to `audit_log`. Admin intervention required.
 
 ### Enforcement strategy
 
@@ -331,43 +357,45 @@ Stdio: always ownerContext()
 ### Key files
 
 - `src/access.ts` — AccessContext types, pattern matching, `resolveAccessContext`
+- `src/oauth.ts` — Token-bound principal binding, consent auto-mapping
 - `src/tools.ts` — Per-tool enforcement in every handler
-- `src/index.ts` — Threads AccessContext from transport to tools
+- `src/index.ts` — Threads AccessContext from transport to tools, `resolveConsentIdentity`
 - `docs/authorization-matrix.md` — Full tool-by-tool authorization spec
-
-### Phase 1 boundary (current)
-
-- Owner + scoped non-owner enforcement framework
-- Manual principal provisioning (SQLite insert)
-- Shared-namespace delete is owner-only (entries don't track principal ownership)
 
 ### Admin CLI (`munin-admin`)
 
-Principal management CLI. 7 commands: `list`, `show`, `add`, `revoke`, `update`, `rotate-token`, `test`.
+Principal management CLI + OAuth client management.
 
 ```bash
-# Dev
-npm run admin -- principals list
-
-# After build
+# Principals
 npx munin-admin principals list
-npx munin-admin principals add sara --type family --rules '[{"pattern":"users/sara/*","permissions":"rw"}]'
+npx munin-admin principals add sara --type family --email sara@example.com \
+  --rules '[{"pattern":"users/sara/*","permissions":"rw"},{"pattern":"shared/family/*","permissions":"rw"}]'
+npx munin-admin principals update sara --email newemail@example.com
 npx munin-admin principals test sara users/sara/notes
+
+# OAuth clients (device inventory)
+npx munin-admin oauth-clients list
+npx munin-admin oauth-clients list --principal sara
+npx munin-admin oauth-clients remove <oauth-client-id>
+npx munin-admin oauth-clients clear sara
 ```
 
 Key features:
 - `--json` flag on all commands for machine-readable output
 - `--type owner` requires `--force`
+- `--email` for OAuth consent-time identity resolution
 - Agent principals get auto-generated service tokens (printed once, stored as SHA-256 hash)
 - `rotate-token` for credential rotation
+- `oauth-clients remove` also revokes associated OAuth tokens
 - All mutations write to `audit_log`
 - Refuses non-existent DB path without `--init`
 
-### Not yet implemented (Phase 2+)
+### Not yet implemented (Phase 3+)
 
-- Sara onboarding (use `munin-admin` to provision)
 - Entry-level principal ownership (for shared-namespace per-entry delete)
 - Per-principal rate limiting
+- Drop `principals.oauth_client_id` column (v7 migration)
 
 ## Outcome-aware retrieval (Feature 4 — Phase 1)
 
@@ -518,6 +546,7 @@ See `technical-spec.md` § Security Module for the full pattern list.
 | `MUNIN_OAUTH_ACCESS_TOKEN_TTL` | `3600` | Access token lifetime (seconds) |
 | `MUNIN_OAUTH_REFRESH_TOKEN_TTL` | `2592000` | Refresh token lifetime (30 days, seconds) |
 | `MUNIN_OAUTH_CLIENT_SECRET_KEY` | — | Optional dedicated wrapping key for encrypting confidential OAuth client secrets at rest; defaults to `MUNIN_API_KEY` |
+| `MUNIN_OAUTH_IDENTITY_HEADER` | — | Header containing authenticated user's email for multi-user consent resolution (e.g. `cf-access-authenticated-user-email`) |
 | `MUNIN_ANALYTICS_RETENTION_DAYS` | `90` | Retention period for retrieval analytics (retrieval_events/outcomes). Sessions pruned at 7 days. |
 
 ## Spec amendments from adversarial review

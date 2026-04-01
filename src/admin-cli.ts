@@ -41,18 +41,29 @@ import {
 export interface PrincipalSummary {
   principalId: string;
   principalType: PrincipalType;
+  email: string | null;
   rulesCount: number;
   status: "active" | "revoked" | "expired";
   createdAt: string;
+}
+
+export interface OAuthClientMapping {
+  oauthClientId: string;
+  mappedAt: string;
+  mappedBy: string;
+  revokedAt: string | null;
+  lastUsedAt: string | null;
 }
 
 export interface PrincipalDetail {
   id: string;
   principalId: string;
   principalType: PrincipalType;
-  oauthClientId: string | null;
+  email: string | null;
+  oauthClientId: string | null; // legacy column (pre-v6 compat)
   hasToken: boolean;
   namespaceRules: NamespaceRule[];
+  oauthClients: OAuthClientMapping[];
   status: "active" | "revoked" | "expired";
   createdAt: string;
   revokedAt: string | null;
@@ -63,7 +74,7 @@ export interface AddPrincipalOpts {
   principalId: string;
   principalType: PrincipalType;
   rules: NamespaceRule[];
-  oauthClientId?: string;
+  email?: string;
   expiresAt?: string;
   force?: boolean;
 }
@@ -77,7 +88,7 @@ export interface AddPrincipalResult {
 
 export interface UpdatePrincipalOpts {
   rules?: NamespaceRule[];
-  oauthClientId?: string;
+  email?: string | null; // null clears it
   expiresAt?: string | null; // null clears it
 }
 
@@ -103,12 +114,22 @@ interface PrincipalDbRow {
   id: string;
   principal_id: string;
   principal_type: string;
+  email: string | null;
+  email_lower: string | null;
   oauth_client_id: string | null;
   token_hash: string | null;
   namespace_rules: string;
   created_at: string;
   revoked_at: string | null;
   expires_at: string | null;
+}
+
+interface OAuthClientMappingRow {
+  oauth_client_id: string;
+  mapped_at: string;
+  mapped_by: string;
+  revoked_at: string | null;
+  last_used_at: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -178,7 +199,7 @@ const VALID_TYPES = new Set<string>(["owner", "family", "agent", "external"]);
 export function listPrincipals(db: Database.Database): PrincipalSummary[] {
   const rows = db
     .prepare(
-      `SELECT principal_id, principal_type, namespace_rules, created_at, revoked_at, expires_at
+      `SELECT principal_id, principal_type, email, namespace_rules, created_at, revoked_at, expires_at
        FROM principals ORDER BY created_at DESC`,
     )
     .all() as PrincipalDbRow[];
@@ -186,6 +207,7 @@ export function listPrincipals(db: Database.Database): PrincipalSummary[] {
   return rows.map((row) => ({
     principalId: row.principal_id,
     principalType: row.principal_type as PrincipalType,
+    email: row.email ?? null,
     rulesCount: (JSON.parse(row.namespace_rules) as NamespaceRule[]).length,
     status: deriveStatus(row),
     createdAt: row.created_at,
@@ -198,20 +220,43 @@ export function showPrincipal(
 ): PrincipalDetail | null {
   const row = db
     .prepare(
-      `SELECT id, principal_id, principal_type, oauth_client_id, token_hash, namespace_rules, created_at, revoked_at, expires_at
+      `SELECT id, principal_id, principal_type, email, oauth_client_id, token_hash, namespace_rules, created_at, revoked_at, expires_at
        FROM principals WHERE principal_id = ?`,
     )
     .get(principalId) as PrincipalDbRow | undefined;
 
   if (!row) return null;
 
+  // Fetch OAuth client mappings (v6+)
+  let oauthClients: OAuthClientMapping[] = [];
+  try {
+    const mappings = db
+      .prepare(
+        `SELECT oauth_client_id, mapped_at, mapped_by, revoked_at, last_used_at
+         FROM principal_oauth_clients WHERE principal_id = ? ORDER BY mapped_at DESC`,
+      )
+      .all(principalId) as OAuthClientMappingRow[];
+
+    oauthClients = mappings.map((m) => ({
+      oauthClientId: m.oauth_client_id,
+      mappedAt: m.mapped_at,
+      mappedBy: m.mapped_by,
+      revokedAt: m.revoked_at,
+      lastUsedAt: m.last_used_at,
+    }));
+  } catch {
+    // Table may not exist on pre-v6 databases
+  }
+
   return {
     id: row.id,
     principalId: row.principal_id,
     principalType: row.principal_type as PrincipalType,
+    email: row.email ?? null,
     oauthClientId: row.oauth_client_id,
     hasToken: row.token_hash !== null,
     namespaceRules: JSON.parse(row.namespace_rules) as NamespaceRule[],
+    oauthClients,
     status: deriveStatus(row),
     createdAt: row.created_at,
     revokedAt: row.revoked_at,
@@ -250,16 +295,19 @@ export function addPrincipal(
     tokenHash = hashToken(token);
   }
 
+  const emailLower = opts.email ? opts.email.trim().toLowerCase() : null;
+
   const txn = db.transaction(() => {
     db.prepare(
-      `INSERT INTO principals (id, principal_id, principal_type, oauth_client_id, token_hash, namespace_rules, created_at, revoked_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+      `INSERT INTO principals (id, principal_id, principal_type, token_hash, email, email_lower, namespace_rules, created_at, revoked_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
     ).run(
       id,
       opts.principalId,
       opts.principalType,
-      opts.oauthClientId ?? null,
       tokenHash,
+      opts.email ?? null,
+      emailLower,
       JSON.stringify(opts.rules),
       nowUTC(),
       opts.expiresAt ?? null,
@@ -269,7 +317,7 @@ export function addPrincipal(
       db,
       "principal_add",
       opts.principalId,
-      `type=${opts.principalType}, rules=${opts.rules.length}, has_token=${!!token}`,
+      `type=${opts.principalType}, rules=${opts.rules.length}, has_token=${!!token}, email=${opts.email ?? "(none)"}`,
     );
   });
 
@@ -322,9 +370,11 @@ export function updatePrincipal(
     params.push(JSON.stringify(opts.rules));
   }
 
-  if (opts.oauthClientId !== undefined) {
-    setClauses.push("oauth_client_id = ?");
-    params.push(opts.oauthClientId);
+  if (opts.email !== undefined) {
+    setClauses.push("email = ?");
+    params.push(opts.email);
+    setClauses.push("email_lower = ?");
+    params.push(opts.email ? opts.email.trim().toLowerCase() : null);
   }
 
   if (opts.expiresAt !== undefined) {
@@ -333,7 +383,7 @@ export function updatePrincipal(
   }
 
   if (setClauses.length === 0) {
-    throw new Error("No fields to update. Provide --rules, --oauth-client-id, or --expires-at.");
+    throw new Error("No fields to update. Provide --rules, --email, or --expires-at.");
   }
 
   params.push(principalId);
@@ -458,7 +508,7 @@ function formatDetail(detail: PrincipalDetail): string {
     `Principal ID:    ${detail.principalId}`,
     `Type:            ${detail.principalType}`,
     `Status:          ${detail.status}`,
-    `OAuth Client:    ${detail.oauthClientId ?? "(none)"}`,
+    `Email:           ${detail.email ?? "(none)"}`,
     `Has Token:       ${detail.hasToken ? "yes" : "no"}`,
     `Created:         ${detail.createdAt}`,
     `Expires:         ${detail.expiresAt ?? "(never)"}`,
@@ -473,6 +523,15 @@ function formatDetail(detail: PrincipalDetail): string {
     for (let i = 0; i < detail.namespaceRules.length; i++) {
       const r = detail.namespaceRules[i];
       lines.push(`  ${i + 1}. ${r.pattern}  →  ${r.permissions}`);
+    }
+  }
+
+  if (detail.oauthClients.length > 0) {
+    lines.push("");
+    lines.push("OAuth Clients:");
+    for (const c of detail.oauthClients) {
+      const status = c.revokedAt ? " (revoked)" : "";
+      lines.push(`  - ${c.oauthClientId}  mapped: ${c.mappedAt}  by: ${c.mappedBy}${status}`);
     }
   }
 
@@ -531,8 +590,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
     "--db",
     "--type",
     "--rules",
-    "--oauth-client-id",
+    "--email",
     "--expires-at",
+    "--principal",
   ]);
 
   for (let i = 0; i < args.length; i++) {
@@ -586,11 +646,14 @@ const USAGE = `munin-admin — Manage principals in the munin-memory MCP server.
 Usage:
   munin-admin principals list
   munin-admin principals show <principal-id>
-  munin-admin principals add <principal-id> --type <type> --rules <json|@file>
+  munin-admin principals add <principal-id> --type <type> --rules <json|@file> [--email <email>]
   munin-admin principals revoke <principal-id>
-  munin-admin principals update <principal-id> [--rules ...] [--oauth-client-id ...] [--expires-at ...]
+  munin-admin principals update <principal-id> [--rules ...] [--email ...] [--expires-at ...]
   munin-admin principals rotate-token <principal-id>
   munin-admin principals test <principal-id> <namespace>
+  munin-admin oauth-clients list [--principal <principal-id>]
+  munin-admin oauth-clients remove <oauth-client-id>
+  munin-admin oauth-clients clear <principal-id>
 
 Global flags:
   --db <path>     Database path (default: ~/.munin-memory/memory.db)
@@ -629,10 +692,11 @@ function handleList(
     return;
   }
 
-  const headers = ["PRINCIPAL ID", "TYPE", "RULES", "STATUS", "CREATED"];
+  const headers = ["PRINCIPAL ID", "TYPE", "EMAIL", "RULES", "STATUS", "CREATED"];
   const rows = principals.map((p) => [
     p.principalId,
     p.principalType,
+    p.email ?? "",
     `${p.rulesCount} rule${p.rulesCount !== 1 ? "s" : ""}`,
     p.status,
     p.createdAt,
@@ -684,13 +748,13 @@ function handleAdd(
 
   const rules = parseRules(rulesStr);
   const expiresAt = flags.get("--expires-at");
-  const oauthClientId = flags.get("--oauth-client-id");
+  const email = flags.get("--email");
 
   const result = addPrincipal(db, {
     principalId,
     principalType: typeStr as PrincipalType,
     rules,
-    oauthClientId,
+    email,
     expiresAt,
     force,
   });
@@ -739,9 +803,9 @@ function handleUpdate(
     opts.rules = parseRules(rulesStr);
   }
 
-  const oauthClientId = flags.get("--oauth-client-id");
-  if (oauthClientId !== undefined) {
-    opts.oauthClientId = oauthClientId;
+  const email = flags.get("--email");
+  if (email !== undefined) {
+    opts.email = email === "" ? null : email;
   }
 
   const expiresAt = flags.get("--expires-at");
@@ -814,6 +878,159 @@ function handleTest(
 }
 
 // ---------------------------------------------------------------------------
+// OAuth client management functions (exported for testing)
+// ---------------------------------------------------------------------------
+
+export function listOAuthClients(
+  db: Database.Database,
+  principalId?: string,
+): OAuthClientMapping[] {
+  let rows: OAuthClientMappingRow[];
+  if (principalId) {
+    rows = db
+      .prepare(
+        `SELECT oauth_client_id, mapped_at, mapped_by, revoked_at, last_used_at
+         FROM principal_oauth_clients WHERE principal_id = ? ORDER BY mapped_at DESC`,
+      )
+      .all(principalId) as OAuthClientMappingRow[];
+  } else {
+    rows = db
+      .prepare(
+        `SELECT poc.oauth_client_id, poc.mapped_at, poc.mapped_by, poc.revoked_at, poc.last_used_at
+         FROM principal_oauth_clients poc ORDER BY poc.mapped_at DESC`,
+      )
+      .all() as OAuthClientMappingRow[];
+  }
+
+  return rows.map((m) => ({
+    oauthClientId: m.oauth_client_id,
+    mappedAt: m.mapped_at,
+    mappedBy: m.mapped_by,
+    revokedAt: m.revoked_at,
+    lastUsedAt: m.last_used_at,
+  }));
+}
+
+export function removeOAuthClient(
+  db: Database.Database,
+  oauthClientId: string,
+): boolean {
+  const txn = db.transaction(() => {
+    // Revoke all tokens for this client
+    db.prepare(
+      "UPDATE oauth_tokens SET revoked = 1 WHERE client_id = ? AND revoked = 0",
+    ).run(oauthClientId);
+
+    const result = db
+      .prepare("DELETE FROM principal_oauth_clients WHERE oauth_client_id = ?")
+      .run(oauthClientId);
+
+    if (result.changes > 0) {
+      auditLog(db, "oauth_client_remove", oauthClientId, "mapping removed, tokens revoked");
+    }
+
+    return result.changes > 0;
+  });
+
+  return txn();
+}
+
+export function clearOAuthClients(
+  db: Database.Database,
+  principalId: string,
+): number {
+  const txn = db.transaction(() => {
+    // Get all client_ids for this principal
+    const mappings = db
+      .prepare("SELECT oauth_client_id FROM principal_oauth_clients WHERE principal_id = ?")
+      .all(principalId) as Array<{ oauth_client_id: string }>;
+
+    // Revoke tokens for each client
+    for (const m of mappings) {
+      db.prepare(
+        "UPDATE oauth_tokens SET revoked = 1 WHERE client_id = ? AND revoked = 0",
+      ).run(m.oauth_client_id);
+    }
+
+    const result = db
+      .prepare("DELETE FROM principal_oauth_clients WHERE principal_id = ?")
+      .run(principalId);
+
+    if (result.changes > 0) {
+      auditLog(db, "oauth_clients_clear", principalId, `${result.changes} mapping(s) removed, tokens revoked`);
+    }
+
+    return result.changes;
+  });
+
+  return txn();
+}
+
+function handleOAuthClientsList(
+  db: Database.Database,
+  flags: Map<string, string>,
+  jsonOutput: boolean,
+): void {
+  const principalId = flags.get("--principal");
+  const clients = listOAuthClients(db, principalId);
+
+  if (jsonOutput) {
+    console.log(JSON.stringify(clients, null, 2));
+    return;
+  }
+
+  if (clients.length === 0) {
+    console.log("No OAuth client mappings found.");
+    return;
+  }
+
+  const headers = ["OAUTH CLIENT ID", "MAPPED AT", "MAPPED BY", "STATUS"];
+  const rows = clients.map((c) => [
+    c.oauthClientId,
+    c.mappedAt,
+    c.mappedBy,
+    c.revokedAt ? "revoked" : "active",
+  ]);
+  const widths = headers.map((h, i) =>
+    Math.max(h.length, ...rows.map((r) => r[i].length)),
+  );
+  console.log(formatTable(headers, rows, widths));
+}
+
+function handleOAuthClientsRemove(
+  db: Database.Database,
+  oauthClientId: string,
+  jsonOutput: boolean,
+): void {
+  const success = removeOAuthClient(db, oauthClientId);
+
+  if (jsonOutput) {
+    console.log(JSON.stringify({ oauthClientId, removed: success }));
+  } else if (success) {
+    console.log(`Removed OAuth client mapping: ${oauthClientId} (tokens revoked)`);
+  } else {
+    console.error(`OAuth client mapping not found: ${oauthClientId}`);
+    process.exit(1);
+  }
+}
+
+function handleOAuthClientsClear(
+  db: Database.Database,
+  principalId: string,
+  jsonOutput: boolean,
+): void {
+  const count = clearOAuthClients(db, principalId);
+
+  if (jsonOutput) {
+    console.log(JSON.stringify({ principalId, removed: count }));
+  } else if (count > 0) {
+    console.log(`Cleared ${count} OAuth client mapping(s) for ${principalId} (tokens revoked)`);
+  } else {
+    console.log(`No OAuth client mappings found for ${principalId}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -832,18 +1049,21 @@ function main(): void {
     process.exit(0);
   }
 
-  if (parsed.resource !== "principals") {
+  if (parsed.resource !== "principals" && parsed.resource !== "oauth-clients") {
     if (!parsed.resource) {
-      console.error("Missing resource. Expected: munin-admin principals <command>");
+      console.error("Missing resource. Expected: munin-admin principals|oauth-clients <command>");
     } else {
-      console.error(`Unknown resource: ${parsed.resource}. Expected: principals`);
+      console.error(`Unknown resource: ${parsed.resource}. Expected: principals or oauth-clients`);
     }
     console.error("\nRun 'munin-admin --help' for usage.");
     process.exit(1);
   }
 
   if (!parsed.command) {
-    console.error("Missing command. Expected: list, show, add, revoke, update, rotate-token, test");
+    const cmds = parsed.resource === "oauth-clients"
+      ? "list, remove, clear"
+      : "list, show, add, revoke, update, rotate-token, test";
+    console.error(`Missing command. Expected: ${cmds}`);
     console.error("\nRun 'munin-admin --help' for usage.");
     process.exit(1);
   }
@@ -858,6 +1078,28 @@ function main(): void {
 
   try {
     const pid = parsed.positionals[0];
+
+    // Handle oauth-clients resource
+    if (parsed.resource === "oauth-clients") {
+      switch (parsed.command) {
+        case "list":
+          handleOAuthClientsList(db, parsed.flags, parsed.json);
+          break;
+        case "remove":
+          if (!pid) throw new Error("Missing <oauth-client-id> argument.");
+          handleOAuthClientsRemove(db, pid, parsed.json);
+          break;
+        case "clear":
+          if (!pid) throw new Error("Missing <principal-id> argument.");
+          handleOAuthClientsClear(db, pid, parsed.json);
+          break;
+        default:
+          console.error(`Unknown oauth-clients command: ${parsed.command}`);
+          console.error("\nRun 'munin-admin --help' for usage.");
+          process.exit(1);
+      }
+      return;
+    }
 
     switch (parsed.command) {
       case "list":

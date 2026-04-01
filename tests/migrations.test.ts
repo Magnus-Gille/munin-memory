@@ -290,7 +290,7 @@ describe("initDatabase uses migrations", () => {
     const db = initDatabase(TEST_DB_PATH);
 
     // schema_version exists and has latest version
-    expect(getSchemaVersion(db)).toBe(5);
+    expect(getSchemaVersion(db)).toBe(6);
 
     // Full CRUD works
     const result = writeState(db, "test/ns", "key1", "hello from migrations", ["test"]);
@@ -385,7 +385,8 @@ describe("migration v5 — principals table", () => {
     const db = openRawDb();
     runMigrations(db);
 
-    const types = ["owner", "family", "agent", "external"];
+    // Migration v6 auto-inserts an owner row, so skip 'owner' in our inserts
+    const types = ["family", "agent", "external"];
     for (let i = 0; i < types.length; i++) {
       db.prepare(
         `INSERT INTO principals (id, principal_id, principal_type, namespace_rules, created_at)
@@ -394,7 +395,8 @@ describe("migration v5 — principals table", () => {
     }
 
     const rows = db.prepare("SELECT principal_type FROM principals ORDER BY id").all() as Array<{ principal_type: string }>;
-    expect(rows.map((r) => r.principal_type)).toEqual(types);
+    // Auto-inserted owner + family + agent + external
+    expect(rows.map((r) => r.principal_type)).toEqual(["owner", "family", "agent", "external"]);
     db.close();
   });
 

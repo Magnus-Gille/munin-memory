@@ -257,16 +257,19 @@ export function filterByAccess<T extends { namespace: string }>(
  * Resolution order:
  *   1. "legacy-bearer"     → ownerContext() immediately
  *   2. "principal:<id>"    → direct lookup by principal_id
- *   3. clientId            → lookup by oauth_client_id
- *   4. token (if provided) → lookup by SHA-256 hash of token
- *   5. not found / error   → ZERO_ACCESS (fail-closed)
+ *   3. tokenPrincipalId    → token carries its own principal_id (v6+, set at consent time)
+ *   4. clientId            → JOIN principal_oauth_clients → principals (v6+)
+ *      FALLBACK:             principals.oauth_client_id (pre-v6 compat)
+ *   5. token (if provided) → lookup by SHA-256 hash of token
+ *   6. not found / error   → ZERO_ACCESS (fail-closed)
  *
  * Revoked or expired principals also return ZERO_ACCESS.
  */
 export function resolveAccessContext(
   db: Database.Database,
   clientId: string,
-  token?: string
+  token?: string,
+  tokenPrincipalId?: string,
 ): AccessContext {
   try {
     // 1. Legacy bearer token clients are always owner
@@ -286,18 +289,43 @@ export function resolveAccessContext(
            WHERE principal_id = ?`
         )
         .get(principalId) as PrincipalRow | undefined;
-    } else {
-      // 3. Lookup by oauth_client_id
+    }
+
+    // 3. Token-bound principal (v6+): token carries its own principal_id
+    if (row === undefined && tokenPrincipalId) {
       row = db
         .prepare(
           `SELECT principal_id, principal_type, namespace_rules, revoked_at, expires_at
            FROM principals
-           WHERE oauth_client_id = ?`
+           WHERE principal_id = ?`
         )
-        .get(clientId) as PrincipalRow | undefined;
+        .get(tokenPrincipalId) as PrincipalRow | undefined;
     }
 
-    // 4. Fallback: lookup by token hash (agent service tokens)
+    // 4. Lookup via principal_oauth_clients mapping table (v6+)
+    if (row === undefined && !clientId.startsWith("principal:")) {
+      row = db
+        .prepare(
+          `SELECT p.principal_id, p.principal_type, p.namespace_rules, p.revoked_at, p.expires_at
+           FROM principal_oauth_clients poc
+           JOIN principals p ON poc.principal_id = p.principal_id
+           WHERE poc.oauth_client_id = ? AND poc.revoked_at IS NULL`
+        )
+        .get(clientId) as PrincipalRow | undefined;
+
+      // Fallback: legacy oauth_client_id column (pre-v6 compat, until v7)
+      if (row === undefined) {
+        row = db
+          .prepare(
+            `SELECT principal_id, principal_type, namespace_rules, revoked_at, expires_at
+             FROM principals
+             WHERE oauth_client_id = ?`
+          )
+          .get(clientId) as PrincipalRow | undefined;
+      }
+    }
+
+    // 5. Fallback: lookup by token hash (agent service tokens)
     if (row === undefined && token !== undefined) {
       const tokenHash = createHash("sha256").update(token).digest("hex");
       row = db
@@ -309,7 +337,7 @@ export function resolveAccessContext(
         .get(tokenHash) as PrincipalRow | undefined;
     }
 
-    // 5. Not found → zero access
+    // 6. Not found → zero access
     if (row === undefined) {
       return { ...ZERO_ACCESS };
     }

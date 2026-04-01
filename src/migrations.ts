@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { nowUTC } from "./db.js";
 
@@ -232,6 +233,65 @@ export const migrations: Migration[] = [
         CREATE INDEX idx_principals_oauth_client ON principals(oauth_client_id) WHERE oauth_client_id IS NOT NULL;
         CREATE INDEX idx_principals_token_hash ON principals(token_hash) WHERE token_hash IS NOT NULL;
       `);
+    },
+  },
+  {
+    version: 6,
+    description: "Multi-user OAuth: email on principals, principal_oauth_clients mapping table, principal_id on tokens",
+    up: (db) => {
+      // 1. Add identity columns to principals
+      db.exec(`
+        ALTER TABLE principals ADD COLUMN email TEXT;
+        ALTER TABLE principals ADD COLUMN email_lower TEXT;
+        CREATE UNIQUE INDEX idx_principals_email_lower ON principals(email_lower) WHERE email_lower IS NOT NULL;
+      `);
+
+      // 2. Insert owner row if not already present.
+      // The owner's email comes from MUNIN_OAUTH_TRUSTED_USER_VALUE env var (may be unset in dev).
+      const ownerEmail = process.env.MUNIN_OAUTH_TRUSTED_USER_VALUE?.trim() || null;
+      const existingOwner = db
+        .prepare("SELECT id FROM principals WHERE principal_id = 'owner'")
+        .get();
+
+      if (!existingOwner) {
+        db.prepare(
+          `INSERT INTO principals (id, principal_id, principal_type, email, email_lower, namespace_rules, created_at)
+           VALUES (?, 'owner', 'owner', ?, ?, '[]', ?)`,
+        ).run(
+          randomUUID(),
+          ownerEmail,
+          ownerEmail ? ownerEmail.trim().toLowerCase() : null,
+          nowUTC(),
+        );
+      }
+
+      // 3. Create mapping table (device inventory)
+      db.exec(`
+        CREATE TABLE principal_oauth_clients (
+          oauth_client_id TEXT PRIMARY KEY REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+          principal_id    TEXT NOT NULL,
+          mapped_at       TEXT NOT NULL,
+          mapped_by       TEXT NOT NULL DEFAULT 'consent',
+          revoked_at      TEXT,
+          last_used_at    TEXT
+        );
+        CREATE INDEX idx_poc_principal ON principal_oauth_clients(principal_id);
+      `);
+
+      // 4. Backfill from existing oauth_client_id data
+      db.exec(`
+        INSERT INTO principal_oauth_clients (oauth_client_id, principal_id, mapped_at, mapped_by)
+          SELECT oauth_client_id, principal_id, created_at, 'migration'
+          FROM principals WHERE oauth_client_id IS NOT NULL;
+      `);
+
+      // 5. Add principal_id to token tables (THE KEY CHANGE from Codex debate)
+      db.exec(`
+        ALTER TABLE oauth_auth_codes ADD COLUMN principal_id TEXT;
+        ALTER TABLE oauth_tokens ADD COLUMN principal_id TEXT;
+      `);
+
+      // 6. Leave principals.oauth_client_id in place (removed in future v7)
     },
   },
 ];

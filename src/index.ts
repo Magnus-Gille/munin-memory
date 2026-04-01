@@ -10,7 +10,7 @@ import type { Request, Response, NextFunction } from "express";
 import { createServer, IncomingMessage } from "node:http";
 import { timingSafeEqual, randomUUID, createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
-import { initDatabase, pruneRetrievalAnalytics } from "./db.js";
+import { initDatabase, nowUTC, pruneRetrievalAnalytics } from "./db.js";
 import { registerTools } from "./tools.js";
 import { initEmbeddings, startEmbeddingWorker, stopEmbeddingWorker } from "./embeddings.js";
 import { resolveAccessContext, ownerContext } from "./access.js";
@@ -76,7 +76,14 @@ export interface HttpAppOptions {
 export interface ConsentAuthConfig {
   trustedHeaderName?: string;
   trustedHeaderValue?: string;
+  identityHeaderName?: string;
   allowLocalhost: boolean;
+}
+
+export interface ConsentIdentity {
+  email: string;
+  principalId: string | null; // null = owner via env var fallback or localhost
+  isOwner: boolean;
 }
 
 let cleanupTimerId: ReturnType<typeof setInterval> | undefined;
@@ -191,6 +198,7 @@ export function getConsentAuthConfig(): ConsentAuthConfig {
   return {
     trustedHeaderName: process.env.MUNIN_OAUTH_TRUSTED_USER_HEADER?.trim() || undefined,
     trustedHeaderValue: process.env.MUNIN_OAUTH_TRUSTED_USER_VALUE?.trim() || undefined,
+    identityHeaderName: process.env.MUNIN_OAUTH_IDENTITY_HEADER?.trim() || undefined,
     allowLocalhost: (process.env.MUNIN_OAUTH_ALLOW_LOCALHOST_CONSENT ?? "true") === "true",
   };
 }
@@ -223,11 +231,79 @@ export function isTrustedConsentRequest(req: Request, config: ConsentAuthConfig)
     return true;
   }
 
+  // If identity header is configured, check if the email matches any active principal
+  if (config.identityHeaderName) {
+    const email = req.get(config.identityHeaderName);
+    if (email) return true; // Gate passes — identity will be resolved in the handler
+  }
+
   if (!config.allowLocalhost) {
     return false;
   }
 
   return isLoopbackAddress(req.socket.remoteAddress);
+}
+
+/**
+ * Resolve the identity of the user making a consent request.
+ * Returns null if identity cannot be determined (fail-closed).
+ *
+ * Resolution order:
+ * 1. Owner env var fallback (MUNIN_OAUTH_TRUSTED_USER_VALUE match)
+ * 2. Identity header → DB lookup by email
+ * 3. Localhost → owner
+ */
+export function resolveConsentIdentity(
+  req: Request,
+  config: ConsentAuthConfig,
+  db: Database.Database,
+): ConsentIdentity | null {
+  // 1. Check owner env var (gate header match = owner)
+  if (
+    config.trustedHeaderName &&
+    config.trustedHeaderValue
+  ) {
+    const headerValue = req.get(config.trustedHeaderName) ?? "";
+    if (safeStringEqual(headerValue, config.trustedHeaderValue)) {
+      return { email: config.trustedHeaderValue, principalId: "owner", isOwner: true };
+    }
+  }
+
+  // 2. Identity header → DB lookup
+  if (config.identityHeaderName) {
+    const email = req.get(config.identityHeaderName)?.trim();
+    if (email) {
+      const emailLower = email.toLowerCase();
+      const rows = db
+        .prepare(
+          `SELECT principal_id, principal_type FROM principals
+           WHERE email_lower = ? AND revoked_at IS NULL
+             AND (expires_at IS NULL OR expires_at > ?)`,
+        )
+        .all(emailLower, nowUTC()) as Array<{ principal_id: string; principal_type: string }>;
+
+      if (rows.length === 1) {
+        return {
+          email,
+          principalId: rows[0].principal_id,
+          isOwner: rows[0].principal_type === "owner",
+        };
+      }
+      if (rows.length > 1) {
+        // Ambiguous — fail closed, log error
+        console.error(`resolveConsentIdentity: multiple principals match email "${emailLower}" — failing closed`);
+        return null;
+      }
+      // No match — fall through (may still match localhost)
+    }
+  }
+
+  // 3. Localhost fallback → owner
+  if (config.allowLocalhost && isLoopbackAddress(req.socket.remoteAddress)) {
+    return { email: "localhost", principalId: "owner", isOwner: true };
+  }
+
+  return null;
 }
 
 export function createRateLimiter(): RateLimiterState {
@@ -410,20 +486,36 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
   });
 
   // OAuth consent must be protected by a trusted user signal.
+  // For GET /authorize, also resolve identity and pass to OAuth provider.
   app.use((req: Request, res: Response, next: NextFunction) => {
     if (req.path !== "/authorize" && req.path !== "/authorize/approve") {
       next();
       return;
     }
 
-    if (isTrustedConsentRequest(req, consentAuth)) {
-      next();
+    if (!isTrustedConsentRequest(req, consentAuth)) {
+      res.status(403).json({
+        error: "Forbidden: OAuth consent requires trusted user authentication",
+      });
       return;
     }
 
-    res.status(403).json({
-      error: "Forbidden: OAuth consent requires trusted user authentication",
-    });
+    // Resolve identity for GET /authorize — pass to OAuth provider so
+    // authorize() can bind it to the pending auth
+    if (req.method === "GET" && req.path === "/authorize") {
+      const identity = resolveConsentIdentity(req, consentAuth, database);
+      if (identity) {
+        oauthProvider.setLastResolvedIdentity({
+          email: identity.email,
+          principalId: identity.principalId,
+        });
+      } else {
+        // Identity resolution failed but gate passed — proceed as owner fallback
+        oauthProvider.setLastResolvedIdentity(undefined);
+      }
+    }
+
+    next();
   });
 
   // --- OAuth endpoints (mounted at root) ---
@@ -464,6 +556,25 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
       if (action !== "approve") {
         oauthProvider.denyAuthorization(pending, res);
         return;
+      }
+
+      // TOCTOU protection: re-resolve identity on POST and verify it matches GET
+      const identity = resolveConsentIdentity(req, consentAuth, database);
+      if (!identity) {
+        oauthProvider.denyAuthorization(pending, res);
+        return;
+      }
+
+      // If the pending auth was bound to a specific principal at GET time,
+      // verify the identity hasn't changed
+      if (pending.resolvedPrincipalId && identity.principalId !== pending.resolvedPrincipalId) {
+        oauthProvider.denyAuthorization(pending, res);
+        return;
+      }
+
+      // Bind the resolved principal to the pending auth (for completeAuthorization)
+      if (identity.principalId && !pending.resolvedPrincipalId) {
+        pending.resolvedPrincipalId = identity.principalId;
       }
 
       oauthProvider.completeAuthorization(pending, res);
@@ -512,7 +623,13 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
     });
     // Use mcp-session-id header for correlation, fall back to caller-derived stable ID
     const mcpSessionId = getSessionHeader(req) ?? deriveSessionId(req.auth?.clientId ?? "anonymous");
-    const accessContext = resolveAccessContext(database, req.auth?.clientId ?? "", req.auth?.token);
+    const authInfo = req.auth as (AuthInfo & { principalId?: string }) | undefined;
+    const accessContext = resolveAccessContext(
+      database,
+      authInfo?.clientId ?? "",
+      authInfo?.token,
+      authInfo?.principalId,
+    );
     const mcpServer = createMcpServer(database, mcpSessionId, accessContext);
 
     try {
