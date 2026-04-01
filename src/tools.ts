@@ -3,12 +3,15 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { getSchemaVersion } from "./migrations.js";
 import type { CallToolRequest } from "@modelcontextprotocol/sdk/types.js";
 import type Database from "better-sqlite3";
 import { type AccessContext, ownerContext, canRead, canWrite, canReadSubtree, filterByAccess } from "./access.js";
 import { randomBytes } from "node:crypto";
 import {
   writeState,
+  patchState,
+  type PatchParams,
   readState,
   getById,
   appendLog,
@@ -20,6 +23,7 @@ import {
   queryEntriesHybridScored,
   queryEntriesByFilter,
   listNamespaces,
+  listNamespacesPaged,
   listNamespaceContents,
   previewDelete,
   executeDelete,
@@ -37,10 +41,12 @@ import {
   validateLogInput,
   validateNamespace,
   validateKey,
+  validateTags,
 } from "./security.js";
 import {
   generateEmbedding,
   embeddingToBuffer,
+  isEmbeddingAvailable,
   isSemanticEnabled,
   isHybridEnabled,
   getSearchModeUnavailableReason,
@@ -541,7 +547,7 @@ function resolveOrientDetail(params: OrientParams): OrientDetail {
     return params.detail;
   }
   if (params.include_full_conventions) return "full";
-  return "standard";
+  return "compact";
 }
 
 function matchesNamespacePrefix(namespace: string, prefix?: string): boolean {
@@ -786,8 +792,18 @@ const TOOL_DEFINITIONS = [
           description:
             "Optional. For tracked status writes (projects/*, clients/*): pass the updated_at from your last read to prevent blind overwrites. Returns conflict error if the entry was modified since.",
         },
+        patch: {
+          type: "object",
+          description: "Partial update for an existing entry. Mutually exclusive with content. Entry must already exist.",
+          properties: {
+            content_append: { type: "string", description: "Text to append after existing content (separated by newline)" },
+            content_prepend: { type: "string", description: "Text to prepend before existing content (separated by newline)" },
+            tags_add: { type: "array", items: { type: "string" }, description: "Tags to add (deduplicated with existing)" },
+            tags_remove: { type: "array", items: { type: "string" }, description: "Tags to remove from existing" },
+          },
+        },
       },
-      required: ["namespace", "key", "content"],
+      required: ["namespace", "key"],
     },
   },
   {
@@ -835,7 +851,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_get",
     description:
-      "Retrieve a single memory entry by its ID. Returns the full content regardless of entry type (state or log). Use this when memory_query returns a relevant result and you need the complete content.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Retrieve the full content of a single memory entry by its UUID. Use this after memory_query returns truncated previews — copy the entry's ID from the query result and call this to get the complete content. Works for both state and log entries. Unlike memory_read (which looks up by namespace+key), memory_get requires the entry's UUID.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -991,6 +1007,16 @@ const TOOL_DEFINITIONS = [
           description:
             "Optional. If true, include completed/failed task-run namespaces in the top-level listing. Default: false.",
         },
+        limit: {
+          type: "integer",
+          description:
+            "Optional. Max namespaces to return in the top-level listing (default 20, max 200). Ignored when a namespace is provided.",
+        },
+        offset: {
+          type: "integer",
+          description:
+            "Optional. Skip first N namespaces for pagination of the top-level listing (default 0). Ignored when a namespace is provided.",
+        },
       },
       required: [],
     },
@@ -1014,7 +1040,7 @@ const TOOL_DEFINITIONS = [
         },
         action: {
           type: "string",
-          enum: ["write", "update", "delete", "namespace_delete", "log_append"],
+          enum: ["write", "update", "delete", "delete_namespace", "log"],
           description: "Optional. Filter by action type.",
         },
         limit: {
@@ -1076,21 +1102,39 @@ const TOOL_DEFINITIONS = [
       required: [],
     },
   },
+  {
+    name: "memory_status",
+    description:
+      "Returns server capabilities, version, and feature availability. Use to discover what search modes, tools, and features are available on this server instance.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+  },
 ];
 
 function textResult(obj: Record<string, unknown>) {
   return { content: [{ type: "text" as const, text: JSON.stringify(obj) }] };
 }
 
-function accessDeniedResponse(ctx: AccessContext) {
-  if (ctx.principalType === "agent") {
-    return textResult({ error: "access_denied" });
-  }
-  return textResult({ found: false });
+function okResult(action: string, data: Record<string, unknown>) {
+  return { content: [{ type: "text" as const, text: JSON.stringify({ ok: true, action, ...data }) }] };
 }
 
-function accessDeniedReadResponse() {
-  return textResult({ found: false, message: "No entry found." });
+function errResult(action: string, error: string, message: string, extra?: Record<string, unknown>) {
+  return { content: [{ type: "text" as const, text: JSON.stringify({ ok: false, action, error, message, ...extra }) }] };
+}
+
+function accessDeniedResponse(ctx: AccessContext, action: string) {
+  if (ctx.principalType === "agent") {
+    return errResult(action, "access_denied", "Access denied.");
+  }
+  return okResult(action, { found: false });
+}
+
+function accessDeniedReadResponse(action: string) {
+  return okResult(action, { found: false, message: "No entry found." });
 }
 
 export function getMaxContentSize(): number {
@@ -1342,24 +1386,72 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               });
             }
 
-            return {
-              content: [{
-                type: "text",
-                text: JSON.stringify(response),
-              }],
-            };
+            return okResult("orient", response);
           }
 
           case "memory_write": {
-            const { namespace, key, content, tags, expected_updated_at } =
-              args as unknown as WriteParams & { expected_updated_at?: string };
-            const validation = validateWriteInput(namespace, key, content, tags, maxContentSize);
-            if (!validation.valid) {
-              return { content: [{ type: "text", text: JSON.stringify({ error: "validation_error", message: validation.error }) }] };
+            const { namespace, key, content, tags, expected_updated_at, patch } =
+              args as unknown as WriteParams & { expected_updated_at?: string; patch?: PatchParams };
+
+            // Validate namespace and key (always required)
+            const nsCheck = validateNamespace(namespace);
+            if (!nsCheck.valid) {
+              return errResult("write", "validation_error", nsCheck.error!);
+            }
+            const keyCheck = validateKey(key);
+            if (!keyCheck.valid) {
+              return errResult("write", "validation_error", keyCheck.error!);
+            }
+
+            // Mutually exclusive: patch and content cannot both be provided
+            if (patch !== undefined && content !== undefined) {
+              return errResult("write", "validation_error", "patch and content are mutually exclusive. Use patch for partial updates or content for a full write.");
             }
 
             if (!canWrite(ctx, namespace)) {
-              return accessDeniedResponse(ctx);
+              return accessDeniedResponse(ctx, "write");
+            }
+
+            // --- Patch path ---
+            if (patch !== undefined) {
+              // Validate any new tags being added
+              if (patch.tags_add) {
+                const tagsCheck = validateTags(patch.tags_add);
+                if (!tagsCheck.valid) {
+                  return errResult("write", "validation_error", tagsCheck.error!);
+                }
+              }
+
+              const patchResult = patchState(db, namespace, key, patch, ctx.principalId, expected_updated_at);
+
+              if (patchResult.status === "not_found") {
+                return errResult("write", "not_found", `No entry found at ${namespace}/${key}. Use content (not patch) to create a new entry.`, { namespace, key });
+              }
+
+              if (patchResult.status === "conflict") {
+                return errResult("write", "conflict", patchResult.message!, { namespace, key, current_updated_at: patchResult.current_updated_at });
+              }
+
+              if (patchResult.status === "secret_detected") {
+                return errResult("write", "validation_error", patchResult.error!);
+              }
+
+              const otherKeysPatch = getOtherKeysInNamespace(db, namespace, key);
+              const hintPatch = otherKeysPatch.length === 0
+                ? "This is the first entry in this namespace."
+                : `Related entries in this namespace: ${otherKeysPatch.join(", ")}`;
+
+              if (sessionId) {
+                logRetrievalOutcome(db, sessionId, { outcomeType: "write_in_result_namespace", namespace });
+              }
+
+              return okResult("write", { status: "patched", id: patchResult.id, namespace, key, hint: hintPatch });
+            }
+
+            // --- Full write path ---
+            const validation = validateWriteInput(namespace, key, content, tags, maxContentSize);
+            if (!validation.valid) {
+              return errResult("write", "validation_error", validation.error!);
             }
 
             const isTrackedStatus = key === "status" && isTrackedNamespace(namespace);
@@ -1385,21 +1477,14 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               }
             }
 
-            const result = writeState(db, namespace, key, content, effectiveTags, "default", expected_updated_at);
+            const result = writeState(db, namespace, key, content, effectiveTags, ctx.principalId, expected_updated_at);
 
             if (result.status === "conflict") {
-              return {
-                content: [{
-                  type: "text",
-                  text: JSON.stringify({
-                    status: "conflict",
-                    namespace,
-                    key,
-                    message: result.message,
-                    current_updated_at: result.current_updated_at,
-                  }),
-                }],
-              };
+              return errResult("write", "conflict", result.message!, {
+                namespace,
+                key,
+                current_updated_at: result.current_updated_at,
+              });
             }
 
             const otherKeys = getOtherKeysInNamespace(db, namespace, key);
@@ -1433,26 +1518,21 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               });
             }
 
-            return {
-              content: [{
-                type: "text",
-                text: JSON.stringify(response),
-              }],
-            };
+            return okResult("write", response);
           }
 
           case "memory_read": {
             const { namespace, key } = args as unknown as ReadParams;
             const nsCheck = validateNamespace(namespace);
             if (!nsCheck.valid) {
-              return { content: [{ type: "text", text: JSON.stringify({ error: "validation_error", message: nsCheck.error }) }] };
+              return errResult("read", "validation_error", nsCheck.error!);
             }
             const keyCheck = validateKey(key);
             if (!keyCheck.valid) {
-              return { content: [{ type: "text", text: JSON.stringify({ error: "validation_error", message: keyCheck.error }) }] };
+              return errResult("read", "validation_error", keyCheck.error!);
             }
             if (!canRead(ctx, namespace)) {
-              return accessDeniedReadResponse();
+              return accessDeniedReadResponse("read");
             }
             const entry = readState(db, namespace, key);
             if (entry) {
@@ -1478,38 +1558,28 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                   namespace: parsed.namespace,
                 });
               }
-              return {
-                content: [{
-                  type: "text",
-                  text: JSON.stringify(response),
-                }],
-              };
+              return okResult("read", response);
             }
             const otherKeys = getOtherKeysInNamespace(db, namespace);
             const hint = otherKeys.length > 0
               ? `Other keys in this namespace: ${otherKeys.join(", ")}`
               : `No entries found in namespace "${namespace}".`;
-            return {
-              content: [{
-                type: "text",
-                text: JSON.stringify({
-                  found: false,
-                  namespace,
-                  key,
-                  message: `No state entry found in namespace "${namespace}" with key "${key}".`,
-                  hint,
-                }),
-              }],
-            };
+            return okResult("read", {
+              found: false,
+              namespace,
+              key,
+              message: `No state entry found in namespace "${namespace}" with key "${key}".`,
+              hint,
+            });
           }
 
           case "memory_read_batch": {
             const { reads } = args as unknown as ReadBatchParams;
             if (!Array.isArray(reads) || reads.length === 0) {
-              return { content: [{ type: "text", text: JSON.stringify({ error: "validation_error", message: "reads must be a non-empty array of {namespace, key} pairs." }) }] };
+              return errResult("read_batch", "validation_error", "reads must be a non-empty array of {namespace, key} pairs.");
             }
             if (reads.length > 20) {
-              return { content: [{ type: "text", text: JSON.stringify({ error: "validation_error", message: "Maximum 20 reads per batch." }) }] };
+              return errResult("read_batch", "validation_error", "Maximum 20 reads per batch.");
             }
 
             const results = reads.map(({ namespace: ns, key: k }) => {
@@ -1540,22 +1610,17 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               return { found: false, namespace: ns, key: k };
             });
 
-            return {
-              content: [{
-                type: "text",
-                text: JSON.stringify({ results }),
-              }],
-            };
+            return okResult("read_batch", { results });
           }
 
           case "memory_get": {
             const { id } = args as unknown as GetParams;
             if (!id || typeof id !== "string") {
-              return { content: [{ type: "text", text: JSON.stringify({ error: "validation_error", message: "ID is required." }) }] };
+              return errResult("get", "validation_error", "ID is required.");
             }
             const entry = getById(db, id);
             if (entry && !canRead(ctx, entry.namespace)) {
-              return accessDeniedReadResponse();
+              return accessDeniedReadResponse("get");
             }
             if (entry) {
               const parsed = parseEntry(entry);
@@ -1581,22 +1646,12 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                   namespace: parsed.namespace,
                 });
               }
-              return {
-                content: [{
-                  type: "text",
-                  text: JSON.stringify(response),
-                }],
-              };
+              return okResult("get", response);
             }
-            return {
-              content: [{
-                type: "text",
-                text: JSON.stringify({
-                  found: false,
-                  message: `No entry found with ID "${id}".`,
-                }),
-              }],
-            };
+            return okResult("get", {
+              found: false,
+              message: `No entry found with ID "${id}".`,
+            });
           }
 
           case "memory_query": {
@@ -1608,7 +1663,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             if (!query || typeof query !== "string") {
               // Must have at least one filter to avoid returning everything
               if (!namespace && (!tags || tags.length === 0) && !since && !until && !entry_type) {
-                return { content: [{ type: "text", text: JSON.stringify({ error: "validation_error", message: "Provide either a 'query' string for search, or at least one filter (namespace, tags, entry_type, since, until) to browse." }) }] };
+                return errResult("query", "validation_error", "Provide either a 'query' string for search, or at least one filter (namespace, tags, entry_type, since, until) to browse.");
               }
               const requestedLimit = Math.min(Math.max(limit ?? 10, 1), 50);
               let filterResults = queryEntriesByFilter(db, {
@@ -1648,11 +1703,11 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                 });
               }
 
-              return { content: [{ type: "text", text: JSON.stringify({
+              return okResult("query", {
                 results: formatted,
                 total: formatted.length,
                 search_mode: "filter",
-              }) }] };
+              });
             }
 
             const requestedLimit = Math.min(Math.max(limit ?? 10, 1), 50);
@@ -1867,12 +1922,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               });
             }
 
-            return {
-              content: [{
-                type: "text",
-                text: JSON.stringify(response),
-              }],
-            };
+            return okResult("query", response);
           }
 
           case "memory_attention": {
@@ -1958,28 +2008,28 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               });
             }
 
-            return {
-              content: [{
-                type: "text",
-                text: JSON.stringify({
-                  generated_at: new Date().toISOString(),
-                  summary,
-                  items: limitedItems,
-                }),
-              }],
+            const attentionResult: Record<string, unknown> = {
+              generated_at: new Date().toISOString(),
+              summary,
+              items: limitedItems,
             };
+            if (limitedItems.length === 0) {
+              attentionResult.message = "All tracked projects appear healthy. No items need attention.";
+            }
+
+            return okResult("attention", attentionResult);
           }
 
           case "memory_log": {
             const { namespace, content, tags } = args as unknown as LogParams;
             const validation = validateLogInput(namespace, content, tags, maxContentSize);
             if (!validation.valid) {
-              return { content: [{ type: "text", text: JSON.stringify({ error: "validation_error", message: validation.error }) }] };
+              return errResult("log", "validation_error", validation.error!);
             }
             if (!canWrite(ctx, namespace)) {
-              return accessDeniedResponse(ctx);
+              return accessDeniedResponse(ctx, "log");
             }
-            const result = appendLog(db, namespace, content, tags ?? []);
+            const result = appendLog(db, namespace, content, tags ?? [], ctx.principalId);
             // Analytics: log log outcome correlated to prior retrieval in this session
             if (sessionId) {
               logRetrievalOutcome(db, sessionId, {
@@ -1987,70 +2037,58 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                 namespace,
               });
             }
-            return {
-              content: [{
-                type: "text",
-                text: JSON.stringify({
-                  status: "logged",
-                  id: result.id,
-                  namespace,
-                  timestamp: result.timestamp,
-                }),
-              }],
-            };
+            return okResult("log", {
+              status: "logged",
+              id: result.id,
+              namespace,
+              timestamp: result.timestamp,
+            });
           }
 
           case "memory_list": {
-            const { namespace, include_demo, include_completed_tasks } = (args ?? {}) as ListParams;
+            const { namespace, include_demo, include_completed_tasks, limit: rawLimit, offset: rawOffset } = (args ?? {}) as ListParams;
             if (!namespace) {
+              const resolvedLimit = Math.min(Math.max(1, typeof rawLimit === "number" ? rawLimit : 20), 200);
+              const resolvedOffset = Math.max(0, typeof rawOffset === "number" ? rawOffset : 0);
               const allNamespaces = listNamespaces(db);
               const completedTasks = include_completed_tasks ? new Set<string>() : getCompletedTaskNamespaces(db);
-              const namespaces = allNamespaces.filter((ns) => {
+              const filtered = allNamespaces.filter((ns) => {
                 if (!canRead(ctx, ns.namespace)) return false;
                 if (!include_demo && (ns.namespace.startsWith("demo/") || ns.namespace === "demo")) return false;
                 if (!include_completed_tasks && completedTasks.has(ns.namespace)) return false;
                 return true;
               });
-              return {
-                content: [{
-                  type: "text",
-                  text: JSON.stringify({ namespaces }),
-                }],
-              };
+              const { namespaces, total, has_more } = listNamespacesPaged(filtered, resolvedLimit, resolvedOffset);
+              return okResult("list", { namespaces, total, returned: namespaces.length, has_more });
             }
             const nsCheck = validateNamespace(namespace);
             if (!nsCheck.valid) {
-              return { content: [{ type: "text", text: JSON.stringify({ error: "validation_error", message: nsCheck.error }) }] };
+              return errResult("list", "validation_error", nsCheck.error!);
             }
             if (!canRead(ctx, namespace)) {
-              return textResult({ namespace, state_entries: [], log_summary: { log_count: 0, earliest: null, latest: null, recent: [] } });
+              return okResult("list", { namespace, state_entries: [], log_summary: { log_count: 0, earliest: null, latest: null, recent: [] } });
             }
             const { stateEntries, logSummary } = listNamespaceContents(db, namespace);
-            return {
-              content: [{
-                type: "text",
-                text: JSON.stringify({
-                  namespace,
-                  state_entries: stateEntries.map((e) => ({
-                    key: e.key,
-                    preview: e.preview,
-                    tags: JSON.parse(e.tags) as string[],
-                    updated_at: e.updated_at,
-                  })),
-                  log_summary: {
-                    log_count: logSummary.log_count,
-                    earliest: logSummary.earliest,
-                    latest: logSummary.latest,
-                    recent: logSummary.recent.map((l) => ({
-                      id: l.id,
-                      content_preview: l.content_preview,
-                      tags: JSON.parse(l.tags) as string[],
-                      created_at: l.created_at,
-                    })),
-                  },
-                }),
-              }],
-            };
+            return okResult("list", {
+              namespace,
+              state_entries: stateEntries.map((e) => ({
+                key: e.key,
+                preview: e.preview,
+                tags: JSON.parse(e.tags) as string[],
+                updated_at: e.updated_at,
+              })),
+              log_summary: {
+                log_count: logSummary.log_count,
+                earliest: logSummary.earliest,
+                latest: logSummary.latest,
+                recent: logSummary.recent.map((l) => ({
+                  id: l.id,
+                  content_preview: l.content_preview,
+                  tags: JSON.parse(l.tags) as string[],
+                  created_at: l.created_at,
+                })),
+              },
+            });
           }
 
           case "memory_delete": {
@@ -2058,78 +2096,60 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               args as unknown as DeleteParams;
             const nsCheck = validateNamespace(namespace);
             if (!nsCheck.valid) {
-              return { content: [{ type: "text", text: JSON.stringify({ error: "validation_error", message: nsCheck.error }) }] };
+              return errResult("delete", "validation_error", nsCheck.error!);
             }
             if (key) {
               const keyCheck = validateKey(key);
               if (!keyCheck.valid) {
-                return { content: [{ type: "text", text: JSON.stringify({ error: "validation_error", message: keyCheck.error }) }] };
+                return errResult("delete", "validation_error", keyCheck.error!);
               }
             }
 
             if (!canWrite(ctx, namespace)) {
-              return accessDeniedResponse(ctx);
+              return accessDeniedResponse(ctx, "delete");
             }
             // Namespace-wide delete in shared/ is owner-only
             if (!key && namespace.startsWith("shared/") && ctx.principalType !== "owner") {
-              return accessDeniedResponse(ctx);
+              return accessDeniedResponse(ctx, "delete");
             }
 
             // Execute with token
             if (delete_token) {
               if (!consumeDeleteToken(delete_token, namespace, key)) {
-                return {
-                  content: [{
-                    type: "text",
-                    text: JSON.stringify({
-                      error: "invalid_token",
-                      message: "Delete token is invalid, expired, or doesn't match the requested namespace/key. Request a new preview first.",
-                    }),
-                  }],
-                };
+                return errResult("delete", "invalid_token", "Delete token is invalid, expired, or doesn't match the requested namespace/key. Request a new preview first.");
               }
-              const deletedCount = executeDelete(db, namespace, key);
+              const deletedCount = executeDelete(db, namespace, key, ctx.principalId);
               const target = key ? `entry "${key}" in "${namespace}"` : `all entries in "${namespace}"`;
-              return {
-                content: [{
-                  type: "text",
-                  text: JSON.stringify({
-                    action: "deleted",
-                    namespace,
-                    key: key ?? undefined,
-                    deleted_count: deletedCount,
-                    message: `Deleted ${deletedCount} entries (${target}).`,
-                  }),
-                }],
-              };
+              return okResult("delete", {
+                phase: "confirmed",
+                namespace,
+                key: key ?? undefined,
+                deleted_count: deletedCount,
+                message: `Deleted ${deletedCount} entries (${target}).`,
+              });
             }
 
             // Preview
             const info = previewDelete(db, namespace, key);
             const token = generateDeleteToken(namespace, key);
             const target = key ? `entry "${key}" in "${namespace}"` : `all entries in "${namespace}"`;
-            return {
-              content: [{
-                type: "text",
-                text: JSON.stringify({
-                  action: "preview",
-                  namespace,
-                  key: key ?? undefined,
-                  will_delete: {
-                    state_count: info.stateCount,
-                    log_count: info.logCount,
-                    keys: info.keys.length > 0 ? info.keys : undefined,
-                  },
-                  delete_token: token,
-                  message: `Will delete ${info.stateCount} state entries and ${info.logCount} log entries (${target}). Call again with delete_token to confirm.`,
-                }),
-              }],
-            };
+            return okResult("delete", {
+              phase: "preview",
+              namespace,
+              key: key ?? undefined,
+              will_delete: {
+                state_count: info.stateCount,
+                log_count: info.logCount,
+                keys: info.keys.length > 0 ? info.keys : undefined,
+              },
+              delete_token: token,
+              message: `Will delete ${info.stateCount} state entries and ${info.logCount} log entries (${target}). Call again with delete_token to confirm.`,
+            });
           }
 
           case "memory_insights": {
             if (ctx.principalType !== "owner") {
-              return textResult({ entries: [], total: 0, min_impressions: 3 });
+              return okResult("insights", { entries: [], total: 0, min_impressions: 3 });
             }
             const insightsArgs = (args ?? {}) as InsightsParams;
             const minImpressions = typeof insightsArgs.min_impressions === "number"
@@ -2140,16 +2160,11 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             const rows = getInsightsByEntry(db, insightsArgs.namespace, minImpressions, insightsLimit);
             const entries: EntryInsight[] = rows.map(computeEntryInsight);
 
-            return {
-              content: [{
-                type: "text",
-                text: JSON.stringify({
-                  entries,
-                  total: entries.length,
-                  min_impressions: minImpressions,
-                }),
-              }],
-            };
+            return okResult("insights", {
+              entries,
+              total: entries.length,
+              min_impressions: minImpressions,
+            });
           }
 
           case "memory_history": {
@@ -2159,22 +2174,14 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             if (namespace) {
               const prefix = namespace.endsWith("/") ? namespace : namespace + "/";
               if (!canReadSubtree(ctx, prefix) && !canRead(ctx, namespace)) {
-                return textResult({ generated_at: new Date().toISOString(), count: 0, entries: [] });
+                return okResult("history", { generated_at: new Date().toISOString(), count: 0, entries: [] });
               }
             }
 
             // Validate action enum if provided
-            const validActions = ["write", "update", "delete", "namespace_delete", "log_append", "delete_namespace", "log"];
+            const validActions = ["write", "update", "delete", "delete_namespace", "log"];
             if (action !== undefined && !validActions.includes(action)) {
-              return {
-                content: [{
-                  type: "text",
-                  text: JSON.stringify({
-                    error: "validation_error",
-                    message: `Invalid action "${action}". Must be one of: write, update, delete, namespace_delete, log_append.`,
-                  }),
-                }],
-              };
+              return errResult("history", "validation_error", `Invalid action "${action}". Must be one of: write, update, delete, delete_namespace, log.`);
             }
 
             // getAuditHistory validates since and clamps limit; let errors propagate as internal_error
@@ -2188,35 +2195,46 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             // Filter entries to only those the principal can read
             const filteredEntries = historyEntries.filter(e => canRead(ctx, e.namespace));
 
-            return {
-              content: [{
-                type: "text",
-                text: JSON.stringify({
-                  generated_at: new Date().toISOString(),
-                  count: filteredEntries.length,
-                  entries: filteredEntries,
-                }),
-              }],
-            };
+            return okResult("history", {
+              generated_at: new Date().toISOString(),
+              count: filteredEntries.length,
+              entries: filteredEntries,
+            });
+          }
+
+          case "memory_status": {
+            const schemaVersion = getSchemaVersion(db);
+            return okResult("status", {
+              server: {
+                name: "munin-memory",
+                version: "0.1.0",
+              },
+              schema_version: schemaVersion,
+              features: {
+                embeddings: isEmbeddingAvailable(),
+                semantic_search: isSemanticEnabled(),
+                hybrid_search: isHybridEnabled(),
+              },
+              tools: {
+                count: TOOL_DEFINITIONS.length,
+                names: TOOL_DEFINITIONS.map((t) => t.name),
+              },
+              principal: {
+                id: ctx.principalId,
+                type: ctx.principalType,
+              },
+            });
           }
 
           default:
-            return {
-              content: [{
-                type: "text",
-                text: JSON.stringify({
-                  error: "unknown_tool",
-                  message: `Unknown tool: ${name}`,
-                }),
-              }],
-            };
+            return errResult("unknown", "unknown_tool", `Unknown tool: ${name}`);
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return {
           content: [{
             type: "text",
-            text: JSON.stringify({ error: "internal_error", message }),
+            text: JSON.stringify({ ok: false, action: name ?? "unknown", error: "internal_error", message }),
           }],
           isError: true,
         };

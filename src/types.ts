@@ -76,6 +76,8 @@ export interface ListParams {
   namespace?: string;
   include_demo?: boolean;
   include_completed_tasks?: boolean;
+  limit?: number;
+  offset?: number;
 }
 
 export interface DeleteParams {

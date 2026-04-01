@@ -78,7 +78,7 @@ describe("getAuditHistory — basic retrieval", () => {
     expect(row.action).toBe("write");
     expect(row.namespace).toBe("projects/alpha");
     expect(row.key).toBe("status");
-    expect(row.detail).toBeNull();
+    expect(row.detail).toBe("active");
   });
 
   it("records update action on overwrite", () => {

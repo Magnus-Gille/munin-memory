@@ -6,6 +6,7 @@ import { dirname } from "node:path";
 import { homedir } from "node:os";
 import type { Entry, AuditEntry, EntryType, TrackedStatusRow } from "./types.js";
 import { runMigrations } from "./migrations.js";
+import { scanForSecrets } from "./security.js";
 
 let _vecLoaded = false;
 
@@ -132,8 +133,8 @@ export function writeState(
 
   // Check if exists
   const existing = db.prepare(
-    "SELECT id, updated_at FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'",
-  ).get(namespace, key) as { id: string; updated_at: string } | undefined;
+    "SELECT id, content, updated_at FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'",
+  ).get(namespace, key) as { id: string; content: string; updated_at: string } | undefined;
 
   // Compare-and-swap: reject if entry was modified since caller last read it
   if (expectedUpdatedAt && existing && existing.updated_at !== expectedUpdatedAt) {
@@ -152,9 +153,10 @@ export function writeState(
          WHERE namespace = ? AND key = ? AND entry_type = 'state'`,
       ).run(content, tagsJson, now, agentId, namespace, key);
 
+      const updateDetail = `updated (${existing.content.length} → ${content.length} chars)`;
       db.prepare(
         "INSERT INTO audit_log (timestamp, agent_id, action, namespace, key, detail) VALUES (?, ?, ?, ?, ?, ?)",
-      ).run(now, agentId, "update", namespace, key, "overwritten previous value");
+      ).run(now, agentId, "update", namespace, key, updateDetail);
 
       return { status: "updated" as const, id: existing.id };
     } else {
@@ -164,12 +166,107 @@ export function writeState(
          VALUES (?, ?, ?, 'state', ?, ?, ?, ?, ?)`,
       ).run(id, namespace, key, content, tagsJson, agentId, now, now);
 
+      const writePreview = content.length > 80 ? content.slice(0, 80) + "..." : content;
       db.prepare(
         "INSERT INTO audit_log (timestamp, agent_id, action, namespace, key, detail) VALUES (?, ?, ?, ?, ?, ?)",
-      ).run(now, agentId, "write", namespace, key, null);
+      ).run(now, agentId, "write", namespace, key, writePreview);
 
       return { status: "created" as const, id };
     }
+  });
+
+  return txn();
+}
+
+export interface PatchParams {
+  content_append?: string;
+  content_prepend?: string;
+  tags_add?: string[];
+  tags_remove?: string[];
+}
+
+export type PatchStateResult =
+  | { status: "patched"; id: string }
+  | { status: "not_found" }
+  | { status: "conflict"; message: string; current_updated_at: string }
+  | { status: "secret_detected"; error: string };
+
+export function patchState(
+  db: Database.Database,
+  namespace: string,
+  key: string,
+  patch: PatchParams,
+  agentId = "default",
+  expectedUpdatedAt?: string,
+): PatchStateResult {
+  const existing = db.prepare(
+    "SELECT id, content, tags, updated_at FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'",
+  ).get(namespace, key) as { id: string; content: string; tags: string; updated_at: string } | undefined;
+
+  if (!existing) {
+    return { status: "not_found" };
+  }
+
+  // Compare-and-swap: reject if entry was modified since caller last read it
+  if (expectedUpdatedAt && existing.updated_at !== expectedUpdatedAt) {
+    return {
+      status: "conflict",
+      message: `Entry was updated at ${existing.updated_at}, expected ${expectedUpdatedAt}. Read the current version before overwriting.`,
+      current_updated_at: existing.updated_at,
+    };
+  }
+
+  // Apply content patches
+  let content = existing.content;
+  if (patch.content_prepend !== undefined) {
+    content = patch.content_prepend + "\n" + content;
+  }
+  if (patch.content_append !== undefined) {
+    content = content + "\n" + patch.content_append;
+  }
+
+  // Apply tag patches
+  let tags: string[] = JSON.parse(existing.tags) as string[];
+  if (patch.tags_add && patch.tags_add.length > 0) {
+    const existing_set = new Set(tags);
+    for (const t of patch.tags_add) {
+      if (!existing_set.has(t)) {
+        tags.push(t);
+      }
+    }
+  }
+  if (patch.tags_remove && patch.tags_remove.length > 0) {
+    const remove_set = new Set(patch.tags_remove);
+    tags = tags.filter((t) => !remove_set.has(t));
+  }
+
+  // Security check on final content
+  const secCheck = scanForSecrets(content);
+  if (!secCheck.valid) {
+    return { status: "secret_detected", error: secCheck.error! };
+  }
+
+  const now = nowUTC();
+  const tagsJson = JSON.stringify(tags);
+
+  const txn = db.transaction(() => {
+    db.prepare(
+      `UPDATE entries SET content = ?, tags = ?, updated_at = ?, agent_id = ?,
+       embedding_status = 'pending', embedding_model = NULL
+       WHERE namespace = ? AND key = ? AND entry_type = 'state'`,
+    ).run(content, tagsJson, now, agentId, namespace, key);
+
+    const patchOps: string[] = [];
+    if (patch.content_prepend !== undefined) patchOps.push("content_prepend");
+    if (patch.content_append !== undefined) patchOps.push("content_append");
+    if (patch.tags_add && patch.tags_add.length > 0) patchOps.push("tags_add");
+    if (patch.tags_remove && patch.tags_remove.length > 0) patchOps.push("tags_remove");
+    const patchDetail = patchOps.length > 0 ? patchOps.join(", ") : "no-op";
+    db.prepare(
+      "INSERT INTO audit_log (timestamp, agent_id, action, namespace, key, detail) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run(now, agentId, "patch", namespace, key, patchDetail);
+
+    return { status: "patched" as const, id: existing.id };
   });
 
   return txn();
@@ -214,9 +311,10 @@ export function appendLog(
        VALUES (?, ?, NULL, 'log', ?, ?, ?, ?, ?)`,
     ).run(id, namespace, content, tagsJson, agentId, now, now);
 
+    const logPreview = content.length > 80 ? content.slice(0, 80) + "..." : content;
     db.prepare(
       "INSERT INTO audit_log (timestamp, agent_id, action, namespace, key, detail) VALUES (?, ?, ?, ?, ?, ?)",
-    ).run(now, agentId, "log", namespace, null, null);
+    ).run(now, agentId, "log", namespace, null, logPreview);
   });
 
   txn();
@@ -430,6 +528,22 @@ export function listNamespaces(db: Database.Database): NamespaceCount[] {
        ORDER BY namespace`,
     )
     .all() as NamespaceCount[];
+}
+
+export interface ListNamespacesResult {
+  namespaces: NamespaceCount[];
+  total: number;
+  has_more: boolean;
+}
+
+export function listNamespacesPaged(
+  allNamespaces: NamespaceCount[],
+  limit: number,
+  offset: number,
+): ListNamespacesResult {
+  const total = allNamespaces.length;
+  const paged = allNamespaces.slice(offset, offset + limit);
+  return { namespaces: paged, total, has_more: offset + paged.length < total };
 }
 
 export interface StateEntryPreview {

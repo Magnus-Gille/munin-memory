@@ -591,16 +591,16 @@ describe("memory_delete — access enforcement", () => {
       namespace: "projects/foo",
       key: "status",
     });
-    const preview = parse(previewRaw) as { action: string; delete_token: string };
-    expect(preview.action).toBe("preview");
+    const preview = parse(previewRaw) as { action: string; phase: string; delete_token: string };
+    expect(preview.phase).toBe("preview");
 
     const deleteRaw = await ownerCall("memory_delete", {
       namespace: "projects/foo",
       key: "status",
       delete_token: preview.delete_token,
     });
-    const del = parse(deleteRaw) as { action: string; deleted_count: number };
-    expect(del.action).toBe("deleted");
+    const del = parse(deleteRaw) as { action: string; phase: string; deleted_count: number };
+    expect(del.phase).toBe("confirmed");
     expect(del.deleted_count).toBe(1);
   });
 
@@ -609,16 +609,16 @@ describe("memory_delete — access enforcement", () => {
       namespace: "users/sara/notes",
       key: "today",
     });
-    const preview = parse(previewRaw) as { action: string; delete_token: string };
-    expect(preview.action).toBe("preview");
+    const preview = parse(previewRaw) as { action: string; phase: string; delete_token: string };
+    expect(preview.phase).toBe("preview");
 
     const deleteRaw = await familyCall("memory_delete", {
       namespace: "users/sara/notes",
       key: "today",
       delete_token: preview.delete_token,
     });
-    const del = parse(deleteRaw) as { action: string; deleted_count: number };
-    expect(del.action).toBe("deleted");
+    const del = parse(deleteRaw) as { action: string; phase: string; deleted_count: number };
+    expect(del.phase).toBe("confirmed");
     expect(del.deleted_count).toBe(1);
   });
 
@@ -770,6 +770,7 @@ describe("meta: all registered tools are covered", () => {
       "memory_delete",
       "memory_insights",
       "memory_history",
+      "memory_status",
     ]);
 
     const untestedTools = registeredTools.filter((name) => !testedTools.has(name));

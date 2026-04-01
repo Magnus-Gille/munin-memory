@@ -16,6 +16,12 @@ describe("scanForSecrets", () => {
     expect(result.error).toContain("API key");
   });
 
+  it("rejects OpenAI project API keys (sk-proj-)", () => {
+    const result = scanForSecrets("key: sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij");
+    expect(result.valid).toBe(false);
+    expect(result.error).toContain("OpenAI project API key");
+  });
+
   it("rejects GitHub personal access tokens", () => {
     const result = scanForSecrets("token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij");
     expect(result.valid).toBe(false);

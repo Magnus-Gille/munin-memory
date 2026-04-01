@@ -4,6 +4,8 @@ import { unlinkSync, existsSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { initDatabase } from "../src/db.js";
 import { registerTools } from "../src/tools.js";
+import { ownerContext } from "../src/access.js";
+import type { AccessContext } from "../src/access.js";
 
 const TEST_DB_PATH = "/tmp/munin-memory-tools-test.db";
 
@@ -102,6 +104,142 @@ describe("memory_write", () => {
       namespace: "projects/test",
       key: "config",
       content: "api_key: sk-abcdefghijklmnopqrstuvwxyz",
+    });
+    const result = parseToolResponse(raw) as { error: string };
+    expect(result.error).toBe("validation_error");
+  });
+});
+
+describe("memory_write patch", () => {
+  it("appends content to existing entry", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "notes",
+      content: "line one",
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "notes",
+      patch: { content_append: "line two" },
+    });
+    const result = parseToolResponse(raw) as { status: string; id: string };
+    expect(result.status).toBe("patched");
+
+    const readRaw = await callTool("memory_read", { namespace: "projects/test", key: "notes" });
+    const entry = parseToolResponse(readRaw) as { content: string; tags: string[] };
+    expect(entry.content).toBe("line one\nline two");
+    expect(entry.tags).toEqual(["active"]); // tags unchanged
+  });
+
+  it("prepends content to existing entry", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "notes",
+      content: "line two",
+    });
+
+    await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "notes",
+      patch: { content_prepend: "line one" },
+    });
+
+    const readRaw = await callTool("memory_read", { namespace: "projects/test", key: "notes" });
+    const entry = parseToolResponse(readRaw) as { content: string };
+    expect(entry.content).toBe("line one\nline two");
+  });
+
+  it("adds tags without duplicates", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "notes",
+      content: "hello",
+      tags: ["active", "decision"],
+    });
+
+    await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "notes",
+      patch: { tags_add: ["active", "architecture"] }, // "active" is a duplicate
+    });
+
+    const readRaw = await callTool("memory_read", { namespace: "projects/test", key: "notes" });
+    const entry = parseToolResponse(readRaw) as { tags: string[] };
+    expect(entry.tags).toEqual(["active", "decision", "architecture"]);
+  });
+
+  it("removes specified tags", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "notes",
+      content: "hello",
+      tags: ["active", "decision", "architecture"],
+    });
+
+    await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "notes",
+      patch: { tags_remove: ["decision"] },
+    });
+
+    const readRaw = await callTool("memory_read", { namespace: "projects/test", key: "notes" });
+    const entry = parseToolResponse(readRaw) as { tags: string[] };
+    expect(entry.tags).toEqual(["active", "architecture"]);
+  });
+
+  it("returns not_found for non-existent entry", async () => {
+    const raw = await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "no-such-key",
+      patch: { content_append: "hello" },
+    });
+    const result = parseToolResponse(raw) as { ok: boolean; error: string };
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("not_found");
+  });
+
+  it("rejects patch and content together", async () => {
+    const raw = await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "notes",
+      content: "full write",
+      patch: { content_append: "extra" },
+    });
+    const result = parseToolResponse(raw) as { error: string; message: string };
+    expect(result.error).toBe("validation_error");
+    expect(result.message).toMatch(/mutually exclusive/);
+  });
+
+  it("rejects patch containing a secret in appended content", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "notes",
+      content: "safe content",
+    });
+
+    const raw = await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "notes",
+      patch: { content_append: "token: sk-abcdefghijklmnopqrstuvwxyz" },
+    });
+    const result = parseToolResponse(raw) as { error: string };
+    expect(result.error).toBe("validation_error");
+  });
+
+  it("rejects patch with invalid tags_add", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "notes",
+      content: "hello",
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "notes",
+      patch: { tags_add: ["bad tag!"] },
     });
     const result = parseToolResponse(raw) as { error: string };
     expect(result.error).toBe("validation_error");
@@ -645,11 +783,15 @@ describe("memory_delete", () => {
       key: "status",
     });
     const result = parseToolResponse(raw) as {
+      ok: boolean;
       action: string;
+      phase: string;
       delete_token: string;
       will_delete: { state_count: number };
     };
-    expect(result.action).toBe("preview");
+    expect(result.ok).toBe(true);
+    expect(result.action).toBe("delete");
+    expect(result.phase).toBe("preview");
     expect(result.delete_token).toBeTruthy();
     expect(result.will_delete.state_count).toBe(1);
   });
@@ -668,8 +810,10 @@ describe("memory_delete", () => {
       key: "status",
       delete_token: preview.delete_token,
     });
-    const deleteResult = parseToolResponse(deleteRaw) as { action: string; deleted_count: number };
-    expect(deleteResult.action).toBe("deleted");
+    const deleteResult = parseToolResponse(deleteRaw) as { ok: boolean; action: string; phase: string; deleted_count: number };
+    expect(deleteResult.ok).toBe(true);
+    expect(deleteResult.action).toBe("delete");
+    expect(deleteResult.phase).toBe("confirmed");
     expect(deleteResult.deleted_count).toBe(1);
 
     // Verify it's gone
@@ -848,7 +992,7 @@ describe("memory_orient", () => {
     await callTool("memory_write", { namespace: "projects/real", key: "s", content: "c" });
     await callTool("memory_write", { namespace: "demo/test", key: "s", content: "c" });
 
-    const raw = await callTool("memory_orient", {});
+    const raw = await callTool("memory_orient", { include_namespaces: true });
     const result = parseToolResponse(raw) as { namespaces: Array<{ namespace: string }> };
     const names = result.namespaces.map((n) => n.namespace);
     expect(names).toContain("projects/real");
@@ -859,7 +1003,7 @@ describe("memory_orient", () => {
     await callTool("memory_write", { namespace: "projects/real", key: "s", content: "c" });
     await callTool("memory_write", { namespace: "demo/test", key: "s", content: "c" });
 
-    const raw = await callTool("memory_orient", { include_demo: true });
+    const raw = await callTool("memory_orient", { include_demo: true, include_namespaces: true });
     const result = parseToolResponse(raw) as { namespaces: Array<{ namespace: string }> };
     const names = result.namespaces.map((n) => n.namespace);
     expect(names).toContain("demo/test");
@@ -879,7 +1023,8 @@ describe("memory_orient", () => {
     const result = parseToolResponse(raw) as { conventions: unknown; dashboard: unknown; namespaces: unknown };
     expect(result.conventions).toBeDefined();
     expect(result.dashboard).toBeDefined();
-    expect(result.namespaces).toBeDefined();
+    // compact default does not include namespaces unless include_namespaces is set
+    expect(result.namespaces).toBeUndefined();
   });
 
   it("supports compact detail with dashboard truncation and no namespaces by default", async () => {
@@ -1079,8 +1224,9 @@ describe("compare-and-swap (memory_write)", () => {
       tags: ["active"],
       expected_updated_at: "2020-01-01T00:00:00.000Z",
     });
-    const result = parseToolResponse(raw) as { status: string; current_updated_at: string; message: string };
-    expect(result.status).toBe("conflict");
+    const result = parseToolResponse(raw) as { ok: boolean; error: string; current_updated_at: string; message: string };
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("conflict");
     expect(result.current_updated_at).toBeTruthy();
     expect(result.message).toContain("was updated at");
   });
@@ -1393,7 +1539,7 @@ describe("completed task filtering", () => {
     await callTool("memory_write", { namespace: "tasks/20260327-done", key: "status", content: "done", tags: ["completed"] });
     await callTool("memory_write", { namespace: "tasks/20260327-running", key: "status", content: "running", tags: ["pending"] });
 
-    const raw = await callTool("memory_orient", {});
+    const raw = await callTool("memory_orient", { include_namespaces: true });
     const result = parseToolResponse(raw) as { namespaces: Array<{ namespace: string }> };
     const names = result.namespaces.map((n) => n.namespace);
 
@@ -1408,6 +1554,76 @@ describe("completed task filtering", () => {
     const result = parseToolResponse(raw) as { namespaces: Array<{ namespace: string }> };
     const names = result.namespaces.map((n) => n.namespace);
     expect(names).not.toContain("tasks/20260327-fail");
+  });
+});
+
+describe("memory_list pagination", () => {
+  it("returns total, returned, and has_more fields", async () => {
+    for (let i = 0; i < 5; i++) {
+      await callTool("memory_write", { namespace: `ns/item${i}`, key: "k", content: "c" });
+    }
+
+    const raw = await callTool("memory_list", { limit: 2, offset: 0 });
+    const result = parseToolResponse(raw) as {
+      namespaces: Array<{ namespace: string }>;
+      total: number;
+      returned: number;
+      has_more: boolean;
+    };
+    expect(result.total).toBe(5);
+    expect(result.returned).toBe(2);
+    expect(result.namespaces).toHaveLength(2);
+    expect(result.has_more).toBe(true);
+  });
+
+  it("last page sets has_more false", async () => {
+    for (let i = 0; i < 3; i++) {
+      await callTool("memory_write", { namespace: `pg/item${i}`, key: "k", content: "c" });
+    }
+
+    const raw = await callTool("memory_list", { limit: 10, offset: 0 });
+    const result = parseToolResponse(raw) as {
+      total: number;
+      returned: number;
+      has_more: boolean;
+    };
+    expect(result.total).toBe(3);
+    expect(result.returned).toBe(3);
+    expect(result.has_more).toBe(false);
+  });
+
+  it("offset advances the window", async () => {
+    for (let i = 0; i < 4; i++) {
+      await callTool("memory_write", { namespace: `page/item${i}`, key: "k", content: "c" });
+    }
+
+    const page1 = parseToolResponse(await callTool("memory_list", { limit: 2, offset: 0 })) as {
+      namespaces: Array<{ namespace: string }>;
+    };
+    const page2 = parseToolResponse(await callTool("memory_list", { limit: 2, offset: 2 })) as {
+      namespaces: Array<{ namespace: string }>;
+    };
+
+    const all = [...page1.namespaces, ...page2.namespaces];
+    const names = all.map((n) => n.namespace);
+    // All four distinct, no duplicates
+    expect(new Set(names).size).toBe(4);
+  });
+
+  it("defaults to limit 20", async () => {
+    for (let i = 0; i < 25; i++) {
+      await callTool("memory_write", { namespace: `many/item${String(i).padStart(2, "0")}`, key: "k", content: "c" });
+    }
+
+    const raw = await callTool("memory_list", {});
+    const result = parseToolResponse(raw) as {
+      namespaces: Array<{ namespace: string }>;
+      total: number;
+      has_more: boolean;
+    };
+    expect(result.namespaces).toHaveLength(20);
+    expect(result.total).toBe(25);
+    expect(result.has_more).toBe(true);
   });
 });
 
@@ -1601,6 +1817,77 @@ describe("reference index (memory_orient)", () => {
     const raw = await callTool("memory_orient", {});
     const result = parseToolResponse(raw) as { references?: unknown };
     expect(result.references).toBeUndefined();
+  });
+});
+
+describe("memory_status", () => {
+  it("returns all expected top-level fields", async () => {
+    const raw = await callTool("memory_status", {});
+    const result = parseToolResponse(raw) as {
+      server: { name: string; version: string };
+      schema_version: number;
+      features: { embeddings: boolean; semantic_search: boolean; hybrid_search: boolean };
+      tools: { count: number; names: string[] };
+      principal: { id: string; type: string };
+    };
+
+    expect(result.server).toBeDefined();
+    expect(result.server.name).toBe("munin-memory");
+    expect(result.server.version).toBe("0.1.0");
+
+    expect(typeof result.schema_version).toBe("number");
+    expect(result.schema_version).toBeGreaterThan(0);
+
+    expect(result.features).toBeDefined();
+    expect(typeof result.features.embeddings).toBe("boolean");
+    expect(typeof result.features.semantic_search).toBe("boolean");
+    expect(typeof result.features.hybrid_search).toBe("boolean");
+
+    expect(result.tools).toBeDefined();
+    expect(typeof result.tools.count).toBe("number");
+    expect(Array.isArray(result.tools.names)).toBe(true);
+  });
+
+  it("tools.count matches tools.names.length", async () => {
+    const raw = await callTool("memory_status", {});
+    const result = parseToolResponse(raw) as { tools: { count: number; names: string[] } };
+    expect(result.tools.count).toBe(result.tools.names.length);
+  });
+
+  it("tools.names includes memory_status itself", async () => {
+    const raw = await callTool("memory_status", {});
+    const result = parseToolResponse(raw) as { tools: { names: string[] } };
+    expect(result.tools.names).toContain("memory_status");
+  });
+
+  it("principal reflects the calling context for owner", async () => {
+    const raw = await callTool("memory_status", {});
+    const result = parseToolResponse(raw) as { principal: { id: string; type: string } };
+    expect(result.principal.type).toBe("owner");
+  });
+
+  it("principal reflects a non-owner context", async () => {
+    const agentCtx: AccessContext = {
+      principalId: "agent:test",
+      principalType: "agent",
+      namespaceRules: [],
+    };
+    const agentServer = new Server(
+      { name: "test-munin-agent", version: "0.0.1" },
+      { capabilities: { tools: {} } },
+    );
+    registerTools(agentServer, db, undefined, agentCtx);
+
+    const agentCallTool = async (name: string, args: Record<string, unknown> = {}) => {
+      const handler = (agentServer as unknown as { _requestHandlers: Map<string, Function> })._requestHandlers?.get("tools/call");
+      if (!handler) throw new Error("Cannot access tool handler");
+      return handler({ method: "tools/call", params: { name, arguments: args } });
+    };
+
+    const raw = await agentCallTool("memory_status", {});
+    const result = parseToolResponse(raw) as { principal: { id: string; type: string } };
+    expect(result.principal.id).toBe("agent:test");
+    expect(result.principal.type).toBe("agent");
   });
 });
 

@@ -107,7 +107,7 @@ describe("writeState + readState", () => {
     expect(audits).toHaveLength(2);
     expect(audits[0].action).toBe("write");
     expect(audits[1].action).toBe("update");
-    expect(audits[1].detail).toBe("overwritten previous value");
+    expect(audits[1].detail).toMatch(/^updated \(\d+ → \d+ chars\)$/);
   });
 });
 

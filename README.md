@@ -18,7 +18,7 @@ For the full argument, see [Resilient and Sovereign AI](https://gille.ai/en/blog
 
 ## What it does
 
-- **9 MCP tools** for reading, writing, searching, and organizing memories
+- **12 MCP tools** for reading, writing, searching, and organizing memories
 - **Two memory types:** state entries (mutable, current truth) and log entries (append-only, chronological history)
 - **Hierarchical namespaces** (e.g. `projects/website`, `people/alice`, `decisions/tech-stack`)
 - **Three search modes:** keyword (FTS5), semantic (vector embeddings), and hybrid (both combined via Reciprocal Rank Fusion). Semantic modes are optional and profile-dependent.

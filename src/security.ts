@@ -2,6 +2,7 @@ import type { SecurityResult } from "./types.js";
 
 const SECRET_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /sk-[a-zA-Z0-9]{20,}/, label: "API key (sk-...)" },
+  { pattern: /sk-proj-[a-zA-Z0-9]{20,}/, label: "OpenAI project API key (sk-proj-...)" },
   { pattern: /ghp_[a-zA-Z0-9]{36,}/, label: "GitHub personal access token" },
   { pattern: /gho_[a-zA-Z0-9]{36,}/, label: "GitHub OAuth token" },
   { pattern: /github_pat_[a-zA-Z0-9_]{22,}/, label: "GitHub fine-grained PAT" },
