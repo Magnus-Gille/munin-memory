@@ -294,6 +294,61 @@ export const migrations: Migration[] = [
       // 6. Leave principals.oauth_client_id in place (removed in future v7)
     },
   },
+  {
+    version: 7,
+    description: "Harden audit/history contract: canonical actions, audit entry_id, and backfill missing entry IDs",
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE audit_log ADD COLUMN entry_id TEXT;
+        CREATE INDEX idx_audit_entry_id ON audit_log(entry_id) WHERE entry_id IS NOT NULL;
+      `);
+
+      const missingIds = db
+        .prepare("SELECT rowid FROM entries WHERE id IS NULL OR TRIM(id) = ''")
+        .all() as Array<{ rowid: number }>;
+      const updateEntryId = db.prepare("UPDATE entries SET id = ? WHERE rowid = ?");
+      for (const row of missingIds) {
+        updateEntryId.run(randomUUID(), row.rowid);
+      }
+
+      const hasVecTable = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'entries_vec'")
+        .get();
+      if (hasVecTable) {
+        db.prepare("DELETE FROM entries_vec WHERE entry_id IS NULL").run();
+      }
+
+      db.exec(`
+        UPDATE audit_log SET action = 'log_append' WHERE action = 'log';
+        UPDATE audit_log SET action = 'namespace_delete' WHERE action = 'delete_namespace';
+
+        UPDATE audit_log
+        SET entry_id = (
+          SELECT e.id
+          FROM entries e
+          WHERE e.namespace = audit_log.namespace
+            AND e.key = audit_log.key
+            AND e.entry_type = 'state'
+        )
+        WHERE entry_id IS NULL
+          AND action IN ('write', 'update')
+          AND key IS NOT NULL;
+
+        UPDATE audit_log
+        SET entry_id = (
+          SELECT e.id
+          FROM entries e
+          WHERE e.namespace = audit_log.namespace
+            AND e.entry_type = 'log'
+            AND e.created_at = audit_log.timestamp
+          ORDER BY e.rowid DESC
+          LIMIT 1
+        )
+        WHERE entry_id IS NULL
+          AND action = 'log_append';
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

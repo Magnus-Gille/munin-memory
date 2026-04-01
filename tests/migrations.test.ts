@@ -84,6 +84,7 @@ describe("runMigrations", () => {
     expect(names).toContain("idx_entries_ns_type_created");
     expect(names).toContain("idx_entries_created");
     expect(names).toContain("idx_audit_timestamp");
+    expect(names).toContain("idx_audit_entry_id");
     db.close();
   });
 
@@ -290,7 +291,7 @@ describe("initDatabase uses migrations", () => {
     const db = initDatabase(TEST_DB_PATH);
 
     // schema_version exists and has latest version
-    expect(getSchemaVersion(db)).toBe(6);
+    expect(getSchemaVersion(db)).toBe(7);
 
     // Full CRUD works
     const result = writeState(db, "test/ns", "key1", "hello from migrations", ["test"]);
@@ -303,6 +304,97 @@ describe("initDatabase uses migrations", () => {
     const results = queryEntries(db, { query: "migrations" });
     expect(results.length).toBe(1);
 
+    db.close();
+  });
+});
+
+describe("migration v7 — contract hardening", () => {
+  it("adds audit_log.entry_id and canonicalizes legacy actions", () => {
+    const db = openRawDb();
+    runMigrations(db);
+
+    const cols = db
+      .prepare("PRAGMA table_info(audit_log)")
+      .all() as Array<{ name: string }>;
+    expect(cols.map((c) => c.name)).toContain("entry_id");
+
+    writeState(db, "projects/v7", "status", "hello", []);
+    db.prepare(
+      `INSERT INTO audit_log (timestamp, agent_id, action, namespace, key, detail, entry_id)
+       VALUES ('2026-04-01T00:00:00.000Z', 'default', 'log_append', 'projects/v7', NULL, NULL, NULL)`,
+    ).run();
+
+    const actions = db
+      .prepare("SELECT action FROM audit_log ORDER BY id")
+      .all() as Array<{ action: string }>;
+    expect(actions.some((row) => row.action === "write")).toBe(true);
+    expect(actions.some((row) => row.action === "log_append")).toBe(true);
+    db.close();
+  });
+
+  it("backfills missing entry IDs during migration", () => {
+    const db = openRawDb();
+    db.exec(`
+      CREATE TABLE entries (
+        id TEXT PRIMARY KEY,
+        namespace TEXT NOT NULL,
+        key TEXT,
+        entry_type TEXT NOT NULL CHECK(entry_type IN ('state', 'log')),
+        content TEXT NOT NULL,
+        tags TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(tags) AND json_type(tags) = 'array'),
+        agent_id TEXT DEFAULT 'default',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        embedding_status TEXT NOT NULL DEFAULT 'pending',
+        embedding_model TEXT,
+        CHECK(
+          (entry_type = 'state' AND key IS NOT NULL) OR
+          (entry_type = 'log' AND key IS NULL)
+        )
+      );
+      CREATE UNIQUE INDEX idx_entries_ns_key ON entries(namespace, key) WHERE entry_type = 'state';
+      CREATE INDEX idx_entries_ns_type_key ON entries(namespace, entry_type, key);
+      CREATE INDEX idx_entries_ns_type_created ON entries(namespace, entry_type, created_at DESC);
+      CREATE INDEX idx_entries_created ON entries(created_at);
+      CREATE INDEX idx_entries_embedding_status ON entries(embedding_status, created_at ASC);
+      CREATE TABLE audit_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL,
+        agent_id TEXT NOT NULL DEFAULT 'default',
+        action TEXT NOT NULL,
+        namespace TEXT NOT NULL,
+        key TEXT,
+        detail TEXT
+      );
+      CREATE INDEX idx_audit_timestamp ON audit_log(timestamp);
+      CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+    `);
+    for (let version = 1; version <= 6; version++) {
+      db.prepare("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)")
+        .run(version, "2026-04-01T00:00:00.000Z");
+    }
+
+    db.prepare(
+      `INSERT INTO entries (id, namespace, key, entry_type, content, tags, agent_id, created_at, updated_at, embedding_status, embedding_model)
+       VALUES (NULL, 'projects/legacy', 'status', 'state', 'legacy status', '[]', 'default', '2026-04-01T00:00:00.000Z', '2026-04-01T00:00:00.000Z', 'pending', NULL)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO audit_log (timestamp, agent_id, action, namespace, key, detail)
+       VALUES ('2026-04-01T00:00:00.000Z', 'default', 'write', 'projects/legacy', 'status', NULL)`,
+    ).run();
+
+    runMigrations(db);
+
+    const entry = db
+      .prepare("SELECT id FROM entries WHERE namespace = 'projects/legacy' AND key = 'status'")
+      .get() as { id: string };
+    const audit = db
+      .prepare("SELECT action, entry_id FROM audit_log WHERE namespace = 'projects/legacy'")
+      .get() as { action: string; entry_id: string | null };
+
+    expect(entry.id).toBeTruthy();
+    expect(audit.action).toBe("write");
+    expect(audit.entry_id).toBe(entry.id);
     db.close();
   });
 });

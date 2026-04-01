@@ -169,6 +169,54 @@ describe("memory_write — access enforcement", () => {
 });
 
 // ---------------------------------------------------------------------------
+// memory_update_status
+// ---------------------------------------------------------------------------
+
+describe("memory_update_status — access enforcement", () => {
+  it("owner updates tracked status in projects/foo → succeeds", async () => {
+    const raw = await ownerCall("memory_update_status", {
+      namespace: "projects/foo",
+      phase: "Active",
+      current_work: "Owner-managed status update",
+      blockers: "None.",
+      next_steps: ["Keep going"],
+      lifecycle: "active",
+    });
+    const result = parse(raw) as { status: string; key: string };
+    expect(result.status).toBe("created");
+    expect(result.key).toBe("status");
+  });
+
+  it("family updates users/sara/notes → validation error because namespace is not tracked", async () => {
+    const raw = await familyCall("memory_update_status", {
+      namespace: "users/sara/notes",
+      current_work: "Should fail before write path",
+    });
+    const result = parse(raw) as { error: string };
+    expect(result.error).toBe("validation_error");
+  });
+
+  it("family updates projects/foo → denied", async () => {
+    const raw = await familyCall("memory_update_status", {
+      namespace: "projects/foo",
+      current_work: "Unauthorized project update",
+    });
+    const result = parse(raw) as { found?: boolean; error?: string };
+    expect(result.found).toBe(false);
+    expect(result.error).toBeUndefined();
+  });
+
+  it("agent updates unauthorized tracked namespace → access_denied", async () => {
+    const raw = await agentCall("memory_update_status", {
+      namespace: "projects/foo",
+      current_work: "Unauthorized agent update",
+    });
+    const result = parse(raw) as { error: string };
+    expect(result.error).toBe("access_denied");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // memory_read
 // ---------------------------------------------------------------------------
 
@@ -759,6 +807,7 @@ describe("meta: all registered tools are covered", () => {
     // Tools tested in this file
     const testedTools = new Set([
       "memory_write",
+      "memory_update_status",
       "memory_read",
       "memory_read_batch",
       "memory_get",

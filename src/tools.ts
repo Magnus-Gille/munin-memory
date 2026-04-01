@@ -30,7 +30,7 @@ import {
   logRetrievalEvent,
   logRetrievalOutcome,
   getInsightsByEntry,
-  getAuditHistory,
+  getAuditHistoryPage,
 } from "./db.js";
 import {
   validateWriteInput,
@@ -47,6 +47,7 @@ import {
 } from "./embeddings.js";
 import type {
   WriteParams,
+  StatusUpdateParams,
   ReadParams,
   ReadBatchParams,
   GetParams,
@@ -67,6 +68,8 @@ import type {
   TrackedStatusRow,
   QueryResult,
   AttentionItem,
+  AuditAction,
+  AuditEntry,
 } from "./types.js";
 
 // In-memory delete token store (debate resolution #9)
@@ -109,9 +112,172 @@ function parseEntry(entry: Entry) {
   };
 }
 
+function buildProvenance(principalId: string) {
+  return {
+    principal_id: principalId,
+  };
+}
+
+function serializeParsedEntry(entry: ReturnType<typeof parseEntry>) {
+  return {
+    id: entry.id,
+    namespace: entry.namespace,
+    key: entry.key,
+    entry_type: entry.entry_type,
+    content: entry.content,
+    tags: entry.tags,
+    created_at: entry.created_at,
+    updated_at: entry.updated_at,
+    provenance: buildProvenance(entry.agent_id),
+  };
+}
+
 function parseTags(tags: string): string[] {
   return JSON.parse(tags) as string[];
 }
+
+interface StructuredStatus {
+  phase?: string;
+  current_work?: string;
+  blockers?: string;
+  next_steps?: string[];
+  notes?: string;
+}
+
+const STATUS_SECTION_ORDER = [
+  "phase",
+  "current_work",
+  "blockers",
+  "next_steps",
+  "notes",
+] as const;
+
+const STATUS_SECTION_TITLES: Record<(typeof STATUS_SECTION_ORDER)[number], string> = {
+  phase: "Phase",
+  current_work: "Current Work",
+  blockers: "Blockers",
+  next_steps: "Next Steps",
+  notes: "Notes",
+};
+
+function normalizeStatusLabel(raw: string): keyof StructuredStatus | null {
+  const normalized = raw
+    .toLowerCase()
+    .replace(/[*:_-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (normalized === "phase") return "phase";
+  if (normalized === "current work" || normalized === "current") return "current_work";
+  if (normalized === "blockers" || normalized === "blocker") return "blockers";
+  if (normalized === "next steps" || normalized === "next step" || normalized === "next") return "next_steps";
+  if (normalized === "notes" || normalized === "note") return "notes";
+  return null;
+}
+
+function extractStatusSectionValue(key: keyof StructuredStatus, raw: string): string | string[] | undefined {
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  if (key === "next_steps") {
+    const bulletItems = trimmed
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => line.replace(/^[-*]\s+/, "").trim())
+      .filter(Boolean);
+    if (bulletItems.length > 0) return bulletItems;
+    return [trimmed];
+  }
+  return trimmed;
+}
+
+function parseStructuredStatus(content: string): StructuredStatus {
+  const structured: StructuredStatus = {};
+  const lines = content.split("\n");
+
+  const headingMatches = [...content.matchAll(/^##\s+(.+)$/gm)];
+  if (headingMatches.length > 0) {
+    for (let i = 0; i < headingMatches.length; i++) {
+      const match = headingMatches[i];
+      const label = normalizeStatusLabel(match[1]);
+      if (!label) continue;
+      const sectionStart = match.index! + match[0].length;
+      const sectionEnd = i + 1 < headingMatches.length ? headingMatches[i + 1].index! : content.length;
+      const raw = content.slice(sectionStart, sectionEnd).trim();
+      const extracted = extractStatusSectionValue(label, raw);
+      if (Array.isArray(extracted)) structured[label] = extracted;
+      else if (typeof extracted === "string") structured[label] = extracted;
+    }
+  }
+
+  for (const line of lines) {
+    const inline = line.match(/^\*\*([^*]+)\*\*:\s*(.+)$/);
+    if (!inline) continue;
+    const label = normalizeStatusLabel(inline[1]);
+    if (!label) continue;
+    const extracted = extractStatusSectionValue(label, inline[2]);
+    if (Array.isArray(extracted)) structured[label] = extracted;
+    else if (typeof extracted === "string") structured[label] = extracted;
+  }
+
+  return structured;
+}
+
+function normalizeStatusText(value?: string): string | undefined {
+  if (value === undefined) return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function normalizeStatusList(value?: string[]): string[] | undefined {
+  if (value === undefined) return undefined;
+  const items = value.map((item) => item.trim()).filter(Boolean);
+  return items;
+}
+
+function buildStructuredStatus(update: StructuredStatus, existing?: StructuredStatus): Required<StructuredStatus> {
+  const merged: Required<StructuredStatus> = {
+    phase: normalizeStatusText(update.phase) ?? normalizeStatusText(existing?.phase) ?? "Unspecified.",
+    current_work: normalizeStatusText(update.current_work) ?? normalizeStatusText(existing?.current_work) ?? "Unspecified.",
+    blockers: normalizeStatusText(update.blockers) ?? normalizeStatusText(existing?.blockers) ?? "None.",
+    next_steps: normalizeStatusList(update.next_steps) ?? normalizeStatusList(existing?.next_steps) ?? ["None."],
+    notes: normalizeStatusText(update.notes) ?? normalizeStatusText(existing?.notes) ?? "",
+  };
+  return merged;
+}
+
+function formatStructuredStatus(status: Required<StructuredStatus>): string {
+  const sections: string[] = [];
+  for (const key of STATUS_SECTION_ORDER) {
+    const title = STATUS_SECTION_TITLES[key];
+    const value = status[key];
+    if (key === "notes" && !value) continue;
+    sections.push(`## ${title}`);
+    if (key === "next_steps") {
+      sections.push((value as string[]).map((item) => `- ${item}`).join("\n"));
+    } else {
+      sections.push(value as string);
+    }
+    sections.push("");
+  }
+  return sections.join("\n").trim();
+}
+
+function serializeAuditEntry(entry: AuditEntry) {
+  return {
+    ...entry,
+    provenance: buildProvenance(entry.agent_id),
+  };
+}
+
+const VALID_AUDIT_ACTIONS: Array<AuditAction | "delete_namespace" | "log"> = [
+  "write",
+  "update",
+  "delete",
+  "namespace_delete",
+  "log_append",
+  "delete_namespace",
+  "log",
+];
 
 function contentPreview(content: string, maxLen = 500): string {
   if (content.length <= maxLen) return content;
@@ -285,7 +451,7 @@ function trackedStatusRowToEntry(row: TrackedStatusRow): Entry {
     entry_type: "state",
     content: row.content,
     tags: row.tags,
-    agent_id: "default",
+    agent_id: row.agent_id,
     created_at: row.created_at,
     updated_at: row.updated_at,
     embedding_status: "pending",
@@ -791,6 +957,51 @@ const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: "memory_update_status",
+    description:
+      "Create or patch a tracked `status` entry using a server-enforced structure. Use this for `projects/*` and `clients/*` when you want reliable partial updates instead of read-modify-write on markdown blobs. The server rewrites the content into canonical sections: Phase, Current Work, Blockers, Next Steps, and optional Notes.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        namespace: {
+          type: "string",
+          description: "Tracked namespace to update. Must be under `projects/` or `clients/`.",
+        },
+        phase: {
+          type: "string",
+          description: "Optional. Replace the Phase section.",
+        },
+        current_work: {
+          type: "string",
+          description: "Optional. Replace the Current Work section.",
+        },
+        blockers: {
+          type: "string",
+          description: "Optional. Replace the Blockers section. Use 'None.' to clear blockers explicitly.",
+        },
+        next_steps: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional. Replace the Next Steps bullet list. Pass an empty array to clear it.",
+        },
+        notes: {
+          type: "string",
+          description: "Optional. Replace the Notes section.",
+        },
+        lifecycle: {
+          type: "string",
+          enum: ["active", "blocked", "completed", "stopped", "maintenance", "archived"],
+          description: "Optional. Sets the tracked lifecycle tag while preserving non-lifecycle tags.",
+        },
+        expected_updated_at: {
+          type: "string",
+          description: "Optional compare-and-swap guard. Pass the updated_at from a prior read to avoid blind overwrites.",
+        },
+      },
+      required: ["namespace"],
+    },
+  },
+  {
     name: "memory_read",
     description:
       "Retrieve a specific state entry by namespace and key. Returns the full content, tags, and timestamps. Returns a clear 'not found' message if the entry doesn't exist (not an error).\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
@@ -998,7 +1209,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_history",
     description:
-      "View the chronological audit trail of changes to memory. Returns a timeline of writes, updates, deletes, and log appends. Use this to answer 'what changed recently?' or 'what happened in this namespace?' — unlike memory_query (which is relevance-based search), this is a pure change feed ordered by time.\n\nKnown limitations: audit rows do not contain entry_id (can't link to specific entries across renames/deletes), detail field is sparse (can't reconstruct full content changes), and agent_id is currently not differentiated across environments.",
+      "View the chronological audit trail of changes to memory. Returns a timeline of writes, updates, deletes, namespace deletes, and log appends. Use this to answer 'what changed recently?' or 'what happened in this namespace?' — unlike memory_query (which is relevance-based search), this is a change feed ordered by time. For agent sync, pass `cursor` to page forward through new mutations and use `next_cursor` from the response.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -1016,6 +1227,10 @@ const TOOL_DEFINITIONS = [
           type: "string",
           enum: ["write", "update", "delete", "namespace_delete", "log_append"],
           description: "Optional. Filter by action type.",
+        },
+        cursor: {
+          type: "integer",
+          description: "Optional. Exclusive lower-bound audit cursor. When provided, entries are returned in ascending audit order for sync/polling workflows.",
         },
         limit: {
           type: "integer",
@@ -1385,7 +1600,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               }
             }
 
-            const result = writeState(db, namespace, key, content, effectiveTags, "default", expected_updated_at);
+            const result = writeState(db, namespace, key, content, effectiveTags, ctx.principalId, expected_updated_at);
 
             if (result.status === "conflict") {
               return {
@@ -1413,7 +1628,9 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               id: result.id,
               namespace,
               key,
+              updated_at: result.updated_at,
               hint,
+              provenance: buildProvenance(ctx.principalId),
             };
 
             // CAS hint for tracked status writes without expected_updated_at
@@ -1441,6 +1658,138 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             };
           }
 
+          case "memory_update_status": {
+            const {
+              namespace,
+              phase,
+              current_work,
+              blockers,
+              next_steps,
+              notes,
+              lifecycle,
+              expected_updated_at,
+            } = args as unknown as StatusUpdateParams;
+
+            const nsCheck = validateNamespace(namespace);
+            if (!nsCheck.valid) {
+              return textResult({ error: "validation_error", message: nsCheck.error });
+            }
+            if (!isTrackedNamespace(namespace)) {
+              return textResult({
+                error: "validation_error",
+                message: "memory_update_status only supports tracked namespaces under projects/* or clients/*.",
+              });
+            }
+            if (!canWrite(ctx, namespace)) {
+              return accessDeniedResponse(ctx);
+            }
+            if (next_steps !== undefined && (!Array.isArray(next_steps) || next_steps.some((item) => typeof item !== "string"))) {
+              return textResult({
+                error: "validation_error",
+                message: "next_steps must be an array of strings.",
+              });
+            }
+
+            const existing = readState(db, namespace, "status");
+            const existingParsed = existing ? parseEntry(existing) : null;
+            const existingStructured = existingParsed ? parseStructuredStatus(existingParsed.content) : undefined;
+            const hasExistingStructure = existingStructured
+              ? Object.keys(existingStructured).length > 0
+              : false;
+
+            const hasRequestedUpdate = [
+              phase,
+              current_work,
+              blockers,
+              notes,
+              lifecycle,
+              next_steps,
+            ].some((value) => value !== undefined);
+
+            if (!existing && !hasRequestedUpdate) {
+              return textResult({
+                error: "validation_error",
+                message: "Provide at least one status field or lifecycle when creating a new tracked status.",
+              });
+            }
+            if (existing && !hasRequestedUpdate) {
+              return textResult({
+                error: "validation_error",
+                message: "No status fields were provided to update.",
+              });
+            }
+
+            const structured = buildStructuredStatus(
+              {
+                phase,
+                current_work,
+                blockers,
+                next_steps,
+                notes,
+              },
+              existingStructured,
+            );
+            const content = formatStructuredStatus(structured);
+
+            const warnings: string[] = [];
+            if (existing && !hasExistingStructure) {
+              warnings.push("Existing status was not in the canonical structured format; missing sections were filled with defaults.");
+            }
+
+            const validation = validateWriteInput(namespace, "status", content, existingParsed?.tags, maxContentSize);
+            if (!validation.valid) {
+              return textResult({ error: "validation_error", message: validation.error });
+            }
+
+            const existingTags = existingParsed?.tags ?? [];
+            const retainedTags = existingTags.filter((tag) => !LIFECYCLE_TAGS.has(tag));
+            const lifecycleTag = lifecycle ?? getLifecycleTags(existingTags)[0];
+            const effectiveTags = lifecycleTag ? [...retainedTags, lifecycleTag] : retainedTags;
+
+            if (!lifecycleTag) {
+              warnings.push(`No lifecycle tag set. Consider one of: ${[...LIFECYCLE_TAGS].join(", ")}.`);
+            }
+
+            const result = writeState(
+              db,
+              namespace,
+              "status",
+              content,
+              effectiveTags,
+              ctx.principalId,
+              expected_updated_at ?? existingParsed?.updated_at,
+            );
+
+            if (result.status === "conflict") {
+              return textResult({
+                status: "conflict",
+                namespace,
+                key: "status",
+                message: result.message,
+                current_updated_at: result.current_updated_at,
+              });
+            }
+
+            if (sessionId) {
+              logRetrievalOutcome(db, sessionId, {
+                outcomeType: "write_in_result_namespace",
+                namespace,
+              });
+            }
+
+            return textResult({
+              status: result.status,
+              id: result.id,
+              namespace,
+              key: "status",
+              updated_at: result.updated_at,
+              content,
+              structured_status: structured,
+              warnings: warnings.length > 0 ? warnings : undefined,
+              provenance: buildProvenance(ctx.principalId),
+            });
+          }
+
           case "memory_read": {
             const { namespace, key } = args as unknown as ReadParams;
             const nsCheck = validateNamespace(namespace);
@@ -1457,16 +1806,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             const entry = readState(db, namespace, key);
             if (entry) {
               const parsed = parseEntry(entry);
-              const response: Record<string, unknown> = {
-                found: true,
-                id: parsed.id,
-                namespace: parsed.namespace,
-                key: parsed.key,
-                content: parsed.content,
-                tags: parsed.tags,
-                created_at: parsed.created_at,
-                updated_at: parsed.updated_at,
-              };
+              const response: Record<string, unknown> = { found: true, ...serializeParsedEntry(parsed) };
               if (isStale(parsed.updated_at)) {
                 response.stale = true;
               }
@@ -1522,16 +1862,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               const entry = readState(db, ns, k);
               if (entry) {
                 const parsed = parseEntry(entry);
-                const result: Record<string, unknown> = {
-                  found: true,
-                  id: parsed.id,
-                  namespace: parsed.namespace,
-                  key: parsed.key,
-                  content: parsed.content,
-                  tags: parsed.tags,
-                  created_at: parsed.created_at,
-                  updated_at: parsed.updated_at,
-                };
+                const result: Record<string, unknown> = { found: true, ...serializeParsedEntry(parsed) };
                 if (isStale(parsed.updated_at)) {
                   result.stale = true;
                 }
@@ -1559,17 +1890,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             }
             if (entry) {
               const parsed = parseEntry(entry);
-              const response: Record<string, unknown> = {
-                found: true,
-                id: parsed.id,
-                namespace: parsed.namespace,
-                key: parsed.key,
-                entry_type: parsed.entry_type,
-                content: parsed.content,
-                tags: parsed.tags,
-                created_at: parsed.created_at,
-                updated_at: parsed.updated_at,
-              };
+              const response: Record<string, unknown> = { found: true, ...serializeParsedEntry(parsed) };
               if (isStale(parsed.updated_at)) {
                 response.stale = true;
               }
@@ -1629,6 +1950,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                 tags: parseTags(entry.tags),
                 created_at: entry.created_at,
                 updated_at: entry.updated_at,
+                provenance: buildProvenance(entry.agent_id),
               }));
 
               // Analytics
@@ -1791,6 +2113,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                 tags: parseTags(entry.tags),
                 created_at: entry.created_at,
                 updated_at: entry.updated_at,
+                provenance: buildProvenance(entry.agent_id),
               };
 
               if (explain) {
@@ -1979,7 +2302,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             if (!canWrite(ctx, namespace)) {
               return accessDeniedResponse(ctx);
             }
-            const result = appendLog(db, namespace, content, tags ?? []);
+            const result = appendLog(db, namespace, content, tags ?? [], ctx.principalId);
             // Analytics: log log outcome correlated to prior retrieval in this session
             if (sessionId) {
               logRetrievalOutcome(db, sessionId, {
@@ -1995,6 +2318,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                   id: result.id,
                   namespace,
                   timestamp: result.timestamp,
+                  provenance: buildProvenance(ctx.principalId),
                 }),
               }],
             };
@@ -2032,10 +2356,12 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                 text: JSON.stringify({
                   namespace,
                   state_entries: stateEntries.map((e) => ({
+                    id: e.id,
                     key: e.key,
                     preview: e.preview,
                     tags: JSON.parse(e.tags) as string[],
                     updated_at: e.updated_at,
+                    provenance: buildProvenance(e.agent_id),
                   })),
                   log_summary: {
                     log_count: logSummary.log_count,
@@ -2046,6 +2372,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                       content_preview: l.content_preview,
                       tags: JSON.parse(l.tags) as string[],
                       created_at: l.created_at,
+                      provenance: buildProvenance(l.agent_id),
                     })),
                   },
                 }),
@@ -2088,7 +2415,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                   }],
                 };
               }
-              const deletedCount = executeDelete(db, namespace, key);
+              const deletedCount = executeDelete(db, namespace, key, ctx.principalId);
               const target = key ? `entry "${key}" in "${namespace}"` : `all entries in "${namespace}"`;
               return {
                 content: [{
@@ -2153,19 +2480,24 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
           }
 
           case "memory_history": {
-            const { namespace, since, action, limit } = (args ?? {}) as AuditHistoryParams;
+            const { namespace, since, action, limit, cursor } = (args ?? {}) as AuditHistoryParams;
 
             // Namespace subtree access check
             if (namespace) {
               const prefix = namespace.endsWith("/") ? namespace : namespace + "/";
               if (!canReadSubtree(ctx, prefix) && !canRead(ctx, namespace)) {
-                return textResult({ generated_at: new Date().toISOString(), count: 0, entries: [] });
+                return textResult({
+                  generated_at: new Date().toISOString(),
+                  count: 0,
+                  entries: [],
+                  next_cursor: cursor ?? null,
+                  has_more: false,
+                });
               }
             }
 
             // Validate action enum if provided
-            const validActions = ["write", "update", "delete", "namespace_delete", "log_append", "delete_namespace", "log"];
-            if (action !== undefined && !validActions.includes(action)) {
+            if (action !== undefined && !VALID_AUDIT_ACTIONS.includes(action as AuditAction | "delete_namespace" | "log")) {
               return {
                 content: [{
                   type: "text",
@@ -2177,16 +2509,17 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               };
             }
 
-            // getAuditHistory validates since and clamps limit; let errors propagate as internal_error
-            const historyEntries = getAuditHistory(db, {
+            const historyPage = getAuditHistoryPage(db, {
               namespace,
               since,
               action,
               limit,
+              cursor,
             });
 
-            // Filter entries to only those the principal can read
-            const filteredEntries = historyEntries.filter(e => canRead(ctx, e.namespace));
+            const filteredEntries = historyPage.entries
+              .filter(e => canRead(ctx, e.namespace))
+              .map(serializeAuditEntry);
 
             return {
               content: [{
@@ -2195,6 +2528,8 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                   generated_at: new Date().toISOString(),
                   count: filteredEntries.length,
                   entries: filteredEntries,
+                  next_cursor: historyPage.nextCursor,
+                  has_more: historyPage.hasMore,
                 }),
               }],
             };

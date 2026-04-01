@@ -140,9 +140,9 @@ describe("migration v6", () => {
     db.close();
   });
 
-  it("sets schema version to 6", () => {
+  it("sets schema version to latest migration", () => {
     const db = makeDb();
-    expect(getSchemaVersion(db)).toBe(6);
+    expect(getSchemaVersion(db)).toBe(7);
     db.close();
   });
 });

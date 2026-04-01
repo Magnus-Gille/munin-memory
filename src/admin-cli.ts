@@ -151,7 +151,7 @@ function auditLog(
   detail: string | null,
 ): void {
   db.prepare(
-    "INSERT INTO audit_log (timestamp, agent_id, action, namespace, key, detail) VALUES (?, ?, ?, ?, ?, ?)",
+    "INSERT INTO audit_log (timestamp, agent_id, action, namespace, key, detail, entry_id) VALUES (?, ?, ?, ?, ?, ?, NULL)",
   ).run(nowUTC(), "munin-admin", action, "admin/principals", principalId, detail);
 }
 
