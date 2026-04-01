@@ -190,6 +190,40 @@ function extractStatusSectionValue(key: keyof StructuredStatus, raw: string): st
   return trimmed;
 }
 
+function assignStructuredStatusValue(
+  target: StructuredStatus,
+  key: keyof StructuredStatus,
+  value: string | string[],
+): void {
+  if (key === "next_steps") {
+    if (Array.isArray(value)) {
+      target.next_steps = value;
+    } else {
+      target.next_steps = [value];
+    }
+    return;
+  }
+
+  if (typeof value === "string") {
+    switch (key) {
+      case "phase":
+        target.phase = value;
+        break;
+      case "current_work":
+        target.current_work = value;
+        break;
+      case "blockers":
+        target.blockers = value;
+        break;
+      case "notes":
+        target.notes = value;
+        break;
+      default:
+        break;
+    }
+  }
+}
+
 function parseStructuredStatus(content: string): StructuredStatus {
   const structured: StructuredStatus = {};
   const lines = content.split("\n");
@@ -204,8 +238,7 @@ function parseStructuredStatus(content: string): StructuredStatus {
       const sectionEnd = i + 1 < headingMatches.length ? headingMatches[i + 1].index! : content.length;
       const raw = content.slice(sectionStart, sectionEnd).trim();
       const extracted = extractStatusSectionValue(label, raw);
-      if (Array.isArray(extracted)) structured[label] = extracted;
-      else if (typeof extracted === "string") structured[label] = extracted;
+      if (extracted !== undefined) assignStructuredStatusValue(structured, label, extracted);
     }
   }
 
@@ -215,8 +248,7 @@ function parseStructuredStatus(content: string): StructuredStatus {
     const label = normalizeStatusLabel(inline[1]);
     if (!label) continue;
     const extracted = extractStatusSectionValue(label, inline[2]);
-    if (Array.isArray(extracted)) structured[label] = extracted;
-    else if (typeof extracted === "string") structured[label] = extracted;
+    if (extracted !== undefined) assignStructuredStatusValue(structured, label, extracted);
   }
 
   return structured;
@@ -626,7 +658,8 @@ function injectCanonicalQueryEntries(
   results: Entry[],
   params: QueryParams,
 ): Entry[] {
-  if (!isBroadOrientationQuery(params.query, params)) return results;
+  const query = params.query;
+  if (!query || !isBroadOrientationQuery(query, params)) return results;
 
   const injected = [
     readState(db, "meta", "reference-index"),
@@ -651,7 +684,8 @@ function injectAttentionQueryEntries(
   params: QueryParams,
   trackedStatuses: Map<string, TrackedStatusAssessment>,
 ): Entry[] {
-  if (!isAttentionTriageQuery(params.query, params)) return results;
+  const query = params.query;
+  if (!query || !isAttentionTriageQuery(query, params)) return results;
 
   const injected = [...trackedStatuses.values()]
     .filter((assessment) => assessment.lifecycle === "blocked" || assessment.needsAttention)
@@ -675,7 +709,8 @@ function rerankQueryResults(
   completedTasks: Set<string>,
   trackedStatuses?: Map<string, TrackedStatusAssessment>,
 ): Entry[] {
-  const queryLower = params.query.toLowerCase();
+  const query = params.query ?? "";
+  const queryLower = query.toLowerCase();
   const suppressDefaults = shouldApplyDefaultQuerySuppression(params);
   const filtered = results.filter((entry) => {
     if (!suppressDefaults) return true;
