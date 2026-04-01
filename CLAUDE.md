@@ -55,6 +55,7 @@ munin-memory/
 │   ├── consent.ts         # Minimal HTML consent page for OAuth authorization
 │   ├── tools.ts           # MCP tool definitions and handlers
 │   ├── access.ts          # Multi-principal access control (AccessContext, namespace rules)
+│   ├── admin-cli.ts       # munin-admin CLI for principal management (bin entry)
 │   ├── security.ts        # Secret pattern detection + input validation
 │   └── types.ts           # TypeScript type definitions
 ├── tests/
@@ -68,6 +69,7 @@ munin-memory/
 │   ├── tools.test.ts
 │   ├── access.test.ts             # Access control unit tests
 │   ├── access-enforcement.test.ts # Authorization matrix integration tests
+│   ├── admin-cli.test.ts           # munin-admin CLI unit tests
 │   └── security.test.ts
 ├── docs/
 │   ├── appliance-profiles.md              # Tiered hardware/appliance direction and Pi Zero spike plan
@@ -339,10 +341,31 @@ Stdio: always ownerContext()
 - Manual principal provisioning (SQLite insert)
 - Shared-namespace delete is owner-only (entries don't track principal ownership)
 
+### Admin CLI (`munin-admin`)
+
+Principal management CLI. 7 commands: `list`, `show`, `add`, `revoke`, `update`, `rotate-token`, `test`.
+
+```bash
+# Dev
+npm run admin -- principals list
+
+# After build
+npx munin-admin principals list
+npx munin-admin principals add sara --type family --rules '[{"pattern":"users/sara/*","permissions":"rw"}]'
+npx munin-admin principals test sara users/sara/notes
+```
+
+Key features:
+- `--json` flag on all commands for machine-readable output
+- `--type owner` requires `--force`
+- Agent principals get auto-generated service tokens (printed once, stored as SHA-256 hash)
+- `rotate-token` for credential rotation
+- All mutations write to `audit_log`
+- Refuses non-existent DB path without `--init`
+
 ### Not yet implemented (Phase 2+)
 
-- Admin CLI (`munin-admin principals list/add/revoke`)
-- Sara onboarding
+- Sara onboarding (use `munin-admin` to provision)
 - Entry-level principal ownership (for shared-namespace per-entry delete)
 - Per-principal rate limiting
 
