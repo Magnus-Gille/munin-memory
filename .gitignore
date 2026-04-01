@@ -16,6 +16,7 @@ docs/*
 !docs/usage-model.md
 !docs/claude-md-template.md
 !docs/authorization-matrix.md
+!docs/competitive-analysis.md
 
 # Debate files — keep only summaries and resolutions
 debate/*
