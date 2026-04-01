@@ -49,11 +49,12 @@ munin-memory/
 ├── src/
 │   ├── index.ts           # Entry point — MCP server setup, stdio + Express HTTP transports
 │   ├── db.ts              # SQLite init, pragmas, queries, vec operations
-│   ├── migrations.ts      # Migration framework + migration definitions (v1-v3)
+│   ├── migrations.ts      # Migration framework + migration definitions (v1-v5)
 │   ├── embeddings.ts      # Embedding pipeline, background worker, feature flags
 │   ├── oauth.ts           # OAuth 2.1 provider (OAuthServerProvider impl, SQLite-backed)
 │   ├── consent.ts         # Minimal HTML consent page for OAuth authorization
 │   ├── tools.ts           # MCP tool definitions and handlers
+│   ├── access.ts          # Multi-principal access control (AccessContext, namespace rules)
 │   ├── security.ts        # Secret pattern detection + input validation
 │   └── types.ts           # TypeScript type definitions
 ├── tests/
@@ -65,6 +66,8 @@ munin-memory/
 │   ├── oauth.test.ts              # OAuth provider unit tests
 │   ├── oauth-integration.test.ts  # OAuth end-to-end tests (supertest)
 │   ├── tools.test.ts
+│   ├── access.test.ts             # Access control unit tests
+│   ├── access-enforcement.test.ts # Authorization matrix integration tests
 │   └── security.test.ts
 ├── docs/
 │   ├── appliance-profiles.md              # Tiered hardware/appliance direction and Pi Zero spike plan
@@ -282,6 +285,66 @@ After `MUNIN_EMBEDDINGS_MAX_FAILURES` (default 5) consecutive embedding failures
 - RRF scoring: entries in only one result set contribute `1/(60 + rank)` from that set + 0 from the other. No Infinity sentinel.
 - Over-fetch 5x limit from each source for RRF (not 3x)
 - Vec0 tables don't have an `id` column — use `entry_id TEXT` metadata column instead
+
+## Multi-principal access control (Feature 5 — Phase 1)
+
+### Overview
+
+Server-enforced namespace isolation. Each authenticated principal has scoped namespace rules; owner retains full access with zero overhead. All 12 MCP tools enforce access rules via `AccessContext`.
+
+### Schema (migration v5)
+
+- **`principals`** — maps tokens/OAuth clients to principals with namespace rules
+  - `principal_id` (unique, human-readable: "sara", "agent:skuld")
+  - `principal_type` (owner/family/agent/external)
+  - `oauth_client_id` (for OAuth client → principal mapping)
+  - `token_hash` (SHA-256, for agent service tokens)
+  - `namespace_rules` (JSON: `[{"pattern": "users/sara/*", "permissions": "rw"}]`)
+  - `revoked_at`, `expires_at` for lifecycle management
+
+### AccessContext threading
+
+```
+HTTP: req.auth → resolveAccessContext(db, clientId, token) → AccessContext
+Stdio: always ownerContext()
+→ createMcpServer(db, sessionId, ctx) → registerTools(server, db, sessionId, ctx)
+→ ctx captured in closure, checked in every tool handler
+```
+
+### Resolution order (fail-closed)
+
+1. `clientId === "legacy-bearer"` → owner (no DB hit)
+2. `clientId.startsWith("principal:")` → lookup by `principal_id`
+3. Lookup `principals.oauth_client_id = clientId`
+4. Hash token → lookup `principals.token_hash`
+5. Not found / revoked / expired / error → zero-access context
+
+### Enforcement strategy
+
+- **Simple tools** (read, write, log, delete): pre-check `canRead`/`canWrite` before DB access
+- **Aggregate tools** (orient, attention): authorize each input source BEFORE computing derived fields
+- **Query tools**: post-filter results after reranking, before formatting and analytics
+- **Denial semantics**: humans see "not found" (invisible), agents get `{ error: "access_denied" }`
+
+### Key files
+
+- `src/access.ts` — AccessContext types, pattern matching, `resolveAccessContext`
+- `src/tools.ts` — Per-tool enforcement in every handler
+- `src/index.ts` — Threads AccessContext from transport to tools
+- `docs/authorization-matrix.md` — Full tool-by-tool authorization spec
+
+### Phase 1 boundary (current)
+
+- Owner + scoped non-owner enforcement framework
+- Manual principal provisioning (SQLite insert)
+- Shared-namespace delete is owner-only (entries don't track principal ownership)
+
+### Not yet implemented (Phase 2+)
+
+- Admin CLI (`munin-admin principals list/add/revoke`)
+- Sara onboarding
+- Entry-level principal ownership (for shared-namespace per-entry delete)
+- Per-principal rate limiting
 
 ## Outcome-aware retrieval (Feature 4 — Phase 1)
 
