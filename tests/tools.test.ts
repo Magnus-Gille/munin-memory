@@ -1628,6 +1628,311 @@ describe("memory_extract", () => {
   });
 });
 
+describe("memory_narrative", () => {
+  it("surfaces repeated reversal patterns", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/grimnir",
+      phase: "Active",
+      current_work: "Initial rollout",
+      blockers: "None.",
+      next_steps: ["Keep going"],
+      lifecycle: "active",
+    });
+    await callTool("memory_update_status", {
+      namespace: "projects/grimnir",
+      current_work: "Paused while requirements changed",
+      blockers: "Requirements unclear.",
+      lifecycle: "blocked",
+    });
+    await callTool("memory_update_status", {
+      namespace: "projects/grimnir",
+      current_work: "Resumed after clarification",
+      blockers: "None.",
+      lifecycle: "active",
+    });
+    await callTool("memory_log", {
+      namespace: "projects/grimnir",
+      content: "Resumed work after pausing the rollout.",
+      tags: ["milestone"],
+    });
+
+    const raw = await callTool("memory_narrative", {
+      namespace: "projects/grimnir",
+      include_sources: true,
+    });
+    const result = parseToolResponse(raw) as {
+      signals: Array<{ category: string; source_audit_ids: number[] }>;
+      sources: Array<{ kind: string }>;
+    };
+
+    expect(result.signals).toContainEqual(expect.objectContaining({
+      category: "reversal_pattern",
+    }));
+    const reversal = result.signals.find((signal) => signal.category === "reversal_pattern")!;
+    expect(reversal.source_audit_ids.length).toBeGreaterThan(0);
+    expect(result.sources.some((source) => source.kind === "audit")).toBe(true);
+  });
+
+  it("surfaces old blockers", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/release-train",
+      phase: "Blocked",
+      current_work: "Waiting on vendor",
+      blockers: "Vendor sign-off missing.",
+      next_steps: ["Follow up"],
+      lifecycle: "blocked",
+    });
+    db.prepare("UPDATE entries SET updated_at = '2026-03-20T00:00:00.000Z' WHERE namespace = 'projects/release-train' AND key = 'status'").run();
+
+    const raw = await callTool("memory_narrative", { namespace: "projects/release-train" });
+    const result = parseToolResponse(raw) as {
+      signals: Array<{ category: string; severity: string }>;
+    };
+
+    expect(result.signals).toContainEqual(expect.objectContaining({
+      category: "blocker_age",
+    }));
+  });
+
+  it("does not label stale maintenance work as a long-gap problem", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/mimir",
+      phase: "Maintenance",
+      current_work: "Quiet maintenance mode",
+      blockers: "None.",
+      next_steps: ["Monitor only"],
+      lifecycle: "maintenance",
+    });
+    db.prepare("UPDATE entries SET updated_at = '2026-03-01T00:00:00.000Z' WHERE namespace = 'projects/mimir' AND key = 'status'").run();
+
+    const raw = await callTool("memory_narrative", { namespace: "projects/mimir" });
+    const result = parseToolResponse(raw) as {
+      signals: Array<{ category: string }>;
+    };
+
+    expect(result.signals.some((signal) => signal.category === "long_gap")).toBe(false);
+  });
+
+  it("includes source references when requested", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/skuld",
+      phase: "Active",
+      current_work: "Morning briefing refinement",
+      blockers: "None.",
+      next_steps: ["Tighten scoring"],
+      lifecycle: "active",
+    });
+    await callTool("memory_log", {
+      namespace: "projects/skuld",
+      content: "Decided to keep the first narrative layer source-backed.",
+      tags: ["decision"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/skuld",
+      content: "Decided to avoid background materialization for now.",
+      tags: ["decision"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/skuld",
+      content: "Decision: keep the scope narrow and attributable.",
+      tags: ["decision"],
+    });
+
+    const raw = await callTool("memory_narrative", {
+      namespace: "projects/skuld",
+      include_sources: true,
+    });
+    const result = parseToolResponse(raw) as {
+      signals: Array<{ category: string; source_entry_ids: string[] }>;
+      sources: Array<{ kind: string; id: string | number }>;
+    };
+
+    expect(result.signals).toContainEqual(expect.objectContaining({
+      category: "decision_churn",
+    }));
+    const churn = result.signals.find((signal) => signal.category === "decision_churn")!;
+    expect(churn.source_entry_ids.length).toBeGreaterThan(0);
+    expect(result.sources.length).toBeGreaterThan(0);
+    expect(result.sources.some((source) => source.kind === "entry")).toBe(true);
+  });
+});
+
+describe("memory_commitments", () => {
+  it("tracks status next steps and resolves them when they are cleared", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/bifrost",
+      phase: "Active",
+      current_work: "Polish onboarding",
+      blockers: "None.",
+      next_steps: [
+        "Ship onboarding notes by 2027-04-05",
+        "Add cleanup checklist",
+      ],
+      lifecycle: "active",
+    });
+
+    const initialRaw = await callTool("memory_commitments", {
+      namespace: "projects/bifrost",
+    });
+    const initial = parseToolResponse(initialRaw) as {
+      open: Array<{ text: string; source_type: string; source_entry_id: string; due_at: string | null }>;
+      completed_recently: Array<unknown>;
+    };
+
+    expect(initial.open).toHaveLength(2);
+    expect(initial.open).toContainEqual(expect.objectContaining({
+      text: "Ship onboarding notes by 2027-04-05",
+      source_type: "tracked_next_step",
+    }));
+    expect(initial.open[0].source_entry_id).toBeTruthy();
+    expect(initial.completed_recently).toHaveLength(0);
+
+    await callTool("memory_update_status", {
+      namespace: "projects/bifrost",
+      current_work: "Onboarding notes shipped",
+      blockers: "None.",
+      next_steps: [],
+      lifecycle: "active",
+    });
+
+    const resolvedRaw = await callTool("memory_commitments", {
+      namespace: "projects/bifrost",
+    });
+    const resolved = parseToolResponse(resolvedRaw) as {
+      open: Array<unknown>;
+      completed_recently: Array<{ text: string; status: string }>;
+    };
+
+    expect(resolved.open).toHaveLength(0);
+    expect(resolved.completed_recently).toContainEqual(expect.objectContaining({
+      text: "Ship onboarding notes by 2027-04-05",
+      status: "done",
+    }));
+  });
+
+  it("surfaces overdue explicit commitments from dated logs", async () => {
+    await callTool("memory_log", {
+      namespace: "projects/tyr",
+      content: "We will ship the patch by 2026-03-01.",
+      tags: ["decision"],
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/tyr",
+    });
+    const result = parseToolResponse(raw) as {
+      overdue: Array<{ text: string; source_type: string; due_at: string | null }>;
+    };
+
+    expect(result.overdue).toContainEqual(expect.objectContaining({
+      text: "We will ship the patch by 2026-03-01.",
+      source_type: "explicit_dated_commitment",
+    }));
+    expect(result.overdue[0].due_at).toContain("2026-03-01");
+  });
+});
+
+describe("memory_patterns", () => {
+  it("surfaces repeated decision themes with source references", async () => {
+    await callTool("memory_log", {
+      namespace: "projects/odin",
+      content: "Decision: ARM64 support still looks fragile because maintainer risk remains high.",
+      tags: ["decision"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/odin",
+      content: "Decided to defer rollout again due to ARM64 uncertainty and single maintainer risk.",
+      tags: ["decision"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/odin",
+      content: "Decision review: maintainer risk and ARM64 support are still the blocking concerns.",
+      tags: ["decision"],
+    });
+
+    const raw = await callTool("memory_patterns", {
+      namespace: "projects/odin",
+    });
+    const result = parseToolResponse(raw) as {
+      patterns: Array<{ kind: string; summary: string; source_entry_ids: string[] }>;
+      supporting_sources: Array<{ entry_id: string }>;
+    };
+
+    expect(result.patterns).toContainEqual(expect.objectContaining({
+      kind: "decision_theme",
+    }));
+    expect(result.patterns[0].summary.toLowerCase()).toMatch(/arm64|maintainer|risk/);
+    expect(result.patterns[0].source_entry_ids.length).toBeGreaterThan(0);
+    expect(result.supporting_sources.length).toBeGreaterThan(0);
+  });
+
+  it("does not overstate a one-off status snapshot as a heuristic", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/solo",
+      phase: "Active",
+      current_work: "One session only",
+      blockers: "None.",
+      next_steps: ["Do the thing", "Do the other thing"],
+      lifecycle: "active",
+    });
+
+    const raw = await callTool("memory_patterns", {
+      namespace: "projects/solo",
+    });
+    const result = parseToolResponse(raw) as {
+      patterns: Array<unknown>;
+      heuristics: Array<unknown>;
+    };
+
+    expect(result.patterns).toHaveLength(0);
+    expect(result.heuristics).toHaveLength(0);
+  });
+});
+
+describe("memory_handoff", () => {
+  it("returns current state, recent decisions, recent actors, and open loops", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/heimdall",
+      phase: "Blocked",
+      current_work: "Waiting on deployment auth",
+      blockers: "Deploy remains blocked on external auth.",
+      next_steps: ["Retry the deploy tomorrow"],
+      lifecycle: "blocked",
+    });
+    await callTool("memory_log", {
+      namespace: "projects/heimdall",
+      content: "Decision: pause the rollout until auth is working again.",
+      tags: ["decision"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/heimdall",
+      content: "We will rerun the deploy by 2026-03-20.",
+      tags: ["milestone"],
+    });
+
+    const raw = await callTool("memory_handoff", {
+      namespace: "projects/heimdall",
+    });
+    const result = parseToolResponse(raw) as {
+      found: boolean;
+      current_state: { summary: string } | null;
+      recent_decisions: Array<{ summary: string }>;
+      open_loops: string[];
+      recent_actors: Array<{ principal_id: string }>;
+      recommended_next_actions: string[];
+    };
+
+    expect(result.found).toBe(true);
+    expect(result.current_state?.summary).toContain("Blocked");
+    expect(result.recent_decisions.length).toBeGreaterThan(0);
+    expect(result.recent_actors).toContainEqual(expect.objectContaining({
+      principal_id: "owner",
+    }));
+    expect(result.open_loops.some((loop) => /blocker|overdue|retry/i.test(loop))).toBe(true);
+    expect(result.recommended_next_actions.length).toBeGreaterThan(0);
+  });
+});
+
 describe("memory_attention", () => {
   it("surfaces blocked, stale, and missing-status work in priority order", async () => {
     const upcomingDate = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);

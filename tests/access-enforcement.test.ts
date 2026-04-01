@@ -712,6 +712,211 @@ describe("memory_extract — access enforcement", () => {
 });
 
 // ---------------------------------------------------------------------------
+// memory_narrative
+// ---------------------------------------------------------------------------
+
+describe("memory_narrative — access enforcement", () => {
+  beforeEach(async () => {
+    await ownerCall("memory_update_status", {
+      namespace: "projects/foo",
+      phase: "Active",
+      current_work: "Restricted project",
+      blockers: "None.",
+      next_steps: ["Keep going"],
+      lifecycle: "active",
+    });
+    await ownerCall("memory_log", {
+      namespace: "projects/foo",
+      content: "Decided to keep this project private.",
+      tags: ["decision"],
+    });
+  });
+
+  it("family memory_narrative on inaccessible namespace → empty narrative view", async () => {
+    const raw = await familyCall("memory_narrative", {
+      namespace: "projects/foo",
+      include_sources: true,
+    });
+    const result = parse(raw) as {
+      namespace: string;
+      summary: string;
+      signals: unknown[];
+      timeline: unknown[];
+      sources: unknown[];
+    };
+
+    expect(result.namespace).toBe("projects/foo");
+    expect(result.summary).toContain("No narrative context found");
+    expect(result.signals).toHaveLength(0);
+    expect(result.timeline).toHaveLength(0);
+    expect(result.sources).toHaveLength(0);
+  });
+
+  it("owner memory_narrative on accessible namespace → returns signal-bearing view", async () => {
+    const raw = await ownerCall("memory_narrative", {
+      namespace: "projects/foo",
+    });
+    const result = parse(raw) as {
+      namespace: string;
+      timeline: Array<{ category: string }>;
+    };
+
+    expect(result.namespace).toBe("projects/foo");
+    expect(result.timeline.some((item) => item.category === "status" || item.category === "log")).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// memory_commitments
+// ---------------------------------------------------------------------------
+
+describe("memory_commitments — access enforcement", () => {
+  beforeEach(async () => {
+    await ownerCall("memory_update_status", {
+      namespace: "projects/foo",
+      phase: "Active",
+      current_work: "Restricted follow-through",
+      blockers: "None.",
+      next_steps: ["Ship the private patch by 2027-04-05"],
+      lifecycle: "active",
+    });
+  });
+
+  it("family memory_commitments on inaccessible namespace → empty commitment buckets", async () => {
+    const raw = await familyCall("memory_commitments", {
+      namespace: "projects/foo",
+    });
+    const result = parse(raw) as {
+      open: unknown[];
+      at_risk: unknown[];
+      overdue: unknown[];
+      completed_recently: unknown[];
+    };
+
+    expect(result.open).toHaveLength(0);
+    expect(result.at_risk).toHaveLength(0);
+    expect(result.overdue).toHaveLength(0);
+    expect(result.completed_recently).toHaveLength(0);
+  });
+
+  it("owner memory_commitments on accessible namespace → returns source-backed commitments", async () => {
+    const raw = await ownerCall("memory_commitments", {
+      namespace: "projects/foo",
+    });
+    const result = parse(raw) as {
+      open: Array<{ source_entry_id: string }>;
+    };
+
+    expect(result.open.length).toBeGreaterThan(0);
+    expect(result.open[0].source_entry_id).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// memory_patterns
+// ---------------------------------------------------------------------------
+
+describe("memory_patterns — access enforcement", () => {
+  beforeEach(async () => {
+    await ownerCall("memory_log", {
+      namespace: "projects/foo",
+      content: "Decision: ARM64 support is still blocked by maintainer risk.",
+      tags: ["decision"],
+    });
+    await ownerCall("memory_log", {
+      namespace: "projects/foo",
+      content: "Decided to wait again because ARM64 support and maintainer risk remain unresolved.",
+      tags: ["decision"],
+    });
+  });
+
+  it("family memory_patterns on inaccessible namespace → empty pattern view", async () => {
+    const raw = await familyCall("memory_patterns", {
+      namespace: "projects/foo",
+    });
+    const result = parse(raw) as {
+      patterns: unknown[];
+      heuristics: unknown[];
+      supporting_sources: unknown[];
+    };
+
+    expect(result.patterns).toHaveLength(0);
+    expect(result.heuristics).toHaveLength(0);
+    expect(result.supporting_sources).toHaveLength(0);
+  });
+
+  it("owner memory_patterns on accessible namespace → returns pattern-backed summary", async () => {
+    const raw = await ownerCall("memory_patterns", {
+      namespace: "projects/foo",
+    });
+    const result = parse(raw) as {
+      patterns: Array<{ source_entry_ids: string[] }>;
+    };
+
+    expect(result.patterns.length).toBeGreaterThan(0);
+    expect(result.patterns[0].source_entry_ids.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// memory_handoff
+// ---------------------------------------------------------------------------
+
+describe("memory_handoff — access enforcement", () => {
+  beforeEach(async () => {
+    await ownerCall("memory_update_status", {
+      namespace: "projects/foo",
+      phase: "Blocked",
+      current_work: "Restricted handoff",
+      blockers: "Waiting on auth.",
+      next_steps: ["Retry tomorrow"],
+      lifecycle: "blocked",
+    });
+    await ownerCall("memory_log", {
+      namespace: "projects/foo",
+      content: "Decision: keep the restricted handoff inside the owner workspace.",
+      tags: ["decision"],
+    });
+  });
+
+  it("family memory_handoff on inaccessible namespace → found false with empty pack", async () => {
+    const raw = await familyCall("memory_handoff", {
+      namespace: "projects/foo",
+    });
+    const result = parse(raw) as {
+      found: boolean;
+      current_state: unknown;
+      recent_decisions: unknown[];
+      open_loops: unknown[];
+      recent_actors: unknown[];
+      recommended_next_actions: unknown[];
+    };
+
+    expect(result.found).toBe(false);
+    expect(result.current_state).toBeNull();
+    expect(result.recent_decisions).toHaveLength(0);
+    expect(result.open_loops).toHaveLength(0);
+    expect(result.recent_actors).toHaveLength(0);
+    expect(result.recommended_next_actions).toHaveLength(0);
+  });
+
+  it("owner memory_handoff on accessible namespace → returns populated pack", async () => {
+    const raw = await ownerCall("memory_handoff", {
+      namespace: "projects/foo",
+    });
+    const result = parse(raw) as {
+      found: boolean;
+      recent_decisions: unknown[];
+      recent_actors: unknown[];
+    };
+
+    expect(result.found).toBe(true);
+    expect(result.recent_decisions.length).toBeGreaterThan(0);
+    expect(result.recent_actors.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // memory_attention
 // ---------------------------------------------------------------------------
 
@@ -757,15 +962,28 @@ describe("memory_delete — access enforcement", () => {
       key: "status",
       content: "To be deleted",
     });
-    await ownerCall("memory_write", {
+    await familyCall("memory_write", {
       namespace: "users/sara/notes",
       key: "today",
       content: "Sara's deletable note",
     });
     await ownerCall("memory_write", {
-      namespace: "shared/family/list",
-      key: "items",
-      content: "Family list",
+      namespace: "shared/family/board",
+      key: "owner-note",
+      content: "Owner family note",
+    });
+    await familyCall("memory_write", {
+      namespace: "shared/family/board",
+      key: "sara-note",
+      content: "Sara family note",
+    });
+    await ownerCall("memory_log", {
+      namespace: "shared/family/board",
+      content: "Owner log entry",
+    });
+    await familyCall("memory_log", {
+      namespace: "shared/family/board",
+      content: "Sara log entry",
     });
   });
 
@@ -815,16 +1033,90 @@ describe("memory_delete — access enforcement", () => {
     expect(result.error).toBeUndefined();
   });
 
-  it("family namespace-wide delete on shared/family → owner-only, denied (found: false)", async () => {
-    // Family has rw on shared/family/* but namespace-wide delete requires owner
-    const raw = await familyCall("memory_delete", {
-      namespace: "shared/family",
+  it("family namespace-wide delete on shared/family/board → previews only caller-owned entries", async () => {
+    const previewRaw = await familyCall("memory_delete", {
+      namespace: "shared/family/board",
     });
-    const result = parse(raw) as { found?: boolean; error?: string };
-    // canWrite on shared/family may pass (exact match is not covered by "shared/family/*"),
-    // but the namespace-wide delete check kicks in
-    // Either way: must not return action: "preview"
-    expect((result as { action?: string }).action).not.toBe("preview");
+    const preview = parse(previewRaw) as {
+      phase: string;
+      delete_token: string;
+      will_delete: { state_count: number; log_count: number; keys?: string[] };
+    };
+
+    expect(preview.phase).toBe("preview");
+    expect(preview.will_delete.state_count).toBe(1);
+    expect(preview.will_delete.log_count).toBe(1);
+    expect(preview.will_delete.keys).toEqual(["sara-note"]);
+
+    const deleteRaw = await familyCall("memory_delete", {
+      namespace: "shared/family/board",
+      delete_token: preview.delete_token,
+    });
+    const del = parse(deleteRaw) as { deleted_count: number };
+    expect(del.deleted_count).toBe(2);
+
+    const ownerStillThereRaw = await ownerCall("memory_read", {
+      namespace: "shared/family/board",
+      key: "owner-note",
+    });
+    const ownerStillThere = parse(ownerStillThereRaw) as { found: boolean };
+    expect(ownerStillThere.found).toBe(true);
+
+    const saraGoneRaw = await familyCall("memory_read", {
+      namespace: "shared/family/board",
+      key: "sara-note",
+    });
+    const saraGone = parse(saraGoneRaw) as { found: boolean };
+    expect(saraGone.found).toBe(false);
+  });
+
+  it("owner namespace-wide delete on shared/family/board → deletes all owners' entries", async () => {
+    const previewRaw = await ownerCall("memory_delete", {
+      namespace: "shared/family/board",
+    });
+    const preview = parse(previewRaw) as {
+      phase: string;
+      delete_token: string;
+      will_delete: { state_count: number; log_count: number };
+    };
+
+    expect(preview.phase).toBe("preview");
+    expect(preview.will_delete.state_count).toBe(2);
+    expect(preview.will_delete.log_count).toBe(2);
+
+    const deleteRaw = await ownerCall("memory_delete", {
+      namespace: "shared/family/board",
+      delete_token: preview.delete_token,
+    });
+    const del = parse(deleteRaw) as { deleted_count: number };
+    expect(del.deleted_count).toBe(4);
+
+    const ownerGoneRaw = await ownerCall("memory_read", {
+      namespace: "shared/family/board",
+      key: "owner-note",
+    });
+    const ownerGone = parse(ownerGoneRaw) as { found: boolean };
+    expect(ownerGone.found).toBe(false);
+
+    const saraGoneRaw = await familyCall("memory_read", {
+      namespace: "shared/family/board",
+      key: "sara-note",
+    });
+    const saraGone = parse(saraGoneRaw) as { found: boolean };
+    expect(saraGone.found).toBe(false);
+  });
+
+  it("family specific delete on owner-owned shared entry → previews zero deletions", async () => {
+    const raw = await familyCall("memory_delete", {
+      namespace: "shared/family/board",
+      key: "owner-note",
+    });
+    const result = parse(raw) as {
+      phase: string;
+      will_delete: { state_count: number };
+    };
+    expect(result.phase).toBe("preview");
+    expect(result.will_delete.state_count).toBe(0);
   });
 
   it("agent deletes from unauthorized namespace → access_denied", async () => {
@@ -952,6 +1244,10 @@ describe("meta: all registered tools are covered", () => {
       "memory_orient",
       "memory_resume",
       "memory_extract",
+      "memory_narrative",
+      "memory_commitments",
+      "memory_patterns",
+      "memory_handoff",
       "memory_attention",
       "memory_delete",
       "memory_insights",

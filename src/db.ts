@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, chmodSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { homedir } from "node:os";
-import type { Entry, AuditAction, AuditEntry, EntryType, TrackedStatusRow } from "./types.js";
+import type { CommitmentStatus, Entry, AuditAction, AuditEntry, EntryType, TrackedStatusRow } from "./types.js";
 import { runMigrations } from "./migrations.js";
 import { scanForSecrets } from "./security.js";
 
@@ -101,7 +101,7 @@ export function rebuildFTS(db: Database.Database): void {
 export function getTrackedStatuses(db: Database.Database): TrackedStatusRow[] {
   return db
     .prepare(
-      `SELECT id, namespace, key, substr(content, 1, 300) as content_preview, content, tags, agent_id, created_at, updated_at, valid_until
+      `SELECT id, namespace, key, substr(content, 1, 300) as content_preview, content, tags, agent_id, owner_principal_id, created_at, updated_at, valid_until
        FROM entries
        WHERE entry_type = 'state' AND key = 'status'
          AND (namespace LIKE 'projects/%' ESCAPE '\\' OR namespace LIKE 'clients/%' ESCAPE '\\')
@@ -161,8 +161,8 @@ export function writeState(
 
   // Check if exists
   const existing = db.prepare(
-    "SELECT id, content, updated_at, valid_until FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'",
-  ).get(namespace, key) as { id: string; content: string; updated_at: string; valid_until: string | null } | undefined;
+    "SELECT id, content, updated_at, valid_until, owner_principal_id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'",
+  ).get(namespace, key) as { id: string; content: string; updated_at: string; valid_until: string | null; owner_principal_id: string | null } | undefined;
 
   // Compare-and-swap: reject if entry was modified since caller last read it
   if (expectedUpdatedAt && existing && existing.updated_at !== expectedUpdatedAt) {
@@ -189,9 +189,9 @@ export function writeState(
     } else {
       const id = randomUUID();
       db.prepare(
-        `INSERT INTO entries (id, namespace, key, entry_type, content, tags, agent_id, created_at, updated_at, valid_until)
-         VALUES (?, ?, ?, 'state', ?, ?, ?, ?, ?, ?)`,
-      ).run(id, namespace, key, content, tagsJson, agentId, now, now, validUntil ?? null);
+        `INSERT INTO entries (id, namespace, key, entry_type, content, tags, agent_id, owner_principal_id, created_at, updated_at, valid_until)
+         VALUES (?, ?, ?, 'state', ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(id, namespace, key, content, tagsJson, agentId, agentId, now, now, validUntil ?? null);
 
       const writePreview = content.length > 80 ? content.slice(0, 80) + "..." : content;
       insertAuditRow(db, now, agentId, "write", namespace, key, writePreview, id);
@@ -332,9 +332,9 @@ export function appendLog(
 
   const txn = db.transaction(() => {
     db.prepare(
-      `INSERT INTO entries (id, namespace, key, entry_type, content, tags, agent_id, created_at, updated_at)
-       VALUES (?, ?, NULL, 'log', ?, ?, ?, ?, ?)`,
-    ).run(id, namespace, content, tagsJson, agentId, now, now);
+      `INSERT INTO entries (id, namespace, key, entry_type, content, tags, agent_id, owner_principal_id, created_at, updated_at)
+       VALUES (?, ?, NULL, 'log', ?, ?, ?, ?, ?, ?)`,
+    ).run(id, namespace, content, tagsJson, agentId, agentId, now, now);
 
     const logPreview = content.length > 80 ? content.slice(0, 80) + "..." : content;
     insertAuditRow(db, now, agentId, "log_append", namespace, null, logPreview, id);
@@ -589,6 +589,7 @@ export interface StateEntryPreview {
   preview: string;
   tags: string;
   agent_id: string;
+  owner_principal_id: string | null;
   updated_at: string;
 }
 
@@ -597,6 +598,7 @@ export interface LogPreview {
   content_preview: string;
   tags: string;
   agent_id: string;
+  owner_principal_id: string | null;
   created_at: string;
 }
 
@@ -613,7 +615,7 @@ export function listNamespaceContents(
 ): { stateEntries: StateEntryPreview[]; logSummary: LogSummary } {
   const stateEntries = db
     .prepare(
-      `SELECT id, key, substr(content, 1, 100) as preview, tags, agent_id, updated_at
+      `SELECT id, key, substr(content, 1, 100) as preview, tags, agent_id, owner_principal_id, updated_at
        FROM entries WHERE namespace = ? AND entry_type = 'state' ORDER BY key`,
     )
     .all(namespace) as StateEntryPreview[];
@@ -627,7 +629,7 @@ export function listNamespaceContents(
 
   const recentLogs = db
     .prepare(
-      `SELECT id, substr(content, 1, 200) as content_preview, tags, agent_id, created_at
+      `SELECT id, substr(content, 1, 200) as content_preview, tags, agent_id, owner_principal_id, created_at
        FROM entries WHERE namespace = ? AND entry_type = 'log'
        ORDER BY rowid DESC LIMIT 5`,
     )
@@ -639,6 +641,195 @@ export function listNamespaceContents(
   };
 
   return { stateEntries, logSummary };
+}
+
+export interface DerivationEntryOptions {
+  namespace?: string;
+  since?: string;
+}
+
+export function listEntriesForDerivation(
+  db: Database.Database,
+  options: DerivationEntryOptions = {},
+): Entry[] {
+  const { namespace, since } = options;
+  let sql = "SELECT * FROM entries WHERE 1=1";
+  const params: unknown[] = [];
+
+  if (namespace) {
+    if (namespace.endsWith("/")) {
+      sql += " AND namespace LIKE ? ESCAPE '\\'";
+      params.push(escapeForLike(namespace) + "%");
+    } else {
+      sql += " AND (namespace = ? OR namespace LIKE ? ESCAPE '\\')";
+      params.push(namespace);
+      params.push(escapeForLike(namespace) + "/%");
+    }
+  }
+
+  if (since) {
+    sql += " AND updated_at >= ?";
+    params.push(since);
+  }
+
+  sql += " ORDER BY updated_at DESC";
+  return db.prepare(sql).all(...params) as Entry[];
+}
+
+export interface DerivedCommitmentInput {
+  sourceType: string;
+  fingerprint: string;
+  text: string;
+  dueAt?: string | null;
+  confidence: number;
+}
+
+export interface CommitmentRow {
+  id: string;
+  namespace: string;
+  source_entry_id: string;
+  source_type: string;
+  source_fingerprint: string;
+  text: string;
+  due_at: string | null;
+  status: CommitmentStatus;
+  confidence: number;
+  created_at: string;
+  updated_at: string;
+  resolved_at: string | null;
+  source_key: string | null;
+  source_excerpt: string;
+}
+
+export interface ListCommitmentsOptions {
+  namespace?: string;
+  since?: string;
+  limit?: number;
+  includeResolved?: boolean;
+}
+
+export function syncCommitmentsForEntry(
+  db: Database.Database,
+  entryId: string,
+  derivedCommitments: DerivedCommitmentInput[],
+): void {
+  const source = db
+    .prepare("SELECT id, namespace, key, entry_type FROM entries WHERE id = ?")
+    .get(entryId) as { id: string; namespace: string; key: string | null; entry_type: EntryType } | undefined;
+
+  if (!source) return;
+
+  const existingRows = db
+    .prepare(
+      `SELECT id, source_type, source_fingerprint, status
+       FROM commitments
+       WHERE source_entry_id = ?`,
+    )
+    .all(entryId) as Array<{ id: string; source_type: string; source_fingerprint: string; status: CommitmentStatus }>;
+
+  const existingByFingerprint = new Map(existingRows.map((row) => [row.source_fingerprint, row]));
+  const nextFingerprints = new Set(derivedCommitments.map((commitment) => commitment.fingerprint));
+  const now = nowUTC();
+
+  const insertCommitment = db.prepare(
+    `INSERT INTO commitments
+       (id, namespace, source_entry_id, source_type, source_fingerprint, text, due_at, status, confidence, created_at, updated_at, resolved_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, NULL)`,
+  );
+  const updateCommitment = db.prepare(
+    `UPDATE commitments
+     SET namespace = ?, source_type = ?, text = ?, due_at = ?, confidence = ?, status = 'open', updated_at = ?, resolved_at = NULL
+     WHERE id = ?`,
+  );
+  const resolveCommitment = db.prepare(
+    `UPDATE commitments
+     SET status = ?, updated_at = ?, resolved_at = COALESCE(resolved_at, ?)
+     WHERE id = ? AND status = 'open'`,
+  );
+
+  const txn = db.transaction(() => {
+    for (const commitment of derivedCommitments) {
+      const existing = existingByFingerprint.get(commitment.fingerprint);
+      if (existing) {
+        updateCommitment.run(
+          source.namespace,
+          commitment.sourceType,
+          commitment.text,
+          commitment.dueAt ?? null,
+          commitment.confidence,
+          now,
+          existing.id,
+        );
+        continue;
+      }
+
+      insertCommitment.run(
+        randomUUID(),
+        source.namespace,
+        source.id,
+        commitment.sourceType,
+        commitment.fingerprint,
+        commitment.text,
+        commitment.dueAt ?? null,
+        commitment.confidence,
+        now,
+        now,
+      );
+    }
+
+    for (const existing of existingRows) {
+      if (nextFingerprints.has(existing.source_fingerprint)) continue;
+      const resolvedStatus: CommitmentStatus = existing.source_type === "tracked_next_step"
+        ? "done"
+        : "cancelled";
+      resolveCommitment.run(resolvedStatus, now, now, existing.id);
+    }
+  });
+
+  txn();
+}
+
+export function listCommitments(
+  db: Database.Database,
+  options: ListCommitmentsOptions = {},
+): CommitmentRow[] {
+  const { namespace, since, limit = 100, includeResolved = true } = options;
+  const clampedLimit = Math.min(Math.max(limit, 1), 200);
+
+  let sql = `
+    SELECT c.*,
+           e.key AS source_key,
+           substr(e.content, 1, 220) AS source_excerpt
+    FROM commitments c
+    JOIN entries e ON e.id = c.source_entry_id
+    WHERE 1=1
+  `;
+  const params: unknown[] = [];
+
+  if (namespace) {
+    if (namespace.endsWith("/")) {
+      sql += " AND c.namespace LIKE ? ESCAPE '\\'";
+      params.push(escapeForLike(namespace) + "%");
+    } else {
+      sql += " AND (c.namespace = ? OR c.namespace LIKE ? ESCAPE '\\')";
+      params.push(namespace);
+      params.push(escapeForLike(namespace) + "/%");
+    }
+  }
+
+  if (since) {
+    sql += " AND c.updated_at >= ?";
+    params.push(since);
+  }
+
+  if (!includeResolved) {
+    sql += " AND c.status = 'open'";
+  }
+
+  sql += " ORDER BY CASE WHEN c.due_at IS NULL THEN 1 ELSE 0 END, c.due_at ASC, c.updated_at DESC LIMIT ?";
+  params.push(clampedLimit);
+
+  return db.prepare(sql).all(...params) as CommitmentRow[];
 }
 
 // --- Delete operations ---
@@ -653,13 +844,15 @@ export function previewDelete(
   db: Database.Database,
   namespace: string,
   key?: string,
+  agentId = "default",
+  allowGlobalNamespaceDelete = false,
 ): DeleteInfo {
   if (key) {
-    const entry = db
-      .prepare(
-        "SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'",
-      )
-      .get(namespace, key) as { id: string } | undefined;
+    const sql = allowGlobalNamespaceDelete
+      ? "SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'"
+      : "SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND COALESCE(owner_principal_id, agent_id) = ?";
+    const params = allowGlobalNamespaceDelete ? [namespace, key] : [namespace, key, agentId];
+    const entry = db.prepare(sql).get(...params) as { id: string } | undefined;
     return {
       stateCount: entry ? 1 : 0,
       logCount: 0,
@@ -667,17 +860,17 @@ export function previewDelete(
     };
   }
 
-  const stateKeys = db
-    .prepare(
-      "SELECT key FROM entries WHERE namespace = ? AND entry_type = 'state' ORDER BY key",
-    )
-    .all(namespace) as Array<{ key: string }>;
+  const stateSql = allowGlobalNamespaceDelete
+    ? "SELECT key FROM entries WHERE namespace = ? AND entry_type = 'state' ORDER BY key"
+    : "SELECT key FROM entries WHERE namespace = ? AND entry_type = 'state' AND COALESCE(owner_principal_id, agent_id) = ? ORDER BY key";
+  const stateParams = allowGlobalNamespaceDelete ? [namespace] : [namespace, agentId];
+  const stateKeys = db.prepare(stateSql).all(...stateParams) as Array<{ key: string }>;
 
-  const logCount = (
-    db
-      .prepare("SELECT COUNT(*) as cnt FROM entries WHERE namespace = ? AND entry_type = 'log'")
-      .get(namespace) as { cnt: number }
-  ).cnt;
+  const logSql = allowGlobalNamespaceDelete
+    ? "SELECT COUNT(*) as cnt FROM entries WHERE namespace = ? AND entry_type = 'log'"
+    : "SELECT COUNT(*) as cnt FROM entries WHERE namespace = ? AND entry_type = 'log' AND COALESCE(owner_principal_id, agent_id) = ?";
+  const logParams = allowGlobalNamespaceDelete ? [namespace] : [namespace, agentId];
+  const logCount = (db.prepare(logSql).get(...logParams) as { cnt: number }).cnt;
 
   return {
     stateCount: stateKeys.length,
@@ -691,6 +884,7 @@ export function executeDelete(
   namespace: string,
   key?: string,
   agentId = "default",
+  allowGlobalNamespaceDelete = false,
 ): number {
   const now = nowUTC();
 
@@ -698,16 +892,20 @@ export function executeDelete(
     // App-level vec cleanup (no SQL trigger — extension may not be loaded)
     if (_vecLoaded) {
       if (key) {
-        const entry = db
-          .prepare("SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'")
-          .get(namespace, key) as { id: string } | undefined;
+        const selectSql = allowGlobalNamespaceDelete
+          ? "SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'"
+          : "SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND COALESCE(owner_principal_id, agent_id) = ?";
+        const selectParams = allowGlobalNamespaceDelete ? [namespace, key] : [namespace, key, agentId];
+        const entry = db.prepare(selectSql).get(...selectParams) as { id: string } | undefined;
         if (entry) {
           db.prepare("DELETE FROM entries_vec WHERE entry_id = ?").run(entry.id);
         }
       } else {
-        const ids = db
-          .prepare("SELECT id FROM entries WHERE namespace = ?")
-          .all(namespace) as Array<{ id: string }>;
+        const idsSql = allowGlobalNamespaceDelete
+          ? "SELECT id FROM entries WHERE namespace = ?"
+          : "SELECT id FROM entries WHERE namespace = ? AND COALESCE(owner_principal_id, agent_id) = ?";
+        const idsParams = allowGlobalNamespaceDelete ? [namespace] : [namespace, agentId];
+        const ids = db.prepare(idsSql).all(...idsParams) as Array<{ id: string }>;
         const deleteVec = db.prepare("DELETE FROM entries_vec WHERE entry_id = ?");
         for (const { id } of ids) {
           deleteVec.run(id);
@@ -718,22 +916,32 @@ export function executeDelete(
     let deletedCount: number;
 
     if (key) {
-      const entry = db
-        .prepare("SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'")
-        .get(namespace, key) as { id: string } | undefined;
-      const result = db
-        .prepare("DELETE FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'")
-        .run(namespace, key);
+      const selectSql = allowGlobalNamespaceDelete
+        ? "SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'"
+        : "SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND COALESCE(owner_principal_id, agent_id) = ?";
+      const selectParams = allowGlobalNamespaceDelete ? [namespace, key] : [namespace, key, agentId];
+      const entry = db.prepare(selectSql).get(...selectParams) as { id: string } | undefined;
+      const deleteSql = allowGlobalNamespaceDelete
+        ? "DELETE FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'"
+        : "DELETE FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND COALESCE(owner_principal_id, agent_id) = ?";
+      const deleteParams = allowGlobalNamespaceDelete ? [namespace, key] : [namespace, key, agentId];
+      const result = db.prepare(deleteSql).run(...deleteParams);
       deletedCount = result.changes;
 
-      insertAuditRow(db, now, agentId, "delete", namespace, key, null, entry?.id ?? null);
+      if (deletedCount > 0) {
+        insertAuditRow(db, now, agentId, "delete", namespace, key, null, entry?.id ?? null);
+      }
     } else {
-      const result = db
-        .prepare("DELETE FROM entries WHERE namespace = ?")
-        .run(namespace);
+      const deleteSql = allowGlobalNamespaceDelete
+        ? "DELETE FROM entries WHERE namespace = ?"
+        : "DELETE FROM entries WHERE namespace = ? AND COALESCE(owner_principal_id, agent_id) = ?";
+      const deleteParams = allowGlobalNamespaceDelete ? [namespace] : [namespace, agentId];
+      const result = db.prepare(deleteSql).run(...deleteParams);
       deletedCount = result.changes;
 
-      insertAuditRow(db, now, agentId, "namespace_delete", namespace, null, `deleted ${deletedCount} entries`);
+      if (deletedCount > 0) {
+        insertAuditRow(db, now, agentId, "namespace_delete", namespace, null, `deleted ${deletedCount} entries`);
+      }
     }
 
     return deletedCount;

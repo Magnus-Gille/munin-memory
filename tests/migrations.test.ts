@@ -84,6 +84,9 @@ describe("runMigrations", () => {
     expect(names).toContain("idx_entries_ns_type_created");
     expect(names).toContain("idx_entries_created");
     expect(names).toContain("idx_entries_state_valid_until");
+    expect(names).toContain("idx_commitments_namespace_status_due");
+    expect(names).toContain("idx_commitments_source_entry");
+    expect(names).toContain("idx_entries_ns_owner");
     expect(names).toContain("idx_audit_timestamp");
     expect(names).toContain("idx_audit_entry_id");
     db.close();
@@ -292,7 +295,7 @@ describe("initDatabase uses migrations", () => {
     const db = initDatabase(TEST_DB_PATH);
 
     // schema_version exists and has latest version
-    expect(getSchemaVersion(db)).toBe(8);
+    expect(getSchemaVersion(db)).toBe(10);
 
     // Full CRUD works
     const result = writeState(db, "test/ns", "key1", "hello from migrations", ["test"]);
@@ -420,6 +423,121 @@ describe("migration v8 — valid_until", () => {
       .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name = 'idx_entries_state_valid_until'")
       .all() as Array<{ name: string }>;
     expect(indexes).toHaveLength(1);
+    db.close();
+  });
+});
+
+describe("migration v9 — commitments", () => {
+  it("creates the commitments table and indexes", () => {
+    const db = openRawDb();
+    runMigrations(db);
+
+    const tables = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = 'commitments'")
+      .all() as Array<{ name: string }>;
+    expect(tables).toHaveLength(1);
+
+    const cols = db
+      .prepare("PRAGMA table_info(commitments)")
+      .all() as Array<{ name: string }>;
+    expect(cols.map((c) => c.name)).toEqual(expect.arrayContaining([
+      "source_entry_id",
+      "source_type",
+      "source_fingerprint",
+      "status",
+      "resolved_at",
+    ]));
+    db.close();
+  });
+});
+
+describe("migration v10 — owner_principal_id", () => {
+  it("adds owner_principal_id to entries", () => {
+    const db = openRawDb();
+    runMigrations(db);
+
+    const cols = db
+      .prepare("PRAGMA table_info(entries)")
+      .all() as Array<{ name: string }>;
+    expect(cols.map((c) => c.name)).toContain("owner_principal_id");
+    db.close();
+  });
+
+  it("backfills owner_principal_id from agent_id on upgrade", () => {
+    const db = openRawDb();
+    db.exec(`
+      CREATE TABLE entries (
+        id TEXT PRIMARY KEY,
+        namespace TEXT NOT NULL,
+        key TEXT,
+        entry_type TEXT NOT NULL CHECK(entry_type IN ('state', 'log')),
+        content TEXT NOT NULL,
+        tags TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(tags) AND json_type(tags) = 'array'),
+        agent_id TEXT DEFAULT 'default',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        embedding_status TEXT NOT NULL DEFAULT 'pending',
+        embedding_model TEXT,
+        valid_until TEXT,
+        CHECK(
+          (entry_type = 'state' AND key IS NOT NULL) OR
+          (entry_type = 'log' AND key IS NULL)
+        )
+      );
+      CREATE UNIQUE INDEX idx_entries_ns_key ON entries(namespace, key) WHERE entry_type = 'state';
+      CREATE INDEX idx_entries_ns_type_key ON entries(namespace, entry_type, key);
+      CREATE INDEX idx_entries_ns_type_created ON entries(namespace, entry_type, created_at DESC);
+      CREATE INDEX idx_entries_created ON entries(created_at);
+      CREATE INDEX idx_entries_embedding_status ON entries(embedding_status, created_at ASC);
+      CREATE INDEX idx_entries_state_valid_until ON entries(valid_until) WHERE entry_type = 'state' AND valid_until IS NOT NULL;
+      CREATE TABLE audit_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL,
+        agent_id TEXT NOT NULL DEFAULT 'default',
+        action TEXT NOT NULL,
+        namespace TEXT NOT NULL,
+        key TEXT,
+        detail TEXT,
+        entry_id TEXT
+      );
+      CREATE INDEX idx_audit_timestamp ON audit_log(timestamp);
+      CREATE INDEX idx_audit_entry_id ON audit_log(entry_id) WHERE entry_id IS NOT NULL;
+      CREATE TABLE commitments (
+        id TEXT PRIMARY KEY,
+        namespace TEXT NOT NULL,
+        source_entry_id TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+        source_type TEXT NOT NULL,
+        source_fingerprint TEXT NOT NULL,
+        text TEXT NOT NULL,
+        due_at TEXT,
+        status TEXT NOT NULL CHECK(status IN ('open', 'done', 'cancelled')),
+        confidence REAL NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        resolved_at TEXT,
+        UNIQUE(source_entry_id, source_fingerprint)
+      );
+      CREATE INDEX idx_commitments_namespace_status_due ON commitments(namespace, status, due_at);
+      CREATE INDEX idx_commitments_source_entry ON commitments(source_entry_id);
+      CREATE INDEX idx_commitments_updated_at ON commitments(updated_at DESC);
+      CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+    `);
+    for (let version = 1; version <= 9; version++) {
+      db.prepare("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)")
+        .run(version, "2026-04-01T00:00:00.000Z");
+    }
+
+    db.prepare(
+      `INSERT INTO entries (id, namespace, key, entry_type, content, tags, agent_id, created_at, updated_at, embedding_status, embedding_model, valid_until)
+       VALUES ('owned-entry', 'shared/family/board', 'note', 'state', 'hello', '[]', 'sara', '2026-04-01T00:00:00.000Z', '2026-04-01T00:00:00.000Z', 'pending', NULL, NULL)`,
+    ).run();
+
+    runMigrations(db);
+
+    const row = db
+      .prepare("SELECT owner_principal_id FROM entries WHERE id = 'owned-entry'")
+      .get() as { owner_principal_id: string | null };
+    expect(row.owner_principal_id).toBe("sara");
     db.close();
   });
 });

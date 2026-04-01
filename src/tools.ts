@@ -23,15 +23,21 @@ import {
   queryEntriesHybrid,
   queryEntriesHybridScored,
   queryEntriesByFilter,
+  listEntriesForDerivation,
   listNamespaces,
   listNamespacesPaged,
   listNamespaceContents,
   previewDelete,
   executeDelete,
+  listCommitments,
+  syncCommitmentsForEntry,
+  type DerivedCommitmentInput,
+  type CommitmentRow,
   getOtherKeysInNamespace,
   getTrackedStatuses,
   getCompletedTaskNamespaces,
   isEntryExpired,
+  nowUTC,
   vecLoaded,
   logRetrievalEvent,
   logRetrievalOutcome,
@@ -63,6 +69,10 @@ import type {
   OrientParams,
   ResumeParams,
   ExtractParams,
+  NarrativeParams,
+  CommitmentsParams,
+  PatternsParams,
+  HandoffParams,
   LogParams,
   ListParams,
   DeleteParams,
@@ -83,6 +93,14 @@ import type {
   ResumeSuggestedRead,
   ExtractSuggestion,
   ExtractRelatedEntry,
+  NarrativeSignal,
+  NarrativeTimelineItem,
+  NarrativeSource,
+  CommitmentItem,
+  PatternItem,
+  HeuristicItem,
+  PatternSource,
+  HandoffResponse,
   AuditAction,
   AuditEntry,
 } from "./types.js";
@@ -127,9 +145,10 @@ function parseEntry(entry: Entry) {
   };
 }
 
-function buildProvenance(principalId: string) {
+function buildProvenance(principalId: string, ownerPrincipalId?: string | null) {
   return {
     principal_id: principalId,
+    owner_principal_id: ownerPrincipalId ?? undefined,
   };
 }
 
@@ -144,7 +163,7 @@ function serializeParsedEntry(entry: ReturnType<typeof parseEntry>) {
     created_at: entry.created_at,
     updated_at: entry.updated_at,
     valid_until: entry.valid_until ?? undefined,
-    provenance: buildProvenance(entry.agent_id),
+    provenance: buildProvenance(entry.agent_id, entry.owner_principal_id),
   };
 }
 
@@ -580,6 +599,7 @@ function trackedStatusRowToEntry(row: TrackedStatusRow): Entry {
     content: row.content,
     tags: row.tags,
     agent_id: row.agent_id,
+    owner_principal_id: row.owner_principal_id,
     created_at: row.created_at,
     updated_at: row.updated_at,
     valid_until: row.valid_until,
@@ -1621,6 +1641,484 @@ function buildExtractSuggestions(
   return { suggestions, warnings };
 }
 
+const NARRATIVE_LONG_GAP_DAYS = 14;
+const NARRATIVE_BLOCKER_DAYS = 3;
+const NARRATIVE_DECISION_CHURN_THRESHOLD = 3;
+const NARRATIVE_REVERSAL_KEYWORDS = /\b(reopen|reopened|resume|resumed|paused|parked|on hold|unblocked|rolled back|restarted|active again)\b/i;
+
+function getLifecycleFromEntry(entry: Entry): string | undefined {
+  const tags = parseTags(entry.tags);
+  const { canonical } = canonicalizeTags(tags);
+  return getLifecycleTags(canonical)[0];
+}
+
+function resolveNarrativeStatusEntry(db: Database.Database, namespace: string): Entry | null {
+  if (!namespace.endsWith("/")) {
+    return readState(db, namespace, "status");
+  }
+
+  return queryEntriesByFilter(db, {
+    namespace,
+    entryType: "state",
+    includeExpired: true,
+    limit: 20,
+  }).find((entry) => entry.key === "status") ?? null;
+}
+
+function buildNarrativeSourceFromEntry(entry: Entry): NarrativeSource {
+  return {
+    kind: "entry",
+    id: entry.id,
+    namespace: entry.namespace,
+    key: entry.key,
+    timestamp: entry.entry_type === "log" ? entry.created_at : entry.updated_at,
+    preview: contentPreview(entry.content, 220),
+  };
+}
+
+function buildNarrativeSourceFromAudit(entry: AuditHistoryEntry): NarrativeSource {
+  return {
+    kind: "audit",
+    id: entry.id,
+    namespace: entry.namespace,
+    key: entry.key,
+    timestamp: entry.timestamp,
+    preview: contentPreview(entry.detail ?? `${entry.action} ${entry.key ?? "namespace"}`, 220),
+  };
+}
+
+function getDaysSince(timestamp: string): number {
+  return Math.floor((Date.now() - new Date(timestamp).getTime()) / (24 * 60 * 60 * 1000));
+}
+
+function buildNarrativeStatusSummary(entry: Entry): string {
+  const structured = parseStructuredStatus(entry.content);
+  const lifecycle = getLifecycleFromEntry(entry);
+  const phase = structured.phase ?? lifecycle ?? "Unspecified";
+  const currentWork = structured.current_work ? ` ${contentPreview(structured.current_work, 120)}` : "";
+  return `Status in phase ${phase}.${currentWork}`;
+}
+
+function buildNarrativeSignals(
+  namespace: string,
+  statusEntry: Entry | null,
+  logs: Entry[],
+  history: AuditHistoryEntry[],
+): NarrativeSignal[] {
+  const signals: NarrativeSignal[] = [];
+  const seenSummaries = new Set<string>();
+
+  const pushSignal = (signal: NarrativeSignal) => {
+    if (seenSummaries.has(signal.summary)) return;
+    seenSummaries.add(signal.summary);
+    signals.push(signal);
+  };
+
+  if (statusEntry) {
+    const structured = parseStructuredStatus(statusEntry.content);
+    const lifecycle = getLifecycleFromEntry(statusEntry);
+    const phase = structured.phase ?? lifecycle ?? "Unspecified";
+    const daysInPhase = getDaysSince(statusEntry.updated_at);
+
+    pushSignal({
+      category: "time_in_phase",
+      severity: daysInPhase > NARRATIVE_LONG_GAP_DAYS && (lifecycle === "active" || lifecycle === "blocked") ? "medium" : "low",
+      summary: `Current phase "${phase}" has held for ${daysInPhase} day${daysInPhase === 1 ? "" : "s"}.`,
+      reason: "Derived from the current tracked status timestamp.",
+      source_entry_ids: [statusEntry.id],
+      source_audit_ids: [],
+    });
+
+    const blockerText = structured.blockers?.trim();
+    if (
+      ((lifecycle === "blocked") || (blockerText && !isNoneLikeStatusText(blockerText))) &&
+      daysInPhase >= NARRATIVE_BLOCKER_DAYS
+    ) {
+      pushSignal({
+        category: "blocker_age",
+        severity: daysInPhase > NARRATIVE_LONG_GAP_DAYS ? "high" : "medium",
+        summary: `Blocker context has been unchanged for ${daysInPhase} day${daysInPhase === 1 ? "" : "s"}.`,
+        reason: "Current status is blocked or still lists blockers, and the status has not been refreshed recently.",
+        source_entry_ids: [statusEntry.id],
+        source_audit_ids: [],
+      });
+    }
+
+    const latestActivity = [statusEntry.updated_at, ...logs.map((entry) => entry.updated_at)]
+      .sort()
+      .at(-1);
+    if (latestActivity) {
+      const daysSinceActivity = getDaysSince(latestActivity);
+      if (
+        daysSinceActivity >= NARRATIVE_LONG_GAP_DAYS &&
+        lifecycle !== "maintenance" &&
+        lifecycle !== "completed" &&
+        lifecycle !== "stopped" &&
+        lifecycle !== "archived"
+      ) {
+        pushSignal({
+          category: "long_gap",
+          severity: lifecycle === "blocked" ? "high" : "medium",
+          summary: `No meaningful updates have landed for ${daysSinceActivity} day${daysSinceActivity === 1 ? "" : "s"}.`,
+          reason: "Derived from the most recent status or log activity in this namespace.",
+          source_entry_ids: [statusEntry.id, ...logs.slice(0, 2).map((entry) => entry.id)],
+          source_audit_ids: [],
+        });
+      }
+    }
+  }
+
+  const decisionLogs = logs.filter((entry) => isDecisionLikeLog(entry));
+  if (decisionLogs.length >= NARRATIVE_DECISION_CHURN_THRESHOLD) {
+    const newest = decisionLogs[0];
+    const oldest = decisionLogs.at(-1)!;
+    const spanDays = Math.max(0, getDaysSince(oldest.created_at) - getDaysSince(newest.created_at));
+    pushSignal({
+      category: "decision_churn",
+      severity: decisionLogs.length >= 5 ? "high" : "medium",
+      summary: `${decisionLogs.length} decision-like log entries landed across roughly ${spanDays} day${spanDays === 1 ? "" : "s"}.`,
+      reason: "A dense cluster of decision logs suggests active re-evaluation or churn.",
+      source_entry_ids: decisionLogs.slice(0, 5).map((entry) => entry.id),
+      source_audit_ids: [],
+    });
+  }
+
+  const reversalLogs = logs.filter((entry) => NARRATIVE_REVERSAL_KEYWORDS.test(entry.content));
+  const statusHistory = history.filter((entry) => entry.key === "status" && ((entry.action as string) === "write" || (entry.action as string) === "update" || (entry.action as string) === "patch"));
+  if (reversalLogs.length >= 2 || (reversalLogs.length >= 1 && statusHistory.length >= 3)) {
+    pushSignal({
+      category: "reversal_pattern",
+      severity: reversalLogs.length >= 2 ? "medium" : "low",
+      summary: `Recent logs and status changes suggest reopen or reversal behavior in ${namespace}.`,
+      reason: "Detected reversal-style language in logs together with repeated status mutation activity.",
+      source_entry_ids: reversalLogs.slice(0, 3).map((entry) => entry.id),
+      source_audit_ids: statusHistory.slice(0, 3).map((entry) => entry.id),
+    });
+  }
+
+  const severityRank: Record<NarrativeSignal["severity"], number> = { high: 3, medium: 2, low: 1 };
+  return signals.sort((a, b) => severityRank[b.severity] - severityRank[a.severity] || a.category.localeCompare(b.category));
+}
+
+function buildNarrativeTimeline(
+  statusEntry: Entry | null,
+  logs: Entry[],
+  history: AuditHistoryEntry[],
+  limit: number,
+): NarrativeTimelineItem[] {
+  const items: NarrativeTimelineItem[] = [];
+
+  if (statusEntry) {
+    items.push({
+      timestamp: statusEntry.updated_at,
+      category: "status",
+      summary: buildNarrativeStatusSummary(statusEntry),
+      source_entry_id: statusEntry.id,
+    });
+  }
+
+  for (const entry of logs) {
+    items.push({
+      timestamp: entry.created_at,
+      category: "log",
+      summary: contentPreview(entry.content, 180),
+      source_entry_id: entry.id,
+    });
+  }
+
+  for (const entry of history) {
+    items.push({
+      timestamp: entry.timestamp,
+      category: "audit",
+      summary: contentPreview(entry.detail ?? `${entry.action} ${entry.key ?? "namespace"}`, 180),
+      source_audit_id: entry.id,
+    });
+  }
+
+  return items
+    .sort((a, b) => b.timestamp.localeCompare(a.timestamp) || a.category.localeCompare(b.category))
+    .slice(0, limit);
+}
+
+function buildNarrativeSources(
+  includeSources: boolean,
+  statusEntry: Entry | null,
+  logs: Entry[],
+  history: AuditHistoryEntry[],
+): NarrativeSource[] | undefined {
+  if (!includeSources) return undefined;
+
+  const sources: NarrativeSource[] = [];
+  const seen = new Set<string>();
+
+  const push = (source: NarrativeSource) => {
+    const key = `${source.kind}:${source.id}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    sources.push(source);
+  };
+
+  if (statusEntry) push(buildNarrativeSourceFromEntry(statusEntry));
+  for (const entry of logs) push(buildNarrativeSourceFromEntry(entry));
+  for (const entry of history) push(buildNarrativeSourceFromAudit(entry));
+
+  return sources;
+}
+
+const COMMITMENT_SOON_DAYS = 3;
+const COMMITMENT_COMPLETED_RECENT_DAYS = 14;
+const COMMITMENT_ACTION_CUE =
+  /\b(will|must|need to|needs to|plan to|planned|before|by|follow up|follow-up|send|ship|deliver|finish|complete|publish|deploy|update|write|call|review|rerun|check)\b/i;
+
+function getTrackedStatusAssessmentByNamespace(db: Database.Database): Map<string, TrackedStatusAssessment> {
+  const byNamespace = new Map<string, TrackedStatusAssessment>();
+  for (const assessment of getTrackedStatusAssessments(db).values()) {
+    byNamespace.set(assessment.row.namespace, assessment);
+  }
+  return byNamespace;
+}
+
+function normalizeCommitmentText(text: string): string {
+  return normalizeCompareText(
+    text
+      .replace(/^[-*]\s+/, "")
+      .replace(/\s+/g, " ")
+      .trim(),
+  );
+}
+
+function buildDueAtFromDateString(dateString: string): string | null {
+  const parsed = new Date(`${dateString}T23:59:59Z`);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toISOString();
+}
+
+function extractDueAtFromText(text: string): string | null {
+  const match = text.match(DATE_PATTERN);
+  if (!match || match.length === 0) return null;
+  return buildDueAtFromDateString(match[0]);
+}
+
+function extractCandidateSegments(content: string): string[] {
+  return content
+    .split("\n")
+    .flatMap((line) => line.split(/(?<=[.!?])\s+/))
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+function extractCommitmentsFromEntry(entry: Entry): DerivedCommitmentInput[] {
+  const commitments: DerivedCommitmentInput[] = [];
+  const seenNormalized = new Set<string>();
+
+  const pushCommitment = (commitment: DerivedCommitmentInput, normalizedText: string) => {
+    if (seenNormalized.has(normalizedText)) return;
+    seenNormalized.add(normalizedText);
+    commitments.push(commitment);
+  };
+
+  if (entry.entry_type === "state" && entry.key === "status" && isTrackedNamespace(entry.namespace)) {
+    const structured = parseStructuredStatus(entry.content);
+    for (const step of structured.next_steps ?? []) {
+      if (isNoneLikeStatusText(step)) continue;
+      const normalized = normalizeCommitmentText(step);
+      if (!normalized) continue;
+      pushCommitment({
+        sourceType: "tracked_next_step",
+        fingerprint: `tracked_next_step:${normalized}`,
+        text: step.trim(),
+        dueAt: extractDueAtFromText(step),
+        confidence: 0.96,
+      }, normalized);
+    }
+  }
+
+  for (const segment of extractCandidateSegments(entry.content)) {
+    const dueAt = extractDueAtFromText(segment);
+    if (!dueAt) continue;
+    if (!COMMITMENT_ACTION_CUE.test(segment)) continue;
+
+    const normalized = normalizeCommitmentText(segment);
+    if (!normalized) continue;
+    pushCommitment({
+      sourceType: "explicit_dated_commitment",
+      fingerprint: `explicit_dated_commitment:${normalized}`,
+      text: segment.trim(),
+      dueAt,
+      confidence: 0.78,
+    }, normalized);
+  }
+
+  return commitments;
+}
+
+function syncCommitmentsForScope(
+  db: Database.Database,
+  ctx: AccessContext,
+  namespace?: string,
+  since?: string,
+): void {
+  const entries = listEntriesForDerivation(db, { namespace, since })
+    .filter((entry) => canRead(ctx, entry.namespace));
+
+  for (const entry of entries) {
+    syncCommitmentsForEntry(db, entry.id, extractCommitmentsFromEntry(entry));
+  }
+}
+
+function buildCommitmentItem(row: CommitmentRow, reason?: string): CommitmentItem {
+  return {
+    id: row.id,
+    namespace: row.namespace,
+    text: row.text,
+    due_at: row.due_at,
+    status: row.status,
+    confidence: row.confidence,
+    source_type: row.source_type,
+    source_entry_id: row.source_entry_id,
+    source_key: row.source_key,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    resolved_at: row.resolved_at,
+    source_excerpt: row.source_excerpt,
+    reason,
+  };
+}
+
+function compareCommitmentItems(a: CommitmentItem, b: CommitmentItem): number {
+  const aDue = a.due_at ?? "9999-12-31T23:59:59.999Z";
+  const bDue = b.due_at ?? "9999-12-31T23:59:59.999Z";
+  if (aDue !== bDue) return aDue.localeCompare(bDue);
+  if (a.updated_at !== b.updated_at) return b.updated_at.localeCompare(a.updated_at);
+  return a.namespace.localeCompare(b.namespace);
+}
+
+function classifyCommitments(
+  rows: CommitmentRow[],
+  trackedStatusByNamespace: Map<string, TrackedStatusAssessment>,
+  limit: number,
+) {
+  const now = nowUTC();
+  const completedCutoff = new Date(Date.now() - COMMITMENT_COMPLETED_RECENT_DAYS * 24 * 60 * 60 * 1000).toISOString();
+
+  const open: CommitmentItem[] = [];
+  const atRisk: CommitmentItem[] = [];
+  const overdue: CommitmentItem[] = [];
+  const completedRecently: CommitmentItem[] = [];
+
+  for (const row of rows) {
+    const assessment = trackedStatusByNamespace.get(row.namespace);
+
+    if (row.status === "done" && row.resolved_at && row.resolved_at >= completedCutoff) {
+      completedRecently.push(buildCommitmentItem(row, "Recently resolved from an explicit source entry."));
+      continue;
+    }
+
+    if (row.status !== "open") continue;
+
+    if (row.due_at && row.due_at < now) {
+      overdue.push(buildCommitmentItem(row, `Due at ${row.due_at}.`));
+      continue;
+    }
+
+    const dueSoon = row.due_at
+      ? getDaysUntil(row.due_at) <= COMMITMENT_SOON_DAYS
+      : false;
+    const blockedNamespace = assessment?.lifecycle === "blocked";
+    const attentionNamespace = assessment?.needsAttention ?? false;
+
+    if (dueSoon || blockedNamespace || attentionNamespace) {
+      let reason = row.due_at
+        ? `Due soon at ${row.due_at}.`
+        : "Source namespace needs attention.";
+      if (blockedNamespace) {
+        reason = "Source namespace is currently blocked.";
+      } else if (attentionNamespace && assessment?.maintenanceItems[0]) {
+        reason = assessment.maintenanceItems[0].suggestion;
+      }
+      atRisk.push(buildCommitmentItem(row, reason));
+      continue;
+    }
+
+    open.push(buildCommitmentItem(row));
+  }
+
+  return {
+    open: open.sort(compareCommitmentItems).slice(0, limit),
+    at_risk: atRisk.sort(compareCommitmentItems).slice(0, limit),
+    overdue: overdue.sort(compareCommitmentItems).slice(0, limit),
+    completed_recently: completedRecently
+      .sort((a, b) => (b.resolved_at ?? "").localeCompare(a.resolved_at ?? ""))
+      .slice(0, limit),
+  };
+}
+
+function extractPatternTerms(text: string): string[] {
+  return [
+    ...new Set(
+      text
+        .toLowerCase()
+        .split(/[^a-z0-9_-]+/i)
+        .map((term) => term.trim())
+        .filter((term) => term.length >= 4 && !RELAXED_QUERY_STOPWORDS.has(term) && !/^\d+$/.test(term) && !/^\d{4}-\d{2}-\d{2}$/.test(term)),
+    ),
+  ];
+}
+
+function buildPatternSources(entries: Entry[], sourceIds: Set<string>): PatternSource[] {
+  return entries
+    .filter((entry) => sourceIds.has(entry.id))
+    .map((entry) => ({
+      entry_id: entry.id,
+      namespace: entry.namespace,
+      key: entry.key,
+      preview: contentPreview(entry.content, 220),
+      updated_at: entry.updated_at,
+    }));
+}
+
+function buildHandoffCurrentState(namespace: string, statusEntry: Entry | null, fallbackEntries: Entry[]): HandoffResponse["current_state"] {
+  if (statusEntry) {
+    return {
+      namespace,
+      summary: buildNarrativeStatusSummary(statusEntry),
+      updated_at: statusEntry.updated_at,
+      source_entry_id: statusEntry.id,
+    };
+  }
+
+  const fallback = fallbackEntries.find((entry) => entry.entry_type === "state");
+  if (!fallback) return null;
+  return {
+    namespace,
+    summary: contentPreview(fallback.content, 220),
+    updated_at: fallback.updated_at,
+    source_entry_id: fallback.id,
+  };
+}
+
+function buildHandoffRecentActors(history: AuditHistoryEntry[], limit: number) {
+  const actors = new Map<string, { last_seen_at: string; actions: Set<string> }>();
+
+  for (const entry of history) {
+    const existing = actors.get(entry.agent_id) ?? { last_seen_at: entry.timestamp, actions: new Set<string>() };
+    if (entry.timestamp > existing.last_seen_at) {
+      existing.last_seen_at = entry.timestamp;
+    }
+    existing.actions.add(entry.action);
+    actors.set(entry.agent_id, existing);
+  }
+
+  return [...actors.entries()]
+    .map(([principal_id, value]) => ({
+      principal_id,
+      last_seen_at: value.last_seen_at,
+      actions: [...value.actions].sort(),
+    }))
+    .sort((a, b) => b.last_seen_at.localeCompare(a.last_seen_at))
+    .slice(0, limit);
+}
+
 function compareAttentionItems(a: AttentionItem, b: AttentionItem): number {
   const severityRank: Record<AttentionItem["severity"], number> = {
     high: 3,
@@ -1807,6 +2305,120 @@ const TOOL_DEFINITIONS = [
         },
       },
       required: ["conversation_text"],
+    },
+  },
+  {
+    name: "memory_narrative",
+    description:
+      "Derive a compact narrative view for one namespace from current status, recent logs, and audit history. Use this when you want project-arc signals such as blocker age, decision churn, reversals, or long gaps without pretending that Munin has a hidden planning model. Every signal is source-backed.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        namespace: {
+          type: "string",
+          description:
+            "Namespace or namespace prefix to analyze. For project arcs, prefer exact tracked namespaces such as `projects/munin-memory`.",
+        },
+        since: {
+          type: "string",
+          description:
+            "Optional. ISO 8601 timestamp. Restrict logs and audit history to this lower bound.",
+        },
+        limit: {
+          type: "integer",
+          description:
+            "Optional. Maximum number of timeline items to return. Default 8, max 20.",
+        },
+        include_sources: {
+          type: "boolean",
+          description:
+            "Optional. Include explicit source objects for the signals and timeline. Default: false.",
+        },
+      },
+      required: ["namespace"],
+    },
+  },
+  {
+    name: "memory_commitments",
+    description:
+      "Surface explicit commitments derived from tracked next steps and dated, attributable source text. Use this when you want to review open, at-risk, overdue, or recently completed follow-through items rather than rely on fuzzy prose search.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        namespace: {
+          type: "string",
+          description:
+            "Optional. Restrict the view to one namespace or namespace prefix.",
+        },
+        since: {
+          type: "string",
+          description:
+            "Optional. ISO 8601 timestamp. Restrict commitment derivation and listing to this lower bound.",
+        },
+        limit: {
+          type: "integer",
+          description:
+            "Optional. Maximum number of items to return per bucket. Default 10, max 25.",
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "memory_patterns",
+    description:
+      "Derive conservative, reviewable patterns from repeated decision logs, tracked-status follow-through, and commitment outcomes. Use this for compressed summaries, not hidden policy: every surfaced pattern stays tied to explicit source entries.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        namespace: {
+          type: "string",
+          description:
+            "Optional. Restrict derivation to one namespace or namespace prefix.",
+        },
+        topic: {
+          type: "string",
+          description:
+            "Optional. Simple term filter applied to candidate source text and namespace names.",
+        },
+        since: {
+          type: "string",
+          description:
+            "Optional. ISO 8601 timestamp. Restrict candidate entries to this lower bound.",
+        },
+        limit: {
+          type: "integer",
+          description:
+            "Optional. Maximum number of patterns and heuristics to return. Default 5, max 10.",
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "memory_handoff",
+    description:
+      "Assemble a source-backed handoff pack for one namespace: current state, recent decisions, open loops, recent actors, and recommended next actions. Use this when one agent or environment is handing work to another.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        namespace: {
+          type: "string",
+          description:
+            "Namespace or namespace prefix to hand off.",
+        },
+        since: {
+          type: "string",
+          description:
+            "Optional. ISO 8601 timestamp. Restrict logs and audit history to this lower bound.",
+        },
+        limit: {
+          type: "integer",
+          description:
+            "Optional. Maximum number of recent decisions, actors, and next actions to return. Default 5, max 10.",
+        },
+      },
+      required: ["namespace"],
     },
   },
   {
@@ -2716,6 +3328,393 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             return okResult("extract", response);
           }
 
+          case "memory_narrative": {
+            const narrativeArgs = (args ?? {}) as unknown as NarrativeParams;
+            const limit = clampOptionalLimit(narrativeArgs.limit, 20) ?? 8;
+
+            const namespaceCheck = validateNamespace(narrativeArgs.namespace);
+            if (!namespaceCheck.valid) {
+              return errResult("narrative", "validation_error", namespaceCheck.error!);
+            }
+
+            let normalizedSince: string | undefined;
+            if (narrativeArgs.since !== undefined) {
+              const parsed = new Date(narrativeArgs.since);
+              if (Number.isNaN(parsed.getTime())) {
+                return errResult("narrative", "validation_error", '"since" must be a valid ISO 8601 timestamp.');
+              }
+              normalizedSince = parsed.toISOString();
+            }
+
+            const historyAccessPrefix = narrativeArgs.namespace.endsWith("/")
+              ? narrativeArgs.namespace
+              : `${narrativeArgs.namespace}/`;
+            if (!canRead(ctx, narrativeArgs.namespace) && !canReadSubtree(ctx, historyAccessPrefix)) {
+              const response: Record<string, unknown> = {
+                namespace: narrativeArgs.namespace,
+                summary: "No narrative context found.",
+                signals: [],
+                timeline: [],
+              };
+              if (narrativeArgs.include_sources) response.sources = [];
+              return okResult("narrative", response);
+            }
+
+            const rawStatusEntry = resolveNarrativeStatusEntry(db, narrativeArgs.namespace);
+            const statusEntry = rawStatusEntry && canRead(ctx, rawStatusEntry.namespace)
+              ? rawStatusEntry
+              : null;
+            const logs = queryEntriesByFilter(db, {
+              namespace: narrativeArgs.namespace,
+              entryType: "log",
+              limit: Math.max(limit, 12),
+              since: normalizedSince,
+            }).filter((entry) => canRead(ctx, entry.namespace));
+            const history = getAuditHistoryPage(db, {
+              namespace: narrativeArgs.namespace,
+              since: normalizedSince,
+              limit: Math.max(limit * 2, 12),
+            }).entries.filter((entry) => canRead(ctx, entry.namespace));
+
+            if (!statusEntry && logs.length === 0 && history.length === 0) {
+              const response: Record<string, unknown> = {
+                namespace: narrativeArgs.namespace,
+                summary: "No narrative context found.",
+                signals: [],
+                timeline: [],
+              };
+              if (narrativeArgs.include_sources) response.sources = [];
+              return okResult("narrative", response);
+            }
+
+            const signals = buildNarrativeSignals(narrativeArgs.namespace, statusEntry, logs, history);
+            const timeline = buildNarrativeTimeline(statusEntry, logs, history, limit);
+            const sources = buildNarrativeSources(narrativeArgs.include_sources === true, statusEntry, logs, history);
+
+            const recentActivity = timeline[0]?.timestamp;
+            const summary = recentActivity
+              ? `Narrative view for ${narrativeArgs.namespace}: ${signals.length} signal${signals.length === 1 ? "" : "s"} derived from current status, recent logs, and audit history. Most recent activity: ${recentActivity}.`
+              : `Narrative view for ${narrativeArgs.namespace}: ${signals.length} signal${signals.length === 1 ? "" : "s"} derived from available context.`;
+
+            const response: Record<string, unknown> = {
+              namespace: narrativeArgs.namespace,
+              summary,
+              signals,
+              timeline,
+            };
+            if (sources) response.sources = sources;
+
+            return okResult("narrative", response);
+          }
+
+          case "memory_commitments": {
+            const { namespace, since, limit: rawLimit } = args as unknown as CommitmentsParams;
+            const limit = clampOptionalLimit(rawLimit, 25) ?? 10;
+
+            if (namespace) {
+              const nsCheck = validateNamespace(namespace);
+              if (!nsCheck.valid) {
+                return errResult("commitments", "validation_error", nsCheck.error!);
+              }
+            }
+
+            let normalizedSince: string | undefined;
+            if (since !== undefined) {
+              const sinceCheck = normalizeIsoTimestamp(since, "since");
+              if (!sinceCheck.ok) {
+                return errResult("commitments", "validation_error", sinceCheck.error);
+              }
+              normalizedSince = sinceCheck.value;
+            }
+
+            if (namespace) {
+              const subtreeScope = namespace.endsWith("/") ? namespace : `${namespace}/`;
+              if (!canRead(ctx, namespace) && !canReadSubtree(ctx, subtreeScope)) {
+                return okResult("commitments", {
+                  open: [],
+                  at_risk: [],
+                  overdue: [],
+                  completed_recently: [],
+                });
+              }
+            }
+
+            syncCommitmentsForScope(db, ctx, namespace, normalizedSince);
+
+            const trackedStatusByNamespace = getTrackedStatusAssessmentByNamespace(db);
+            const rows = listCommitments(db, {
+              namespace,
+              since: normalizedSince,
+              limit: Math.max(limit * 8, 80),
+              includeResolved: true,
+            }).filter((row) => canRead(ctx, row.namespace));
+
+            return okResult("commitments", classifyCommitments(rows, trackedStatusByNamespace, limit));
+          }
+
+          case "memory_patterns": {
+            const { namespace, topic, since, limit: rawLimit } = args as unknown as PatternsParams;
+            const limit = clampOptionalLimit(rawLimit, 10) ?? 5;
+
+            if (namespace) {
+              const nsCheck = validateNamespace(namespace);
+              if (!nsCheck.valid) {
+                return errResult("patterns", "validation_error", nsCheck.error!);
+              }
+            }
+
+            let normalizedSince: string | undefined;
+            if (since !== undefined) {
+              const sinceCheck = normalizeIsoTimestamp(since, "since");
+              if (!sinceCheck.ok) {
+                return errResult("patterns", "validation_error", sinceCheck.error);
+              }
+              normalizedSince = sinceCheck.value;
+            }
+
+            if (namespace) {
+              const subtreeScope = namespace.endsWith("/") ? namespace : `${namespace}/`;
+              if (!canRead(ctx, namespace) && !canReadSubtree(ctx, subtreeScope)) {
+                return okResult("patterns", {
+                  patterns: [],
+                  heuristics: [],
+                  supporting_sources: [],
+                });
+              }
+            }
+
+            syncCommitmentsForScope(db, ctx, namespace, normalizedSince);
+
+            const topicNeedle = normalizeCompareText(topic ?? "");
+            const allEntries = listEntriesForDerivation(db, {
+              namespace,
+              since: normalizedSince,
+            }).filter((entry) => canRead(ctx, entry.namespace));
+
+            const candidateEntries = topicNeedle
+              ? allEntries.filter((entry) => normalizeCompareText(`${entry.namespace} ${entry.key ?? ""} ${entry.content}`).includes(topicNeedle))
+              : allEntries;
+
+            const patterns: PatternItem[] = [];
+            const heuristics: HeuristicItem[] = [];
+            const sourceIds = new Set<string>();
+
+            const decisionLogs = candidateEntries.filter((entry) => isDecisionLikeLog(entry));
+            const termSources = new Map<string, Set<string>>();
+            for (const entry of decisionLogs) {
+              for (const term of extractPatternTerms(entry.content)) {
+                const ids = termSources.get(term) ?? new Set<string>();
+                ids.add(entry.id);
+                termSources.set(term, ids);
+              }
+            }
+
+            const recurringTerms = [...termSources.entries()]
+              .filter(([, ids]) => ids.size >= 2)
+              .sort((a, b) => b[1].size - a[1].size || a[0].localeCompare(b[0]));
+            if (recurringTerms.length >= 2) {
+              const topTerms = recurringTerms.slice(0, 3);
+              const ids = [...new Set(topTerms.flatMap(([, ids]) => [...ids]))];
+              ids.forEach((id) => sourceIds.add(id));
+              patterns.push({
+                kind: "decision_theme",
+                summary: `Decision work repeatedly references: ${topTerms.map(([term]) => term).join(", ")}.`,
+                confidence: Math.min(0.95, 0.55 + topTerms[0][1].size * 0.1),
+                source_entry_ids: ids.slice(0, 6),
+                source_namespaces: [...new Set(ids
+                  .map((id) => allEntries.find((entry) => entry.id === id)?.namespace)
+                  .filter((value): value is string => typeof value === "string"))],
+              });
+              heuristics.push({
+                summary: `Review the recurring decision terms before reopening this line of work.`,
+                rationale: "Multiple decision logs repeated the same concern terms, suggesting stable evaluation criteria rather than a one-off thought.",
+                source_entry_ids: ids.slice(0, 6),
+              });
+            }
+
+            const trackedStatusByNamespace = getTrackedStatusAssessmentByNamespace(db);
+            const commitmentRows = listCommitments(db, {
+              namespace,
+              since: normalizedSince,
+              limit: 200,
+              includeResolved: true,
+            }).filter((row) => canRead(ctx, row.namespace));
+
+            const undatedOpen = commitmentRows.filter((row) => row.status === "open" && !row.due_at);
+            const undatedSources = new Set(undatedOpen.map((row) => row.source_entry_id));
+            if (undatedSources.size >= 2) {
+              undatedOpen.slice(0, 4).forEach((row) => sourceIds.add(row.source_entry_id));
+              patterns.push({
+                kind: "undated_next_steps",
+                summary: "Open commitments in this scope are frequently undated.",
+                confidence: Math.min(0.9, 0.5 + undatedOpen.length * 0.08),
+                source_entry_ids: undatedOpen.slice(0, 6).map((row) => row.source_entry_id),
+                source_namespaces: [...new Set(undatedOpen.slice(0, 6).map((row) => row.namespace))],
+              });
+              heuristics.push({
+                summary: "Add explicit dates to next steps when they should survive across sessions.",
+                rationale: "Multiple open commitments had no due date, which weakens reviewability and makes drop-off harder to spot.",
+                source_entry_ids: undatedOpen.slice(0, 6).map((row) => row.source_entry_id),
+              });
+            }
+
+            const overdueRows = commitmentRows.filter((row) => row.status === "open" && row.due_at && row.due_at < nowUTC());
+            const blockedRows = commitmentRows.filter((row) => trackedStatusByNamespace.get(row.namespace)?.lifecycle === "blocked");
+            const overdueSourceCount = new Set(overdueRows.map((row) => row.source_entry_id)).size;
+            const blockedSourceCount = new Set(blockedRows.map((row) => row.source_entry_id)).size;
+            if (overdueSourceCount >= 2 || blockedSourceCount >= 2) {
+              const supporting = (overdueSourceCount >= 2 ? overdueRows : blockedRows).slice(0, 6);
+              supporting.forEach((row) => sourceIds.add(row.source_entry_id));
+              patterns.push({
+                kind: overdueRows.length >= 2 ? "commitment_slip" : "blocked_followthrough",
+                summary: overdueRows.length >= 2
+                  ? "Explicit commitments are slipping past their written due dates."
+                  : "Blocked work is carrying unresolved commitments.",
+                confidence: Math.min(0.92, 0.56 + supporting.length * 0.08),
+                source_entry_ids: supporting.map((row) => row.source_entry_id),
+                source_namespaces: [...new Set(supporting.map((row) => row.namespace))],
+              });
+              heuristics.push({
+                summary: overdueRows.length >= 2
+                  ? "Review stale commitments before adding more follow-through items."
+                  : "Clear or rewrite blocker-side commitments before reopening the work.",
+                rationale: overdueRows.length >= 2
+                  ? "Repeated overdue commitments suggest the current next-step layer is drifting from execution."
+                  : "Blocked namespaces with lingering commitments create noisy handoffs and false progress signals.",
+                source_entry_ids: supporting.map((row) => row.source_entry_id),
+              });
+            }
+
+            const sortedPatterns = patterns
+              .sort((a, b) => b.confidence - a.confidence || a.summary.localeCompare(b.summary))
+              .slice(0, limit);
+            const allowedPatternSourceIds = new Set(sortedPatterns.flatMap((pattern) => pattern.source_entry_ids));
+            const supportingSources = buildPatternSources(allEntries, allowedPatternSourceIds).slice(0, limit * 3);
+
+            return okResult("patterns", {
+              patterns: sortedPatterns,
+              heuristics: heuristics
+                .filter((heuristic) => heuristic.source_entry_ids.some((id) => allowedPatternSourceIds.has(id)))
+                .slice(0, limit),
+              supporting_sources: supportingSources,
+            });
+          }
+
+          case "memory_handoff": {
+            const { namespace, since, limit: rawLimit } = args as unknown as HandoffParams;
+            const limit = clampOptionalLimit(rawLimit, 10) ?? 5;
+
+            const nsCheck = validateNamespace(namespace);
+            if (!nsCheck.valid) {
+              return errResult("handoff", "validation_error", nsCheck.error!);
+            }
+
+            let normalizedSince: string | undefined;
+            if (since !== undefined) {
+              const sinceCheck = normalizeIsoTimestamp(since, "since");
+              if (!sinceCheck.ok) {
+                return errResult("handoff", "validation_error", sinceCheck.error);
+              }
+              normalizedSince = sinceCheck.value;
+            }
+
+            const subtreeScope = namespace.endsWith("/") ? namespace : `${namespace}/`;
+            if (!canRead(ctx, namespace) && !canReadSubtree(ctx, subtreeScope)) {
+              return okResult("handoff", {
+                found: false,
+                namespace,
+                current_state: null,
+                recent_decisions: [],
+                open_loops: [],
+                recent_actors: [],
+                recommended_next_actions: [],
+              });
+            }
+
+            syncCommitmentsForScope(db, ctx, namespace, normalizedSince);
+
+            const allEntries = listEntriesForDerivation(db, {
+              namespace,
+              since: normalizedSince,
+            }).filter((entry) => canRead(ctx, entry.namespace));
+            const rawStatusEntry = resolveNarrativeStatusEntry(db, namespace);
+            const statusEntry = rawStatusEntry && canRead(ctx, rawStatusEntry.namespace)
+              ? rawStatusEntry
+              : null;
+            const logs = allEntries
+              .filter((entry) => entry.entry_type === "log")
+              .sort((a, b) => b.created_at.localeCompare(a.created_at));
+            const history = getAuditHistoryPage(db, {
+              namespace,
+              since: normalizedSince,
+              limit: Math.max(limit * 4, 20),
+            }).entries.filter((entry) => canRead(ctx, entry.namespace));
+            const commitmentRows = listCommitments(db, {
+              namespace,
+              since: normalizedSince,
+              limit: 200,
+              includeResolved: true,
+            }).filter((row) => canRead(ctx, row.namespace));
+            const trackedStatusByNamespace = getTrackedStatusAssessmentByNamespace(db);
+            const currentState = buildHandoffCurrentState(namespace, statusEntry, allEntries);
+
+            const recentDecisions = logs
+              .filter((entry) => isDecisionLikeLog(entry))
+              .slice(0, limit)
+              .map((entry) => ({
+                timestamp: entry.created_at,
+                summary: contentPreview(entry.content, 200),
+                source_entry_id: entry.id,
+              }));
+
+            const openLoopSet = new Set<string>();
+            const recommendedActionSet = new Set<string>();
+            const statusAssessment = statusEntry ? trackedStatusByNamespace.get(statusEntry.namespace) : undefined;
+            if (statusAssessment) {
+              for (const loop of extractResumeOpenLoops(statusAssessment)) {
+                openLoopSet.add(loop.summary);
+                recommendedActionSet.add(loop.suggested_action);
+              }
+            }
+
+            for (const row of commitmentRows) {
+              if (row.status !== "open") continue;
+              if (row.due_at && row.due_at < nowUTC()) {
+                openLoopSet.add(`Overdue commitment: ${row.text}`);
+                recommendedActionSet.add(`Resolve or reschedule the overdue commitment written for ${row.due_at}.`);
+                continue;
+              }
+              const namespaceAssessment = trackedStatusByNamespace.get(row.namespace);
+              if (namespaceAssessment?.lifecycle === "blocked") {
+                openLoopSet.add(`Blocked commitment: ${row.text}`);
+                recommendedActionSet.add("Unblock the namespace or clear the lingering commitment before handing work onward.");
+                continue;
+              }
+              if (row.due_at && getDaysUntil(row.due_at) <= COMMITMENT_SOON_DAYS) {
+                openLoopSet.add(`Due soon: ${row.text}`);
+                recommendedActionSet.add(`Review the commitment due at ${row.due_at}.`);
+              }
+            }
+
+            if (recommendedActionSet.size === 0 && recentDecisions.length > 0) {
+              recommendedActionSet.add("Read the most recent decision log before making the next change.");
+            }
+            if (recommendedActionSet.size === 0 && currentState) {
+              recommendedActionSet.add("Refresh the tracked status if the current state has drifted.");
+            }
+
+            const found = Boolean(currentState) || recentDecisions.length > 0 || history.length > 0 || commitmentRows.length > 0;
+            return okResult("handoff", {
+              found,
+              namespace,
+              current_state: currentState,
+              recent_decisions: recentDecisions,
+              open_loops: [...openLoopSet].slice(0, limit),
+              recent_actors: buildHandoffRecentActors(history, limit),
+              recommended_next_actions: [...recommendedActionSet].slice(0, limit),
+            });
+          }
+
           case "memory_write": {
             const { namespace, key, content, tags, valid_until, expected_updated_at, patch } =
               args as unknown as WriteParams & { expected_updated_at?: string; patch?: PatchParams };
@@ -2773,6 +3772,11 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
 
               if (sessionId) {
                 logRetrievalOutcome(db, sessionId, { outcomeType: "write_in_result_namespace", namespace });
+              }
+
+              const patchedEntry = readState(db, namespace, key);
+              if (patchedEntry) {
+                syncCommitmentsForEntry(db, patchedEntry.id, extractCommitmentsFromEntry(patchedEntry));
               }
 
               return okResult("write", { status: "patched", id: patchResult.id, namespace, key, hint: hintPatch });
@@ -2851,7 +3855,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               key,
               updated_at: result.updated_at,
               hint,
-              provenance: buildProvenance(ctx.principalId),
+              provenance: buildProvenance(ctx.principalId, ctx.principalId),
             };
 
             // CAS hint for tracked status writes without expected_updated_at
@@ -2869,6 +3873,13 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                 outcomeType: "write_in_result_namespace",
                 namespace,
               });
+            }
+
+            if (result.id) {
+              const writtenEntry = getById(db, result.id);
+              if (writtenEntry) {
+                syncCommitmentsForEntry(db, writtenEntry.id, extractCommitmentsFromEntry(writtenEntry));
+              }
             }
 
             return okResult("write", response);
@@ -2979,6 +3990,13 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               });
             }
 
+            if (result.id) {
+              const statusEntry = getById(db, result.id);
+              if (statusEntry) {
+                syncCommitmentsForEntry(db, statusEntry.id, extractCommitmentsFromEntry(statusEntry));
+              }
+            }
+
             return okResult("update_status", {
               status: result.status,
               id: result.id,
@@ -2988,7 +4006,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               content,
               structured_status: structured,
               warnings: warnings.length > 0 ? warnings : undefined,
-              provenance: buildProvenance(ctx.principalId),
+              provenance: buildProvenance(ctx.principalId, ctx.principalId),
             });
           }
 
@@ -3147,7 +4165,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                   created_at: entry.created_at,
                   updated_at: entry.updated_at,
                   valid_until: entry.valid_until ?? undefined,
-                  provenance: buildProvenance(entry.agent_id),
+                  provenance: buildProvenance(entry.agent_id, entry.owner_principal_id),
                 };
                 if (isEntryExpired(entry)) {
                   result.expired = true;
@@ -3342,7 +4360,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                 created_at: entry.created_at,
                 updated_at: entry.updated_at,
                 valid_until: entry.valid_until ?? undefined,
-                provenance: buildProvenance(entry.agent_id),
+                provenance: buildProvenance(entry.agent_id, entry.owner_principal_id),
               };
               if (isEntryExpired(entry)) {
                 result.expired = true;
@@ -3534,6 +4552,10 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               return accessDeniedResponse(ctx, "log");
             }
             const result = appendLog(db, namespace, content, tags ?? [], ctx.principalId);
+            const logEntry = getById(db, result.id);
+            if (logEntry) {
+              syncCommitmentsForEntry(db, logEntry.id, extractCommitmentsFromEntry(logEntry));
+            }
             // Analytics: log log outcome correlated to prior retrieval in this session
             if (sessionId) {
               logRetrievalOutcome(db, sessionId, {
@@ -3546,7 +4568,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               id: result.id,
               namespace,
               timestamp: result.timestamp,
-              provenance: buildProvenance(ctx.principalId),
+              provenance: buildProvenance(ctx.principalId, ctx.principalId),
             });
           }
 
@@ -3582,7 +4604,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                 preview: e.preview,
                 tags: JSON.parse(e.tags) as string[],
                 updated_at: e.updated_at,
-                provenance: buildProvenance(e.agent_id),
+                provenance: buildProvenance(e.agent_id, e.owner_principal_id),
               })),
               log_summary: {
                 log_count: logSummary.log_count,
@@ -3593,7 +4615,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                   content_preview: l.content_preview,
                   tags: JSON.parse(l.tags) as string[],
                   created_at: l.created_at,
-                  provenance: buildProvenance(l.agent_id),
+                  provenance: buildProvenance(l.agent_id, l.owner_principal_id),
                 })),
               },
             });
@@ -3616,17 +4638,14 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             if (!canWrite(ctx, namespace)) {
               return accessDeniedResponse(ctx, "delete");
             }
-            // Namespace-wide delete in shared/ is owner-only
-            if (!key && namespace.startsWith("shared/") && ctx.principalType !== "owner") {
-              return accessDeniedResponse(ctx, "delete");
-            }
+            const allowGlobalNamespaceDelete = ctx.principalType === "owner";
 
             // Execute with token
             if (delete_token) {
               if (!consumeDeleteToken(delete_token, namespace, key)) {
                 return errResult("delete", "invalid_token", "Delete token is invalid, expired, or doesn't match the requested namespace/key. Request a new preview first.");
               }
-              const deletedCount = executeDelete(db, namespace, key, ctx.principalId);
+              const deletedCount = executeDelete(db, namespace, key, ctx.principalId, allowGlobalNamespaceDelete);
               const target = key ? `entry "${key}" in "${namespace}"` : `all entries in "${namespace}"`;
               return okResult("delete", {
                 phase: "confirmed",
@@ -3638,7 +4657,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             }
 
             // Preview
-            const info = previewDelete(db, namespace, key);
+            const info = previewDelete(db, namespace, key, ctx.principalId, allowGlobalNamespaceDelete);
             const token = generateDeleteToken(namespace, key);
             const target = key ? `entry "${key}" in "${namespace}"` : `all entries in "${namespace}"`;
             return okResult("delete", {

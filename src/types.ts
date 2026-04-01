@@ -4,10 +4,12 @@ export type EntryType = "state" | "log";
 export type EmbeddingStatus = "pending" | "processing" | "generated" | "failed";
 export type SearchMode = "lexical" | "semantic" | "hybrid";
 export type OrientDetail = "compact" | "standard" | "full";
-export type AuditAction = "write" | "update" | "delete" | "namespace_delete" | "log_append";
+export type AuditAction = "write" | "update" | "patch" | "delete" | "namespace_delete" | "log_append";
+export type CommitmentStatus = "open" | "done" | "cancelled";
 
 export interface EntryProvenance {
   principal_id: string;
+  owner_principal_id?: string;
 }
 
 export interface Entry {
@@ -18,6 +20,7 @@ export interface Entry {
   content: string;
   tags: string; // JSON array string
   agent_id: string;
+  owner_principal_id: string | null;
   created_at: string;
   updated_at: string;
   valid_until: string | null;
@@ -100,6 +103,32 @@ export interface ExtractParams {
   namespace_hint?: string;
   project_hint?: string;
   max_suggestions?: number;
+}
+
+export interface NarrativeParams {
+  namespace: string;
+  since?: string;
+  limit?: number;
+  include_sources?: boolean;
+}
+
+export interface CommitmentsParams {
+  namespace?: string;
+  since?: string;
+  limit?: number;
+}
+
+export interface PatternsParams {
+  namespace?: string;
+  topic?: string;
+  since?: string;
+  limit?: number;
+}
+
+export interface HandoffParams {
+  namespace: string;
+  since?: string;
+  limit?: number;
 }
 
 export interface LogParams {
@@ -189,6 +218,7 @@ export interface TrackedStatusRow {
   content: string;
   tags: string;
   agent_id: string;
+  owner_principal_id: string | null;
   created_at: string;
   updated_at: string;
   valid_until: string | null;
@@ -426,6 +456,121 @@ export interface ExtractResponse {
   candidate_namespaces: string[];
   related_entries: ExtractRelatedEntry[];
   capture_warnings: string[];
+}
+
+export interface NarrativeSignal {
+  category: "time_in_phase" | "blocker_age" | "reversal_pattern" | "decision_churn" | "long_gap";
+  severity: "high" | "medium" | "low";
+  summary: string;
+  reason: string;
+  source_entry_ids: string[];
+  source_audit_ids: number[];
+}
+
+export interface NarrativeTimelineItem {
+  timestamp: string;
+  category: "status" | "log" | "audit";
+  summary: string;
+  source_entry_id?: string;
+  source_audit_id?: number;
+}
+
+export interface NarrativeSource {
+  kind: "entry" | "audit";
+  id: string | number;
+  namespace: string;
+  key?: string | null;
+  timestamp: string;
+  preview: string;
+}
+
+export interface NarrativeResponse {
+  namespace: string;
+  summary: string;
+  signals: NarrativeSignal[];
+  timeline: NarrativeTimelineItem[];
+  sources?: NarrativeSource[];
+}
+
+export interface CommitmentItem {
+  id: string;
+  namespace: string;
+  text: string;
+  due_at: string | null;
+  status: CommitmentStatus;
+  confidence: number;
+  source_type: string;
+  source_entry_id: string;
+  source_key: string | null;
+  created_at: string;
+  updated_at: string;
+  resolved_at: string | null;
+  source_excerpt?: string;
+  reason?: string;
+}
+
+export interface CommitmentsResponse {
+  open: CommitmentItem[];
+  at_risk: CommitmentItem[];
+  overdue: CommitmentItem[];
+  completed_recently: CommitmentItem[];
+}
+
+export interface PatternItem {
+  kind: "decision_theme" | "commitment_slip" | "blocked_followthrough" | "undated_next_steps";
+  summary: string;
+  confidence: number;
+  source_entry_ids: string[];
+  source_namespaces: string[];
+}
+
+export interface HeuristicItem {
+  summary: string;
+  rationale: string;
+  source_entry_ids: string[];
+}
+
+export interface PatternSource {
+  entry_id: string;
+  namespace: string;
+  key: string | null;
+  preview: string;
+  updated_at: string;
+}
+
+export interface PatternsResponse {
+  patterns: PatternItem[];
+  heuristics: HeuristicItem[];
+  supporting_sources: PatternSource[];
+}
+
+export interface HandoffDecision {
+  timestamp: string;
+  summary: string;
+  source_entry_id: string;
+}
+
+export interface HandoffActor {
+  principal_id: string;
+  last_seen_at: string;
+  actions: string[];
+}
+
+export interface HandoffState {
+  namespace: string;
+  summary: string;
+  updated_at: string;
+  source_entry_id?: string;
+}
+
+export interface HandoffResponse {
+  found: boolean;
+  namespace: string;
+  current_state: HandoffState | null;
+  recent_decisions: HandoffDecision[];
+  open_loops: string[];
+  recent_actors: HandoffActor[];
+  recommended_next_actions: string[];
 }
 
 // Retrieval insights types

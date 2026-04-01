@@ -361,6 +361,50 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 9,
+    description: "Add derived commitments table for explicit follow-through signals",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE commitments (
+          id TEXT PRIMARY KEY,
+          namespace TEXT NOT NULL,
+          source_entry_id TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+          source_type TEXT NOT NULL,
+          source_fingerprint TEXT NOT NULL,
+          text TEXT NOT NULL,
+          due_at TEXT,
+          status TEXT NOT NULL CHECK(status IN ('open', 'done', 'cancelled')),
+          confidence REAL NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          resolved_at TEXT,
+          UNIQUE(source_entry_id, source_fingerprint)
+        );
+        CREATE INDEX idx_commitments_namespace_status_due
+          ON commitments(namespace, status, due_at);
+        CREATE INDEX idx_commitments_source_entry
+          ON commitments(source_entry_id);
+        CREATE INDEX idx_commitments_updated_at
+          ON commitments(updated_at DESC);
+      `);
+    },
+  },
+  {
+    version: 10,
+    description: "Add immutable owner_principal_id to entries",
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE entries ADD COLUMN owner_principal_id TEXT;
+        UPDATE entries
+        SET owner_principal_id = COALESCE(NULLIF(TRIM(agent_id), ''), 'default')
+        WHERE owner_principal_id IS NULL;
+        CREATE INDEX idx_entries_ns_owner
+          ON entries(namespace, owner_principal_id)
+          WHERE owner_principal_id IS NOT NULL;
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {
