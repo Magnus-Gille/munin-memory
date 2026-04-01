@@ -62,6 +62,7 @@ import type {
   QueryParams,
   OrientParams,
   ResumeParams,
+  ExtractParams,
   LogParams,
   ListParams,
   DeleteParams,
@@ -80,6 +81,8 @@ import type {
   ResumeItem,
   ResumeOpenLoop,
   ResumeSuggestedRead,
+  ExtractSuggestion,
+  ExtractRelatedEntry,
   AuditAction,
   AuditEntry,
 } from "./types.js";
@@ -344,6 +347,7 @@ const DEFAULT_SEARCH_RECENCY_WEIGHT = 0.2;
 const SEARCH_RECENCY_HALF_LIFE_DAYS = 30;
 const EXPIRES_SOON_DAYS = 7;
 const ISO_8601_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
+const TRANSCRIPT_SPEAKER_PREFIX_RE = /^(user|assistant|human|claude|codex|magnus|sara)\s*:\s*/i;
 const RELAXED_QUERY_STOPWORDS = new Set([
   "a", "an", "and", "are", "for", "how", "i", "important", "is", "it",
   "my", "myself", "of", "or", "should", "the", "to", "what",
@@ -1243,6 +1247,380 @@ function compareResumeCandidates(a: ResumeCandidate, b: ResumeCandidate): number
   return a.item.category.localeCompare(b.item.category);
 }
 
+interface ExtractSignals {
+  decisions: string[];
+  nextSteps: string[];
+  preferences: string[];
+  currentWork?: string;
+  blockers?: string;
+  phase?: string;
+  lifecycle?: "active" | "blocked" | "completed" | "stopped" | "maintenance" | "archived";
+  hasRelativeDates: boolean;
+}
+
+function normalizeTranscriptLine(line: string): string {
+  return line
+    .replace(TRANSCRIPT_SPEAKER_PREFIX_RE, "")
+    .replace(/^[-*]\s+/, "")
+    .replace(/^\d+\.\s+/, "")
+    .trim();
+}
+
+function normalizeCompareText(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function extractConversationSignals(conversationText: string): ExtractSignals {
+  const lines = conversationText
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim().length > 0);
+
+  const decisions: string[] = [];
+  const nextSteps: string[] = [];
+  const preferences: string[] = [];
+  let currentWork: string | undefined;
+  let blockers: string | undefined;
+  let phase: string | undefined;
+  let lifecycle: ExtractSignals["lifecycle"];
+  let section: "next_steps" | "decisions" | "preferences" | null = null;
+  let hasRelativeDates = false;
+
+  for (const rawLine of lines) {
+    const line = normalizeTranscriptLine(rawLine);
+    if (!line) {
+      section = null;
+      continue;
+    }
+
+    if (/\b(today|tomorrow|yesterday|by friday|by monday|by tuesday|by wednesday|by thursday|by saturday|by sunday|next week|next month)\b/i.test(line)) {
+      hasRelativeDates = true;
+    }
+
+    const lowerLine = line.toLowerCase();
+
+    if (/^next steps?:/i.test(line) || /^action items?:/i.test(line) || /^todo:?/i.test(line)) {
+      section = "next_steps";
+      const remainder = line.replace(/^(next steps?|action items?|todo):\s*/i, "").trim();
+      if (remainder) nextSteps.push(remainder);
+      continue;
+    }
+    if (/^decisions?:/i.test(line)) {
+      section = "decisions";
+      const remainder = line.replace(/^decisions?:\s*/i, "").trim();
+      if (remainder) decisions.push(remainder);
+      continue;
+    }
+    if (/^preferences?:/i.test(line)) {
+      section = "preferences";
+      const remainder = line.replace(/^preferences?:\s*/i, "").trim();
+      if (remainder) preferences.push(remainder);
+      continue;
+    }
+    if (/^phase:/i.test(line)) {
+      phase = line.replace(/^phase:\s*/i, "").trim();
+      continue;
+    }
+    if (/^current work:/i.test(line)) {
+      currentWork = line.replace(/^current work:\s*/i, "").trim();
+      continue;
+    }
+    if (/^blockers?:/i.test(line)) {
+      blockers = line.replace(/^blockers?:\s*/i, "").trim();
+      lifecycle = lifecycle ?? "blocked";
+      continue;
+    }
+
+    const isBullet = /^[-*]\s+/.test(rawLine.trim()) || /^\d+\.\s+/.test(rawLine.trim());
+    if (isBullet && section === "next_steps") {
+      nextSteps.push(line);
+      continue;
+    }
+    if (isBullet && section === "decisions") {
+      decisions.push(line);
+      continue;
+    }
+    if (isBullet && section === "preferences") {
+      preferences.push(line);
+      continue;
+    }
+
+    if (/\b(decided|decision:|agreed to|settled on|chose to)\b/i.test(line)) {
+      decisions.push(line);
+    }
+    if (/\b(next step|action item|todo|follow up|we need to|need to)\b/i.test(line)) {
+      nextSteps.push(line.replace(/^(next step|action item|todo):\s*/i, "").trim());
+    }
+    if (/\b(i prefer|i don't like|i do not like|please remember|remember that|i always|i never)\b/i.test(line)) {
+      preferences.push(line);
+    }
+
+    if (!currentWork && /\b(current work|working on|in progress)\b/i.test(line)) {
+      currentWork = line;
+    }
+    if (!blockers && /\b(blocked|waiting on|depends on)\b/i.test(lowerLine)) {
+      blockers = line;
+      lifecycle = "blocked";
+    }
+    if (!lifecycle && /\b(completed|done|shipped|finished)\b/i.test(lowerLine)) {
+      lifecycle = "completed";
+    }
+    if (!lifecycle && /\b(paused|parked|on hold|stopped)\b/i.test(lowerLine)) {
+      lifecycle = "stopped";
+    }
+    if (!lifecycle && /\b(active again|back in progress|resumed)\b/i.test(lowerLine)) {
+      lifecycle = "active";
+    }
+  }
+
+  return {
+    decisions: [...new Set(decisions.map((line) => line.trim()).filter(Boolean))],
+    nextSteps: [...new Set(nextSteps.map((line) => line.trim()).filter(Boolean))],
+    preferences: [...new Set(preferences.map((line) => line.trim()).filter(Boolean))],
+    currentWork: currentWork?.trim() || undefined,
+    blockers: blockers?.trim() || undefined,
+    phase: phase?.trim() || undefined,
+    lifecycle,
+    hasRelativeDates,
+  };
+}
+
+function resolveExtractNamespace(
+  params: ExtractParams,
+  conversationText: string,
+  trackedStatusAssessments: TrackedStatusAssessment[],
+  ctx: AccessContext,
+): {
+  primaryNamespace?: string;
+  candidateNamespaces: string[];
+  warnings: string[];
+} {
+  const warnings: string[] = [];
+  const candidateNamespaces: string[] = [];
+  const seen = new Set<string>();
+
+  const addCandidate = (namespace: string | undefined, warningWhenDenied?: string) => {
+    if (!namespace) return;
+    if (seen.has(namespace)) return;
+    if (canWrite(ctx, namespace)) {
+      seen.add(namespace);
+      candidateNamespaces.push(namespace);
+      return;
+    }
+    if (warningWhenDenied) warnings.push(warningWhenDenied);
+  };
+
+  if (typeof params.namespace_hint === "string" && params.namespace_hint.trim().length > 0) {
+    addCandidate(
+      params.namespace_hint.trim(),
+      `Skipped namespace_hint ${params.namespace_hint.trim()} because the current principal cannot write there.`,
+    );
+  }
+
+  const scopeFromProject = resolveResumeScope({
+    namespace: params.namespace_hint,
+    project: params.project_hint,
+  }, trackedStatusAssessments);
+  if (scopeFromProject && scopeFromProject !== params.namespace_hint) {
+    addCandidate(
+      scopeFromProject,
+      `Skipped project-derived namespace ${scopeFromProject} because the current principal cannot write there.`,
+    );
+  }
+
+  const hintTerms = extractResumeTerms(params.namespace_hint, params.project_hint, conversationText);
+  const inferredTrackedNamespaces = trackedStatusAssessments
+    .filter((assessment) => canWrite(ctx, assessment.row.namespace))
+    .map((assessment) => ({
+      namespace: assessment.row.namespace,
+      score: countResumeTermMatches(`${assessment.row.namespace} ${assessment.row.content_preview}`, hintTerms),
+    }))
+    .filter((candidate) => candidate.score > 0)
+    .sort((a, b) => b.score - a.score || a.namespace.localeCompare(b.namespace))
+    .slice(0, 3);
+
+  for (const candidate of inferredTrackedNamespaces) {
+    addCandidate(candidate.namespace);
+  }
+
+  return {
+    primaryNamespace: candidateNamespaces[0],
+    candidateNamespaces,
+    warnings,
+  };
+}
+
+function buildExtractRelatedEntries(
+  db: Database.Database,
+  namespace: string | undefined,
+  ctx: AccessContext,
+): ExtractRelatedEntry[] {
+  if (!namespace || !canRead(ctx, namespace)) return [];
+
+  const related: ExtractRelatedEntry[] = [];
+  const seenIds = new Set<string>();
+
+  const pushEntry = (entry: Entry | null, reason: string) => {
+    if (!entry) return;
+    if (!canRead(ctx, entry.namespace)) return;
+    if (seenIds.has(entry.id)) return;
+    seenIds.add(entry.id);
+    related.push({
+      id: entry.id,
+      namespace: entry.namespace,
+      key: entry.key,
+      entry_type: entry.entry_type,
+      preview: contentPreview(entry.content, 220),
+      updated_at: entry.updated_at,
+      reason,
+    });
+  };
+
+  pushEntry(readState(db, namespace, "status"), "current status in the hinted namespace");
+
+  for (const entry of queryEntriesByFilter(db, {
+    namespace,
+    entryType: "log",
+    limit: 2,
+  })) {
+    pushEntry(entry, "recent decision or activity log in the hinted namespace");
+  }
+
+  for (const entry of queryEntriesByFilter(db, {
+    namespace,
+    entryType: "state",
+    includeExpired: true,
+    limit: 3,
+  }).filter((entry) => entry.key !== "status")) {
+    pushEntry(entry, "recent state entry in the hinted namespace");
+  }
+
+  return related.slice(0, 5);
+}
+
+function buildExistingContextSet(relatedEntries: ExtractRelatedEntry[]): Set<string> {
+  return new Set(relatedEntries.map((entry) => normalizeCompareText(entry.preview)));
+}
+
+function determineWriteKeyForNamespace(namespace: string): string {
+  if (namespace.startsWith("people/")) return "profile";
+  return "notes";
+}
+
+function determineWriteTags(namespace: string): string[] {
+  if (namespace.startsWith("people/")) return ["preference"];
+  return ["note"];
+}
+
+function buildExtractSuggestions(
+  signals: ExtractSignals,
+  namespace: string | undefined,
+  relatedEntries: ExtractRelatedEntry[],
+): {
+  suggestions: ExtractSuggestion[];
+  warnings: string[];
+} {
+  const warnings: string[] = [];
+  if (!namespace) {
+    return {
+      suggestions: [],
+      warnings: ["No clear writable namespace was found. Pass namespace_hint or project_hint for better suggestions."],
+    };
+  }
+
+  const existingContext = buildExistingContextSet(relatedEntries);
+  const duplicateLines: string[] = [];
+  const suggestions: ExtractSuggestion[] = [];
+
+  const isTracked = isTrackedNamespace(namespace);
+  const isPeopleNamespace = namespace.startsWith("people/");
+
+  const dedupeLine = (line: string): boolean => {
+    const normalized = normalizeCompareText(line);
+    if (existingContext.has(normalized)) {
+      duplicateLines.push(line);
+      return true;
+    }
+    return false;
+  };
+
+  if (signals.decisions.length > 0) {
+    for (const line of signals.decisions) {
+      if (dedupeLine(line)) continue;
+      suggestions.push({
+        action: "memory_log",
+        namespace,
+        content: line,
+        tags: ["decision"],
+        rationale: "Explicit decision-style language was found in the conversation.",
+        confidence: 0.96,
+      });
+    }
+  }
+
+  const statusPatch: NonNullable<ExtractSuggestion["status_patch"]> = {};
+  if (signals.phase) statusPatch.phase = signals.phase;
+  if (signals.currentWork) statusPatch.current_work = signals.currentWork;
+  if (signals.blockers) statusPatch.blockers = signals.blockers;
+  if (signals.nextSteps.length > 0) statusPatch.next_steps = signals.nextSteps.filter((line) => !dedupeLine(line));
+  if (signals.lifecycle) statusPatch.lifecycle = signals.lifecycle;
+
+  if (isTracked && (
+    statusPatch.phase !== undefined ||
+    statusPatch.current_work !== undefined ||
+    statusPatch.blockers !== undefined ||
+    (statusPatch.next_steps !== undefined && statusPatch.next_steps.length > 0) ||
+    statusPatch.lifecycle !== undefined
+  )) {
+    suggestions.push({
+      action: "memory_update_status",
+      namespace,
+      status_patch: statusPatch,
+      rationale: "The conversation included explicit project-status signals such as current work, blockers, next steps, or lifecycle changes.",
+      confidence: 0.91,
+    });
+  } else if (!isTracked && signals.nextSteps.length > 0) {
+    const nonDuplicateSteps = signals.nextSteps.filter((line) => !duplicateLines.includes(line));
+    if (nonDuplicateSteps.length > 0) {
+      suggestions.push({
+        action: "memory_write",
+        namespace,
+        key: determineWriteKeyForNamespace(namespace),
+        content: nonDuplicateSteps.map((step) => `- ${step}`).join("\n"),
+        tags: determineWriteTags(namespace),
+        rationale: "The conversation included explicit next steps, but the target namespace is not tracked, so a state write is a better fit than status patching.",
+        confidence: 0.79,
+      });
+    }
+  }
+
+  if (signals.preferences.length > 0 && isPeopleNamespace) {
+    const nonDuplicatePreferences = signals.preferences.filter((line) => !dedupeLine(line));
+    if (nonDuplicatePreferences.length > 0) {
+      suggestions.push({
+        action: "memory_write",
+        namespace,
+        key: "profile",
+        content: nonDuplicatePreferences.map((line) => `- ${line}`).join("\n"),
+        tags: ["preference"],
+        rationale: "The conversation included explicit preference-style statements suited for a people profile.",
+        confidence: 0.82,
+      });
+    }
+  } else if (signals.preferences.length > 0) {
+    warnings.push("Preference-style lines were found, but no people/* namespace was identified, so no profile suggestion was produced.");
+  }
+
+  if (duplicateLines.length > 0) {
+    warnings.push(`Skipped ${duplicateLines.length} extracted line${duplicateLines.length === 1 ? "" : "s"} that already appeared in the related context.`);
+  }
+  if (signals.hasRelativeDates) {
+    warnings.push("Relative date phrases were captured verbatim. Review them before writing durable memory.");
+  }
+
+  return { suggestions, warnings };
+}
+
 function compareAttentionItems(a: AttentionItem, b: AttentionItem): number {
   const severityRank: Record<AttentionItem["severity"], number> = {
     high: 3,
@@ -1398,6 +1776,37 @@ const TOOL_DEFINITIONS = [
         },
       },
       required: [],
+    },
+  },
+  {
+    name: "memory_extract",
+    description:
+      "Suggest reviewable memory operations from explicit conversation signals. Use this after `memory_orient` when you have messy notes or transcript text and want proposed `memory_log`, `memory_write`, or `memory_update_status` calls. This tool is suggestion-only: it never writes to memory.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        conversation_text: {
+          type: "string",
+          description:
+            "Raw transcript text, notes, or a rough recap to inspect for explicit capture-worthy signals.",
+        },
+        namespace_hint: {
+          type: "string",
+          description:
+            "Optional. Exact namespace to target if you already know where the memory should go.",
+        },
+        project_hint: {
+          type: "string",
+          description:
+            "Optional. Project slug or tracked namespace hint, such as `grimnir` or `projects/grimnir`.",
+        },
+        max_suggestions: {
+          type: "integer",
+          description:
+            "Optional. Maximum number of suggestions to return. Default 5, max 10.",
+        },
+      },
+      required: ["conversation_text"],
     },
   },
   {
@@ -2257,6 +2666,54 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             if (scope) response.target_namespace = scope;
 
             return okResult("resume", response);
+          }
+
+          case "memory_extract": {
+            const extractArgs = (args ?? {}) as unknown as ExtractParams;
+            const maxSuggestions = clampOptionalLimit(extractArgs.max_suggestions, 10) ?? 5;
+
+            if (typeof extractArgs.conversation_text !== "string" || extractArgs.conversation_text.trim().length === 0) {
+              return errResult("extract", "validation_error", '"conversation_text" is required and must be a non-empty string.');
+            }
+            if (extractArgs.namespace_hint !== undefined) {
+              const namespaceCheck = validateNamespace(extractArgs.namespace_hint);
+              if (!namespaceCheck.valid) {
+                return errResult("extract", "validation_error", namespaceCheck.error!);
+              }
+            }
+            if (
+              typeof extractArgs.project_hint === "string" &&
+              (extractArgs.project_hint.startsWith("projects/") || extractArgs.project_hint.startsWith("clients/"))
+            ) {
+              const projectNamespaceCheck = validateNamespace(extractArgs.project_hint);
+              if (!projectNamespaceCheck.valid) {
+                return errResult("extract", "validation_error", projectNamespaceCheck.error!);
+              }
+            }
+
+            const trackedStatusAssessments = [...getTrackedStatusAssessments(db).values()];
+            const scope = resolveExtractNamespace(
+              extractArgs,
+              extractArgs.conversation_text,
+              trackedStatusAssessments,
+              ctx,
+            );
+            const relatedEntries = buildExtractRelatedEntries(db, scope.primaryNamespace, ctx);
+            const signals = extractConversationSignals(extractArgs.conversation_text);
+            const built = buildExtractSuggestions(signals, scope.primaryNamespace, relatedEntries);
+
+            const response: Record<string, unknown> = {
+              suggestions: built.suggestions.slice(0, maxSuggestions),
+              candidate_namespaces: scope.candidateNamespaces,
+              related_entries: relatedEntries,
+              capture_warnings: [...new Set([
+                "Suggestions only — nothing has been written.",
+                ...scope.warnings,
+                ...built.warnings,
+              ])],
+            };
+
+            return okResult("extract", response);
           }
 
           case "memory_write": {

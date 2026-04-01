@@ -95,6 +95,13 @@ export interface ResumeParams {
   include_attention?: boolean;
 }
 
+export interface ExtractParams {
+  conversation_text: string;
+  namespace_hint?: string;
+  project_hint?: string;
+  max_suggestions?: number;
+}
+
 export interface LogParams {
   namespace: string;
   content: string;
@@ -384,6 +391,41 @@ export interface ResumeResponse {
   open_loops: ResumeOpenLoop[];
   suggested_reads: ResumeSuggestedRead[];
   why_this_set: string[];
+}
+
+export interface ExtractSuggestion {
+  action: "memory_write" | "memory_log" | "memory_update_status";
+  namespace: string;
+  key?: string;
+  content?: string;
+  tags?: string[];
+  status_patch?: {
+    phase?: string;
+    current_work?: string;
+    blockers?: string;
+    next_steps?: string[];
+    notes?: string;
+    lifecycle?: "active" | "blocked" | "completed" | "stopped" | "maintenance" | "archived";
+  };
+  rationale: string;
+  confidence: number;
+}
+
+export interface ExtractRelatedEntry {
+  id: string;
+  namespace: string;
+  key?: string | null;
+  entry_type: EntryType;
+  preview: string;
+  updated_at: string;
+  reason: string;
+}
+
+export interface ExtractResponse {
+  suggestions: ExtractSuggestion[];
+  candidate_namespaces: string[];
+  related_entries: ExtractRelatedEntry[];
+  capture_warnings: string[];
 }
 
 // Retrieval insights types

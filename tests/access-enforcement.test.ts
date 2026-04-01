@@ -660,6 +660,58 @@ describe("memory_resume — access enforcement", () => {
 });
 
 // ---------------------------------------------------------------------------
+// memory_extract
+// ---------------------------------------------------------------------------
+
+describe("memory_extract — access enforcement", () => {
+  beforeEach(async () => {
+    await ownerCall("memory_write", {
+      namespace: "projects/foo",
+      key: "status",
+      content: "## Phase\nActive\n\n## Current Work\nRestricted project.\n\n## Blockers\nNone.\n\n## Next Steps\n- Keep going",
+      tags: ["active"],
+    });
+    await ownerCall("memory_write", {
+      namespace: "users/sara/notes",
+      key: "profile",
+      content: "Sara family notes.",
+    });
+  });
+
+  it("family memory_extract does not leak restricted related entries or target namespaces", async () => {
+    const raw = await familyCall("memory_extract", {
+      conversation_text: "We decided to keep working on the restricted project.",
+      namespace_hint: "projects/foo",
+    });
+    const result = parse(raw) as {
+      suggestions: Array<{ namespace: string }>;
+      candidate_namespaces: string[];
+      related_entries: Array<{ namespace: string }>;
+    };
+
+    expect(result.candidate_namespaces).not.toContain("projects/foo");
+    expect(result.related_entries).toHaveLength(0);
+    expect(result.suggestions).toHaveLength(0);
+  });
+
+  it("owner memory_extract can target the hinted tracked namespace", async () => {
+    const raw = await ownerCall("memory_extract", {
+      conversation_text: "We decided to keep working on the restricted project.",
+      namespace_hint: "projects/foo",
+    });
+    const result = parse(raw) as {
+      candidate_namespaces: string[];
+      related_entries: Array<{ namespace: string }>;
+    };
+
+    expect(result.candidate_namespaces).toContain("projects/foo");
+    expect(result.related_entries).toContainEqual(expect.objectContaining({
+      namespace: "projects/foo",
+    }));
+  });
+});
+
+// ---------------------------------------------------------------------------
 // memory_attention
 // ---------------------------------------------------------------------------
 
@@ -899,6 +951,7 @@ describe("meta: all registered tools are covered", () => {
       "memory_list",
       "memory_orient",
       "memory_resume",
+      "memory_extract",
       "memory_attention",
       "memory_delete",
       "memory_insights",

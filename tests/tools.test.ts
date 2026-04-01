@@ -1520,6 +1520,114 @@ describe("memory_resume", () => {
   });
 });
 
+describe("memory_extract", () => {
+  it("turns explicit decisions into proposed log entries", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/grimnir",
+      key: "status",
+      content: "## Phase\nActive\n\n## Current Work\nParser rollout.\n\n## Blockers\nNone.\n\n## Next Steps\n- Ship it",
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_extract", {
+      conversation_text: "We decided to keep parser rollout inside the Grimnir project namespace.",
+      project_hint: "grimnir",
+    });
+    const result = parseToolResponse(raw) as {
+      suggestions: Array<{ action: string; namespace: string; content?: string; tags?: string[]; confidence: number }>;
+      candidate_namespaces: string[];
+      capture_warnings: string[];
+    };
+
+    expect(result.candidate_namespaces[0]).toBe("projects/grimnir");
+    expect(result.suggestions).toContainEqual(expect.objectContaining({
+      action: "memory_log",
+      namespace: "projects/grimnir",
+      content: "We decided to keep parser rollout inside the Grimnir project namespace.",
+      tags: ["decision"],
+    }));
+    expect(result.capture_warnings).toContain("Suggestions only — nothing has been written.");
+    expect(result.suggestions[0].confidence).toBeGreaterThan(0.9);
+  });
+
+  it("turns explicit next steps into a proposed status update for tracked namespaces", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/grimnir",
+      key: "status",
+      content: "## Phase\nActive\n\n## Current Work\nResume tool.\n\n## Blockers\nNone.\n\n## Next Steps\n- Ship the first pass",
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_extract", {
+      conversation_text: [
+        "Current work: finish memory_extract.",
+        "Next steps:",
+        "- Add tests",
+        "- Update docs",
+      ].join("\n"),
+      namespace_hint: "projects/grimnir",
+    });
+    const result = parseToolResponse(raw) as {
+      suggestions: Array<{ action: string; namespace: string; status_patch?: { current_work?: string; next_steps?: string[] } }>;
+      related_entries: Array<{ namespace: string; key?: string | null }>;
+    };
+
+    expect(result.related_entries).toContainEqual(expect.objectContaining({
+      namespace: "projects/grimnir",
+      key: "status",
+    }));
+    expect(result.suggestions).toContainEqual(expect.objectContaining({
+      action: "memory_update_status",
+      namespace: "projects/grimnir",
+      status_patch: expect.objectContaining({
+        current_work: "finish memory_extract.",
+        next_steps: ["Add tests", "Update docs"],
+      }),
+    }));
+  });
+
+  it("uses namespace hints to constrain suggestions and related entries", async () => {
+    await callTool("memory_write", {
+      namespace: "users/sara/notes",
+      key: "profile",
+      content: "Sara family notes profile.",
+    });
+    await callTool("memory_write", {
+      namespace: "projects/foo",
+      key: "status",
+      content: "Owner-only project context.",
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_extract", {
+      conversation_text: "Decided to keep this in Sara's family notes.",
+      namespace_hint: "users/sara/notes",
+    });
+    const result = parseToolResponse(raw) as {
+      suggestions: Array<{ namespace: string }>;
+      candidate_namespaces: string[];
+      related_entries: Array<{ namespace: string }>;
+    };
+
+    expect(result.candidate_namespaces).toEqual(["users/sara/notes"]);
+    expect(result.suggestions.every((suggestion) => suggestion.namespace === "users/sara/notes")).toBe(true);
+    expect(result.related_entries.every((entry) => entry.namespace === "users/sara/notes")).toBe(true);
+  });
+
+  it("does not write anything while generating suggestions", async () => {
+    const raw = await callTool("memory_extract", {
+      conversation_text: "We decided to document this later.\nNext steps:\n- Add notes",
+      project_hint: "grimnir",
+    });
+    const result = parseToolResponse(raw) as { suggestions: Array<unknown> };
+    expect(result.suggestions.length).toBeGreaterThan(0);
+
+    const listRaw = await callTool("memory_list", {});
+    const listResult = parseToolResponse(listRaw) as { namespaces?: Array<unknown> };
+    expect(listResult.namespaces ?? []).toHaveLength(0);
+  });
+});
+
 describe("memory_attention", () => {
   it("surfaces blocked, stale, and missing-status work in priority order", async () => {
     const upcomingDate = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
