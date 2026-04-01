@@ -13,6 +13,8 @@ import { pathToFileURL } from "node:url";
 import { initDatabase, pruneRetrievalAnalytics } from "./db.js";
 import { registerTools } from "./tools.js";
 import { initEmbeddings, startEmbeddingWorker, stopEmbeddingWorker } from "./embeddings.js";
+import { resolveAccessContext, ownerContext } from "./access.js";
+import type { AccessContext } from "./access.js";
 import { MuninOAuthProvider } from "./oauth.js";
 
 // Analytics retention (default 90 days)
@@ -82,12 +84,12 @@ let activeDb: Database.Database | undefined;
 
 // --- MCP server factory ---
 
-function createMcpServer(database: Database.Database, sessionId?: string): Server {
+function createMcpServer(database: Database.Database, sessionId?: string, accessContext?: AccessContext): Server {
   const server = new Server(
     { name: "munin-memory", version: "0.1.0" },
     { capabilities: { tools: {} } },
   );
-  registerTools(server, database, sessionId);
+  registerTools(server, database, sessionId, accessContext);
   return server;
 }
 
@@ -510,7 +512,8 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
     });
     // Use mcp-session-id header for correlation, fall back to caller-derived stable ID
     const mcpSessionId = getSessionHeader(req) ?? deriveSessionId(req.auth?.clientId ?? "anonymous");
-    const mcpServer = createMcpServer(database, mcpSessionId);
+    const accessContext = resolveAccessContext(database, req.auth?.clientId ?? "", req.auth?.token);
+    const mcpServer = createMcpServer(database, mcpSessionId, accessContext);
 
     try {
       await mcpServer.connect(transport);
@@ -574,7 +577,7 @@ async function startHttp(database: Database.Database) {
 async function startStdio(database: Database.Database) {
   // One session ID per stdio process — all tool calls in this process are correlated
   const stdioSessionId = randomUUID();
-  const server = createMcpServer(database, stdioSessionId);
+  const server = createMcpServer(database, stdioSessionId, ownerContext());
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

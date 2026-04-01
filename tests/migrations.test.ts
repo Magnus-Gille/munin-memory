@@ -290,7 +290,7 @@ describe("initDatabase uses migrations", () => {
     const db = initDatabase(TEST_DB_PATH);
 
     // schema_version exists and has latest version
-    expect(getSchemaVersion(db)).toBe(4);
+    expect(getSchemaVersion(db)).toBe(5);
 
     // Full CRUD works
     const result = writeState(db, "test/ns", "key1", "hello from migrations", ["test"]);
@@ -303,6 +303,114 @@ describe("initDatabase uses migrations", () => {
     const results = queryEntries(db, { query: "migrations" });
     expect(results.length).toBe(1);
 
+    db.close();
+  });
+});
+
+describe("migration v5 — principals table", () => {
+  it("creates the principals table", () => {
+    const db = openRawDb();
+    runMigrations(db);
+
+    const tables = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='principals'")
+      .all() as Array<{ name: string }>;
+    expect(tables).toHaveLength(1);
+    db.close();
+  });
+
+  it("creates the expected indexes on principals", () => {
+    const db = openRawDb();
+    runMigrations(db);
+
+    const indexes = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_principals_%' ORDER BY name")
+      .all() as Array<{ name: string }>;
+    const names = indexes.map((i) => i.name);
+    expect(names).toContain("idx_principals_oauth_client");
+    expect(names).toContain("idx_principals_token_hash");
+    db.close();
+  });
+
+  it("enforces principal_type CHECK constraint", () => {
+    const db = openRawDb();
+    runMigrations(db);
+
+    expect(() => {
+      db.prepare(
+        `INSERT INTO principals (id, principal_id, principal_type, namespace_rules, created_at)
+         VALUES ('p1', 'alice', 'invalid', '[]', '2025-01-01T00:00:00.000Z')`,
+      ).run();
+    }).toThrow();
+    db.close();
+  });
+
+  it("enforces UNIQUE constraint on principal_id", () => {
+    const db = openRawDb();
+    runMigrations(db);
+
+    db.prepare(
+      `INSERT INTO principals (id, principal_id, principal_type, namespace_rules, created_at)
+       VALUES ('p1', 'alice', 'owner', '[]', '2025-01-01T00:00:00.000Z')`,
+    ).run();
+
+    expect(() => {
+      db.prepare(
+        `INSERT INTO principals (id, principal_id, principal_type, namespace_rules, created_at)
+         VALUES ('p2', 'alice', 'family', '[]', '2025-01-01T00:00:00.000Z')`,
+      ).run();
+    }).toThrow();
+    db.close();
+  });
+
+  it("enforces UNIQUE constraint on oauth_client_id", () => {
+    const db = openRawDb();
+    runMigrations(db);
+
+    db.prepare(
+      `INSERT INTO principals (id, principal_id, principal_type, oauth_client_id, namespace_rules, created_at)
+       VALUES ('p1', 'alice', 'owner', 'client-abc', '[]', '2025-01-01T00:00:00.000Z')`,
+    ).run();
+
+    expect(() => {
+      db.prepare(
+        `INSERT INTO principals (id, principal_id, principal_type, oauth_client_id, namespace_rules, created_at)
+         VALUES ('p2', 'bob', 'external', 'client-abc', '[]', '2025-01-01T00:00:00.000Z')`,
+      ).run();
+    }).toThrow();
+    db.close();
+  });
+
+  it("accepts all valid principal_type values", () => {
+    const db = openRawDb();
+    runMigrations(db);
+
+    const types = ["owner", "family", "agent", "external"];
+    for (let i = 0; i < types.length; i++) {
+      db.prepare(
+        `INSERT INTO principals (id, principal_id, principal_type, namespace_rules, created_at)
+         VALUES (?, ?, ?, '[]', '2025-01-01T00:00:00.000Z')`,
+      ).run(`p${i}`, `principal-${i}`, types[i]);
+    }
+
+    const rows = db.prepare("SELECT principal_type FROM principals ORDER BY id").all() as Array<{ principal_type: string }>;
+    expect(rows.map((r) => r.principal_type)).toEqual(types);
+    db.close();
+  });
+
+  it("defaults namespace_rules to empty JSON array", () => {
+    const db = openRawDb();
+    runMigrations(db);
+
+    db.prepare(
+      `INSERT INTO principals (id, principal_id, principal_type, created_at)
+       VALUES ('p1', 'alice', 'owner', '2025-01-01T00:00:00.000Z')`,
+    ).run();
+
+    const row = db
+      .prepare("SELECT namespace_rules FROM principals WHERE id = 'p1'")
+      .get() as { namespace_rules: string };
+    expect(row.namespace_rules).toBe("[]");
     db.close();
   });
 });

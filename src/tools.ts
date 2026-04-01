@@ -5,6 +5,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { CallToolRequest } from "@modelcontextprotocol/sdk/types.js";
 import type Database from "better-sqlite3";
+import { type AccessContext, ownerContext, canRead, canWrite, canReadSubtree, filterByAccess } from "./access.js";
 import { randomBytes } from "node:crypto";
 import {
   writeState,
@@ -1068,6 +1069,21 @@ const TOOL_DEFINITIONS = [
   },
 ];
 
+function textResult(obj: Record<string, unknown>) {
+  return { content: [{ type: "text" as const, text: JSON.stringify(obj) }] };
+}
+
+function accessDeniedResponse(ctx: AccessContext) {
+  if (ctx.principalType === "agent") {
+    return textResult({ error: "access_denied" });
+  }
+  return textResult({ found: false });
+}
+
+function accessDeniedReadResponse() {
+  return textResult({ found: false, message: "No entry found." });
+}
+
 export function getMaxContentSize(): number {
   const envVal = process.env.MUNIN_MEMORY_MAX_CONTENT_SIZE;
   return envVal ? parseInt(envVal, 10) || 100_000 : 100_000;
@@ -1128,7 +1144,7 @@ function computeEntryInsight(row: {
   };
 }
 
-export function registerTools(server: Server, db: Database.Database, sessionId?: string): void {
+export function registerTools(server: Server, db: Database.Database, sessionId?: string, ctx: AccessContext = ownerContext()): void {
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: TOOL_DEFINITIONS,
   }));
@@ -1147,13 +1163,15 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             const dashboardLimit = clampOptionalLimit(orientArgs.dashboard_limit_per_group, 50) ?? (detail === "compact" ? 5 : undefined);
             const namespaceLimit = clampOptionalLimit(orientArgs.namespace_limit, 200) ?? (detail === "compact" ? 20 : undefined);
             // Read conventions and namespace list
-            const conventions = readState(db, "meta/conventions", "conventions");
-            const namespaces = listNamespaces(db);
+            const conventions = ctx.principalType === "owner" ? readState(db, "meta/conventions", "conventions") : null;
+            const namespaces = listNamespaces(db).filter(ns => canRead(ctx, ns.namespace));
 
             const response: Record<string, unknown> = {};
 
-            // Conventions — compact by default, full on request
-            if (conventions) {
+            // Conventions — owner only; compact by default, full on request
+            if (ctx.principalType !== "owner") {
+              response.conventions = null;
+            } else if (conventions) {
               const parsed = parseEntry(conventions);
               const content = detail === "full"
                 ? parsed.content
@@ -1176,7 +1194,8 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             }
 
             // Computed dashboard from tracked status entries
-            const trackedStatusAssessments = [...getTrackedStatusAssessments(db).values()];
+            const trackedStatusAssessments = [...getTrackedStatusAssessments(db).values()]
+              .filter(a => canRead(ctx, a.row.namespace));
             const dashboard: Record<string, DashboardEntry[]> = {
               active: [],
               blocked: [],
@@ -1233,34 +1252,36 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               truncated_groups: truncatedGroups,
             };
 
-            // Curated overlay (meta/workbench-notes)
-            const notes = readState(db, "meta", "workbench-notes");
-            if (notes) {
-              response.notes = notes.content;
-            }
+            // Curated overlay (meta/workbench-notes) — owner only
+            if (ctx.principalType === "owner") {
+              const notes = readState(db, "meta", "workbench-notes");
+              if (notes) {
+                response.notes = notes.content;
+              }
 
-            // Reference index — data-driven discoverability for key entries
-            const refIndex = readState(db, "meta", "reference-index");
-            if (refIndex) {
-              try {
-                const parsed = JSON.parse(refIndex.content);
-                if (parsed && Array.isArray(parsed.references)) {
-                  const validEntries = parsed.references.filter(
-                    (r: Record<string, unknown>) =>
-                      typeof r.namespace === "string" &&
-                      typeof r.key === "string" &&
-                      typeof r.title === "string" &&
-                      typeof r.when_to_load === "string",
-                  );
-                  if (validEntries.length > 0) {
-                    response.references = {
-                      entries: validEntries,
-                      updated_at: refIndex.updated_at,
-                    };
+              // Reference index — data-driven discoverability for key entries
+              const refIndex = readState(db, "meta", "reference-index");
+              if (refIndex) {
+                try {
+                  const parsed = JSON.parse(refIndex.content);
+                  if (parsed && Array.isArray(parsed.references)) {
+                    const validEntries = parsed.references.filter(
+                      (r: Record<string, unknown>) =>
+                        typeof r.namespace === "string" &&
+                        typeof r.key === "string" &&
+                        typeof r.title === "string" &&
+                        typeof r.when_to_load === "string",
+                    );
+                    if (validEntries.length > 0) {
+                      response.references = {
+                        entries: validEntries,
+                        updated_at: refIndex.updated_at,
+                      };
+                    }
                   }
+                } catch {
+                  // Malformed JSON — skip silently, don't break orient
                 }
-              } catch {
-                // Malformed JSON — skip silently, don't break orient
               }
             }
 
@@ -1269,15 +1290,17 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               response.maintenance_needed = maintenanceNeeded;
             }
 
-            // Legacy workbench (transition period)
-            const workbench = readState(db, "meta", "workbench");
-            if (workbench) {
-              const parsed = parseEntry(workbench);
-              response.legacy_workbench = {
-                content: parsed.content,
-                updated_at: parsed.updated_at,
-                deprecation_note: "The workbench is deprecated. The computed dashboard above is now the source of truth for project/client state. Delete meta/workbench when ready.",
-              };
+            // Legacy workbench (transition period) — owner only
+            if (ctx.principalType === "owner") {
+              const workbench = readState(db, "meta", "workbench");
+              if (workbench) {
+                const parsed = parseEntry(workbench);
+                response.legacy_workbench = {
+                  content: parsed.content,
+                  updated_at: parsed.updated_at,
+                  deprecation_note: "The workbench is deprecated. The computed dashboard above is now the source of truth for project/client state. Delete meta/workbench when ready.",
+                };
+              }
             }
 
             // Namespace overview — filter demo and completed task-run namespaces by default
@@ -1324,6 +1347,10 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             const validation = validateWriteInput(namespace, key, content, tags, maxContentSize);
             if (!validation.valid) {
               return { content: [{ type: "text", text: JSON.stringify({ error: "validation_error", message: validation.error }) }] };
+            }
+
+            if (!canWrite(ctx, namespace)) {
+              return accessDeniedResponse(ctx);
             }
 
             const isTrackedStatus = key === "status" && isTrackedNamespace(namespace);
@@ -1415,6 +1442,9 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             if (!keyCheck.valid) {
               return { content: [{ type: "text", text: JSON.stringify({ error: "validation_error", message: keyCheck.error }) }] };
             }
+            if (!canRead(ctx, namespace)) {
+              return accessDeniedReadResponse();
+            }
             const entry = readState(db, namespace, key);
             if (entry) {
               const parsed = parseEntry(entry);
@@ -1478,6 +1508,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               if (!nsCheck.valid) return { found: false, namespace: ns, key: k, error: nsCheck.error };
               const keyCheck = validateKey(k);
               if (!keyCheck.valid) return { found: false, namespace: ns, key: k, error: keyCheck.error };
+              if (!canRead(ctx, ns)) return { found: false, namespace: ns, key: k };
 
               const entry = readState(db, ns, k);
               if (entry) {
@@ -1514,6 +1545,9 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               return { content: [{ type: "text", text: JSON.stringify({ error: "validation_error", message: "ID is required." }) }] };
             }
             const entry = getById(db, id);
+            if (entry && !canRead(ctx, entry.namespace)) {
+              return accessDeniedReadResponse();
+            }
             if (entry) {
               const parsed = parseEntry(entry);
               const response: Record<string, unknown> = {
@@ -1682,6 +1716,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               ? getCompletedTaskNamespaces(db)
               : new Set<string>();
             results = rerankQueryResults(results, queryParams, completedTasks, trackedStatuses).slice(0, requestedLimit);
+            results = filterByAccess(ctx, results);
 
             const lexicalById = new Map(lexicalResults.map((result) => [result.entry.id, result] as const));
             const semanticById = new Map(semanticResults.map((result) => [result.entry.id, result] as const));
@@ -1791,8 +1826,9 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             const includeMissingLifecycle = attentionArgs.include_missing_lifecycle !== false;
             const limit = clampOptionalLimit(attentionArgs.limit, 50) ?? 20;
 
-            const trackedStatusAssessments = [...getTrackedStatusAssessments(db).values()];
-            const namespaces = listNamespaces(db);
+            const trackedStatusAssessments = [...getTrackedStatusAssessments(db).values()]
+              .filter(a => canRead(ctx, a.row.namespace));
+            const namespaces = listNamespaces(db).filter(ns => canRead(ctx, ns.namespace));
             const attentionItems: AttentionItem[] = [];
 
             for (const assessment of trackedStatusAssessments) {
@@ -1881,6 +1917,9 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             if (!validation.valid) {
               return { content: [{ type: "text", text: JSON.stringify({ error: "validation_error", message: validation.error }) }] };
             }
+            if (!canWrite(ctx, namespace)) {
+              return accessDeniedResponse(ctx);
+            }
             const result = appendLog(db, namespace, content, tags ?? []);
             // Analytics: log log outcome correlated to prior retrieval in this session
             if (sessionId) {
@@ -1908,6 +1947,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               const allNamespaces = listNamespaces(db);
               const completedTasks = include_completed_tasks ? new Set<string>() : getCompletedTaskNamespaces(db);
               const namespaces = allNamespaces.filter((ns) => {
+                if (!canRead(ctx, ns.namespace)) return false;
                 if (!include_demo && (ns.namespace.startsWith("demo/") || ns.namespace === "demo")) return false;
                 if (!include_completed_tasks && completedTasks.has(ns.namespace)) return false;
                 return true;
@@ -1922,6 +1962,9 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             const nsCheck = validateNamespace(namespace);
             if (!nsCheck.valid) {
               return { content: [{ type: "text", text: JSON.stringify({ error: "validation_error", message: nsCheck.error }) }] };
+            }
+            if (!canRead(ctx, namespace)) {
+              return textResult({ namespace, state_entries: [], log_summary: { log_count: 0, earliest: null, latest: null, recent: [] } });
             }
             const { stateEntries, logSummary } = listNamespaceContents(db, namespace);
             return {
@@ -1963,6 +2006,14 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               if (!keyCheck.valid) {
                 return { content: [{ type: "text", text: JSON.stringify({ error: "validation_error", message: keyCheck.error }) }] };
               }
+            }
+
+            if (!canWrite(ctx, namespace)) {
+              return accessDeniedResponse(ctx);
+            }
+            // Namespace-wide delete in shared/ is owner-only
+            if (!key && namespace.startsWith("shared/") && ctx.principalType !== "owner") {
+              return accessDeniedResponse(ctx);
             }
 
             // Execute with token
@@ -2018,6 +2069,9 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
           }
 
           case "memory_insights": {
+            if (ctx.principalType !== "owner") {
+              return textResult({ entries: [], total: 0, min_impressions: 3 });
+            }
             const insightsArgs = (args ?? {}) as InsightsParams;
             const minImpressions = typeof insightsArgs.min_impressions === "number"
               ? Math.max(1, Math.floor(insightsArgs.min_impressions))
@@ -2042,6 +2096,14 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
           case "memory_history": {
             const { namespace, since, action, limit } = (args ?? {}) as AuditHistoryParams;
 
+            // Namespace subtree access check
+            if (namespace) {
+              const prefix = namespace.endsWith("/") ? namespace : namespace + "/";
+              if (!canReadSubtree(ctx, prefix) && !canRead(ctx, namespace)) {
+                return textResult({ generated_at: new Date().toISOString(), count: 0, entries: [] });
+              }
+            }
+
             // Validate action enum if provided
             const validActions = ["write", "update", "delete", "namespace_delete", "log_append", "delete_namespace", "log"];
             if (action !== undefined && !validActions.includes(action)) {
@@ -2064,13 +2126,16 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               limit,
             });
 
+            // Filter entries to only those the principal can read
+            const filteredEntries = historyEntries.filter(e => canRead(ctx, e.namespace));
+
             return {
               content: [{
                 type: "text",
                 text: JSON.stringify({
                   generated_at: new Date().toISOString(),
-                  count: historyEntries.length,
-                  entries: historyEntries,
+                  count: filteredEntries.length,
+                  entries: filteredEntries,
                 }),
               }],
             };

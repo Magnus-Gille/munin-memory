@@ -213,6 +213,27 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 5,
+    description: "Add principals table for multi-principal access control",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE principals (
+          id              TEXT PRIMARY KEY,
+          principal_id    TEXT NOT NULL UNIQUE,
+          principal_type  TEXT NOT NULL CHECK(principal_type IN ('owner','family','agent','external')),
+          oauth_client_id TEXT UNIQUE,
+          token_hash      TEXT,
+          namespace_rules TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(namespace_rules)),
+          created_at      TEXT NOT NULL,
+          revoked_at      TEXT,
+          expires_at      TEXT
+        );
+        CREATE INDEX idx_principals_oauth_client ON principals(oauth_client_id) WHERE oauth_client_id IS NOT NULL;
+        CREATE INDEX idx_principals_token_hash ON principals(token_hash) WHERE token_hash IS NOT NULL;
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {
