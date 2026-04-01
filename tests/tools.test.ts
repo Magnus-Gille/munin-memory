@@ -108,6 +108,35 @@ describe("memory_write", () => {
     const result = parseToolResponse(raw) as { error: string };
     expect(result.error).toBe("validation_error");
   });
+
+  it("accepts and normalizes valid_until", async () => {
+    const raw = await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "temporary",
+      content: "Temporary note",
+      valid_until: "2027-06-15T12:00:00+02:00",
+    });
+    const result = parseToolResponse(raw) as { status: string };
+    expect(result.status).toBe("created");
+
+    const readRaw = await callTool("memory_read", {
+      namespace: "projects/test",
+      key: "temporary",
+    });
+    const readResult = parseToolResponse(readRaw) as { valid_until?: string };
+    expect(readResult.valid_until).toBe("2027-06-15T10:00:00.000Z");
+  });
+
+  it("rejects invalid valid_until", async () => {
+    const raw = await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "temporary",
+      content: "Temporary note",
+      valid_until: "next tuesday",
+    });
+    const result = parseToolResponse(raw) as { error: string };
+    expect(result.error).toBe("validation_error");
+  });
 });
 
 describe("memory_write patch", () => {
@@ -344,6 +373,24 @@ describe("memory_read", () => {
     expect(result.found).toBe(false);
     expect(result.message).toContain("No state entry found");
   });
+
+  it("returns expired entries with valid_until and expired flag", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "temporary",
+      content: "Expired state",
+      valid_until: "2020-01-01T00:00:00Z",
+    });
+
+    const raw = await callTool("memory_read", {
+      namespace: "projects/test",
+      key: "temporary",
+    });
+    const result = parseToolResponse(raw) as { found: boolean; valid_until?: string; expired?: boolean };
+    expect(result.found).toBe(true);
+    expect(result.valid_until).toBe("2020-01-01T00:00:00.000Z");
+    expect(result.expired).toBe(true);
+  });
 });
 
 describe("memory_get", () => {
@@ -379,6 +426,22 @@ describe("memory_get", () => {
     const raw = await callTool("memory_get", { id: "nonexistent" });
     const result = parseToolResponse(raw) as { found: boolean };
     expect(result.found).toBe(false);
+  });
+
+  it("returns expired flag on memory_get for expired state entries", async () => {
+    const writeRaw = await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "temporary",
+      content: "Expired state",
+      valid_until: "2020-01-01T00:00:00Z",
+    });
+    const writeResult = parseToolResponse(writeRaw) as { id: string };
+
+    const raw = await callTool("memory_get", { id: writeResult.id });
+    const result = parseToolResponse(raw) as { found: boolean; valid_until?: string; expired?: boolean };
+    expect(result.found).toBe(true);
+    expect(result.valid_until).toBe("2020-01-01T00:00:00.000Z");
+    expect(result.expired).toBe(true);
   });
 });
 
@@ -456,6 +519,141 @@ describe("memory_query", () => {
     const raw = await callTool("memory_query", { query: "xyznonexistent" });
     const result = parseToolResponse(raw) as { total: number };
     expect(result.total).toBe(0);
+  });
+
+  it("excludes expired state entries from query results by default", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/expired",
+      key: "status",
+      content: "SQLite phase plan",
+      tags: ["active"],
+      valid_until: "2020-01-01T00:00:00Z",
+    });
+
+    const raw = await callTool("memory_query", { query: "SQLite phase plan", search_mode: "lexical" });
+    const result = parseToolResponse(raw) as {
+      results: Array<{ namespace: string }>;
+      retrieval: { expired_filtered_count: number };
+    };
+
+    expect(result.results).not.toContainEqual(expect.objectContaining({ namespace: "projects/expired" }));
+    expect(result.retrieval.expired_filtered_count).toBeGreaterThanOrEqual(1);
+  });
+
+  it("includes expired state entries when include_expired is true", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/expired",
+      key: "status",
+      content: "SQLite phase plan",
+      tags: ["active"],
+      valid_until: "2020-01-01T00:00:00Z",
+    });
+
+    const raw = await callTool("memory_query", {
+      query: "SQLite phase plan",
+      search_mode: "lexical",
+      include_expired: true,
+    });
+    const result = parseToolResponse(raw) as {
+      results: Array<{ namespace: string; expired?: boolean; valid_until?: string }>;
+      retrieval: { expired_filtered_count: number };
+    };
+
+    expect(result.results).toContainEqual(expect.objectContaining({
+      namespace: "projects/expired",
+      expired: true,
+      valid_until: "2020-01-01T00:00:00.000Z",
+    }));
+    expect(result.retrieval.expired_filtered_count).toBe(0);
+  });
+
+  it("promotes fresher equivalent entries by default", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/old-recency",
+      key: "status",
+      content: "Recency ranking candidate",
+      tags: ["active"],
+    });
+    await callTool("memory_write", {
+      namespace: "projects/fresh-recency",
+      key: "status",
+      content: "Recency ranking candidate",
+      tags: ["active"],
+    });
+    db.prepare("UPDATE entries SET updated_at = '2020-01-01T00:00:00.000Z' WHERE namespace = 'projects/old-recency'").run();
+
+    const raw = await callTool("memory_query", {
+      query: "Recency ranking candidate",
+      search_mode: "lexical",
+      limit: 2,
+    });
+    const result = parseToolResponse(raw) as {
+      results: Array<{ namespace: string }>;
+      retrieval: { recency_applied: boolean; search_recency_weight: number };
+    };
+
+    expect(result.results[0].namespace).toBe("projects/fresh-recency");
+    expect(result.retrieval.recency_applied).toBe(true);
+    expect(result.retrieval.search_recency_weight).toBe(0.2);
+  });
+
+  it("search_recency_weight 0 preserves previous candidate ordering", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/old-recency",
+      key: "status",
+      content: "Recency ranking candidate",
+      tags: ["active"],
+    });
+    await callTool("memory_write", {
+      namespace: "projects/fresh-recency",
+      key: "status",
+      content: "Recency ranking candidate",
+      tags: ["active"],
+    });
+    db.prepare("UPDATE entries SET updated_at = '2020-01-01T00:00:00.000Z' WHERE namespace = 'projects/old-recency'").run();
+
+    const raw = await callTool("memory_query", {
+      query: "Recency ranking candidate",
+      search_mode: "lexical",
+      search_recency_weight: 0,
+      limit: 2,
+    });
+    const result = parseToolResponse(raw) as {
+      results: Array<{ namespace: string }>;
+      retrieval: { recency_applied: boolean; search_recency_weight: number };
+    };
+
+    expect(result.results[0].namespace).toBe("projects/old-recency");
+    expect(result.retrieval.recency_applied).toBe(false);
+    expect(result.retrieval.search_recency_weight).toBe(0);
+  });
+
+  it("keeps strong tracked-status heuristics above fresher generic noise", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/grimnir",
+      key: "status",
+      content: "Current work, blockers, and next steps for the main project.",
+      tags: ["active"],
+    });
+    db.prepare("UPDATE entries SET updated_at = '2020-01-01T00:00:00.000Z' WHERE namespace = 'projects/grimnir'").run();
+
+    await callTool("memory_write", {
+      namespace: "notes/fresh-noise",
+      key: "summary",
+      content: "Current work blockers next steps generic fresh note.",
+    });
+
+    const raw = await callTool("memory_query", {
+      query: "current work blockers next steps",
+      search_mode: "lexical",
+      limit: 3,
+    });
+    const result = parseToolResponse(raw) as { results: Array<{ namespace: string; key: string | null }> };
+
+    expect(result.results[0]).toEqual(expect.objectContaining({
+      namespace: "projects/grimnir",
+      key: "status",
+    }));
   });
 
   it("suppresses demo namespaces for broad queries by default", async () => {
@@ -1158,6 +1356,170 @@ describe("memory_orient", () => {
   });
 });
 
+describe("memory_resume", () => {
+  it("prioritizes the current tracked status for a project-scoped resume", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/grimnir",
+      key: "status",
+      content: "## Phase\nActive\n\n## Current Work\nParser rollout and retrieval cleanup.\n\n## Blockers\nNone.\n\n## Next Steps\n- Finish the migration\n- Update the tests",
+      tags: ["active"],
+    });
+    await callTool("memory_write", {
+      namespace: "projects/grimnir",
+      key: "architecture",
+      content: "Current architecture notes for Grimnir.",
+    });
+    await callTool("memory_log", {
+      namespace: "projects/grimnir",
+      content: "Decided to keep the first resume pack deterministic and tool-layer only.",
+      tags: ["decision"],
+    });
+    await callTool("memory_write", {
+      namespace: "projects/other",
+      key: "status",
+      content: "Another active project.",
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_resume", { project: "grimnir", limit: 4 });
+    const result = parseToolResponse(raw) as {
+      target_namespace?: string;
+      items: Array<{ namespace: string; key?: string | null; category: string }>;
+      open_loops: Array<{ type: string; summary: string }>;
+      suggested_reads: Array<{ tool: string; namespace?: string; key?: string }>;
+    };
+
+    expect(result.target_namespace).toBe("projects/grimnir");
+    expect(result.items[0]).toEqual(expect.objectContaining({
+      namespace: "projects/grimnir",
+      key: "status",
+      category: "status",
+    }));
+    expect(result.open_loops).toContainEqual(expect.objectContaining({
+      type: "next_step",
+      summary: "Finish the migration",
+    }));
+    expect(result.suggested_reads).toContainEqual(expect.objectContaining({
+      tool: "memory_read",
+      namespace: "projects/grimnir",
+      key: "status",
+    }));
+  });
+
+  it("uses opener terms to pull likely-relevant status and decision context", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/grimnir",
+      key: "status",
+      content: "## Phase\nActive\n\n## Current Work\nParser rollout and resume-tool wiring.\n\n## Blockers\nNone.\n\n## Next Steps\n- Land the parser patch",
+      tags: ["active"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/grimnir",
+      content: "Decided to keep parser rollout inside the Grimnir project namespace.",
+      tags: ["decision"],
+    });
+    await callTool("memory_write", {
+      namespace: "projects/hugin",
+      key: "status",
+      content: "Task runner maintenance.",
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_resume", {
+      opener: "continue grimnir parser rollout",
+      limit: 4,
+    });
+    const result = parseToolResponse(raw) as {
+      items: Array<{ namespace: string; category: string }>;
+      why_this_set: string[];
+    };
+
+    expect(result.items).toContainEqual(expect.objectContaining({
+      namespace: "projects/grimnir",
+      category: "status",
+    }));
+    expect(result.items).toContainEqual(expect.objectContaining({
+      namespace: "projects/grimnir",
+      category: "decision_log",
+    }));
+    expect(result.why_this_set).toContain("Biased toward terms from the opener.");
+  });
+
+  it("ranks blocked work ahead of generic recent noise", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/release-train",
+      key: "status",
+      content: "## Phase\nBlocked\n\n## Current Work\nWaiting on vendor approval.\n\n## Blockers\nVendor sign-off is missing.\n\n## Next Steps\n- Escalate with vendor",
+      tags: ["blocked"],
+    });
+    await callTool("memory_write", {
+      namespace: "projects/generic",
+      key: "status",
+      content: "Routine active project with no blockers.",
+      tags: ["active"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/generic",
+      content: "General project note with little decision value.",
+      tags: ["milestone"],
+    });
+
+    const raw = await callTool("memory_resume", {
+      opener: "what should I continue next",
+      limit: 3,
+    });
+    const result = parseToolResponse(raw) as {
+      items: Array<{ namespace: string; key?: string | null; category: string }>;
+      open_loops: Array<{ namespace: string; type: string }>;
+    };
+
+    expect(result.items[0]).toEqual(expect.objectContaining({
+      namespace: "projects/release-train",
+      key: "status",
+      category: "status",
+    }));
+    expect(result.open_loops).toContainEqual(expect.objectContaining({
+      namespace: "projects/release-train",
+      type: "blocker",
+    }));
+  });
+
+  it("can include recent namespace history in the resume pack", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/grimnir",
+      key: "status",
+      content: "## Phase\nActive\n\n## Current Work\nResume pack implementation.\n\n## Blockers\nNone.\n\n## Next Steps\n- Add history coverage",
+      tags: ["active"],
+    });
+    await callTool("memory_write", {
+      namespace: "projects/grimnir",
+      key: "architecture",
+      content: "Architecture note for the current iteration.",
+    });
+    await callTool("memory_log", {
+      namespace: "projects/grimnir",
+      content: "Milestone: first resume pack assembled.",
+      tags: ["milestone"],
+    });
+
+    const raw = await callTool("memory_resume", {
+      namespace: "projects/grimnir",
+      include_history: true,
+      limit: 6,
+    });
+    const result = parseToolResponse(raw) as {
+      items: Array<{ category: string }>;
+      suggested_reads: Array<{ tool: string; namespace?: string }>;
+    };
+
+    expect(result.items).toContainEqual(expect.objectContaining({ category: "history" }));
+    expect(result.suggested_reads).toContainEqual(expect.objectContaining({
+      tool: "memory_history",
+      namespace: "projects/grimnir",
+    }));
+  });
+});
+
 describe("memory_attention", () => {
   it("surfaces blocked, stale, and missing-status work in priority order", async () => {
     const upcomingDate = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
@@ -1229,6 +1591,41 @@ describe("memory_attention", () => {
 
     expect(result.items).toHaveLength(1);
     expect(result.items[0].namespace).toBe("clients/acme");
+  });
+
+  it("surfaces expired and expiring tracked statuses", async () => {
+    const soon = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString();
+
+    await callTool("memory_write", {
+      namespace: "projects/expired-status",
+      key: "status",
+      content: "Expired tracked status",
+      tags: ["active"],
+      valid_until: "2020-01-01T00:00:00Z",
+    });
+    await callTool("memory_write", {
+      namespace: "projects/expiring-status",
+      key: "status",
+      content: "Expiring tracked status",
+      tags: ["active"],
+      valid_until: soon,
+    });
+
+    const raw = await callTool("memory_attention", {});
+    const result = parseToolResponse(raw) as {
+      items: Array<{ namespace: string; category: string; severity: string }>;
+    };
+
+    expect(result.items).toContainEqual(expect.objectContaining({
+      namespace: "projects/expired-status",
+      category: "expired",
+      severity: "high",
+    }));
+    expect(result.items).toContainEqual(expect.objectContaining({
+      namespace: "projects/expiring-status",
+      category: "expiring_soon",
+      severity: "medium",
+    }));
   });
 });
 
@@ -1504,6 +1901,23 @@ describe("memory_read_batch", () => {
     expect(result.results[0].stale).toBe(true);
   });
 
+  it("includes expired flag for expired entries", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/a",
+      key: "status",
+      content: "Expired",
+      valid_until: "2020-01-01T00:00:00Z",
+    });
+
+    const raw = await callTool("memory_read_batch", {
+      reads: [{ namespace: "projects/a", key: "status" }],
+    });
+    const result = parseToolResponse(raw) as { results: Array<{ found: boolean; expired?: boolean; valid_until?: string }> };
+    expect(result.results[0].found).toBe(true);
+    expect(result.results[0].expired).toBe(true);
+    expect(result.results[0].valid_until).toBe("2020-01-01T00:00:00.000Z");
+  });
+
   it("rejects empty reads array", async () => {
     const raw = await callTool("memory_read_batch", { reads: [] });
     const result = parseToolResponse(raw) as { error: string };
@@ -1757,6 +2171,51 @@ describe("maintenance suggestions (memory_orient)", () => {
     const missing = result.maintenance_needed.find(m => m.issue === "missing_lifecycle");
     expect(missing).toBeDefined();
     expect(missing!.namespace).toBe("projects/nolc");
+  });
+
+  it("flags expired tracked statuses without hiding them from the dashboard", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/expired-status",
+      key: "status",
+      content: "Expired tracked status",
+      tags: ["active"],
+      valid_until: "2020-01-01T00:00:00Z",
+    });
+
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as {
+      dashboard: { active: Array<{ namespace: string; needs_attention?: boolean }> };
+      maintenance_needed: Array<{ namespace: string; issue: string }>;
+    };
+
+    expect(result.dashboard.active).toContainEqual(expect.objectContaining({
+      namespace: "projects/expired-status",
+      needs_attention: true,
+    }));
+    expect(result.maintenance_needed).toContainEqual(expect.objectContaining({
+      namespace: "projects/expired-status",
+      issue: "expired",
+    }));
+  });
+
+  it("flags expiring-soon tracked statuses", async () => {
+    const soon = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString();
+    await callTool("memory_write", {
+      namespace: "projects/expiring-status",
+      key: "status",
+      content: "Expiring tracked status",
+      tags: ["active"],
+      valid_until: soon,
+    });
+
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as {
+      maintenance_needed: Array<{ namespace: string; issue: string }>;
+    };
+    expect(result.maintenance_needed).toContainEqual(expect.objectContaining({
+      namespace: "projects/expiring-status",
+      issue: "expiring_soon",
+    }));
   });
 
   it("empty maintenance_needed when clean", async () => {

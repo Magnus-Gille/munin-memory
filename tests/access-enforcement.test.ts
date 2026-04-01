@@ -612,6 +612,54 @@ describe("memory_orient — access enforcement", () => {
 });
 
 // ---------------------------------------------------------------------------
+// memory_resume
+// ---------------------------------------------------------------------------
+
+describe("memory_resume — access enforcement", () => {
+  beforeEach(async () => {
+    await ownerCall("memory_write", {
+      namespace: "projects/foo",
+      key: "status",
+      content: "## Phase\nActive\n\n## Current Work\nOwner-only project.\n\n## Blockers\nNone.\n\n## Next Steps\n- Keep going",
+      tags: ["active"],
+    });
+    await ownerCall("memory_log", {
+      namespace: "projects/foo",
+      content: "Decided on the owner-only project direction.",
+      tags: ["decision"],
+    });
+    await ownerCall("memory_log", {
+      namespace: "users/sara/notes",
+      content: "Decided on Sara's own family note.",
+      tags: ["decision"],
+    });
+  });
+
+  it("family memory_resume → only returns items from accessible namespaces", async () => {
+    const raw = await familyCall("memory_resume", { opener: "decided" });
+    const result = parse(raw) as { items: Array<{ namespace: string }> };
+    const namespaces = result.items.map((item) => item.namespace);
+
+    expect(namespaces).not.toContain("projects/foo");
+    for (const namespace of namespaces) {
+      expect(
+        namespace.startsWith("users/sara/") || namespace.startsWith("shared/family/"),
+      ).toBe(true);
+    }
+  });
+
+  it("owner memory_resume → can see project-scoped tracked status", async () => {
+    const raw = await ownerCall("memory_resume", { project: "foo" });
+    const result = parse(raw) as { items: Array<{ namespace: string; key?: string | null }> };
+
+    expect(result.items).toContainEqual(expect.objectContaining({
+      namespace: "projects/foo",
+      key: "status",
+    }));
+  });
+});
+
+// ---------------------------------------------------------------------------
 // memory_attention
 // ---------------------------------------------------------------------------
 
@@ -850,6 +898,7 @@ describe("meta: all registered tools are covered", () => {
       "memory_log",
       "memory_list",
       "memory_orient",
+      "memory_resume",
       "memory_attention",
       "memory_delete",
       "memory_insights",

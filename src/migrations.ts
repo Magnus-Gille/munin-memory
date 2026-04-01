@@ -349,6 +349,18 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 8,
+    description: "Add valid_until to state entries for soft expiry",
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE entries ADD COLUMN valid_until TEXT;
+        CREATE INDEX idx_entries_state_valid_until
+          ON entries(valid_until)
+          WHERE entry_type = 'state' AND valid_until IS NOT NULL;
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

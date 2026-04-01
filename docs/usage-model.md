@@ -61,6 +61,24 @@ Status entries use lifecycle tags (`active`, `blocked`, `completed`, `stopped`,
 
 ---
 
+## Broad handshake vs. targeted resume
+
+Munin now separates **broad orientation** from **targeted continuation**.
+
+Use `memory_orient` first when a session starts. It is the handshake tool: conventions,
+dashboard, maintenance items, and namespace overview in one place.
+
+Use `memory_resume` after that when you already have a likely direction — a project
+name, a namespace, or a user opener such as "continue grimnir parser rollout." It
+returns a compact continuation pack: the most relevant current status, recent decision
+logs, open loops, and optionally a small slice of recent namespace history.
+
+This split exists because "what exists?" and "what should I load right now?" are
+different jobs. `memory_orient` stays stable and broad; `memory_resume` can be sharper
+and more task-aware without destabilizing the base handshake.
+
+---
+
 ## State/log discipline
 
 When to use each:

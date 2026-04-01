@@ -121,7 +121,7 @@ Make the right context easier to surface and the right memories easier to captur
 
 2. **Intent-aware resume**
 
-- extend `memory_orient` or add a dedicated resume tool
+- add a dedicated `memory_resume` tool after the broad `memory_orient` handshake
 - accept an optional hint such as project, topic, or user opener
 - return the most relevant active work, recent decisions, blockers, and open loops
 

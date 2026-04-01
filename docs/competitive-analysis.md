@@ -6,7 +6,7 @@
 
 ## Executive Summary
 
-The AI memory tool landscape has matured rapidly through 2025–2026, converging on hybrid architectures that combine vector search, graph relationships, and key-value storage. Munin Memory occupies a distinctive niche: **MCP-native, SQLite-backed, self-hosted, single-user-first** — a sovereignty-first design that no other tool in this survey replicates. The principal gaps are graph/temporal memory (Zep's killer feature), automatic memory extraction from conversation text (mem0, Zep, LangMem), and memory decay in retrieval ranking. These gaps are real but addressable within our existing architecture. The most impactful near-term investments are (1) surfacing staleness as a retrieval signal (Phase 2 of the existing outcome-aware pipeline), (2) adding temporal validity windows to state entries, and (3) an admin CLI for principal management — all feasible without leaving SQLite or MCP.
+The AI memory tool landscape has matured rapidly through 2025–2026, converging on hybrid architectures that combine vector search, graph relationships, and key-value storage. Munin Memory occupies a distinctive niche: **MCP-native, SQLite-backed, self-hosted, single-user-first** — a sovereignty-first design that no other tool in this survey replicates. Since this spike began, Munin has already landed conservative recency-aware reranking, soft expiry for state entries via `valid_until`, and the `munin-admin` principal-management CLI. The principal remaining gaps are graph/temporal history beyond soft expiry (Zep's killer feature), automatic memory extraction from conversation text (mem0, Zep, LangMem), and richer entity/relationship modeling. These gaps are still addressable within the current SQLite + MCP architecture, but they are now clearly Phase 2+ work rather than missing groundwork.
 
 ---
 
@@ -233,8 +233,8 @@ The AI memory tool landscape has matured rapidly through 2025–2026, converging
 | Hierarchical namespaces | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | Partial |
 | Auto-extraction from conversation | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ |
 | Graph / entity relationships | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Temporal validity windows | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Memory decay / forgetting | ❌ | ✅ | ✅ | ❌ | ❌ | Partial | ❌ |
+| Temporal validity windows | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Memory decay / forgetting | Partial | ✅ | ✅ | ❌ | ❌ | Partial | ❌ |
 | Markdown / human-readable store | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
 | **Auth & Security** | | | | | | | |
 | OAuth 2.1 (PKCE, dynamic reg.) | ✅ | ❌ | ❌ | ❌ | Partial | ❌ | ❌ |
@@ -243,15 +243,15 @@ The AI memory tool landscape has matured rapidly through 2025–2026, converging
 | Secret-pattern write rejection | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | OAuth client secrets encrypted at rest | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | **Observability** | | | | | | | |
-| Outcome-aware retrieval analytics | ✅(P1) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Outcome-aware retrieval analytics | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | Learned reranking from outcomes | ❌(P2) | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | Web UI / dashboard | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ |
-| Admin CLI | ❌(P2) | ✅ | ✅ | ✅ | ✅ | N/A | ❌ |
+| Admin CLI | ✅ | ✅ | ✅ | ✅ | ✅ | N/A | ❌ |
 | **Developer ergonomics** | | | | | | | |
 | Compare-and-swap (CAS writes) | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | Computed project dashboard | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | Maintenance suggestions | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Multi-agent / multi-user | Planned | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| Multi-agent / multi-user | Partial | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
 
 ---
 
@@ -259,13 +259,13 @@ The AI memory tool landscape has matured rapidly through 2025–2026, converging
 
 ### Features We're Missing
 
-#### 1. Temporal Validity / Fact Invalidation *(Zep's killer feature)*
+#### 1. Temporal History / Fact Invalidation Beyond Soft Expiry *(Zep's killer feature)*
 
-Zep stores when a fact became true and when it was superseded — so a query can ask "what was true on date X?" rather than only "what is true now?" Munin state entries are simply overwritten on every write; the old value is gone. We do have append-only log entries, but they are unstructured history, not a queryable temporal index on state.
+Zep stores when a fact became true and when it was superseded — so a query can ask "what was true on date X?" rather than only "what is true now?" Munin now supports **soft expiry** via `valid_until`, so outdated temporary state can fall out of default retrieval without being deleted. What it still does not support is historical truth reconstruction: no `valid_from`, no "as of" query surface, and no structured record of when a state fact became superseded.
 
-**Why it matters:** For personal memory, outdated facts (old addresses, stale job titles, superseded decisions) currently persist with equal weight to current facts. Temporal validity would let retrieval surface freshness and let users query historical state.
+**Why it matters:** Soft expiry solves the operational problem of temporary context lingering forever, but it does not answer historical questions about durable facts such as old addresses, prior roles, or what a project status looked like last month.
 
-**Feasibility in our architecture:** Medium. SQLite supports adding `valid_from` / `valid_until` columns to state entries. Retrieval queries would need an additional filter/boost. The CAS machinery already tracks `updated_at`; extending to a temporal index is achievable without changing the fundamental model.
+**Feasibility in our architecture:** Medium-Large. SQLite can support `valid_from` / `valid_until` or a versioned state history table, but the query semantics and write model are meaningfully more complex than the shipped `valid_until` filter.
 
 #### 2. Automatic Memory Extraction from Conversation *(mem0, Zep, LangMem)*
 
@@ -275,23 +275,15 @@ All three major cloud platforms automatically extract structured memories from r
 
 **Feasibility:** Medium. This is fundamentally a prompt-engineering concern on the Claude side, not infrastructure. However, Munin could offer an optional tool (e.g., `memory_extract`) that accepts raw conversation text and suggests write operations — implemented as a thin prompt wrapper, no new backend needed. The LLM does the extraction work.
 
-#### 3. Memory Decay / Staleness in Retrieval Ranking *(mem0, Zep, emerging research)*
+#### 3. Adaptive Memory Decay / Learned Ranking *(mem0, Zep, emerging research)*
 
-Current munin retrieval (FTS5 + vector KNN + RRF) treats a 3-year-old entry identically to one written yesterday. Recency-weighted scoring — multiplying semantic similarity by a time-decay factor — is the most-requested pattern in 2025–2026 AI memory forums and is standard in mem0 and Zep.
+Current Munin retrieval now applies **conservative recency-aware reranking** and filters soft-expired state by default. That closes the basic freshness gap, but it is still a static model. It does not yet learn from retrieval outcomes, use access frequency, or adapt decay behavior by query class or namespace. Recency-weighted scoring remains one of the most-requested patterns in 2025–2026 AI memory forums and is standard in mem0 and Zep.
 
-**Why it matters:** Stale entries pollute retrieval. `memory_orient` already flags staleness as a maintenance concern, but this is advisory (user must act), not automatic (system deprioritizes stale entries in ranking).
+**Why it matters:** Basic freshness is now handled, but the next quality step is making reranking more context-sensitive so "old but foundational" does not get penalized the same way as stale tactical notes.
 
-**Feasibility:** Small-Medium. This is a retrieval-layer change. We already collect `updated_at` timestamps. Adding a time-decay multiplier to the RRF score (configurable decay half-life) is a contained change to `db.ts` query logic. Phase 2 of the existing outcome-aware retrieval pipeline is the natural home for this.
+**Feasibility:** Small-Medium. This remains a retrieval-layer change. The new `search_recency_weight` hook and retrieval metadata provide a clean place to experiment with stronger or learned decay policies.
 
-#### 4. Admin CLI for Principal Management *(already Phase 2 in roadmap)*
-
-All mature tools ship a CLI for managing users, agents, scopes, and credentials. Munin requires manual SQLite inserts to provision principals — noted as Phase 2 in the access control implementation.
-
-**Why it matters:** Makes multi-user (Sara onboarding, agent provisioning) practical without database spelunking. Without this, multi-principal is a paper feature.
-
-**Feasibility:** Small. The schema and enforcement are already implemented (migration v5). This is pure CLI plumbing on top of existing DB operations.
-
-#### 5. Entity / Relationship Graph Index *(mem0 graph, Zep Graphiti, MCP reference server)*
+#### 4. Entity / Relationship Graph Index *(mem0 graph, Zep Graphiti, MCP reference server)*
 
 Munin has hierarchical namespaces and tag cross-references, but no first-class entity model and no relationship traversal. The MCP reference server, mem0, and Zep all store typed relationships between entities (e.g., `[Magnus] --works_at--> [Gillearna AB]`).
 
@@ -299,7 +291,7 @@ Munin has hierarchical namespaces and tag cross-references, but no first-class e
 
 **Feasibility:** Large. sqlite-vec is already loaded; we could add a separate `entities` + `entity_relations` table. This is architecturally additive but requires new tool surface area and careful design to avoid scope creep. Worth a design spike.
 
-#### 6. Web UI / Inspection Dashboard *(Letta, Zep, Khoj, mem0)*
+#### 5. Web UI / Inspection Dashboard *(Letta, Zep, Khoj, mem0)*
 
 Letta's Agent Development Environment lets developers inspect agent memory state, edit memory blocks, replay sessions, and debug retrieval. Munin has `memory_orient` and `memory_insights` as CLI/LLM tools, but no browser-based view.
 
@@ -323,11 +315,13 @@ Letta's Agent Development Environment lets developers inspect agent memory state
 
 6. **OAuth 2.1 with dynamic client registration and PKCE.** Munin supports Claude.ai and Claude Mobile connecting via standard OAuth flows, encrypted client secrets at rest, and a hardened consent page. This enables sovereign, cloud-ai-connected memory without exposing a raw API key — no comparable tool offers this.
 
-7. **Secret-pattern write rejection.** Every write is scanned for API keys, tokens, passwords, and private keys before storage. Competitors do not surface this as a feature — it's a silent gap in their security models.
+7. **Admin CLI for principals and OAuth clients.** `munin-admin` makes multi-principal provisioning, token rotation, namespace-rule testing, and OAuth-client cleanup operational without direct SQLite manipulation. That closes a practical gap between the access-control model and day-to-day use.
 
-8. **Tiered hardware profiles (zero-appliance / full-node).** Explicit support for Pi Zero 2 W–class targets — semantic features gracefully disabled, core memory operational. No other tool in this survey targets sub-1W edge hardware.
+8. **Secret-pattern write rejection.** Every write is scanned for API keys, tokens, passwords, and private keys before storage. Competitors do not surface this as a feature — it's a silent gap in their security models.
 
-9. **Computed project dashboard and maintenance suggestions.** `memory_orient` returns a living project dashboard, maintenance alerts (stale statuses, upcoming events, missing lifecycle tags), and curated notes in one call. This is highly tailored to the "memory as a second brain for work" use case — no competitor offers analogous tooling.
+9. **Tiered hardware profiles (zero-appliance / full-node).** Explicit support for Pi Zero 2 W–class targets — semantic features gracefully disabled, core memory operational. No other tool in this survey targets sub-1W edge hardware.
+
+10. **Computed project dashboard and maintenance suggestions.** `memory_orient` returns a living project dashboard, maintenance alerts (stale statuses, upcoming events, missing lifecycle tags, and now expiring or expired tracked work), and curated notes in one call. This is highly tailored to the "memory as a second brain for work" use case — no competitor offers analogous tooling.
 
 ---
 
@@ -355,73 +349,61 @@ Based on the research literature, forums, and blog posts surveyed:
 
 ## Recommendations
 
-Prioritized by combined impact × feasibility, constrained to our SQLite + MCP-native architecture.
+Prioritized by combined impact × feasibility, constrained to our SQLite + MCP-native architecture, and updated for the Phase 1 work now landed.
 
-### 1. Memory Decay in Retrieval Ranking — Phase 2 of Outcome-Aware Pipeline
-
-**What:** Add a time-decay multiplier to the RRF scoring function in `memory_query`. Score = current RRF score × `exp(-λ × days_since_updated)`, with `λ` configurable (or derived from outcome signals as Phase 2 matures). Expose `search_recency_weight` parameter on `memory_query`.
-
-**Rationale:** This is the single most-requested feature in AI memory tooling across forums and research in 2025–2026. We already collect `updated_at` on every entry. The change is contained to `db.ts` and the `memory_query` handler. It directly leverages the `retrieval_events` / `retrieval_outcomes` infrastructure we built in Feature 4.
-
-**Impact:** High — stale entries polluting retrieval is a day-to-day friction point.
-**Feasibility:** High — additive change, no schema migration needed.
-**Effort:** S
-
----
-
-### 2. Temporal Validity on State Entries
-
-**What:** Add `valid_until` (nullable timestamp) to state entries. When set, entries past their validity date are excluded from default retrieval (soft-expired) but remain queryable with `include_expired: true`. Surface as a parameter on `memory_write` and as a filter on `memory_query`. Add `expires_soon` to `memory_orient` maintenance suggestions.
-
-**Rationale:** Addresses the core gap vs. Zep's temporal knowledge graph without requiring a full graph engine. Straightforward SQLite migration (add nullable column). Useful for time-bounded facts: meeting prep notes, temporary delegations, event context, project deadlines. Complements the existing staleness maintenance alerts.
-
-**Impact:** High — prevents outdated facts from polluting retrieval without requiring manual cleanup.
-**Feasibility:** High — nullable column addition, filter in query logic.
-**Effort:** S-M (schema migration + query changes + tool parameter + orient integration)
-
----
-
-### 3. Admin CLI for Principal Management
-
-**What:** Implement `munin-admin` CLI (Phase 2 boundary already defined in `CLAUDE.md`) with subcommands: `principals list`, `principals add <id> --type <family|agent|external> --namespace-rules <json>`, `principals revoke <id>`, `principals show <id>`. SQLite operations on the existing `principals` table (migration v5).
-
-**Rationale:** Multi-principal access control is fully implemented in the server but requires raw SQL inserts to use. This is a blocker for the Sara onboarding use case and for provisioning agent service tokens. The schema, enforcement, and resolution logic are all done — this is pure CLI plumbing.
-
-**Impact:** Medium-High — unlocks the multi-user/multi-agent use case that is already architecturally ready.
-**Feasibility:** High — no new backend logic.
-**Effort:** S
-
----
-
-### 4. `memory_extract` Tool — Conversation-to-Memory Pipeline
+### 1. `memory_extract` Tool — Conversation-to-Memory Pipeline
 
 **What:** Add a `memory_extract` MCP tool that accepts `conversation_text` (raw transcript) and returns a structured list of suggested `memory_write` / `memory_log` calls for Claude to review and execute. The extraction logic is a prompted LLM call — Munin supplies the prompt template; the MCP client's LLM does the work (no external API call from Munin itself).
 
-**Rationale:** Bridges the gap with mem0/Zep/LangMem automatic extraction without requiring Munin to call an LLM (which would add a dependency). Claude already does this extraction implicitly; making it an explicit tool gives a structured interface and allows the calling agent to batch-review suggestions before committing them.
+**Rationale:** This is still the biggest workflow gap versus mem0/Zep/LangMem. Claude already does some of this implicitly; making it explicit gives a reviewable, structured interface without making Munin depend on an external model API.
 
-**Impact:** Medium — reduces friction for memory capture in long conversations.
-**Feasibility:** Medium — Munin provides the prompt template and parses the LLM response; the tool output is suggestions, not committed writes (so errors are safe).
-**Effort:** M (tool definition, prompt engineering, response parsing, tests)
+**Impact:** Medium-High — reduces dropped signal in long or lightly-structured conversations.
+**Feasibility:** Medium — prompt and response-shape design matter more than backend complexity.
+**Effort:** M
 
 ---
 
-### 5. Lightweight Entity Index
+### 2. Lightweight Entity Index
 
 **What:** Add `entities` (id, name, type, namespace, description) and `entity_mentions` (entry_id, entity_id) tables via a new migration. Expose `memory_entity_link` (create/update entity), `memory_entity_get` (retrieve with linked entries), and surface entity hits in `memory_query` results. Start with manual entity linking (Claude tags entries), not auto-extraction.
 
-**Rationale:** Addresses the most significant structural gap vs. mem0 graph and Zep Graphiti. Rather than a full temporal knowledge graph (which is a large, risky rewrite), a lightweight entity index gives 80% of the value: "what do I know about this person/project?" traversal queries. SQLite joins make this efficient. FTS5 already indexes entry content; entity mentions add a structured cross-reference layer.
+**Rationale:** This addresses the most significant structural gap vs. mem0 graph and Zep Graphiti without jumping straight to a full temporal knowledge graph. A lightweight entity index would materially improve "what do I know about X?" retrieval and cross-entry traversal.
 
-**Impact:** High long-term — enables richer "second brain" queries.
-**Feasibility:** Medium — additive schema change, but requires new tool surface and design discipline to avoid namespace/entity duplication.
-**Effort:** L (schema migration, 2-3 new tools, query integration, tests, documentation)
+**Impact:** High long-term — enables richer second-brain queries than namespace/tag heuristics alone.
+**Feasibility:** Medium — additive schema, but requires careful tool-surface design.
+**Effort:** L
+
+---
+
+### 3. Adaptive Recency from Retrieval Outcomes
+
+**What:** Extend the new recency-aware reranker so decay is influenced by retrieval outcomes, namespace type, or query class instead of a single static freshness curve. Keep `search_recency_weight` as the control surface, but make the backend smarter about when freshness should matter more or less.
+
+**Rationale:** Phase 1 solved the baseline freshness problem. The next step is quality, not capability: preserve stable foundational knowledge while continuing to suppress stale tactical noise.
+
+**Impact:** Medium-High — improves search quality without increasing tool surface area.
+**Feasibility:** Medium — uses infrastructure already present in retrieval events and outcomes.
+**Effort:** M
+
+---
+
+### 4. Temporal History Beyond Soft Expiry
+
+**What:** Explore a versioned-state or validity-range model that can answer "what was true on date X?" without discarding the simpler current write path for ordinary state entries.
+
+**Rationale:** `valid_until` solves temporary-context expiry, but it intentionally stops short of temporal knowledge-graph semantics. Historical truth queries remain one of the clearest product gaps versus Zep.
+
+**Impact:** High long-term — unlocks a qualitatively different class of memory queries.
+**Feasibility:** Medium-Large — design work matters more than schema plumbing.
+**Effort:** L
 
 ---
 
 ## Not Recommended (Now)
 
-- **Full temporal knowledge graph (Graphiti-style):** L-XL effort; would require Neo4j or a significant SQLite schema expansion. The `valid_until` approach (Recommendation 2) gives most of the user-facing value.
+- **Full temporal knowledge graph (Graphiti-style):** L-XL effort; would require Neo4j or a significant SQLite schema expansion. The shipped `valid_until` approach already gives much of the immediate user-facing value at a fraction of the cost.
 - **Web UI:** XL effort; outside scope for personal/homelab deployment. MCP tool surface (`memory_orient`, `memory_insights`) is the right interface for LLM consumers.
-- **Auto-extraction via external LLM API:** Adds a hard dependency on an external API, contradicts the sovereignty-first design, and raises cost/privacy concerns. The `memory_extract` tool (Recommendation 4) achieves the goal without this dependency.
+- **Auto-extraction via external LLM API:** Adds a hard dependency on an external API, contradicts the sovereignty-first design, and raises cost/privacy concerns. A `memory_extract` tool can achieve most of the value without this dependency.
 - **Managed cloud service:** Outside the project's mission. Sovereignty is the differentiator.
 
 ---

@@ -83,6 +83,7 @@ describe("runMigrations", () => {
     expect(names).toContain("idx_entries_ns_type_key");
     expect(names).toContain("idx_entries_ns_type_created");
     expect(names).toContain("idx_entries_created");
+    expect(names).toContain("idx_entries_state_valid_until");
     expect(names).toContain("idx_audit_timestamp");
     expect(names).toContain("idx_audit_entry_id");
     db.close();
@@ -291,7 +292,7 @@ describe("initDatabase uses migrations", () => {
     const db = initDatabase(TEST_DB_PATH);
 
     // schema_version exists and has latest version
-    expect(getSchemaVersion(db)).toBe(7);
+    expect(getSchemaVersion(db)).toBe(8);
 
     // Full CRUD works
     const result = writeState(db, "test/ns", "key1", "hello from migrations", ["test"]);
@@ -395,6 +396,30 @@ describe("migration v7 — contract hardening", () => {
     expect(entry.id).toBeTruthy();
     expect(audit.action).toBe("write");
     expect(audit.entry_id).toBe(entry.id);
+    db.close();
+  });
+});
+
+describe("migration v8 — valid_until", () => {
+  it("adds valid_until column to entries", () => {
+    const db = openRawDb();
+    runMigrations(db);
+
+    const cols = db
+      .prepare("PRAGMA table_info(entries)")
+      .all() as Array<{ name: string }>;
+    expect(cols.map((c) => c.name)).toContain("valid_until");
+    db.close();
+  });
+
+  it("adds partial index for expiring state entries", () => {
+    const db = openRawDb();
+    runMigrations(db);
+
+    const indexes = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name = 'idx_entries_state_valid_until'")
+      .all() as Array<{ name: string }>;
+    expect(indexes).toHaveLength(1);
     db.close();
   });
 });

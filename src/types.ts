@@ -20,6 +20,7 @@ export interface Entry {
   agent_id: string;
   created_at: string;
   updated_at: string;
+  valid_until: string | null;
   embedding_status: EmbeddingStatus;
   embedding_model: string | null;
 }
@@ -34,8 +35,9 @@ export interface ParsedEntry extends Omit<Entry, "tags"> {
 export interface WriteParams {
   namespace: string;
   key: string;
-  content: string;
+  content?: string;
   tags?: string[];
+  valid_until?: string | null;
 }
 
 export interface StatusUpdateParams {
@@ -69,6 +71,8 @@ export interface QueryParams {
   tags?: string[];
   limit?: number;
   search_mode?: SearchMode;
+  search_recency_weight?: number;
+  include_expired?: boolean;
   explain?: boolean;
   since?: string;
   until?: string;
@@ -80,6 +84,15 @@ export interface OrientParams extends ListParams {
   dashboard_limit_per_group?: number;
   namespace_limit?: number;
   include_namespaces?: boolean;
+}
+
+export interface ResumeParams {
+  opener?: string;
+  namespace?: string;
+  project?: string;
+  limit?: number;
+  include_history?: boolean;
+  include_attention?: boolean;
 }
 
 export interface LogParams {
@@ -108,6 +121,7 @@ export interface AttentionParams {
   include_blocked?: boolean;
   include_stale?: boolean;
   include_upcoming_events?: boolean;
+  include_expiring?: boolean;
   include_missing_status?: boolean;
   include_conflicting_lifecycle?: boolean;
   include_missing_lifecycle?: boolean;
@@ -156,7 +170,7 @@ export interface DashboardEntry {
 
 export interface MaintenanceItem {
   namespace: string;
-  issue: "active_but_stale" | "missing_status" | "conflicting_lifecycle" | "missing_lifecycle" | "upcoming_event_stale";
+  issue: "active_but_stale" | "missing_status" | "conflicting_lifecycle" | "missing_lifecycle" | "upcoming_event_stale" | "expiring_soon" | "expired";
   suggestion: string;
 }
 
@@ -170,6 +184,7 @@ export interface TrackedStatusRow {
   agent_id: string;
   created_at: string;
   updated_at: string;
+  valid_until: string | null;
 }
 
 export interface ReadResponse {
@@ -181,6 +196,8 @@ export interface ReadResponse {
   tags?: string[];
   created_at?: string;
   updated_at?: string;
+  valid_until?: string | null;
+  expired?: boolean;
   provenance?: EntryProvenance;
   message?: string;
   hint?: string;
@@ -196,6 +213,8 @@ export interface GetResponse {
   tags?: string[];
   created_at?: string;
   updated_at?: string;
+  valid_until?: string | null;
+  expired?: boolean;
   provenance?: EntryProvenance;
   message?: string;
 }
@@ -209,9 +228,12 @@ export interface QueryResult {
   tags: string[];
   created_at: string;
   updated_at: string;
+  valid_until?: string | null;
+  expired?: boolean;
   provenance?: EntryProvenance;
   match?: {
     heuristic_score: number;
+    freshness_score?: number;
     lexical_rank?: number;
     lexical_score?: number;
     semantic_rank?: number;
@@ -232,6 +254,9 @@ export interface QueryResponse {
     reranked: boolean;
     relaxed_lexical: boolean;
     fallback_reason: string | null;
+    recency_applied: boolean;
+    search_recency_weight: number;
+    expired_filtered_count: number;
   };
 }
 
@@ -324,6 +349,41 @@ export interface AttentionResponse {
     total: number;
   };
   items: AttentionItem[];
+}
+
+export interface ResumeItem {
+  namespace: string;
+  key?: string | null;
+  entry_id?: string;
+  category: "status" | "state" | "decision_log" | "history" | "reference";
+  preview: string;
+  updated_at: string;
+  reason: string;
+  suggested_action: string;
+}
+
+export interface ResumeOpenLoop {
+  namespace: string;
+  type: "blocker" | "next_step" | "attention";
+  summary: string;
+  suggested_action: string;
+}
+
+export interface ResumeSuggestedRead {
+  tool: "memory_read" | "memory_get" | "memory_history";
+  namespace?: string;
+  key?: string;
+  id?: string;
+  reason: string;
+}
+
+export interface ResumeResponse {
+  summary: string;
+  target_namespace?: string;
+  items: ResumeItem[];
+  open_loops: ResumeOpenLoop[];
+  suggested_reads: ResumeSuggestedRead[];
+  why_this_set: string[];
 }
 
 // Retrieval insights types

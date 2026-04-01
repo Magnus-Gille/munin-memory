@@ -101,7 +101,7 @@ export function rebuildFTS(db: Database.Database): void {
 export function getTrackedStatuses(db: Database.Database): TrackedStatusRow[] {
   return db
     .prepare(
-      `SELECT id, namespace, key, substr(content, 1, 300) as content_preview, content, tags, agent_id, created_at, updated_at
+      `SELECT id, namespace, key, substr(content, 1, 300) as content_preview, content, tags, agent_id, created_at, updated_at, valid_until
        FROM entries
        WHERE entry_type = 'state' AND key = 'status'
          AND (namespace LIKE 'projects/%' ESCAPE '\\' OR namespace LIKE 'clients/%' ESCAPE '\\')
@@ -118,6 +118,17 @@ export interface WriteStateResult {
   updated_at?: string;
   message?: string;
   current_updated_at?: string;
+}
+
+export interface ExpirableEntryLike {
+  entry_type: EntryType;
+  valid_until?: string | null;
+}
+
+export function isEntryExpired(entry: ExpirableEntryLike, now = nowUTC()): boolean {
+  return entry.entry_type === "state"
+    && typeof entry.valid_until === "string"
+    && entry.valid_until <= now;
 }
 
 function insertAuditRow(
@@ -143,14 +154,15 @@ export function writeState(
   tags: string[],
   agentId = "default",
   expectedUpdatedAt?: string,
+  validUntil?: string | null,
 ): WriteStateResult {
   const now = nowUTC();
   const tagsJson = JSON.stringify(tags);
 
   // Check if exists
   const existing = db.prepare(
-    "SELECT id, content, updated_at FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'",
-  ).get(namespace, key) as { id: string; content: string; updated_at: string } | undefined;
+    "SELECT id, content, updated_at, valid_until FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'",
+  ).get(namespace, key) as { id: string; content: string; updated_at: string; valid_until: string | null } | undefined;
 
   // Compare-and-swap: reject if entry was modified since caller last read it
   if (expectedUpdatedAt && existing && existing.updated_at !== expectedUpdatedAt) {
@@ -163,11 +175,12 @@ export function writeState(
 
   const txn = db.transaction(() => {
     if (existing) {
+      const nextValidUntil = validUntil === undefined ? existing.valid_until : validUntil;
       db.prepare(
-        `UPDATE entries SET content = ?, tags = ?, updated_at = ?, agent_id = ?,
+        `UPDATE entries SET content = ?, tags = ?, updated_at = ?, valid_until = ?, agent_id = ?,
          embedding_status = 'pending', embedding_model = NULL
          WHERE namespace = ? AND key = ? AND entry_type = 'state'`,
-      ).run(content, tagsJson, now, agentId, namespace, key);
+      ).run(content, tagsJson, now, nextValidUntil ?? null, agentId, namespace, key);
 
       const updateDetail = `updated (${existing.content.length} → ${content.length} chars)`;
       insertAuditRow(db, now, agentId, "update", namespace, key, updateDetail, existing.id);
@@ -176,9 +189,9 @@ export function writeState(
     } else {
       const id = randomUUID();
       db.prepare(
-        `INSERT INTO entries (id, namespace, key, entry_type, content, tags, agent_id, created_at, updated_at)
-         VALUES (?, ?, ?, 'state', ?, ?, ?, ?, ?)`,
-      ).run(id, namespace, key, content, tagsJson, agentId, now, now);
+        `INSERT INTO entries (id, namespace, key, entry_type, content, tags, agent_id, created_at, updated_at, valid_until)
+         VALUES (?, ?, ?, 'state', ?, ?, ?, ?, ?, ?)`,
+      ).run(id, namespace, key, content, tagsJson, agentId, now, now, validUntil ?? null);
 
       const writePreview = content.length > 80 ? content.slice(0, 80) + "..." : content;
       insertAuditRow(db, now, agentId, "write", namespace, key, writePreview, id);
@@ -360,6 +373,7 @@ export interface QueryOptions {
   entryType?: EntryType;
   tags?: string[];
   limit?: number;
+  includeExpired?: boolean;
   since?: string;
   until?: string;
 }
@@ -396,8 +410,9 @@ export function queryEntriesLexicalScored(
   db: Database.Database,
   options: QueryOptions,
 ): LexicalQueryResult[] {
-  const { query, namespace, entryType, tags, limit = 10, since, until } = options;
+  const { query, namespace, entryType, tags, limit = 10, includeExpired = false, since, until } = options;
   const clampedLimit = Math.min(Math.max(limit, 1), 50);
+  const now = nowUTC();
 
   let sql = `
     SELECT e.*, bm25(entries_fts) as lexical_score FROM entries e
@@ -419,6 +434,11 @@ export function queryEntriesLexicalScored(
   if (entryType) {
     sql += " AND e.entry_type = ?";
     params.push(entryType);
+  }
+
+  if (!includeExpired) {
+    sql += " AND (e.entry_type != 'state' OR e.valid_until IS NULL OR e.valid_until > ?)";
+    params.push(now);
   }
 
   // Apply tag filtering in SQL before LIMIT so that limit semantics
@@ -461,6 +481,7 @@ export interface FilterOptions {
   entryType?: EntryType;
   tags?: string[];
   limit?: number;
+  includeExpired?: boolean;
   since?: string;
   until?: string;
 }
@@ -473,8 +494,9 @@ export function queryEntriesByFilter(
   db: Database.Database,
   options: FilterOptions,
 ): Entry[] {
-  const { namespace, entryType, tags, limit = 10, since, until } = options;
+  const { namespace, entryType, tags, limit = 10, includeExpired = false, since, until } = options;
   const clampedLimit = Math.min(Math.max(limit, 1), 50);
+  const now = nowUTC();
 
   let sql = "SELECT * FROM entries WHERE 1=1";
   const params: unknown[] = [];
@@ -492,6 +514,11 @@ export function queryEntriesByFilter(
   if (entryType) {
     sql += " AND entry_type = ?";
     params.push(entryType);
+  }
+
+  if (!includeExpired) {
+    sql += " AND (entry_type != 'state' OR valid_until IS NULL OR valid_until > ?)";
+    params.push(now);
   }
 
   if (tags && tags.length > 0) {
@@ -723,6 +750,7 @@ export interface SemanticQueryOptions {
   entryType?: EntryType;
   tags?: string[];
   limit?: number;
+  includeExpired?: boolean;
   since?: string;
   until?: string;
 }
@@ -738,8 +766,9 @@ export function queryEntriesSemanticScored(
   db: Database.Database,
   options: SemanticQueryOptions,
 ): SemanticQueryResult[] {
-  const { queryEmbedding, namespace, entryType, tags, limit = 10, since, until } = options;
+  const { queryEmbedding, namespace, entryType, tags, limit = 10, includeExpired = false, since, until } = options;
   const clampedLimit = Math.min(Math.max(limit, 1), 50);
+  const now = nowUTC();
 
   // Fetch enough KNN candidates to satisfy clampedLimit after filtering.
   // vec0 KNN queries can't include tag/namespace predicates, so we
@@ -778,6 +807,8 @@ export function queryEntriesSemanticScored(
     }
 
     if (entryType && entry.entry_type !== entryType) continue;
+
+    if (!includeExpired && isEntryExpired(entry, now)) continue;
 
     if (tags && tags.length > 0) {
       const entryTags: string[] = JSON.parse(entry.tags);

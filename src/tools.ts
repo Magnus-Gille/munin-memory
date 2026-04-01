@@ -12,6 +12,7 @@ import {
   writeState,
   patchState,
   type PatchParams,
+  type AuditHistoryEntry,
   readState,
   getById,
   appendLog,
@@ -30,6 +31,7 @@ import {
   getOtherKeysInNamespace,
   getTrackedStatuses,
   getCompletedTaskNamespaces,
+  isEntryExpired,
   vecLoaded,
   logRetrievalEvent,
   logRetrievalOutcome,
@@ -59,6 +61,7 @@ import type {
   GetParams,
   QueryParams,
   OrientParams,
+  ResumeParams,
   LogParams,
   ListParams,
   DeleteParams,
@@ -74,6 +77,9 @@ import type {
   TrackedStatusRow,
   QueryResult,
   AttentionItem,
+  ResumeItem,
+  ResumeOpenLoop,
+  ResumeSuggestedRead,
   AuditAction,
   AuditEntry,
 } from "./types.js";
@@ -134,6 +140,7 @@ function serializeParsedEntry(entry: ReturnType<typeof parseEntry>) {
     tags: entry.tags,
     created_at: entry.created_at,
     updated_at: entry.updated_at,
+    valid_until: entry.valid_until ?? undefined,
     provenance: buildProvenance(entry.agent_id),
   };
 }
@@ -333,6 +340,10 @@ const EVENT_STALENESS_THRESHOLD_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
 const EVENT_LOOKAHEAD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const QUERY_RERANK_OVERFETCH_MULTIPLIER = 5;
 const DEFAULT_ORIENT_DETAIL: OrientDetail = "compact";
+const DEFAULT_SEARCH_RECENCY_WEIGHT = 0.2;
+const SEARCH_RECENCY_HALF_LIFE_DAYS = 30;
+const EXPIRES_SOON_DAYS = 7;
+const ISO_8601_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 const RELAXED_QUERY_STOPWORDS = new Set([
   "a", "an", "and", "are", "for", "how", "i", "important", "is", "it",
   "my", "myself", "of", "or", "should", "the", "to", "what",
@@ -373,6 +384,74 @@ interface TrackedStatusAssessment {
 
 function isStale(updatedAt: string): boolean {
   return Date.now() - new Date(updatedAt).getTime() > STALENESS_THRESHOLD_MS;
+}
+
+function normalizeIsoTimestamp(value: unknown, fieldName: string): { ok: true; value: string } | { ok: false; error: string } {
+  if (typeof value !== "string" || !ISO_8601_TIMESTAMP_RE.test(value)) {
+    return {
+      ok: false,
+      error: `Invalid "${fieldName}" value. Must be an ISO 8601 timestamp (e.g. 2026-12-31T23:59:59Z).`,
+    };
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return {
+      ok: false,
+      error: `Invalid "${fieldName}" value. Must be a valid ISO 8601 timestamp.`,
+    };
+  }
+
+  return { ok: true, value: date.toISOString() };
+}
+
+function resolveSearchRecencyWeight(params: QueryParams): { ok: true; value: number } | { ok: false; error: string } {
+  if (params.search_recency_weight === undefined) {
+    return { ok: true, value: DEFAULT_SEARCH_RECENCY_WEIGHT };
+  }
+  if (typeof params.search_recency_weight !== "number" || !Number.isFinite(params.search_recency_weight)) {
+    return { ok: false, error: '"search_recency_weight" must be a number between 0 and 1.' };
+  }
+  if (params.search_recency_weight < 0 || params.search_recency_weight > 1) {
+    return { ok: false, error: '"search_recency_weight" must be between 0 and 1.' };
+  }
+  return { ok: true, value: params.search_recency_weight };
+}
+
+function getFreshnessScore(updatedAt: string): number {
+  const ageMs = Math.max(0, Date.now() - new Date(updatedAt).getTime());
+  const ageDays = ageMs / (24 * 60 * 60 * 1000);
+  return Math.exp((-Math.log(2) * ageDays) / SEARCH_RECENCY_HALF_LIFE_DAYS);
+}
+
+function getDaysUntil(validUntil: string): number {
+  return (new Date(validUntil).getTime() - Date.now()) / (24 * 60 * 60 * 1000);
+}
+
+function isEntryExpiringSoon(entry: { entry_type: "state" | "log"; valid_until?: string | null }): boolean {
+  if (entry.entry_type !== "state" || !entry.valid_until) return false;
+  const daysUntil = getDaysUntil(entry.valid_until);
+  return daysUntil > 0 && daysUntil <= EXPIRES_SOON_DAYS;
+}
+
+function filterExpiredEntries<T extends Entry | { entry: Entry }>(
+  items: T[],
+  includeExpired: boolean,
+): { items: T[]; expiredFilteredCount: number } {
+  if (includeExpired) {
+    return { items, expiredFilteredCount: 0 };
+  }
+
+  let expiredFilteredCount = 0;
+  const filtered = items.filter((item) => {
+    const wrapper = item as { entry?: Entry };
+    const entry = wrapper.entry ?? (item as Entry);
+    if (!isEntryExpired(entry)) return true;
+    expiredFilteredCount += 1;
+    return false;
+  });
+
+  return { items: filtered, expiredFilteredCount };
 }
 
 // Date pattern: YYYY-MM-DD (standalone or in ISO timestamp)
@@ -499,6 +578,7 @@ function trackedStatusRowToEntry(row: TrackedStatusRow): Entry {
     agent_id: row.agent_id,
     created_at: row.created_at,
     updated_at: row.updated_at,
+    valid_until: row.valid_until,
     embedding_status: "pending",
     embedding_model: null,
   };
@@ -536,7 +616,26 @@ function assessTrackedStatus(row: TrackedStatusRow): TrackedStatusAssessment {
     attentionReason = "blocked";
   }
 
-  if (lifecycle === "active" && isStale(row.updated_at)) {
+  if (row.valid_until && isEntryExpired({ entry_type: "state", valid_until: row.valid_until })) {
+    needsAttention = true;
+    attentionReason = "expired";
+    maintenanceItems.push({
+      namespace: row.namespace,
+      issue: "expired",
+      suggestion: `Status expired at ${row.valid_until}. Refresh it or rewrite without valid_until if it should remain current.`,
+    });
+  } else if (row.valid_until && isEntryExpiringSoon({ entry_type: "state", valid_until: row.valid_until })) {
+    needsAttention = true;
+    attentionReason = "expiring_soon";
+    const daysUntil = Math.max(1, Math.ceil(getDaysUntil(row.valid_until)));
+    maintenanceItems.push({
+      namespace: row.namespace,
+      issue: "expiring_soon",
+      suggestion: `Status expires in ${daysUntil} day${daysUntil === 1 ? "" : "s"} (${row.valid_until}). Refresh it if it should remain current.`,
+    });
+  }
+
+  if (lifecycle === "active" && !needsAttention && isStale(row.updated_at)) {
     needsAttention = true;
     attentionReason = "active_but_stale";
     const daysSince = Math.floor((Date.now() - new Date(row.updated_at).getTime()) / (24 * 60 * 60 * 1000));
@@ -685,6 +784,7 @@ function injectCanonicalQueryEntries(
   const seen = new Set(results.map((entry) => entry.id));
   const merged = [...results];
   for (const entry of injected) {
+    if (!params.include_expired && isEntryExpired(entry)) continue;
     if (seen.has(entry.id)) continue;
     seen.add(entry.id);
     merged.push(entry);
@@ -709,6 +809,7 @@ function injectAttentionQueryEntries(
   const seen = new Set(results.map((entry) => entry.id));
   const merged = [...results];
   for (const entry of injected) {
+    if (!params.include_expired && isEntryExpired(entry)) continue;
     if (seen.has(entry.id)) continue;
     seen.add(entry.id);
     merged.push(entry);
@@ -724,6 +825,7 @@ function rerankQueryResults(
 ): Entry[] {
   const query = params.query ?? "";
   const queryLower = query.toLowerCase();
+  const searchRecencyWeight = params.search_recency_weight ?? DEFAULT_SEARCH_RECENCY_WEIGHT;
   const suppressDefaults = shouldApplyDefaultQuerySuppression(params);
   const filtered = results.filter((entry) => {
     if (!suppressDefaults) return true;
@@ -737,9 +839,11 @@ function rerankQueryResults(
       entry,
       index,
       heuristic: getQueryHeuristicScore(entry, queryLower, trackedStatuses),
+      freshness: getFreshnessScore(entry.updated_at),
     }))
     .sort((a, b) => {
       if (b.heuristic !== a.heuristic) return b.heuristic - a.heuristic;
+      if (searchRecencyWeight > 0 && b.freshness !== a.freshness) return b.freshness - a.freshness;
       return a.index - b.index;
     })
     .map((item) => item.entry);
@@ -767,10 +871,12 @@ function matchesNamespacePrefix(namespace: string, prefix?: string): boolean {
 function getAttentionSeverity(category: AttentionItem["category"]): AttentionItem["severity"] {
   switch (category) {
     case "blocked":
+    case "expired":
     case "upcoming_event_stale":
     case "conflicting_lifecycle":
       return "high";
     case "active_but_stale":
+    case "expiring_soon":
     case "missing_status":
     case "missing_lifecycle":
       return "medium";
@@ -798,6 +904,8 @@ function getQueryExplainReasons(
   if (entry.namespace.startsWith("people/") && entry.key === "profile") reasons.push("profile entry");
   if (entry.namespace === "meta/conventions" && entry.key === "conventions") reasons.push("conventions reference");
   if (entry.namespace === "meta" && entry.key === "reference-index") reasons.push("reference index");
+  if (match.freshness_score !== undefined && match.freshness_score >= 0.5) reasons.push("recently updated");
+  if (isEntryExpired(entry)) reasons.push("expired entry included on request");
 
   const queryTerms = queryLower
     .split(/[^a-z0-9_-]+/i)
@@ -837,6 +945,12 @@ function buildAttentionItem(
     case "missing_lifecycle":
       reason = "Status is missing a lifecycle tag.";
       break;
+    case "expiring_soon":
+      reason = "Status is nearing its validity deadline.";
+      break;
+    case "expired":
+      reason = "Status validity window has expired.";
+      break;
     default:
       reason = suggestion;
       break;
@@ -851,6 +965,282 @@ function buildAttentionItem(
     reason,
     suggested_action: suggestion,
   };
+}
+
+interface ResumeCandidate {
+  item: ResumeItem;
+  score: number;
+  openLoops: ResumeOpenLoop[];
+  suggestedRead?: ResumeSuggestedRead;
+}
+
+function isNoneLikeStatusText(value: string): boolean {
+  return /^(none|n\/a)[.!]?$/i.test(value.trim());
+}
+
+function extractResumeTerms(...values: Array<string | undefined>): string[] {
+  const combined = values
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .join(" ")
+    .toLowerCase();
+
+  if (!combined) return [];
+
+  const terms = combined
+    .split(/[^a-z0-9_-]+/i)
+    .map((term) => term.trim())
+    .filter((term) => term.length >= 3 && !RELAXED_QUERY_STOPWORDS.has(term));
+
+  return [...new Set(terms)];
+}
+
+function countResumeTermMatches(text: string, terms: string[]): number {
+  if (terms.length === 0) return 0;
+  const haystack = text.toLowerCase();
+  return terms.reduce((count, term) => count + (haystack.includes(term) ? 1 : 0), 0);
+}
+
+function resolveResumeScope(
+  params: ResumeParams,
+  trackedStatusAssessments: TrackedStatusAssessment[],
+): string | undefined {
+  if (typeof params.namespace === "string" && params.namespace.trim().length > 0) {
+    return params.namespace.trim();
+  }
+
+  if (typeof params.project !== "string" || params.project.trim().length === 0) {
+    return undefined;
+  }
+
+  const project = params.project.trim();
+  if (project.startsWith("projects/") || project.startsWith("clients/")) {
+    return project;
+  }
+
+  const trackedNamespaces = trackedStatusAssessments.map((assessment) => assessment.row.namespace);
+  const preferredProjects = [`projects/${project}`, `clients/${project}`];
+  for (const candidate of preferredProjects) {
+    if (trackedNamespaces.includes(candidate)) return candidate;
+  }
+
+  const suffixMatches = trackedNamespaces
+    .filter((namespace) => namespace.endsWith(`/${project}`))
+    .sort();
+  if (suffixMatches.length > 0) return suffixMatches[0];
+
+  return `projects/${project}`;
+}
+
+function extractResumeOpenLoops(assessment: TrackedStatusAssessment): ResumeOpenLoop[] {
+  const structured = parseStructuredStatus(assessment.row.content);
+  const loops: ResumeOpenLoop[] = [];
+
+  if (structured.blockers && !isNoneLikeStatusText(structured.blockers)) {
+    loops.push({
+      namespace: assessment.row.namespace,
+      type: "blocker",
+      summary: contentPreview(structured.blockers, 160),
+      suggested_action: "Review blocker details and update the status when it changes.",
+    });
+  }
+
+  for (const step of structured.next_steps ?? []) {
+    if (isNoneLikeStatusText(step)) continue;
+    loops.push({
+      namespace: assessment.row.namespace,
+      type: "next_step",
+      summary: contentPreview(step, 160),
+      suggested_action: "Treat this as the next concrete action for the project.",
+    });
+    if (loops.filter((loop) => loop.type === "next_step").length >= 2) break;
+  }
+
+  if (assessment.needsAttention && assessment.maintenanceItems.length > 0) {
+    loops.push({
+      namespace: assessment.row.namespace,
+      type: "attention",
+      summary: contentPreview(assessment.maintenanceItems[0].suggestion, 160),
+      suggested_action: assessment.maintenanceItems[0].suggestion,
+    });
+  }
+
+  return loops;
+}
+
+function buildResumeStatusCandidate(
+  assessment: TrackedStatusAssessment,
+  scope: string | undefined,
+  hintTerms: string[],
+  includeAttention: boolean,
+): ResumeCandidate | null {
+  const inScope = scope ? matchesNamespacePrefix(assessment.row.namespace, scope) : false;
+  const matchText = `${assessment.row.namespace} ${assessment.row.key} ${assessment.row.content_preview}`;
+  const matchedTerms = countResumeTermMatches(matchText, hintTerms);
+
+  if (scope && !inScope) return null;
+  if (
+    !scope &&
+    assessment.lifecycle !== "active" &&
+    assessment.lifecycle !== "blocked" &&
+    !(includeAttention && assessment.needsAttention) &&
+    matchedTerms === 0
+  ) {
+    return null;
+  }
+
+  let score = 0;
+  if (inScope) score += 140;
+  if (assessment.lifecycle === "blocked") score += 80;
+  else if (includeAttention && assessment.needsAttention) score += 70;
+  else if (assessment.lifecycle === "active") score += 60;
+  else if (assessment.lifecycle === "maintenance") score += 30;
+  else if (assessment.lifecycle === "completed" || assessment.lifecycle === "stopped" || assessment.lifecycle === "archived") score -= 20;
+  score += matchedTerms * 8;
+  score += getFreshnessScore(assessment.row.updated_at) * 10;
+
+  const reasons: string[] = [];
+  if (inScope) reasons.push("current tracked status in the requested scope");
+  else if (assessment.lifecycle === "blocked") reasons.push("blocked tracked status");
+  else if (includeAttention && assessment.needsAttention) reasons.push("attention-worthy tracked status");
+  else reasons.push(`${assessment.lifecycle} tracked status`);
+  if (matchedTerms > 0) reasons.push("matched opener/project terms");
+
+  let suggestedAction = "Read the current status, then continue from the listed next steps.";
+  if (assessment.lifecycle === "blocked") {
+    suggestedAction = "Read the blocker context first, then decide whether to unblock or re-plan.";
+  } else if (includeAttention && assessment.needsAttention && assessment.maintenanceItems.length > 0) {
+    suggestedAction = assessment.maintenanceItems[0].suggestion;
+  }
+
+  return {
+    item: {
+      namespace: assessment.row.namespace,
+      key: assessment.row.key,
+      entry_id: assessment.row.id,
+      category: "status",
+      preview: contentPreview(assessment.row.content_preview, 220),
+      updated_at: assessment.row.updated_at,
+      reason: reasons.join("; "),
+      suggested_action: suggestedAction,
+    },
+    score,
+    openLoops: extractResumeOpenLoops(assessment),
+    suggestedRead: {
+      tool: "memory_read",
+      namespace: assessment.row.namespace,
+      key: assessment.row.key,
+      reason: "Read the full tracked status before continuing work.",
+    },
+  };
+}
+
+function buildResumeStateCandidate(
+  entry: Entry,
+  scope: string,
+  hintTerms: string[],
+): ResumeCandidate {
+  const matchText = `${entry.namespace} ${entry.key ?? ""} ${entry.content}`;
+  const matchedTerms = countResumeTermMatches(matchText, hintTerms);
+
+  return {
+    item: {
+      namespace: entry.namespace,
+      key: entry.key,
+      entry_id: entry.id,
+      category: "state",
+      preview: contentPreview(entry.content, 220),
+      updated_at: entry.updated_at,
+      reason: matchedTerms > 0
+        ? "recent state entry in the requested scope that matched the opener"
+        : "recent state entry in the requested scope",
+      suggested_action: "Read this entry if you need implementation or reference context beyond the status.",
+    },
+    score: 60 + matchedTerms * 6 + getFreshnessScore(entry.updated_at) * 8 + (matchesNamespacePrefix(entry.namespace, scope) ? 20 : 0),
+    openLoops: [],
+    suggestedRead: entry.key
+      ? {
+          tool: "memory_read",
+          namespace: entry.namespace,
+          key: entry.key,
+          reason: "Read the full state entry for additional project context.",
+        }
+      : undefined,
+  };
+}
+
+function isDecisionLikeLog(entry: Entry): boolean {
+  if (entry.entry_type !== "log") return false;
+  const tags = parseTags(entry.tags);
+  if (tags.some((tag) => ["decision", "milestone", "blocker", "discovery", "correction"].includes(tag))) {
+    return true;
+  }
+  return /\b(decided|decision|milestone|blocker|resolved|discovered|corrected)\b/i.test(entry.content);
+}
+
+function buildResumeLogCandidate(
+  entry: Entry,
+  scope: string | undefined,
+  hintTerms: string[],
+): ResumeCandidate | null {
+  if (!isDecisionLikeLog(entry)) return null;
+  if (scope && !matchesNamespacePrefix(entry.namespace, scope)) return null;
+
+  const matchText = `${entry.namespace} ${entry.content}`;
+  const matchedTerms = countResumeTermMatches(matchText, hintTerms);
+  const inScope = scope ? matchesNamespacePrefix(entry.namespace, scope) : false;
+
+  return {
+    item: {
+      namespace: entry.namespace,
+      key: entry.key,
+      entry_id: entry.id,
+      category: "decision_log",
+      preview: contentPreview(entry.content, 220),
+      updated_at: entry.updated_at,
+      reason: inScope
+        ? "recent decision-style log in the requested scope"
+        : matchedTerms > 0
+          ? "recent decision-style log that matched the opener"
+          : "recent decision-style log in a likely-relevant namespace",
+      suggested_action: "Read this log before making changes that could repeat or undo an earlier decision.",
+    },
+    score: (inScope ? 85 : 35) + matchedTerms * 7 + getFreshnessScore(entry.updated_at) * 8,
+    openLoops: [],
+    suggestedRead: {
+      tool: "memory_get",
+      id: entry.id,
+      reason: "Open the full decision log entry for rationale and chronology.",
+    },
+  };
+}
+
+function buildResumeHistoryCandidate(entry: AuditHistoryEntry, scope: string): ResumeCandidate {
+  const detail = entry.detail ? contentPreview(entry.detail, 180) : `${entry.action} ${entry.key ?? "namespace"}`;
+  return {
+    item: {
+      namespace: entry.namespace,
+      category: "history",
+      preview: detail,
+      updated_at: entry.timestamp,
+      reason: "recent namespace mutation history",
+      suggested_action: "Review recent writes and updates before continuing work in this namespace.",
+    },
+    score: 50 + (matchesNamespacePrefix(entry.namespace, scope) ? 15 : 0) + getFreshnessScore(entry.timestamp) * 6,
+    openLoops: [],
+    suggestedRead: {
+      tool: "memory_history",
+      namespace: scope,
+      reason: "Inspect the recent mutation history for this namespace.",
+    },
+  };
+}
+
+function compareResumeCandidates(a: ResumeCandidate, b: ResumeCandidate): number {
+  if (b.score !== a.score) return b.score - a.score;
+  if (b.item.updated_at !== a.item.updated_at) return b.item.updated_at.localeCompare(a.item.updated_at);
+  if (a.item.namespace !== b.item.namespace) return a.item.namespace.localeCompare(b.item.namespace);
+  if ((a.item.key ?? "") !== (b.item.key ?? "")) return (a.item.key ?? "").localeCompare(b.item.key ?? "");
+  return a.item.category.localeCompare(b.item.category);
 }
 
 function compareAttentionItems(a: AttentionItem, b: AttentionItem): number {
@@ -925,7 +1315,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_orient",
     description:
-      `START HERE. Call this at the beginning of every conversation before using any other memory tool. Returns conventions, a computed project dashboard (grouped by lifecycle from status entries), optional curated notes, actionable maintenance suggestions, and optionally a namespace overview — everything needed to orient yourself in one call.\n\nThe dashboard is computed automatically from status entries in projects/* and clients/* namespaces. No manual workbench maintenance needed. Demo namespaces and completed task-run namespaces are hidden by default.\n\nUse \`detail\` to control response size. \`${DEFAULT_ORIENT_DETAIL}\` is the default for token-sensitive handshakes, \`standard\` includes the full dashboard and namespace overview, and \`full\` includes the full conventions document.`,
+      `START HERE. Call this at the beginning of every conversation before using any other memory tool. Returns conventions, a computed project dashboard (grouped by lifecycle from status entries), optional curated notes, actionable maintenance suggestions, and optionally a namespace overview — everything needed to orient yourself in one call. Use \`memory_resume\` after this when you want a targeted continuation pack for a project, namespace, or opener.\n\nThe dashboard is computed automatically from status entries in projects/* and clients/* namespaces. No manual workbench maintenance needed. Demo namespaces and completed task-run namespaces are hidden by default.\n\nUse \`detail\` to control response size. \`${DEFAULT_ORIENT_DETAIL}\` is the default for token-sensitive handshakes, \`standard\` includes the full dashboard and namespace overview, and \`full\` includes the full conventions document.`,
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -970,9 +1360,50 @@ const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: "memory_resume",
+    description:
+      "Build a compact, targeted continuation pack after `memory_orient`. Use this when you have a project hint, namespace, or opener and want the most relevant current status, recent decision context, open loops, and optional recent namespace history without running broad search.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        opener: {
+          type: "string",
+          description:
+            "Optional. User opener or task phrasing to bias the pack toward likely-relevant context.",
+        },
+        namespace: {
+          type: "string",
+          description:
+            "Optional. Exact namespace or namespace prefix to focus on. Prefer exact tracked namespaces such as `projects/grimnir`.",
+        },
+        project: {
+          type: "string",
+          description:
+            "Optional. Project slug or tracked namespace hint, such as `grimnir` or `projects/grimnir`.",
+        },
+        limit: {
+          type: "integer",
+          description:
+            "Optional. Maximum number of items to include in the resume pack. Default 6, max 10.",
+        },
+        include_history: {
+          type: "boolean",
+          description:
+            "Optional. Include a few recent audit-history items for the focused namespace. Default: false.",
+        },
+        include_attention: {
+          type: "boolean",
+          description:
+            "Optional. Include blocked or attention-worthy tracked work when relevant. Default: true.",
+        },
+      },
+      required: [],
+    },
+  },
+  {
     name: "memory_write",
     description:
-      "Store or update a state entry in memory. If an entry with the same namespace+key exists, it will be overwritten. Use this for mutable facts and non-tracked state. For `status` entries under `projects/*` or `clients/*`, prefer `memory_update_status`.\n\nIf this is your first memory operation in this conversation, call memory_orient first.\n\nNamespace conventions: projects/<name> for project state, people/<name> for context about people, decisions/<topic> for cross-cutting decisions, meta/<topic> for system notes.\n\nKey conventions: 'status' = compact resumption summary (Phase / Current work / Blockers / Next — keep brief, move details to other keys like 'architecture', 'workflow', 'research'). 'index' = directory of important keys in this namespace and their purpose.\n\nTag vocabulary: Use canonical lifecycle tags on status entries: active, blocked, completed, stopped, maintenance, archived. Aliases are auto-normalized (done→completed, paused→stopped, inactive→archived). Category tags: decision, architecture, preference, milestone, convention. Type tags: bug, feature, research. Prefixed tags for cross-referencing: client:<name>, person:<name>, topic:<topic>, type:<artifact> (pdf, presentation, meeting-notes), source:external/internal.\n\nThe project dashboard is computed automatically from status entries with lifecycle tags. No manual workbench maintenance needed. Writing to 'status' in projects/* or clients/* supports compare-and-swap via expected_updated_at.\n\nTo start a new project: (1) write projects/<name>/status with a lifecycle tag (e.g. 'active'), (2) optionally write projects/<name>/index listing the keys.",
+      "Store or update a state entry in memory. If an entry with the same namespace+key exists, it will be overwritten. Use this for mutable facts and non-tracked state. For `status` entries under `projects/*` or `clients/*`, prefer `memory_update_status`. Optional `valid_until` adds soft expiry for temporary state; direct reads still work after expiry, but broad search hides expired state by default.\n\nIf this is your first memory operation in this conversation, call memory_orient first.\n\nNamespace conventions: projects/<name> for project state, people/<name> for context about people, decisions/<topic> for cross-cutting decisions, meta/<topic> for system notes.\n\nKey conventions: 'status' = compact resumption summary (Phase / Current work / Blockers / Next — keep brief, move details to other keys like 'architecture', 'workflow', 'research'). 'index' = directory of important keys in this namespace and their purpose.\n\nTag vocabulary: Use canonical lifecycle tags on status entries: active, blocked, completed, stopped, maintenance, archived. Aliases are auto-normalized (done→completed, paused→stopped, inactive→archived). Category tags: decision, architecture, preference, milestone, convention. Type tags: bug, feature, research. Prefixed tags for cross-referencing: client:<name>, person:<name>, topic:<topic>, type:<artifact> (pdf, presentation, meeting-notes), source:external/internal.\n\nThe project dashboard is computed automatically from status entries with lifecycle tags. No manual workbench maintenance needed. Writing to 'status' in projects/* or clients/* supports compare-and-swap via expected_updated_at.\n\nTo start a new project: (1) write projects/<name>/status with a lifecycle tag (e.g. 'active'), (2) optionally write projects/<name>/index listing the keys.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -996,6 +1427,11 @@ const TOOL_DEFINITIONS = [
           items: { type: "string" },
           description:
             'Optional freeform tags for cross-cutting queries. Must be a JSON array, e.g. ["decision", "active", "client:lofalk"]. Do NOT pass as a comma-separated string.',
+        },
+        valid_until: {
+          type: "string",
+          description:
+            "Optional. ISO 8601 timestamp after which this state entry is treated as expired in broad retrieval, while remaining available to direct read/get.",
         },
         expected_updated_at: {
           type: "string",
@@ -1121,7 +1557,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_query",
     description:
-      "Search and filter memories. Supports lexical (FTS5 keyword), semantic (vector similarity), and hybrid (RRF fusion of both) search modes. Filters by namespace prefix, entry type, tags, and time range (since/until). Can be used without a query to browse by filters alone (e.g. all entries with a specific tag, or all entries updated today). Pass `explain: true` to include retrieval metadata and per-result match explanations.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Search and filter memories. Supports lexical (FTS5 keyword), semantic (vector similarity), and hybrid (RRF fusion of both) search modes. Filters by namespace prefix, entry type, tags, time range (since/until), and optional expiry handling. Can be used without a query to browse by filters alone (e.g. all entries with a specific tag, or all entries updated today). Broad retrieval hides expired state entries by default; use `include_expired: true` to include them. Pass `explain: true` to include retrieval metadata and per-result match explanations.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -1156,6 +1592,16 @@ const TOOL_DEFINITIONS = [
           description:
             "Search mode. Default: hybrid (RRF fusion of keyword + vector). Lexical: FTS5 keyword search. Semantic: vector KNN similarity. Degrades to lexical if embeddings unavailable.",
         },
+        search_recency_weight: {
+          type: "number",
+          description:
+            `Optional. Recency influence from 0 to 1. Default ${DEFAULT_SEARCH_RECENCY_WEIGHT}. Only affects query-based search, not filter-only browsing.`,
+        },
+        include_expired: {
+          type: "boolean",
+          description:
+            "Optional. If true, include expired state entries in query results and mark them as expired. Default: false.",
+        },
         explain: {
           type: "boolean",
           description: "Optional. If true, include retrieval metadata and per-result match explanations.",
@@ -1175,7 +1621,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_attention",
     description:
-      "Return deterministic triage items for tracked work. Surfaces blocked statuses, stale active work, near-term event staleness, and tracked namespaces missing status or lifecycle structure. Use this instead of broad natural-language search when you explicitly want what needs attention.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Return deterministic triage items for tracked work. Surfaces blocked statuses, stale active work, expiring or expired tracked statuses, near-term event staleness, and tracked namespaces missing status or lifecycle structure. Use this instead of broad natural-language search when you explicitly want what needs attention.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -1194,6 +1640,10 @@ const TOOL_DEFINITIONS = [
         include_upcoming_events: {
           type: "boolean",
           description: "Optional. Include stale statuses with near-term event dates. Default: true.",
+        },
+        include_expiring: {
+          type: "boolean",
+          description: "Optional. Include expiring-soon and expired tracked statuses. Default: true.",
         },
         include_missing_status: {
           type: "boolean",
@@ -1648,8 +2098,169 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             return okResult("orient", response);
           }
 
+          case "memory_resume": {
+            const resumeArgs = (args ?? {}) as ResumeParams;
+            const includeAttention = resumeArgs.include_attention !== false;
+            const includeHistory = resumeArgs.include_history === true;
+            const limit = clampOptionalLimit(resumeArgs.limit, 10) ?? 6;
+
+            if (resumeArgs.namespace !== undefined) {
+              const namespaceCheck = validateNamespace(resumeArgs.namespace);
+              if (!namespaceCheck.valid) {
+                return errResult("resume", "validation_error", namespaceCheck.error!);
+              }
+            }
+            if (
+              typeof resumeArgs.project === "string" &&
+              (resumeArgs.project.startsWith("projects/") || resumeArgs.project.startsWith("clients/"))
+            ) {
+              const projectNamespaceCheck = validateNamespace(resumeArgs.project);
+              if (!projectNamespaceCheck.valid) {
+                return errResult("resume", "validation_error", projectNamespaceCheck.error!);
+              }
+            }
+
+            const trackedStatusAssessments = [...getTrackedStatusAssessments(db).values()]
+              .filter((assessment) => canRead(ctx, assessment.row.namespace));
+            const scope = resolveResumeScope(resumeArgs, trackedStatusAssessments);
+            const hintTerms = extractResumeTerms(resumeArgs.opener, resumeArgs.project, scope);
+
+            const candidates: ResumeCandidate[] = [];
+            const statusCandidates = trackedStatusAssessments
+              .map((assessment) => buildResumeStatusCandidate(assessment, scope, hintTerms, includeAttention))
+              .filter((candidate): candidate is ResumeCandidate => candidate !== null)
+              .sort(compareResumeCandidates);
+            candidates.push(...statusCandidates);
+
+            const focusNamespaces = new Set(statusCandidates.slice(0, 3).map((candidate) => candidate.item.namespace));
+
+            const logPool = queryEntriesByFilter(db, {
+              namespace: scope,
+              entryType: "log",
+              limit: scope ? Math.max(limit, 4) : Math.max(limit * 2, 8),
+            }).filter((entry) => canRead(ctx, entry.namespace));
+
+            for (const entry of logPool) {
+              const matchedTerms = countResumeTermMatches(`${entry.namespace} ${entry.content}`, hintTerms);
+              if (!scope && focusNamespaces.size > 0 && !focusNamespaces.has(entry.namespace) && matchedTerms === 0) {
+                continue;
+              }
+              const candidate = buildResumeLogCandidate(entry, scope, hintTerms);
+              if (candidate) candidates.push(candidate);
+            }
+
+            if (scope) {
+              const scopedStateEntries = queryEntriesByFilter(db, {
+                namespace: scope,
+                entryType: "state",
+                includeExpired: true,
+                limit: 4,
+              })
+                .filter((entry) => canRead(ctx, entry.namespace))
+                .filter((entry) => entry.key !== "status");
+
+              for (const entry of scopedStateEntries) {
+                candidates.push(buildResumeStateCandidate(entry, scope, hintTerms));
+              }
+            }
+
+            if (includeHistory && scope) {
+              const historyPage = getAuditHistoryPage(db, { namespace: scope, limit: 3 });
+              for (const entry of historyPage.entries.filter((historyEntry) => canRead(ctx, historyEntry.namespace))) {
+                candidates.push(buildResumeHistoryCandidate(entry, scope));
+              }
+            }
+
+            const dedupedCandidates: ResumeCandidate[] = [];
+            const seenCandidateIds = new Set<string>();
+            for (const candidate of candidates.sort(compareResumeCandidates)) {
+              const dedupeKey = candidate.item.entry_id
+                ? `entry:${candidate.item.entry_id}`
+                : `${candidate.item.category}:${candidate.item.namespace}:${candidate.item.key ?? ""}:${candidate.item.updated_at}`;
+              if (seenCandidateIds.has(dedupeKey)) continue;
+              seenCandidateIds.add(dedupeKey);
+              dedupedCandidates.push(candidate);
+            }
+
+            const selected = dedupedCandidates.slice(0, limit);
+
+            const openLoops: ResumeOpenLoop[] = [];
+            const seenLoops = new Set<string>();
+            for (const loop of selected.flatMap((candidate) => candidate.openLoops)) {
+              const loopKey = `${loop.namespace}:${loop.type}:${loop.summary}`;
+              if (seenLoops.has(loopKey)) continue;
+              seenLoops.add(loopKey);
+              openLoops.push(loop);
+              if (openLoops.length >= Math.max(4, limit)) break;
+            }
+
+            const suggestedReads: ResumeSuggestedRead[] = [];
+            const seenReads = new Set<string>();
+            for (const candidate of selected) {
+              if (!candidate.suggestedRead) continue;
+              const read = candidate.suggestedRead;
+              const readKey = `${read.tool}:${read.namespace ?? ""}:${read.key ?? ""}:${read.id ?? ""}`;
+              if (seenReads.has(readKey)) continue;
+              seenReads.add(readKey);
+              suggestedReads.push(read);
+            }
+
+            const whyThisSet: string[] = [];
+            if (scope) {
+              whyThisSet.push(`Focused on ${scope}.`);
+            } else if (resumeArgs.project) {
+              whyThisSet.push("Biased toward the supplied project hint.");
+            } else if (resumeArgs.opener) {
+              whyThisSet.push("Biased toward terms from the opener.");
+            }
+            if (selected.some((candidate) => candidate.item.category === "status")) {
+              whyThisSet.push("Tracked statuses were prioritized over generic notes.");
+            }
+            if (selected.some((candidate) => candidate.item.category === "decision_log")) {
+              whyThisSet.push("Recent decision logs were included for rationale.");
+            }
+            if (
+              includeAttention &&
+              selected.some((candidate) =>
+                candidate.item.category === "status" &&
+                (candidate.item.reason.includes("blocked") || candidate.item.reason.includes("attention-worthy"))
+              )
+            ) {
+              whyThisSet.push("Blocked or attention-worthy work was ranked ahead of generic historical noise.");
+            }
+            if (includeHistory && selected.some((candidate) => candidate.item.category === "history")) {
+              whyThisSet.push("Recent namespace history was included because include_history was enabled.");
+            }
+            if (whyThisSet.length === 0) {
+              whyThisSet.push("Returned the most relevant accessible context available.");
+            }
+
+            const statusCount = selected.filter((candidate) => candidate.item.category === "status").length;
+            const logCount = selected.filter((candidate) => candidate.item.category === "decision_log").length;
+            const historyCount = selected.filter((candidate) => candidate.item.category === "history").length;
+            const summaryPrefix = scope
+              ? `Resume pack for ${scope}`
+              : resumeArgs.project
+                ? `Resume pack for ${resumeArgs.project}`
+                : "Resume pack";
+            const summary = selected.length === 0
+              ? `${summaryPrefix}: no matching context found.`
+              : `${summaryPrefix}: ${statusCount} tracked status item${statusCount === 1 ? "" : "s"}, ${logCount} recent decision log${logCount === 1 ? "" : "s"}, ${openLoops.length} open loop${openLoops.length === 1 ? "" : "s"}${historyCount > 0 ? `, ${historyCount} history item${historyCount === 1 ? "" : "s"}` : ""}.`;
+
+            const response: Record<string, unknown> = {
+              summary,
+              items: selected.map((candidate) => candidate.item),
+              open_loops: openLoops,
+              suggested_reads: suggestedReads,
+              why_this_set: whyThisSet,
+            };
+            if (scope) response.target_namespace = scope;
+
+            return okResult("resume", response);
+          }
+
           case "memory_write": {
-            const { namespace, key, content, tags, expected_updated_at, patch } =
+            const { namespace, key, content, tags, valid_until, expected_updated_at, patch } =
               args as unknown as WriteParams & { expected_updated_at?: string; patch?: PatchParams };
 
             // Validate namespace and key (always required)
@@ -1665,6 +2276,9 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             // Mutually exclusive: patch and content cannot both be provided
             if (patch !== undefined && content !== undefined) {
               return errResult("write", "validation_error", "patch and content are mutually exclusive. Use patch for partial updates or content for a full write.");
+            }
+            if (patch !== undefined && valid_until !== undefined) {
+              return errResult("write", "validation_error", "valid_until is only supported on full memory_write calls, not patch updates.");
             }
 
             if (!canWrite(ctx, namespace)) {
@@ -1708,9 +2322,21 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             }
 
             // --- Full write path ---
+            if (typeof content !== "string") {
+              return errResult("write", "validation_error", "Content is required and must be a non-empty string.");
+            }
             const validation = validateWriteInput(namespace, key, content, tags, maxContentSize);
             if (!validation.valid) {
               return errResult("write", "validation_error", validation.error!);
+            }
+
+            let normalizedValidUntil: string | null = null;
+            if (valid_until !== undefined && valid_until !== null) {
+              const timestampCheck = normalizeIsoTimestamp(valid_until, "valid_until");
+              if (!timestampCheck.ok) {
+                return errResult("write", "validation_error", timestampCheck.error);
+              }
+              normalizedValidUntil = timestampCheck.value;
             }
 
             const isTrackedStatus = key === "status" && isTrackedNamespace(namespace);
@@ -1736,7 +2362,16 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               }
             }
 
-            const result = writeState(db, namespace, key, content, effectiveTags, ctx.principalId, expected_updated_at);
+            const result = writeState(
+              db,
+              namespace,
+              key,
+              content,
+              effectiveTags,
+              ctx.principalId,
+              expected_updated_at,
+              normalizedValidUntil,
+            );
 
             if (result.status === "conflict") {
               return errResult("write", "conflict", result.message!, {
@@ -1917,6 +2552,9 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             if (entry) {
               const parsed = parseEntry(entry);
               const response: Record<string, unknown> = { found: true, ...serializeParsedEntry(parsed) };
+              if (isEntryExpired(parsed)) {
+                response.expired = true;
+              }
               if (isStale(parsed.updated_at)) {
                 response.stale = true;
               }
@@ -1963,6 +2601,9 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               if (entry) {
                 const parsed = parseEntry(entry);
                 const result: Record<string, unknown> = { found: true, ...serializeParsedEntry(parsed) };
+                if (isEntryExpired(parsed)) {
+                  result.expired = true;
+                }
                 if (isStale(parsed.updated_at)) {
                   result.stale = true;
                 }
@@ -1986,6 +2627,9 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             if (entry) {
               const parsed = parseEntry(entry);
               const response: Record<string, unknown> = { found: true, ...serializeParsedEntry(parsed) };
+              if (isEntryExpired(parsed)) {
+                response.expired = true;
+              }
               if (isStale(parsed.updated_at)) {
                 response.stale = true;
               }
@@ -2009,6 +2653,12 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             const queryArgs = (args ?? {}) as unknown as QueryParams;
             const { query, namespace, entry_type, tags, limit, search_mode, since, until } = queryArgs;
             const explain = queryArgs.explain === true;
+            const includeExpired = queryArgs.include_expired === true;
+            const recencyWeightCheck = resolveSearchRecencyWeight(queryArgs);
+            if (!recencyWeightCheck.ok) {
+              return errResult("query", "validation_error", recencyWeightCheck.error);
+            }
+            const searchRecencyWeight = recencyWeightCheck.value;
 
             // Filter-only mode: no query text, just browse by filters
             if (!query || typeof query !== "string") {
@@ -2017,29 +2667,36 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                 return errResult("query", "validation_error", "Provide either a 'query' string for search, or at least one filter (namespace, tags, entry_type, since, until) to browse.");
               }
               const requestedLimit = Math.min(Math.max(limit ?? 10, 1), 50);
-              const internalFilterLimit = ctx.principalType === "owner"
-                ? requestedLimit
-                : Math.min(requestedLimit * QUERY_RERANK_OVERFETCH_MULTIPLIER, 50);
+              const internalFilterLimit = Math.min(requestedLimit * QUERY_RERANK_OVERFETCH_MULTIPLIER, 50);
               let filterResults = queryEntriesByFilter(db, {
                 namespace,
                 entryType: entry_type,
                 tags,
                 limit: internalFilterLimit,
+                includeExpired: true,
                 since,
                 until,
               });
-              filterResults = filterByAccess(ctx, filterResults).slice(0, requestedLimit);
-              const formatted = filterResults.map((entry) => ({
-                id: entry.id,
-                namespace: entry.namespace,
-                key: entry.key,
-                entry_type: entry.entry_type,
-                content_preview: contentPreview(entry.content),
-                tags: parseTags(entry.tags),
-                created_at: entry.created_at,
-                updated_at: entry.updated_at,
-                provenance: buildProvenance(entry.agent_id),
-              }));
+              const filteredExpired = filterExpiredEntries(filterResults, includeExpired);
+              filterResults = filterByAccess(ctx, filteredExpired.items).slice(0, requestedLimit);
+              const formatted = filterResults.map((entry) => {
+                const result: QueryResult = {
+                  id: entry.id,
+                  namespace: entry.namespace,
+                  key: entry.key,
+                  entry_type: entry.entry_type,
+                  content_preview: contentPreview(entry.content),
+                  tags: parseTags(entry.tags),
+                  created_at: entry.created_at,
+                  updated_at: entry.updated_at,
+                  valid_until: entry.valid_until ?? undefined,
+                  provenance: buildProvenance(entry.agent_id),
+                };
+                if (isEntryExpired(entry)) {
+                  result.expired = true;
+                }
+                return result;
+              });
 
               // Analytics
               if (sessionId) {
@@ -2062,6 +2719,14 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                 results: formatted,
                 total: formatted.length,
                 search_mode: "filter",
+                retrieval: {
+                  reranked: false,
+                  relaxed_lexical: false,
+                  fallback_reason: null,
+                  recency_applied: false,
+                  search_recency_weight: 0,
+                  expired_filtered_count: filteredExpired.expiredFilteredCount,
+                },
               });
             }
 
@@ -2074,6 +2739,8 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               tags,
               limit: requestedLimit,
               search_mode,
+              search_recency_weight: searchRecencyWeight,
+              include_expired: includeExpired,
               explain,
               since,
               until,
@@ -2083,6 +2750,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             let warning: string | undefined;
             let fallbackReason: string | null = null;
             let relaxedLexical = false;
+            let expiredFilteredCount = 0;
             let results: Entry[] = [];
             let lexicalResults: ReturnType<typeof queryEntriesLexicalScored> = [];
             let semanticResults: ReturnType<typeof queryEntriesSemanticScored> = [];
@@ -2116,9 +2784,13 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                   entryType: entry_type,
                   tags,
                   limit: internalLimit,
+                  includeExpired: true,
                   since,
                   until,
                 });
+                const filteredExpired = filterExpiredEntries(semanticResults, includeExpired);
+                semanticResults = filteredExpired.items;
+                expiredFilteredCount = filteredExpired.expiredFilteredCount;
                 results = semanticResults.map((result) => result.entry);
               }
             }
@@ -2132,9 +2804,12 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               } else {
                 const buf = embeddingToBuffer(queryEmb);
                 hybridResults = queryEntriesHybridScored(db, {
-                  ftsOptions: { query, namespace, entryType: entry_type, tags, limit: internalLimit, since, until },
-                  semanticOptions: { queryEmbedding: buf, namespace, entryType: entry_type, tags, limit: internalLimit, since, until },
+                  ftsOptions: { query, namespace, entryType: entry_type, tags, limit: internalLimit, includeExpired: true, since, until },
+                  semanticOptions: { queryEmbedding: buf, namespace, entryType: entry_type, tags, limit: internalLimit, includeExpired: true, since, until },
                 });
+                const filteredExpired = filterExpiredEntries(hybridResults, includeExpired);
+                hybridResults = filteredExpired.items;
+                expiredFilteredCount = filteredExpired.expiredFilteredCount;
                 results = hybridResults.map((result) => result.entry);
               }
             }
@@ -2147,9 +2822,13 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                 entryType: entry_type,
                 tags,
                 limit: internalLimit,
+                includeExpired: true,
                 since,
                 until,
               });
+              let filteredExpired = filterExpiredEntries(lexicalResults, includeExpired);
+              lexicalResults = filteredExpired.items;
+              expiredFilteredCount = filteredExpired.expiredFilteredCount;
               results = lexicalResults.map((result) => result.entry);
 
               if (results.length === 0) {
@@ -2161,9 +2840,13 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                     entryType: entry_type,
                     tags,
                     limit: internalLimit,
+                    includeExpired: true,
                     since,
                     until,
                   });
+                  filteredExpired = filterExpiredEntries(lexicalResults, includeExpired);
+                  lexicalResults = filteredExpired.items;
+                  expiredFilteredCount = filteredExpired.expiredFilteredCount;
                   results = lexicalResults.map((result) => result.entry);
                   if (results.length > 0 && !warning) {
                     warning = "No exact lexical matches found. Used relaxed token matching for natural-language query.";
@@ -2201,13 +2884,18 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                 tags: parseTags(entry.tags),
                 created_at: entry.created_at,
                 updated_at: entry.updated_at,
+                valid_until: entry.valid_until ?? undefined,
                 provenance: buildProvenance(entry.agent_id),
               };
+              if (isEntryExpired(entry)) {
+                result.expired = true;
+              }
 
               if (explain) {
                 const heuristicScore = getQueryHeuristicScore(entry, query.toLowerCase(), trackedStatuses);
                 const match: NonNullable<QueryResult["match"]> = {
                   heuristic_score: heuristicScore,
+                  freshness_score: getFreshnessScore(entry.updated_at),
                   reasons: [],
                 };
 
@@ -2253,13 +2941,14 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             if (warning) {
               response.warning = warning;
             }
-            if (explain) {
-              response.retrieval = {
-                reranked: true,
-                relaxed_lexical: relaxedLexical,
-                fallback_reason: fallbackReason,
-              };
-            }
+            response.retrieval = {
+              reranked: true,
+              relaxed_lexical: relaxedLexical,
+              fallback_reason: fallbackReason,
+              recency_applied: searchRecencyWeight > 0,
+              search_recency_weight: searchRecencyWeight,
+              expired_filtered_count: expiredFilteredCount,
+            };
 
             // Analytics: log retrieval event with result IDs and ranks
             if (sessionId) {
@@ -2286,6 +2975,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             const includeBlocked = attentionArgs.include_blocked !== false;
             const includeStale = attentionArgs.include_stale !== false;
             const includeUpcomingEvents = attentionArgs.include_upcoming_events !== false;
+            const includeExpiring = attentionArgs.include_expiring !== false;
             const includeMissingStatus = attentionArgs.include_missing_status !== false;
             const includeConflictingLifecycle = attentionArgs.include_conflicting_lifecycle !== false;
             const includeMissingLifecycle = attentionArgs.include_missing_lifecycle !== false;
@@ -2312,6 +3002,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               for (const item of assessment.maintenanceItems) {
                 if (item.issue === "active_but_stale" && !includeStale) continue;
                 if (item.issue === "upcoming_event_stale" && !includeUpcomingEvents) continue;
+                if ((item.issue === "expiring_soon" || item.issue === "expired") && !includeExpiring) continue;
                 if (item.issue === "conflicting_lifecycle" && !includeConflictingLifecycle) continue;
                 if (item.issue === "missing_lifecycle" && !includeMissingLifecycle) continue;
                 if (item.issue === "missing_status") continue;
