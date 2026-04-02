@@ -828,6 +828,11 @@ describe("memory_patterns — access enforcement", () => {
       content: "Decided to wait again because ARM64 support and maintainer risk remain unresolved.",
       tags: ["decision"],
     });
+    await ownerCall("memory_log", {
+      namespace: "projects/foo",
+      content: "Decision review: ARM64 uncertainty and maintainer risk are still the blocking concerns.",
+      tags: ["decision"],
+    });
   });
 
   it("family memory_patterns on inaccessible namespace → empty pattern view", async () => {

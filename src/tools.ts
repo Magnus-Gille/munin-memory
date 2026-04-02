@@ -372,11 +372,13 @@ const RELAXED_QUERY_STOPWORDS = new Set([
   "my", "myself", "of", "or", "should", "the", "to", "what",
 ]);
 const PATTERN_GENERIC_TERMS = new Set([
+  "added",
   "after",
   "around",
   "batch",
   "before",
   "build",
+  "clean",
   "current",
   "decision",
   "decisions",
@@ -384,22 +386,32 @@ const PATTERN_GENERIC_TERMS = new Set([
   "deployed",
   "deployment",
   "docs",
+  "exact",
+  "full",
   "from",
+  "into",
   "implementation",
   "implemented",
+  "live",
   "memory",
+  "normal",
   "phase",
   "project",
   "projects",
+  "real",
   "release",
   "released",
   "review",
   "source",
   "sources",
   "status",
+  "suite",
   "sync",
   "synced",
   "tests",
+  "through",
+  "tool",
+  "tools",
   "update",
   "updated",
   "using",
@@ -410,15 +422,23 @@ const PATTERN_GENERIC_TERMS = new Set([
 const EXTRACT_ACTION_STEP_CUE =
   /\b(next step(?:s)?|action item(?:s)?|todo|follow up|follow-up|we need to|need to|needs to|we should|should|must|plan to|planned to|we will|will|next clean move|next move|continue with|retry|before|by)\b/i;
 const EXTRACT_IMPERATIVE_STEP_PREFIX =
-  /^(?:next(?:\s+clean)?\s+move(?:\s+is)?(?:\s+to)?|next step(?:s)?(?:\s+is)?(?:\s+to)?|action item(?:s)?(?:\s+is)?(?:\s+to)?|todo:?|follow up:?|follow-up:?|then\s+)?(?:add|clear|commit|continue|deploy|document|draft|fix|implement|investigate|prepare|publish|push|refresh|rerun|retry|review|ship|split|sync|update|write|check)\b/i;
+  /^(?:next(?:\s+clean)?\s+move(?::|\s+is:?)?(?:\s+to)?|next step(?:s)?(?::|\s+is:?)?(?:\s+to)?|action item(?:s)?(?::|\s+is:?)?(?:\s+to)?|todo:?|follow up:?|follow-up:?|then\s+)?(?:add|clear|commit|continue|deploy|document|draft|exercise|fix|implement|investigate|prepare|publish|push|refresh|rerun|retry|review|ship|split|sync|update|write|check)\b/i;
 const EXTRACT_STEP_PREFIX =
-  /^(?:next(?:\s+clean)?\s+move(?:\s+is)?(?:\s+to)?|next step(?:s)?(?:\s+is)?(?:\s+to)?|action item(?:s)?(?:\s+is)?(?:\s+to)?|todo:?|follow up:?|follow-up:?|we need to|need to|needs to|we should|should|we will|will|plan to|planned to)\s*/i;
+  /^(?:next(?:\s+clean)?\s+move(?::|\s+is:?)?(?:\s+to)?|next step(?:s)?(?::|\s+is:?)?(?:\s+to)?|action item(?:s)?(?::|\s+is:?)?(?:\s+to)?|todo:?|follow up:?|follow-up:?|we need to|need to|needs to|we should|should|we will|will|plan to|planned to)\s*/i;
+const EXTRACT_INLINE_EXPLICIT_STEP =
+  /\b(next(?:\s+clean)?\s+move(?::|\s+is:?)?(?:\s+to)?|next step(?:s)?(?::|\s+is:?)?(?:\s+to)?|action item(?:s)?(?::|\s+is:?)?(?:\s+to)?|todo:?|follow up:?|follow-up:?)/i;
 const EXTRACT_RECAP_LANGUAGE =
   /\b(completed|deployed|implemented|landed|passed|pushed|released|shipped|started|synced|updated|verified)\b/i;
 const EXTRACT_FUTURE_LANGUAGE =
   /\b(will|need to|needs to|should|must|plan to|planned to|next step|next clean move|todo|action item|follow up|follow-up|continue with|retry|before|by)\b/i;
 const EXTRACT_COMPLETED_LIFECYCLE =
   /\b(project|repository|repo|engagement|client work)\b.*\b(completed|archived|wrapped up|finished)\b|\b(completed|archived|wrapped up|finished)\b.*\b(project|repository|repo|engagement|client work)\b/i;
+const NARRATIVE_META_DISCUSSION_TERMS =
+  /\b(heuristic|heuristics|signal|signals|pattern|patterns|detection|detector|matcher|regex|keyword|keywords|memory_narrative|memory_patterns|decision churn|reversal pattern)\b/i;
+const NARRATIVE_OPERATIONAL_RELEASE_TERMS =
+  /\b(batch|build|ci|commit(?:ted)?|deploy(?:ed)?|fix(?:ed)?|format(?:ting)?|health|push(?:ed|ing)?|release(?:d)?|ship(?:ped|ping)?|status(?: update)?|sync(?:ed)?|test(?:s)?|verification|verified)\b/i;
+const NARRATIVE_DECISION_RATIONALE_TERMS =
+  /\b(again|avoid|because|choose|chose|concern|concerns|defer|due to|keep|narrow|prefer|reason|revisit|risk|scope|settled|still|tradeoff|uncertainty)\b/i;
 const ORIENTATION_QUERY_PHRASES = [
   "orient me",
   "orientation",
@@ -1359,11 +1379,18 @@ function normalizeExtractStep(text: string): string {
     .replace(/^[-*]\s+/, "")
     .replace(/^\d+\.\s+/, "")
     .replace(EXTRACT_STEP_PREFIX, "")
+    .replace(/^[:;,\-–—)\]]+\s*/, "")
     .replace(/^to\s+/i, "")
     .replace(/[.]+$/, "")
     .trim();
   if (!normalized) return "";
   return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
+function isolateInlineExplicitStep(fragment: string): string {
+  const match = fragment.match(EXTRACT_INLINE_EXPLICIT_STEP);
+  if (!match || match.index === undefined) return fragment;
+  return fragment.slice(match.index).trim();
 }
 
 function extractActionableNextSteps(line: string, force = false): string[] {
@@ -1372,16 +1399,29 @@ function extractActionableNextSteps(line: string, force = false): string[] {
     .map((fragment) => fragment.trim())
     .filter((fragment) => fragment.length > 0)
     .flatMap((fragment) => {
-      if (!force && looksLikeRetrospectiveCompletion(fragment)) return [];
-      if (!force && EXTRACT_RECAP_LANGUAGE.test(fragment) && !EXTRACT_FUTURE_LANGUAGE.test(fragment)) {
+      const candidate = isolateInlineExplicitStep(fragment);
+      if (!force && looksLikeRetrospectiveCompletion(candidate)) return [];
+      if (!force && EXTRACT_RECAP_LANGUAGE.test(candidate) && !EXTRACT_FUTURE_LANGUAGE.test(candidate)) {
         return [];
       }
-      if (!force && !EXTRACT_ACTION_STEP_CUE.test(fragment) && !EXTRACT_IMPERATIVE_STEP_PREFIX.test(fragment)) {
+      if (!force && !EXTRACT_ACTION_STEP_CUE.test(candidate) && !EXTRACT_IMPERATIVE_STEP_PREFIX.test(candidate)) {
         return [];
       }
-      const normalized = normalizeExtractStep(fragment);
+      const normalized = normalizeExtractStep(candidate);
       return normalized ? [normalized] : [];
     });
+}
+
+function isNarrativeMetaDiscussion(text: string): boolean {
+  return NARRATIVE_META_DISCUSSION_TERMS.test(text);
+}
+
+function isOperationalReleaseDecisionLog(entry: Entry): boolean {
+  return NARRATIVE_OPERATIONAL_RELEASE_TERMS.test(entry.content) && !NARRATIVE_DECISION_RATIONALE_TERMS.test(entry.content);
+}
+
+function isChurnRelevantDecisionLog(entry: Entry): boolean {
+  return isStrictDecisionLikeLog(entry) && !isNarrativeMetaDiscussion(entry.content) && !isOperationalReleaseDecisionLog(entry);
 }
 
 function inferExtractLifecycle(line: string): ExtractSignals["lifecycle"] | undefined {
@@ -1872,7 +1912,7 @@ function buildNarrativeSignals(
     }
   }
 
-  const decisionLogs = logs.filter((entry) => isStrictDecisionLikeLog(entry));
+  const decisionLogs = logs.filter((entry) => isChurnRelevantDecisionLog(entry));
   if (decisionLogs.length >= NARRATIVE_DECISION_CHURN_THRESHOLD) {
     const newest = decisionLogs[0];
     const oldest = decisionLogs.at(-1)!;
@@ -1887,7 +1927,9 @@ function buildNarrativeSignals(
     });
   }
 
-  const reversalLogs = logs.filter((entry) => NARRATIVE_REVERSAL_KEYWORDS.test(entry.content));
+  const reversalLogs = logs.filter((entry) =>
+    NARRATIVE_REVERSAL_KEYWORDS.test(entry.content) && !isNarrativeMetaDiscussion(entry.content)
+  );
   const strongReversalLogs = reversalLogs.filter((entry) =>
     /\b(reopened|rolled back)\b/i.test(entry.content) ||
     (NARRATIVE_STRONG_REVERSAL_RESUME.test(entry.content) && NARRATIVE_STRONG_REVERSAL_PAUSE.test(entry.content))
@@ -3666,7 +3708,11 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             const heuristics: HeuristicItem[] = [];
             const sourceIds = new Set<string>();
 
-            const decisionLogs = candidateEntries.filter((entry) => isStrictDecisionLikeLog(entry));
+            const decisionLogs = candidateEntries.filter((entry) =>
+              isStrictDecisionLikeLog(entry) &&
+              !isNarrativeMetaDiscussion(entry.content) &&
+              !isOperationalReleaseDecisionLog(entry)
+            );
             const termSources = new Map<string, Set<string>>();
             for (const entry of decisionLogs) {
               for (const term of extractPatternTerms(entry.content)) {
@@ -3679,7 +3725,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             const recurringTerms = [...termSources.entries()]
               .filter(([, ids]) => ids.size >= 2)
               .sort((a, b) => b[1].size - a[1].size || a[0].localeCompare(b[0]));
-            if (recurringTerms.length >= 2) {
+            if (recurringTerms.length >= 2 && recurringTerms[0][1].size >= 3) {
               const topTerms = recurringTerms.slice(0, 3);
               const ids = [...new Set(topTerms.flatMap(([, ids]) => [...ids]))];
               ids.forEach((id) => sourceIds.add(id));

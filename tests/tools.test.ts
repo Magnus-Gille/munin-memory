@@ -1701,6 +1701,40 @@ describe("memory_extract", () => {
     ]));
     expect(statusSuggestion?.status_patch?.next_steps?.join(" ")).not.toMatch(/recency-aware|valid_until|expiring_soon|phase 1/i);
   });
+
+  it("normalizes inline next-step and action-item fragments without leading punctuation", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/grimnir",
+      key: "status",
+      content: "## Phase\nActive\n\n## Current Work\nHeuristic cleanup.\n\n## Blockers\nNone.\n\n## Next Steps\n- Keep shipping",
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_extract", {
+      conversation_text: [
+        "The sprint demo looked good and the release batch is already deployed.",
+        "Next step: exercise the new tools in normal usage and tune heuristics if they prove too Magnus-specific.",
+        "Action item: refresh the docs after the live pass.",
+      ].join(" "),
+      namespace_hint: "projects/grimnir",
+    });
+    const result = parseToolResponse(raw) as {
+      suggestions: Array<{
+        action: string;
+        status_patch?: {
+          next_steps?: string[];
+        };
+      }>;
+    };
+
+    const statusSuggestion = result.suggestions.find((suggestion) => suggestion.action === "memory_update_status");
+    expect(statusSuggestion?.status_patch?.next_steps).toEqual(expect.arrayContaining([
+      "Exercise the new tools in normal usage and tune heuristics if they prove too Magnus-specific",
+      "Refresh the docs after the live pass",
+    ]));
+    expect(statusSuggestion?.status_patch?.next_steps?.some((step) => /^[:;,\-]/.test(step))).toBe(false);
+    expect(statusSuggestion?.status_patch?.next_steps?.join(" ")).not.toMatch(/sprint demo looked good|release batch is already deployed/i);
+  });
 });
 
 describe("memory_narrative", () => {
@@ -1872,6 +1906,47 @@ describe("memory_narrative", () => {
 
     const raw = await callTool("memory_narrative", {
       namespace: "projects/munin-burst",
+    });
+    const result = parseToolResponse(raw) as {
+      signals: Array<{ category: string }>;
+    };
+
+    expect(result.signals.some((signal) => signal.category === "decision_churn")).toBe(false);
+    expect(result.signals.some((signal) => signal.category === "reversal_pattern")).toBe(false);
+  });
+
+  it("does not fire churn or reversal for linear sprint logs plus meta reversal discussion", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/munin-meta",
+      phase: "Active",
+      current_work: "Shipping the heuristic cleanup",
+      blockers: "None.",
+      next_steps: ["Exercise the tools on live data"],
+      lifecycle: "active",
+    });
+    await callTool("memory_log", {
+      namespace: "projects/munin-meta",
+      content: "Decision: shipped the heuristic cleanup batch and pushed it to main.",
+      tags: ["decision"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/munin-meta",
+      content: "Decision: deployed the follow-up fix and verified the service health check.",
+      tags: ["decision"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/munin-meta",
+      content: "Decision: added the regression coverage and synced STATUS after the deploy.",
+      tags: ["decision"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/munin-meta",
+      content: "Correction: the reversal heuristic should ignore logs that mention reopen or resume signals while describing the detector itself.",
+      tags: ["correction"],
+    });
+
+    const raw = await callTool("memory_narrative", {
+      namespace: "projects/munin-meta",
     });
     const result = parseToolResponse(raw) as {
       signals: Array<{ category: string }>;
@@ -2184,6 +2259,33 @@ describe("memory_patterns", () => {
     };
 
     expect(result.patterns.some((pattern) => pattern.kind === "commitment_slip")).toBe(false);
+  });
+
+  it("omits decision_theme when only live-style glue terms repeat", async () => {
+    await callTool("memory_log", {
+      namespace: "projects/munin-live-patterns",
+      content: "Decision: added the full regression pass into the current batch before deploy.",
+      tags: ["decision"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/munin-live-patterns",
+      content: "Decision: added the full status sync into the current batch after deploy.",
+      tags: ["decision"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/munin-live-patterns",
+      content: "Decision: added the full live feedback into the current tools batch.",
+      tags: ["decision"],
+    });
+
+    const raw = await callTool("memory_patterns", {
+      namespace: "projects/munin-live-patterns",
+    });
+    const result = parseToolResponse(raw) as {
+      patterns: Array<{ kind: string }>;
+    };
+
+    expect(result.patterns.some((pattern) => pattern.kind === "decision_theme")).toBe(false);
   });
 });
 
