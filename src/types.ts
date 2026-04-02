@@ -511,6 +511,7 @@ export interface ExtractResponse {
   candidate_namespaces: string[];
   related_entries: ExtractRelatedEntry[];
   capture_warnings: string[];
+  redacted_sources?: RedactedSourcesSummary;
 }
 
 export interface NarrativeSignal {

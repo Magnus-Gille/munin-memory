@@ -17,6 +17,7 @@ import type {
 import { runMigrations } from "./migrations.js";
 import { scanForSecrets } from "./security.js";
 import {
+  CLASSIFICATION_LEVELS,
   compareClassificationLevels,
   FALLBACK_RESTRICTED_CLASSIFICATION,
   listNamespaceClassificationFloors as listNamespaceClassificationFloorsFromPolicy,
@@ -709,6 +710,12 @@ export interface NamespaceCount {
   last_activity_at: string;
 }
 
+function getVisibleClassificationLevels(
+  maxClassification: ClassificationLevel,
+): ClassificationLevel[] {
+  return CLASSIFICATION_LEVELS.filter((level) => compareClassificationLevels(level, maxClassification) <= 0);
+}
+
 export function listNamespaces(db: Database.Database): NamespaceCount[] {
   return db
     .prepare(
@@ -721,6 +728,27 @@ export function listNamespaces(db: Database.Database): NamespaceCount[] {
        ORDER BY namespace`,
     )
     .all() as NamespaceCount[];
+}
+
+export function listNamespacesByClassification(
+  db: Database.Database,
+  maxClassification: ClassificationLevel,
+): NamespaceCount[] {
+  const visibleLevels = getVisibleClassificationLevels(maxClassification);
+  const placeholders = visibleLevels.map(() => "?").join(", ");
+
+  return db
+    .prepare(
+      `SELECT namespace,
+              SUM(CASE WHEN entry_type = 'state' THEN 1 ELSE 0 END) as state_count,
+              SUM(CASE WHEN entry_type = 'log' THEN 1 ELSE 0 END) as log_count,
+              MAX(updated_at) as last_activity_at
+       FROM entries
+       WHERE classification IN (${placeholders})
+       GROUP BY namespace
+       ORDER BY namespace`,
+    )
+    .all(...visibleLevels) as NamespaceCount[];
 }
 
 export interface ListNamespacesResult {
@@ -765,6 +793,27 @@ export interface LogSummary {
   earliest: string | null;
   latest: string | null;
   recent: LogPreview[];
+}
+
+export function summarizeNamespaceLogsByClassification(
+  db: Database.Database,
+  namespace: string,
+  maxClassification: ClassificationLevel,
+): Omit<LogSummary, "recent"> {
+  const visibleLevels = getVisibleClassificationLevels(maxClassification);
+  const placeholders = visibleLevels.map(() => "?").join(", ");
+
+  return (
+    db
+      .prepare(
+        `SELECT COUNT(*) as log_count, MIN(created_at) as earliest, MAX(created_at) as latest
+         FROM entries
+         WHERE namespace = ?
+           AND entry_type = 'log'
+           AND classification IN (${placeholders})`,
+      )
+      .get(namespace, ...visibleLevels) as Omit<LogSummary, "recent">
+  ) ?? { log_count: 0, earliest: null, latest: null };
 }
 
 export function listNamespaceContents(

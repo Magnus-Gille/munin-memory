@@ -10,7 +10,7 @@ import type { Request, Response, NextFunction } from "express";
 import { createServer, IncomingMessage } from "node:http";
 import { timingSafeEqual, randomUUID, createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
-import { initDatabase, nowUTC, pruneRetrievalAnalytics } from "./db.js";
+import { initDatabase, nowUTC, pruneRedactionLog, pruneRetrievalAnalytics } from "./db.js";
 import { registerTools } from "./tools.js";
 import { initEmbeddings, startEmbeddingWorker, stopEmbeddingWorker } from "./embeddings.js";
 import { resolveAccessContext } from "./access.js";
@@ -21,6 +21,16 @@ import { MuninOAuthProvider, type ExtendedAuthInfo } from "./oauth.js";
 function getAnalyticsRetentionDays(): number {
   const val = parseInt(process.env.MUNIN_ANALYTICS_RETENTION_DAYS ?? "90", 10);
   return Number.isFinite(val) && val > 0 ? val : 90;
+}
+
+function getRedactionLogRetentionDays(): number {
+  const val = parseInt(process.env.MUNIN_REDACTION_LOG_RETENTION_DAYS ?? "90", 10);
+  return Number.isFinite(val) && val > 0 ? val : 90;
+}
+
+export function runMaintenancePrune(database: Database.Database): void {
+  pruneRetrievalAnalytics(database, getAnalyticsRetentionDays());
+  pruneRedactionLog(database, getRedactionLogRetentionDays());
 }
 
 // --- Configuration ---
@@ -707,7 +717,7 @@ async function startHttp(database: Database.Database) {
 
   cleanupTimerId = setInterval(() => {
     oauthProvider.cleanupExpired();
-    pruneRetrievalAnalytics(database, getAnalyticsRetentionDays());
+    runMaintenancePrune(database);
   }, OAUTH_CLEANUP_INTERVAL_MS);
 
   httpServer.listen(httpPort, httpHost, () => {
@@ -750,7 +760,7 @@ async function main() {
   activeDb = database;
 
   // Prune old analytics data at startup
-  pruneRetrievalAnalytics(database, getAnalyticsRetentionDays());
+  runMaintenancePrune(database);
 
   // Initialize embedding pipeline (soft dependency — server works without it)
   const embeddingsReady = await initEmbeddings();

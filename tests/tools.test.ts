@@ -820,6 +820,62 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
     expect(result.log_summary.recent[0].content_preview).toBeUndefined();
   });
 
+  it("hides classified-only namespaces and uses visible aggregate counts in memory_list", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/internal",
+      key: "status",
+      content: "Visible internal status",
+    });
+    await callTool("memory_write", {
+      namespace: "clients/lofalk",
+      key: "status",
+      content: "Classified namespace should disappear from top-level list",
+      classification: "client-confidential",
+    });
+    await callTool("memory_write", {
+      namespace: "shared/family/mixed",
+      key: "status",
+      content: "Visible mixed namespace status",
+    });
+    await callTool("memory_log", {
+      namespace: "shared/family/mixed",
+      content: "Visible mixed namespace log",
+    });
+    await callTool("memory_log", {
+      namespace: "shared/family/mixed",
+      content: "Hidden mixed namespace log",
+      classification: "client-confidential",
+    });
+
+    const consumerOwnerCall = makeContextCallTool({
+      ...ownerContext(),
+      transportType: "consumer",
+      maxClassification: "internal",
+    });
+
+    const topLevelRaw = await consumerOwnerCall("memory_list", {});
+    const topLevelResult = parseToolResponse(topLevelRaw) as {
+      total: number;
+      namespaces: Array<{ namespace: string; log_count: number }>;
+    };
+    const listedNamespaces = topLevelResult.namespaces.map((entry) => entry.namespace);
+
+    expect(listedNamespaces).toContain("projects/internal");
+    expect(listedNamespaces).toContain("shared/family/mixed");
+    expect(listedNamespaces).not.toContain("clients/lofalk");
+    expect(topLevelResult.total).toBe(2);
+    expect(topLevelResult.namespaces.find((entry) => entry.namespace === "shared/family/mixed")?.log_count).toBe(1);
+
+    const detailRaw = await consumerOwnerCall("memory_list", { namespace: "shared/family/mixed" });
+    const detailResult = parseToolResponse(detailRaw) as {
+      log_summary: { log_count: number; recent: Array<Record<string, unknown>> };
+    };
+
+    expect(detailResult.log_summary.log_count).toBe(1);
+    expect(detailResult.log_summary.recent).toHaveLength(2);
+    expect(detailResult.log_summary.recent.some((entry) => entry.redacted === true)).toBe(true);
+  });
+
   it("redacts audit detail in memory_history for classified entries", async () => {
     await callTool("memory_write", {
       namespace: "clients/lofalk",
@@ -850,6 +906,40 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
       expect(entry.classification).toBe("client-confidential");
     }
     expect(result.entries.some((entry) => String(entry.detail ?? "").includes("should not leak"))).toBe(false);
+  });
+
+  it("fails closed for deleted-entry audit history and logs the redaction", async () => {
+    await callTool("memory_write", {
+      namespace: "clients/lofalk",
+      key: "status",
+      content: "Deleted audit detail should not leak after source removal",
+      classification: "client-confidential",
+    });
+    db.prepare(
+      "DELETE FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'",
+    ).run("clients/lofalk", "status");
+
+    const consumerOwnerCall = makeContextCallTool(
+      {
+        ...ownerContext(),
+        transportType: "consumer",
+        maxClassification: "internal",
+      },
+      "history-deleted-source-session",
+    );
+
+    const raw = await consumerOwnerCall("memory_history", { namespace: "clients/lofalk" });
+    const result = parseToolResponse(raw) as { entries: Array<Record<string, unknown>> };
+
+    expect(result.entries.length).toBeGreaterThan(0);
+    expect(result.entries.every((entry) => entry.redacted === true)).toBe(true);
+    expect(result.entries.every((entry) => entry.detail === null)).toBe(true);
+    expect(result.entries.every((entry) => entry.classification === "client-restricted")).toBe(true);
+
+    const redactionCount = db.prepare(
+      "SELECT COUNT(*) AS count FROM redaction_log WHERE tool_name = 'memory_history' AND entry_namespace = ?",
+    ).get("clients/lofalk") as { count: number };
+    expect(redactionCount.count).toBeGreaterThan(0);
   });
 });
 
@@ -913,6 +1003,43 @@ describe("Librarian Pattern B enforcement for derived tools", () => {
     expect(result.redacted_sources?.namespaces).toContain("clients/lofalk");
   });
 
+  it("hides classified-only namespaces from orient namespace overview and missing-status synthesis", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/visible-no-status",
+      key: "notes",
+      content: "Visible project notes without a status entry",
+    });
+    await callTool("memory_write", {
+      namespace: "projects/private-no-status",
+      key: "notes",
+      content: "Hidden project notes without a status entry",
+      classification: "client-confidential",
+    });
+
+    const consumerOwnerCall = makeContextCallTool({
+      ...ownerContext(),
+      transportType: "consumer",
+      maxClassification: "internal",
+    });
+
+    const raw = await consumerOwnerCall("memory_orient", { include_namespaces: true });
+    const result = parseToolResponse(raw) as {
+      namespaces: Array<{ namespace: string }>;
+      maintenance_needed: Array<{ namespace: string; issue: string }>;
+    };
+
+    expect(result.namespaces.map((entry) => entry.namespace)).toContain("projects/visible-no-status");
+    expect(result.namespaces.map((entry) => entry.namespace)).not.toContain("projects/private-no-status");
+    expect(result.maintenance_needed).toContainEqual(expect.objectContaining({
+      namespace: "projects/visible-no-status",
+      issue: "missing_status",
+    }));
+    expect(result.maintenance_needed).not.toContainEqual(expect.objectContaining({
+      namespace: "projects/private-no-status",
+      issue: "missing_status",
+    }));
+  });
+
   it("returns partial or empty resume packs when all matching sources are filtered", async () => {
     await callTool("memory_update_status", {
       namespace: "projects/client-rollout",
@@ -953,6 +1080,71 @@ describe("Librarian Pattern B enforcement for derived tools", () => {
     expect(result.redacted_sources).toMatchObject({ count: expect.any(Number) });
     expect(result.redacted_sources?.count).toBeGreaterThan(0);
     expect(result.redacted_sources?.namespaces).toContain("projects/client-rollout");
+  });
+
+  it("does not infer hidden namespaces in memory_resume from filtered tracked statuses", async () => {
+    await callTool("memory_update_status", {
+      namespace: "clients/lofalk",
+      phase: "Active",
+      current_work: "Hidden client rollout",
+      blockers: "None.",
+      next_steps: ["Keep this private"],
+      lifecycle: "active",
+      classification: "client-confidential",
+    });
+
+    const consumerOwnerCall = makeContextCallTool({
+      ...ownerContext(),
+      transportType: "consumer",
+      maxClassification: "internal",
+    });
+
+    const raw = await consumerOwnerCall("memory_resume", { project: "lofalk" });
+    const result = parseToolResponse(raw) as {
+      target_namespace?: string;
+      items: Array<{ namespace: string }>;
+      redacted_sources?: { count: number; namespaces?: string[] };
+    };
+
+    expect(result.target_namespace).toBe("projects/lofalk");
+    expect(result.items).toHaveLength(0);
+    expect(result.redacted_sources?.count).toBeGreaterThan(0);
+    expect(result.redacted_sources?.namespaces).toContain("clients/lofalk");
+  });
+
+  it("filters hidden scope inference and related entries in memory_extract", async () => {
+    await callTool("memory_update_status", {
+      namespace: "clients/lofalk",
+      phase: "Active",
+      current_work: "Hidden extract target",
+      blockers: "None.",
+      next_steps: ["Keep private notes in this namespace"],
+      lifecycle: "active",
+      classification: "client-confidential",
+    });
+
+    const consumerOwnerCall = makeContextCallTool({
+      ...ownerContext(),
+      transportType: "consumer",
+      maxClassification: "internal",
+    });
+
+    const raw = await consumerOwnerCall("memory_extract", {
+      conversation_text: "We decided to keep the billing notes private for now.",
+      project_hint: "lofalk",
+    });
+    const result = parseToolResponse(raw) as {
+      suggestions: Array<{ namespace: string }>;
+      candidate_namespaces: string[];
+      related_entries: Array<unknown>;
+      redacted_sources?: { count: number; namespaces?: string[] };
+    };
+
+    expect(result.candidate_namespaces).not.toContain("clients/lofalk");
+    expect(result.related_entries).toHaveLength(0);
+    expect(result.suggestions.every((suggestion) => suggestion.namespace !== "clients/lofalk")).toBe(true);
+    expect(result.redacted_sources?.count).toBeGreaterThan(0);
+    expect(result.redacted_sources?.namespaces).toContain("clients/lofalk");
   });
 
   it("does not derive commitments from filtered source entries on downgraded transports", async () => {
@@ -1124,6 +1316,34 @@ describe("Librarian Pattern B enforcement for derived tools", () => {
     expect(result.message).toBe("No attention items are visible on this connection.");
     expect(result.redacted_sources?.count).toBeGreaterThan(0);
     expect(result.redacted_sources?.namespaces).toContain("projects/private-attention");
+  });
+
+  it("does not surface classified-only namespaces as missing-status attention items", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/private-no-status",
+      key: "notes",
+      content: "Hidden namespace notes",
+      classification: "client-confidential",
+    });
+
+    const consumerOwnerCall = makeContextCallTool({
+      ...ownerContext(),
+      transportType: "consumer",
+      maxClassification: "internal",
+    });
+
+    const raw = await consumerOwnerCall("memory_attention", {
+      namespace_prefix: "projects/private-no-status",
+    });
+    const result = parseToolResponse(raw) as {
+      items: Array<{ namespace: string; category: string }>;
+    };
+
+    expect(result.items).toHaveLength(0);
+    expect(result.items).not.toContainEqual(expect.objectContaining({
+      namespace: "projects/private-no-status",
+      category: "missing_status",
+    }));
   });
 });
 
