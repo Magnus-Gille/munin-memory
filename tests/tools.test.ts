@@ -37,6 +37,43 @@ function parseToolResponse(response: unknown): unknown {
   return JSON.parse(resp.content[0].text);
 }
 
+async function seedRetrospectiveCommitmentRow(namespace: string, content: string, suffix: string) {
+  const logRaw = await callTool("memory_log", {
+    namespace,
+    content,
+    tags: ["milestone"],
+  });
+  const logResult = parseToolResponse(logRaw) as { id: string };
+  const sourceTimestamp = "2026-03-05T12:00:00.000Z";
+  const dueDate = content.match(/\d{4}-\d{2}-\d{2}/)?.[0];
+  if (!dueDate) {
+    throw new Error(`Missing due date in test content: ${content}`);
+  }
+
+  db.prepare("UPDATE entries SET created_at = ?, updated_at = ? WHERE id = ?").run(
+    sourceTimestamp,
+    sourceTimestamp,
+    logResult.id,
+  );
+  db.prepare(
+    `INSERT INTO commitments
+       (id, namespace, source_entry_id, source_type, source_fingerprint, text, due_at, status, confidence, created_at, updated_at, resolved_at)
+     VALUES (?, ?, ?, 'explicit_dated_commitment', ?, ?, ?, 'open', ?, ?, ?, NULL)`,
+  ).run(
+    `stale-${suffix}`,
+    namespace,
+    logResult.id,
+    `explicit_dated_commitment:${suffix}`,
+    content,
+    `${dueDate}T23:59:59.000Z`,
+    0.78,
+    "2026-04-01T10:00:00.000Z",
+    "2026-04-01T10:00:00.000Z",
+  );
+
+  return { entryId: logResult.id, commitmentId: `stale-${suffix}` };
+}
+
 beforeEach(() => {
   cleanupTestDb();
   db = initDatabase(TEST_DB_PATH);
@@ -1626,6 +1663,42 @@ describe("memory_extract", () => {
     const listResult = parseToolResponse(listRaw) as { namespaces?: Array<unknown> };
     expect(listResult.namespaces ?? []).toHaveLength(0);
   });
+
+  it("keeps dense sprint recap prose out of next steps", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/grimnir",
+      key: "status",
+      content: "## Phase\nActive\n\n## Current Work\nSprint follow-through.\n\n## Blockers\nNone.\n\n## Next Steps\n- Keep shipping",
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_extract", {
+      conversation_text: [
+        "Phase 1 is now complete in the worktree. The batch adds conservative recency-aware reranking, valid_until soft expiry, expired-entry suppression, and expiring_soon / expired signals.",
+        "I then started Phase 2 with a first memory_resume implementation.",
+        "Next clean move is to commit, push, and deploy this batch, then continue with memory_extract.",
+      ].join("\n\n"),
+      namespace_hint: "projects/grimnir",
+    });
+    const result = parseToolResponse(raw) as {
+      suggestions: Array<{
+        action: string;
+        status_patch?: {
+          lifecycle?: string;
+          next_steps?: string[];
+        };
+      }>;
+    };
+
+    const statusSuggestion = result.suggestions.find((suggestion) => suggestion.action === "memory_update_status");
+    expect(statusSuggestion).toBeTruthy();
+    expect(statusSuggestion?.status_patch?.lifecycle).toBeUndefined();
+    expect(statusSuggestion?.status_patch?.next_steps).toEqual(expect.arrayContaining([
+      "Commit, push, and deploy this batch",
+      "Continue with memory_extract",
+    ]));
+    expect(statusSuggestion?.status_patch?.next_steps?.join(" ")).not.toMatch(/recency-aware|valid_until|expiring_soon|phase 1/i);
+  });
 });
 
 describe("memory_narrative", () => {
@@ -1755,6 +1828,56 @@ describe("memory_narrative", () => {
     expect(result.sources.length).toBeGreaterThan(0);
     expect(result.sources.some((source) => source.kind === "entry")).toBe(true);
   });
+
+  it("does not treat a normal release burst as churn or reversal", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/munin-burst",
+      phase: "Active",
+      current_work: "Preparing release",
+      blockers: "None.",
+      next_steps: ["Deploy the batch"],
+      lifecycle: "active",
+    });
+    await callTool("memory_update_status", {
+      namespace: "projects/munin-burst",
+      current_work: "Release pushed to main",
+      blockers: "None.",
+      next_steps: ["Deploy the batch"],
+      lifecycle: "active",
+    });
+    await callTool("memory_update_status", {
+      namespace: "projects/munin-burst",
+      current_work: "Post-deploy verification",
+      blockers: "None.",
+      next_steps: ["Update the status"],
+      lifecycle: "active",
+    });
+    await callTool("memory_log", {
+      namespace: "projects/munin-burst",
+      content: "Milestone: pushed the release candidate to main.",
+      tags: ["milestone"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/munin-burst",
+      content: "Milestone: deployed the batch and the service restarted cleanly after deploy.",
+      tags: ["milestone"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/munin-burst",
+      content: "Milestone: synced the project status after deploy.",
+      tags: ["milestone"],
+    });
+
+    const raw = await callTool("memory_narrative", {
+      namespace: "projects/munin-burst",
+    });
+    const result = parseToolResponse(raw) as {
+      signals: Array<{ category: string }>;
+    };
+
+    expect(result.signals.some((signal) => signal.category === "decision_churn")).toBe(false);
+    expect(result.signals.some((signal) => signal.category === "reversal_pattern")).toBe(false);
+  });
 });
 
 describe("memory_commitments", () => {
@@ -1858,6 +1981,39 @@ describe("memory_commitments", () => {
     expect(result.overdue).toHaveLength(0);
     expect(result.completed_recently).toHaveLength(0);
   });
+
+  it("re-syncs stale retrospective rows even when since skips the source entry", async () => {
+    await seedRetrospectiveCommitmentRow(
+      "projects/forseti",
+      "Completed the Codex usability improvement (2026-03-05).",
+      "forseti-1",
+    );
+    await seedRetrospectiveCommitmentRow(
+      "projects/forseti",
+      "Public repo security audit completed (2026-03-15).",
+      "forseti-2",
+    );
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/forseti",
+      since: "2026-04-01T00:00:00.000Z",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<unknown>;
+      at_risk: Array<unknown>;
+      overdue: Array<unknown>;
+    };
+
+    expect(result.open).toHaveLength(0);
+    expect(result.at_risk).toHaveLength(0);
+    expect(result.overdue).toHaveLength(0);
+
+    const rows = db.prepare("SELECT id, status FROM commitments WHERE namespace = 'projects/forseti' ORDER BY id").all() as Array<{ id: string; status: string }>;
+    expect(rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "stale-forseti-1", status: "cancelled" }),
+      expect.objectContaining({ id: "stale-forseti-2", status: "cancelled" }),
+    ]));
+  });
 });
 
 describe("memory_patterns", () => {
@@ -1937,6 +2093,56 @@ describe("memory_patterns", () => {
 
     expect(result.patterns.some((pattern) => pattern.kind === "commitment_slip")).toBe(false);
   });
+
+  it("does not derive commitment_slip from stale retrospective rows in since-scoped views", async () => {
+    await seedRetrospectiveCommitmentRow(
+      "projects/bragi",
+      "Completed the Codex usability improvement (2026-03-05).",
+      "bragi-1",
+    );
+    await seedRetrospectiveCommitmentRow(
+      "projects/bragi",
+      "Public repo security audit completed (2026-03-15).",
+      "bragi-2",
+    );
+
+    const raw = await callTool("memory_patterns", {
+      namespace: "projects/bragi",
+      since: "2026-04-01T00:00:00.000Z",
+    });
+    const result = parseToolResponse(raw) as {
+      patterns: Array<{ kind: string }>;
+    };
+
+    expect(result.patterns.some((pattern) => pattern.kind === "commitment_slip")).toBe(false);
+  });
+
+  it("filters generic engineering filler out of decision themes", async () => {
+    await callTool("memory_log", {
+      namespace: "projects/echo",
+      content: "Decision: implementation work and project status need review with the current deployment.",
+      tags: ["decision"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/echo",
+      content: "Decision: review the implementation update with the project status before the next deployment.",
+      tags: ["decision"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/echo",
+      content: "Decision: implementation details from the current project review are still about deployment status.",
+      tags: ["decision"],
+    });
+
+    const raw = await callTool("memory_patterns", {
+      namespace: "projects/echo",
+    });
+    const result = parseToolResponse(raw) as {
+      patterns: Array<{ kind: string; summary: string }>;
+    };
+
+    expect(result.patterns.some((pattern) => pattern.kind === "decision_theme")).toBe(false);
+  });
 });
 
 describe("memory_handoff", () => {
@@ -2004,6 +2210,37 @@ describe("memory_handoff", () => {
 
     const raw = await callTool("memory_handoff", {
       namespace: "projects/vidar",
+    });
+    const result = parseToolResponse(raw) as {
+      open_loops: string[];
+    };
+
+    expect(result.open_loops.some((loop) => /overdue commitment/i.test(loop))).toBe(false);
+  });
+
+  it("does not surface overdue loops from stale retrospective rows in since-scoped views", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/vidar-since",
+      phase: "Active",
+      current_work: "Post-release cleanup",
+      blockers: "None.",
+      next_steps: [],
+      lifecycle: "active",
+    });
+    await seedRetrospectiveCommitmentRow(
+      "projects/vidar-since",
+      "Completed the Codex usability improvement (2026-03-05).",
+      "vidar-1",
+    );
+    await seedRetrospectiveCommitmentRow(
+      "projects/vidar-since",
+      "Public repo security audit completed (2026-03-15).",
+      "vidar-2",
+    );
+
+    const raw = await callTool("memory_handoff", {
+      namespace: "projects/vidar-since",
+      since: "2026-04-01T00:00:00.000Z",
     });
     const result = parseToolResponse(raw) as {
       open_loops: string[];

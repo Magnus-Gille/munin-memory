@@ -371,6 +371,54 @@ const RELAXED_QUERY_STOPWORDS = new Set([
   "a", "an", "and", "are", "for", "how", "i", "important", "is", "it",
   "my", "myself", "of", "or", "should", "the", "to", "what",
 ]);
+const PATTERN_GENERIC_TERMS = new Set([
+  "after",
+  "around",
+  "batch",
+  "before",
+  "build",
+  "current",
+  "decision",
+  "decisions",
+  "deploy",
+  "deployed",
+  "deployment",
+  "docs",
+  "from",
+  "implementation",
+  "implemented",
+  "memory",
+  "phase",
+  "project",
+  "projects",
+  "release",
+  "released",
+  "review",
+  "source",
+  "sources",
+  "status",
+  "sync",
+  "synced",
+  "tests",
+  "update",
+  "updated",
+  "using",
+  "with",
+  "work",
+  "working",
+]);
+const EXTRACT_ACTION_STEP_CUE =
+  /\b(next step(?:s)?|action item(?:s)?|todo|follow up|follow-up|we need to|need to|needs to|we should|should|must|plan to|planned to|we will|will|next clean move|next move|continue with|retry|before|by)\b/i;
+const EXTRACT_IMPERATIVE_STEP_PREFIX =
+  /^(?:next(?:\s+clean)?\s+move(?:\s+is)?(?:\s+to)?|next step(?:s)?(?:\s+is)?(?:\s+to)?|action item(?:s)?(?:\s+is)?(?:\s+to)?|todo:?|follow up:?|follow-up:?|then\s+)?(?:add|clear|commit|continue|deploy|document|draft|fix|implement|investigate|prepare|publish|push|refresh|rerun|retry|review|ship|split|sync|update|write|check)\b/i;
+const EXTRACT_STEP_PREFIX =
+  /^(?:next(?:\s+clean)?\s+move(?:\s+is)?(?:\s+to)?|next step(?:s)?(?:\s+is)?(?:\s+to)?|action item(?:s)?(?:\s+is)?(?:\s+to)?|todo:?|follow up:?|follow-up:?|we need to|need to|needs to|we should|should|we will|will|plan to|planned to)\s*/i;
+const EXTRACT_RECAP_LANGUAGE =
+  /\b(completed|deployed|implemented|landed|passed|pushed|released|shipped|started|synced|updated|verified)\b/i;
+const EXTRACT_FUTURE_LANGUAGE =
+  /\b(will|need to|needs to|should|must|plan to|planned to|next step|next clean move|todo|action item|follow up|follow-up|continue with|retry|before|by)\b/i;
+const EXTRACT_COMPLETED_LIFECYCLE =
+  /\b(project|repository|repo|engagement|client work)\b.*\b(completed|archived|wrapped up|finished)\b|\b(completed|archived|wrapped up|finished)\b.*\b(project|repository|repo|engagement|client work)\b/i;
 const ORIENTATION_QUERY_PHRASES = [
   "orient me",
   "orientation",
@@ -1201,6 +1249,13 @@ function isDecisionLikeLog(entry: Entry): boolean {
   return /\b(decided|decision|milestone|blocker|resolved|discovered|corrected)\b/i.test(entry.content);
 }
 
+function isStrictDecisionLikeLog(entry: Entry): boolean {
+  if (entry.entry_type !== "log") return false;
+  const tags = parseTags(entry.tags);
+  if (tags.includes("decision")) return true;
+  return /\b(decided|decision|agreed to|settled on|chose to)\b/i.test(entry.content);
+}
+
 function buildResumeLogCandidate(
   entry: Entry,
   scope: string | undefined,
@@ -1290,6 +1345,59 @@ function normalizeCompareText(value: string): string {
   return value.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
+function splitExtractFragments(line: string): string[] {
+  return line
+    .split("\n")
+    .flatMap((segment) => segment.split(/(?<=[.!?])\s+/))
+    .flatMap((segment) => segment.split(/\s*;\s*/))
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0);
+}
+
+function normalizeExtractStep(text: string): string {
+  const normalized = text
+    .replace(/^[-*]\s+/, "")
+    .replace(/^\d+\.\s+/, "")
+    .replace(EXTRACT_STEP_PREFIX, "")
+    .replace(/^to\s+/i, "")
+    .replace(/[.]+$/, "")
+    .trim();
+  if (!normalized) return "";
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
+function extractActionableNextSteps(line: string, force = false): string[] {
+  return line
+    .split(/\s*(?:,?\s+then\s+|;\s*)/i)
+    .map((fragment) => fragment.trim())
+    .filter((fragment) => fragment.length > 0)
+    .flatMap((fragment) => {
+      if (!force && looksLikeRetrospectiveCompletion(fragment)) return [];
+      if (!force && EXTRACT_RECAP_LANGUAGE.test(fragment) && !EXTRACT_FUTURE_LANGUAGE.test(fragment)) {
+        return [];
+      }
+      if (!force && !EXTRACT_ACTION_STEP_CUE.test(fragment) && !EXTRACT_IMPERATIVE_STEP_PREFIX.test(fragment)) {
+        return [];
+      }
+      const normalized = normalizeExtractStep(fragment);
+      return normalized ? [normalized] : [];
+    });
+}
+
+function inferExtractLifecycle(line: string): ExtractSignals["lifecycle"] | undefined {
+  if (/^lifecycle:/i.test(line)) {
+    const value = line.replace(/^lifecycle:\s*/i, "").trim().toLowerCase();
+    if (value === "active" || value === "blocked" || value === "completed" || value === "stopped" || value === "maintenance" || value === "archived") {
+      return value;
+    }
+  }
+  if (/\b(paused|parked|on hold|stopped)\b/i.test(line)) return "stopped";
+  if (/\b(active again|back in progress|resumed)\b/i.test(line)) return "active";
+  if (/\b(blocked|waiting on|depends on)\b/i.test(line)) return "blocked";
+  if (EXTRACT_COMPLETED_LIFECYCLE.test(line)) return "completed";
+  return undefined;
+}
+
 function extractConversationSignals(conversationText: string): ExtractSignals {
   const lines = conversationText
     .split("\n")
@@ -1316,13 +1424,10 @@ function extractConversationSignals(conversationText: string): ExtractSignals {
     if (/\b(today|tomorrow|yesterday|by friday|by monday|by tuesday|by wednesday|by thursday|by saturday|by sunday|next week|next month)\b/i.test(line)) {
       hasRelativeDates = true;
     }
-
-    const lowerLine = line.toLowerCase();
-
     if (/^next steps?:/i.test(line) || /^action items?:/i.test(line) || /^todo:?/i.test(line)) {
       section = "next_steps";
       const remainder = line.replace(/^(next steps?|action items?|todo):\s*/i, "").trim();
-      if (remainder) nextSteps.push(remainder);
+      if (remainder) nextSteps.push(...extractActionableNextSteps(remainder, true));
       continue;
     }
     if (/^decisions?:/i.test(line)) {
@@ -1353,7 +1458,7 @@ function extractConversationSignals(conversationText: string): ExtractSignals {
 
     const isBullet = /^[-*]\s+/.test(rawLine.trim()) || /^\d+\.\s+/.test(rawLine.trim());
     if (isBullet && section === "next_steps") {
-      nextSteps.push(line);
+      nextSteps.push(...extractActionableNextSteps(line, true));
       continue;
     }
     if (isBullet && section === "decisions") {
@@ -1365,31 +1470,25 @@ function extractConversationSignals(conversationText: string): ExtractSignals {
       continue;
     }
 
-    if (/\b(decided|decision:|agreed to|settled on|chose to)\b/i.test(line)) {
-      decisions.push(line);
-    }
-    if (/\b(next step|action item|todo|follow up|we need to|need to)\b/i.test(line)) {
-      nextSteps.push(line.replace(/^(next step|action item|todo):\s*/i, "").trim());
-    }
-    if (/\b(i prefer|i don't like|i do not like|please remember|remember that|i always|i never)\b/i.test(line)) {
-      preferences.push(line);
-    }
+    for (const fragment of splitExtractFragments(line)) {
+      if (/\b(decided|decision:|agreed to|settled on|chose to)\b/i.test(fragment)) {
+        decisions.push(fragment);
+      }
+      nextSteps.push(...extractActionableNextSteps(fragment));
+      if (/\b(i prefer|i don't like|i do not like|please remember|remember that|i always|i never)\b/i.test(fragment)) {
+        preferences.push(fragment);
+      }
 
-    if (!currentWork && /\b(current work|working on|in progress)\b/i.test(line)) {
-      currentWork = line;
-    }
-    if (!blockers && /\b(blocked|waiting on|depends on)\b/i.test(lowerLine)) {
-      blockers = line;
-      lifecycle = "blocked";
-    }
-    if (!lifecycle && /\b(completed|done|shipped|finished)\b/i.test(lowerLine)) {
-      lifecycle = "completed";
-    }
-    if (!lifecycle && /\b(paused|parked|on hold|stopped)\b/i.test(lowerLine)) {
-      lifecycle = "stopped";
-    }
-    if (!lifecycle && /\b(active again|back in progress|resumed)\b/i.test(lowerLine)) {
-      lifecycle = "active";
+      if (!currentWork && /\b(current work|working on|in progress)\b/i.test(fragment)) {
+        currentWork = fragment;
+      }
+      if (!blockers && /\b(blocked|waiting on|depends on)\b/i.test(fragment.toLowerCase())) {
+        blockers = fragment;
+        lifecycle = "blocked";
+      }
+      if (!lifecycle) {
+        lifecycle = inferExtractLifecycle(fragment);
+      }
     }
   }
 
@@ -1582,7 +1681,10 @@ function buildExtractSuggestions(
   if (signals.phase) statusPatch.phase = signals.phase;
   if (signals.currentWork) statusPatch.current_work = signals.currentWork;
   if (signals.blockers) statusPatch.blockers = signals.blockers;
-  if (signals.nextSteps.length > 0) statusPatch.next_steps = signals.nextSteps.filter((line) => !dedupeLine(line));
+  if (signals.nextSteps.length > 0) {
+    const dedupedSteps = signals.nextSteps.filter((line) => !dedupeLine(line));
+    if (dedupedSteps.length > 0) statusPatch.next_steps = dedupedSteps;
+  }
   if (signals.lifecycle) statusPatch.lifecycle = signals.lifecycle;
 
   if (isTracked && (
@@ -1644,7 +1746,9 @@ function buildExtractSuggestions(
 const NARRATIVE_LONG_GAP_DAYS = 14;
 const NARRATIVE_BLOCKER_DAYS = 3;
 const NARRATIVE_DECISION_CHURN_THRESHOLD = 3;
-const NARRATIVE_REVERSAL_KEYWORDS = /\b(reopen|reopened|resume|resumed|paused|parked|on hold|unblocked|rolled back|restarted|active again)\b/i;
+const NARRATIVE_REVERSAL_KEYWORDS = /\b(reopen|reopened|resume|resumed|paused|parked|on hold|unblocked|rolled back|active again)\b/i;
+const NARRATIVE_STRONG_REVERSAL_RESUME = /\b(reopen|reopened|resume|resumed|unblocked|active again)\b/i;
+const NARRATIVE_STRONG_REVERSAL_PAUSE = /\b(pause|pausing|paused|parked|parking|on hold|rolled back|rollback)\b/i;
 
 function getLifecycleFromEntry(entry: Entry): string | undefined {
   const tags = parseTags(entry.tags);
@@ -1768,7 +1872,7 @@ function buildNarrativeSignals(
     }
   }
 
-  const decisionLogs = logs.filter((entry) => isDecisionLikeLog(entry));
+  const decisionLogs = logs.filter((entry) => isStrictDecisionLikeLog(entry));
   if (decisionLogs.length >= NARRATIVE_DECISION_CHURN_THRESHOLD) {
     const newest = decisionLogs[0];
     const oldest = decisionLogs.at(-1)!;
@@ -1784,14 +1888,20 @@ function buildNarrativeSignals(
   }
 
   const reversalLogs = logs.filter((entry) => NARRATIVE_REVERSAL_KEYWORDS.test(entry.content));
+  const strongReversalLogs = reversalLogs.filter((entry) =>
+    /\b(reopened|rolled back)\b/i.test(entry.content) ||
+    (NARRATIVE_STRONG_REVERSAL_RESUME.test(entry.content) && NARRATIVE_STRONG_REVERSAL_PAUSE.test(entry.content))
+  );
   const statusHistory = history.filter((entry) => entry.key === "status" && ((entry.action as string) === "write" || (entry.action as string) === "update" || (entry.action as string) === "patch"));
-  if (reversalLogs.length >= 2 || (reversalLogs.length >= 1 && statusHistory.length >= 3)) {
+  if (strongReversalLogs.length >= 1 || reversalLogs.length >= 2) {
     pushSignal({
       category: "reversal_pattern",
       severity: reversalLogs.length >= 2 ? "medium" : "low",
       summary: `Recent logs and status changes suggest reopen or reversal behavior in ${namespace}.`,
-      reason: "Detected reversal-style language in logs together with repeated status mutation activity.",
-      source_entry_ids: reversalLogs.slice(0, 3).map((entry) => entry.id),
+      reason: strongReversalLogs.length >= 1
+        ? "Detected explicit resume/pause or reopen language in recent logs."
+        : "Detected repeated reversal-style language in recent logs.",
+      source_entry_ids: (strongReversalLogs.length >= 1 ? strongReversalLogs : reversalLogs).slice(0, 3).map((entry) => entry.id),
       source_audit_ids: statusHistory.slice(0, 3).map((entry) => entry.id),
     });
   }
@@ -1984,6 +2094,43 @@ function syncCommitmentsForScope(
   }
 }
 
+function listFreshCommitmentRows(
+  db: Database.Database,
+  ctx: AccessContext,
+  options: {
+    namespace?: string;
+    since?: string;
+    limit: number;
+    includeResolved?: boolean;
+  },
+): CommitmentRow[] {
+  const { namespace, since, limit, includeResolved = true } = options;
+  syncCommitmentsForScope(db, ctx, namespace, since);
+
+  const refreshCandidates = listCommitments(db, {
+    namespace,
+    since,
+    limit,
+    includeResolved: true,
+  }).filter((row) => canRead(ctx, row.namespace));
+
+  const seenSourceEntries = new Set<string>();
+  for (const row of refreshCandidates) {
+    if (seenSourceEntries.has(row.source_entry_id)) continue;
+    seenSourceEntries.add(row.source_entry_id);
+    const entry = getById(db, row.source_entry_id);
+    if (!entry || !canRead(ctx, entry.namespace)) continue;
+    syncCommitmentsForEntry(db, entry.id, extractCommitmentsFromEntry(entry));
+  }
+
+  return listCommitments(db, {
+    namespace,
+    since,
+    limit,
+    includeResolved,
+  }).filter((row) => canRead(ctx, row.namespace));
+}
+
 function buildCommitmentItem(row: CommitmentRow, reason?: string): CommitmentItem {
   return {
     id: row.id,
@@ -2078,7 +2225,13 @@ function extractPatternTerms(text: string): string[] {
         .toLowerCase()
         .split(/[^a-z0-9_-]+/i)
         .map((term) => term.trim())
-        .filter((term) => term.length >= 4 && !RELAXED_QUERY_STOPWORDS.has(term) && !/^\d+$/.test(term) && !/^\d{4}-\d{2}-\d{2}$/.test(term)),
+        .filter((term) =>
+          term.length >= 4 &&
+          !RELAXED_QUERY_STOPWORDS.has(term) &&
+          !PATTERN_GENERIC_TERMS.has(term) &&
+          !/^\d+$/.test(term) &&
+          !/^\d{4}-\d{2}-\d{2}$/.test(term),
+        ),
     ),
   ];
 }
@@ -3457,15 +3610,13 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               }
             }
 
-            syncCommitmentsForScope(db, ctx, namespace, normalizedSince);
-
             const trackedStatusByNamespace = getTrackedStatusAssessmentByNamespace(db);
-            const rows = listCommitments(db, {
+            const rows = listFreshCommitmentRows(db, ctx, {
               namespace,
               since: normalizedSince,
               limit: Math.max(limit * 8, 80),
               includeResolved: true,
-            }).filter((row) => canRead(ctx, row.namespace));
+            });
 
             return okResult("commitments", classifyCommitments(rows, trackedStatusByNamespace, limit));
           }
@@ -3501,8 +3652,6 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               }
             }
 
-            syncCommitmentsForScope(db, ctx, namespace, normalizedSince);
-
             const topicNeedle = normalizeCompareText(topic ?? "");
             const allEntries = listEntriesForDerivation(db, {
               namespace,
@@ -3517,7 +3666,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             const heuristics: HeuristicItem[] = [];
             const sourceIds = new Set<string>();
 
-            const decisionLogs = candidateEntries.filter((entry) => isDecisionLikeLog(entry));
+            const decisionLogs = candidateEntries.filter((entry) => isStrictDecisionLikeLog(entry));
             const termSources = new Map<string, Set<string>>();
             for (const entry of decisionLogs) {
               for (const term of extractPatternTerms(entry.content)) {
@@ -3551,12 +3700,12 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             }
 
             const trackedStatusByNamespace = getTrackedStatusAssessmentByNamespace(db);
-            const commitmentRows = listCommitments(db, {
+            const commitmentRows = listFreshCommitmentRows(db, ctx, {
               namespace,
               since: normalizedSince,
               limit: 200,
               includeResolved: true,
-            }).filter((row) => canRead(ctx, row.namespace));
+            });
 
             const undatedOpen = commitmentRows.filter((row) => row.status === "open" && !row.due_at);
             const undatedSources = new Set(undatedOpen.map((row) => row.source_entry_id));
@@ -3649,8 +3798,6 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               });
             }
 
-            syncCommitmentsForScope(db, ctx, namespace, normalizedSince);
-
             const allEntries = listEntriesForDerivation(db, {
               namespace,
               since: normalizedSince,
@@ -3667,12 +3814,12 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               since: normalizedSince,
               limit: Math.max(limit * 4, 20),
             }).entries.filter((entry) => canRead(ctx, entry.namespace));
-            const commitmentRows = listCommitments(db, {
+            const commitmentRows = listFreshCommitmentRows(db, ctx, {
               namespace,
               since: normalizedSince,
               limit: 200,
               includeResolved: true,
-            }).filter((row) => canRead(ctx, row.namespace));
+            });
             const trackedStatusByNamespace = getTrackedStatusAssessmentByNamespace(db);
             const currentState = buildHandoffCurrentState(namespace, statusEntry, allEntries);
 
