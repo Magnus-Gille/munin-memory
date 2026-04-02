@@ -1830,6 +1830,34 @@ describe("memory_commitments", () => {
     }));
     expect(result.overdue[0].due_at).toContain("2026-03-01");
   });
+
+  it("does not treat dated completion records as open or overdue commitments", async () => {
+    await callTool("memory_log", {
+      namespace: "projects/forseti",
+      content: "Completed the Codex usability improvement (2026-03-05).",
+      tags: ["milestone"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/forseti",
+      content: "Public repo security audit completed (2026-03-15).",
+      tags: ["milestone"],
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/forseti",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<unknown>;
+      at_risk: Array<unknown>;
+      overdue: Array<unknown>;
+      completed_recently: Array<unknown>;
+    };
+
+    expect(result.open).toHaveLength(0);
+    expect(result.at_risk).toHaveLength(0);
+    expect(result.overdue).toHaveLength(0);
+    expect(result.completed_recently).toHaveLength(0);
+  });
 });
 
 describe("memory_patterns", () => {
@@ -1887,6 +1915,28 @@ describe("memory_patterns", () => {
     expect(result.patterns).toHaveLength(0);
     expect(result.heuristics).toHaveLength(0);
   });
+
+  it("does not derive commitment_slip only from dated completion logs", async () => {
+    await callTool("memory_log", {
+      namespace: "projects/bragi",
+      content: "Completed the Codex usability improvement (2026-03-05).",
+      tags: ["milestone"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/bragi",
+      content: "Public repo security audit completed (2026-03-15).",
+      tags: ["milestone"],
+    });
+
+    const raw = await callTool("memory_patterns", {
+      namespace: "projects/bragi",
+    });
+    const result = parseToolResponse(raw) as {
+      patterns: Array<{ kind: string }>;
+    };
+
+    expect(result.patterns.some((pattern) => pattern.kind === "commitment_slip")).toBe(false);
+  });
 });
 
 describe("memory_handoff", () => {
@@ -1930,6 +1980,36 @@ describe("memory_handoff", () => {
     }));
     expect(result.open_loops.some((loop) => /blocker|overdue|retry/i.test(loop))).toBe(true);
     expect(result.recommended_next_actions.length).toBeGreaterThan(0);
+  });
+
+  it("does not surface overdue loops from dated completion logs", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/vidar",
+      phase: "Active",
+      current_work: "Post-release cleanup",
+      blockers: "None.",
+      next_steps: [],
+      lifecycle: "active",
+    });
+    await callTool("memory_log", {
+      namespace: "projects/vidar",
+      content: "Completed the Codex usability improvement (2026-03-05).",
+      tags: ["milestone"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/vidar",
+      content: "Public repo security audit completed (2026-03-15).",
+      tags: ["milestone"],
+    });
+
+    const raw = await callTool("memory_handoff", {
+      namespace: "projects/vidar",
+    });
+    const result = parseToolResponse(raw) as {
+      open_loops: string[];
+    };
+
+    expect(result.open_loops.some((loop) => /overdue commitment/i.test(loop))).toBe(false);
   });
 });
 

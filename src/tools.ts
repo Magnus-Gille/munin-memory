@@ -1867,8 +1867,16 @@ function buildNarrativeSources(
 
 const COMMITMENT_SOON_DAYS = 3;
 const COMMITMENT_COMPLETED_RECENT_DAYS = 14;
-const COMMITMENT_ACTION_CUE =
-  /\b(will|must|need to|needs to|plan to|planned|before|by|follow up|follow-up|send|ship|deliver|finish|complete|publish|deploy|update|write|call|review|rerun|check)\b/i;
+const COMMITMENT_ACTION_VERB =
+  /\b(send|ship|deliver|finish|complete|publish|deploy|update|write|call|review|rerun|check)\b/i;
+const COMMITMENT_FORWARD_CUE =
+  /\b(will|must|need to|needs to|plan to|planned|should|target(?:ing)?|aim to|follow up|follow-up|before|by|due)\b/i;
+const COMMITMENT_IMPERATIVE_PREFIX =
+  /^(?:next(?:\s+steps?)?:\s*)?(send|ship|deliver|finish|complete|publish|deploy|update|write|call|review|rerun|check)\b/i;
+const COMMITMENT_RETROSPECTIVE_CUE =
+  /\b(completed|finished|shipped|delivered|published|deployed|resolved|closed|landed|wrapped up|done)\b/i;
+const COMMITMENT_FUTURE_COMPLETION_PHRASE =
+  /\b(must|need to|needs to|should|will|plan to|planned to|target(?:ing)? to|aim to)\s+(?:be\s+)?(completed|finished|shipped|delivered|published|deployed)\b/i;
 
 function getTrackedStatusAssessmentByNamespace(db: Database.Database): Map<string, TrackedStatusAssessment> {
   const byNamespace = new Map<string, TrackedStatusAssessment>();
@@ -1907,6 +1915,16 @@ function extractCandidateSegments(content: string): string[] {
     .filter((line) => line.length > 0);
 }
 
+function looksLikeRetrospectiveCompletion(segment: string): boolean {
+  return COMMITMENT_RETROSPECTIVE_CUE.test(segment) && !COMMITMENT_FUTURE_COMPLETION_PHRASE.test(segment);
+}
+
+function isForwardLookingDatedCommitment(segment: string): boolean {
+  if (!COMMITMENT_ACTION_VERB.test(segment)) return false;
+  if (looksLikeRetrospectiveCompletion(segment)) return false;
+  return COMMITMENT_FORWARD_CUE.test(segment) || COMMITMENT_IMPERATIVE_PREFIX.test(segment);
+}
+
 function extractCommitmentsFromEntry(entry: Entry): DerivedCommitmentInput[] {
   const commitments: DerivedCommitmentInput[] = [];
   const seenNormalized = new Set<string>();
@@ -1936,7 +1954,7 @@ function extractCommitmentsFromEntry(entry: Entry): DerivedCommitmentInput[] {
   for (const segment of extractCandidateSegments(entry.content)) {
     const dueAt = extractDueAtFromText(segment);
     if (!dueAt) continue;
-    if (!COMMITMENT_ACTION_CUE.test(segment)) continue;
+    if (!isForwardLookingDatedCommitment(segment)) continue;
 
     const normalized = normalizeCommitmentText(segment);
     if (!normalized) continue;
