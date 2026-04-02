@@ -6,7 +6,13 @@ import {
   type AccessContext,
   type PrincipalType,
 } from "./access.js";
-import type { ClassificationLevel, EntryType, TransportType } from "./types.js";
+import type {
+  ClassificationLevel,
+  EntryType,
+  LibrarianRuntimeSummary,
+  RedactedSourcesSummary,
+  TransportType,
+} from "./types.js";
 
 export interface NamespaceClassificationFloor {
   namespace_pattern: string;
@@ -38,6 +44,17 @@ export type ClassificationEnforcementResult =
       transportType: TransportType;
       response: Record<string, unknown>;
     };
+
+export interface FilteredRedactedSource<T> {
+  source: T;
+  metadata: RedactableEntryMetadata;
+  response: Record<string, unknown>;
+}
+
+export interface ClassificationSourceFilterResult<T> {
+  allowed: T[];
+  redacted: FilteredRedactedSource<T>[];
+}
 
 export interface ResolveExplicitClassificationOptions {
   classification?: string | null;
@@ -356,6 +373,13 @@ function buildOwnerAccessGuidance(transportType: TransportType): string {
   }
 }
 
+function buildOwnerFilteredSourceReason(
+  transportType: TransportType,
+  maxClassification: ClassificationLevel,
+): string {
+  return `Some sources were excluded because your current connection (${formatTransportLabel(transportType)}) allows up to ${maxClassification}. ${buildOwnerAccessGuidance(transportType)}`;
+}
+
 function buildOwnerRedactionReason(
   entryClassification: ClassificationLevel,
   transportType: TransportType,
@@ -403,6 +427,90 @@ export function buildRedactedEntryResponse(
     redacted: true,
     redaction_reason: "Some entries in this namespace exceed your classification level.",
   };
+}
+
+export function filterSourcesByClassification<T>(
+  ctx: AccessContext,
+  sources: T[],
+  getMetadata: (source: T) => RedactableEntryMetadata,
+): ClassificationSourceFilterResult<T> {
+  if (!isLibrarianEnabled()) {
+    return {
+      allowed: [...sources],
+      redacted: [],
+    };
+  }
+
+  const allowed: T[] = [];
+  const redacted: FilteredRedactedSource<T>[] = [];
+
+  for (const source of sources) {
+    const metadata = getMetadata(source);
+    const enforcement = enforceClassification(ctx, metadata);
+    if (enforcement.allowed) {
+      allowed.push(source);
+      continue;
+    }
+
+    redacted.push({
+      source,
+      metadata,
+      response: enforcement.response,
+    });
+  }
+
+  return { allowed, redacted };
+}
+
+export function summarizeRedactedSources(
+  ctx: AccessContext,
+  entries: RedactableEntryMetadata[],
+): RedactedSourcesSummary | undefined {
+  if (!isLibrarianEnabled() || entries.length === 0) {
+    return undefined;
+  }
+
+  if (ctx.principalType === "owner") {
+    return {
+      count: entries.length,
+      namespaces: [...new Set(entries.map((entry) => entry.namespace))].sort().slice(0, 10),
+      reason: buildOwnerFilteredSourceReason(
+        getContextTransportType(ctx),
+        getContextMaxClassification(ctx),
+      ),
+    };
+  }
+
+  return {
+    count: entries.length,
+    reason: "Some sources exceeded your classification level.",
+  };
+}
+
+export function buildLibrarianRuntimeSummary(
+  ctx: AccessContext,
+  options: {
+    redactedDashboardCount?: number;
+    redactedSourceCount?: number;
+  } = {},
+): LibrarianRuntimeSummary {
+  const summary: LibrarianRuntimeSummary = {
+    enabled: isLibrarianEnabled(),
+    transport_type: getContextTransportType(ctx),
+    max_classification: getContextMaxClassification(ctx),
+  };
+
+  if (options.redactedDashboardCount && options.redactedDashboardCount > 0) {
+    summary.redacted_dashboard_count = options.redactedDashboardCount;
+  }
+  if (options.redactedSourceCount && options.redactedSourceCount > 0) {
+    summary.redacted_source_count = options.redactedSourceCount;
+  }
+  if (ctx.principalType === "owner") {
+    summary.access_guidance = buildOwnerAccessGuidance(getContextTransportType(ctx));
+  }
+
+  return summary;
 }
 
 export function enforceClassification(

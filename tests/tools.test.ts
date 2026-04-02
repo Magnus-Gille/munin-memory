@@ -853,6 +853,280 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
   });
 });
 
+describe("Librarian Pattern B enforcement for derived tools", () => {
+  beforeEach(() => {
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+    delete process.env.MUNIN_REDACTION_LOG_ENABLED;
+  });
+
+  afterEach(() => {
+    delete process.env.MUNIN_LIBRARIAN_ENABLED;
+    delete process.env.MUNIN_REDACTION_LOG_ENABLED;
+  });
+
+  it("omits classified tracked statuses from memory_orient and reports them in Librarian metadata", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/internal",
+      key: "status",
+      content: "Internal project status",
+      tags: ["active"],
+    });
+    await callTool("memory_write", {
+      namespace: "clients/lofalk",
+      key: "status",
+      content: "Client-confidential tracked status",
+      tags: ["active"],
+      classification: "client-confidential",
+    });
+
+    const consumerOwnerCall = makeContextCallTool({
+      ...ownerContext(),
+      transportType: "consumer",
+      maxClassification: "internal",
+    });
+
+    const raw = await consumerOwnerCall("memory_orient", {});
+    const result = parseToolResponse(raw) as {
+      dashboard: Record<string, Array<{ namespace: string }>>;
+      librarian_summary: {
+        enabled: boolean;
+        transport_type: string;
+        max_classification: string;
+        redacted_dashboard_count?: number;
+        redacted_source_count?: number;
+      };
+      redacted_sources?: { count: number; namespaces?: string[] };
+    };
+
+    const dashboardNamespaces = Object.values(result.dashboard).flat().map((entry) => entry.namespace);
+    expect(dashboardNamespaces).toContain("projects/internal");
+    expect(dashboardNamespaces).not.toContain("clients/lofalk");
+    expect(result.librarian_summary).toMatchObject({
+      enabled: true,
+      transport_type: "consumer",
+      max_classification: "internal",
+      redacted_dashboard_count: 1,
+    });
+    expect(result.redacted_sources).toMatchObject({
+      count: 1,
+    });
+    expect(result.redacted_sources?.namespaces).toContain("clients/lofalk");
+  });
+
+  it("returns partial or empty resume packs when all matching sources are filtered", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/client-rollout",
+      phase: "Active",
+      current_work: "Confidential rollout",
+      blockers: "None.",
+      next_steps: ["Call the client by 2026-04-10"],
+      lifecycle: "active",
+      classification: "client-confidential",
+    });
+    await callTool("memory_log", {
+      namespace: "projects/client-rollout",
+      content: "Decided to keep the rollout details private.",
+      tags: ["decision"],
+      classification: "client-confidential",
+    });
+
+    const consumerOwnerCall = makeContextCallTool({
+      ...ownerContext(),
+      transportType: "consumer",
+      maxClassification: "internal",
+    });
+
+    const raw = await consumerOwnerCall("memory_resume", {
+      namespace: "projects/client-rollout",
+      include_history: true,
+    });
+    const result = parseToolResponse(raw) as {
+      target_namespace?: string;
+      items: Array<unknown>;
+      open_loops: Array<unknown>;
+      redacted_sources?: { count: number; namespaces?: string[] };
+    };
+
+    expect(result.target_namespace).toBe("projects/client-rollout");
+    expect(result.items).toHaveLength(0);
+    expect(result.open_loops).toHaveLength(0);
+    expect(result.redacted_sources).toMatchObject({ count: expect.any(Number) });
+    expect(result.redacted_sources?.count).toBeGreaterThan(0);
+    expect(result.redacted_sources?.namespaces).toContain("projects/client-rollout");
+  });
+
+  it("does not derive commitments from filtered source entries on downgraded transports", async () => {
+    db.prepare(
+      `INSERT INTO entries
+         (id, namespace, key, entry_type, content, tags, agent_id, owner_principal_id, created_at, updated_at, valid_until, classification)
+       VALUES (?, ?, ?, 'state', ?, ?, ?, ?, ?, ?, NULL, ?)`,
+    ).run(
+      "private-followthrough-status",
+      "projects/client-followthrough",
+      "status",
+      [
+        "## Phase",
+        "Active",
+        "",
+        "## Current Work",
+        "Private follow-through",
+        "",
+        "## Blockers",
+        "None.",
+        "",
+        "## Next Steps",
+        "- Send the private deck by 2026-04-10",
+      ].join("\n"),
+      JSON.stringify(["active", "classification:client-confidential"]),
+      "owner",
+      "owner",
+      "2026-04-02T12:00:00.000Z",
+      "2026-04-02T12:00:00.000Z",
+      "client-confidential",
+    );
+
+    const consumerOwnerCall = makeContextCallTool({
+      ...ownerContext(),
+      transportType: "consumer",
+      maxClassification: "internal",
+    });
+
+    const raw = await consumerOwnerCall("memory_commitments", {
+      namespace: "projects/client-followthrough",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<unknown>;
+      at_risk: Array<unknown>;
+      overdue: Array<unknown>;
+      completed_recently: Array<unknown>;
+      redacted_sources?: { count: number; namespaces?: string[] };
+    };
+
+    expect(result.open).toHaveLength(0);
+    expect(result.at_risk).toHaveLength(0);
+    expect(result.overdue).toHaveLength(0);
+    expect(result.completed_recently).toHaveLength(0);
+    expect(result.redacted_sources?.count).toBeGreaterThan(0);
+    expect(result.redacted_sources?.namespaces).toContain("projects/client-followthrough");
+
+    const commitmentCount = db.prepare("SELECT COUNT(*) AS count FROM commitments").get() as { count: number };
+    expect(commitmentCount.count).toBe(0);
+  });
+
+  it("does not mine classified decision logs in memory_patterns", async () => {
+    for (const content of [
+      "Decision: lofalk pricing review stays private until Monday.",
+      "Decided again that lofalk pricing review remains private until Monday.",
+      "Decision review: lofalk pricing review remains the recurring concern.",
+    ]) {
+      await callTool("memory_log", {
+        namespace: "projects/private-patterns",
+        content,
+        tags: ["decision"],
+        classification: "client-confidential",
+      });
+    }
+
+    const consumerOwnerCall = makeContextCallTool({
+      ...ownerContext(),
+      transportType: "consumer",
+      maxClassification: "internal",
+    });
+
+    const raw = await consumerOwnerCall("memory_patterns", {
+      namespace: "projects/private-patterns",
+    });
+    const result = parseToolResponse(raw) as {
+      patterns: Array<unknown>;
+      heuristics: Array<unknown>;
+      supporting_sources: Array<unknown>;
+      redacted_sources?: { count: number; namespaces?: string[] };
+    };
+
+    expect(result.patterns).toHaveLength(0);
+    expect(result.heuristics).toHaveLength(0);
+    expect(result.supporting_sources).toHaveLength(0);
+    expect(result.redacted_sources?.count).toBeGreaterThanOrEqual(3);
+    expect(result.redacted_sources?.namespaces).toContain("projects/private-patterns");
+  });
+
+  it("returns an empty handoff pack with redacted source metadata when all inputs are filtered", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/private-handoff",
+      phase: "Blocked",
+      current_work: "Confidential handoff",
+      blockers: "Waiting on the client.",
+      next_steps: ["Retry the call on 2026-04-09"],
+      lifecycle: "blocked",
+      classification: "client-confidential",
+    });
+    await callTool("memory_log", {
+      namespace: "projects/private-handoff",
+      content: "Decision: keep this handoff private.",
+      tags: ["decision"],
+      classification: "client-confidential",
+    });
+
+    const consumerOwnerCall = makeContextCallTool({
+      ...ownerContext(),
+      transportType: "consumer",
+      maxClassification: "internal",
+    });
+
+    const raw = await consumerOwnerCall("memory_handoff", {
+      namespace: "projects/private-handoff",
+    });
+    const result = parseToolResponse(raw) as {
+      found: boolean;
+      current_state: unknown;
+      recent_decisions: Array<unknown>;
+      open_loops: Array<unknown>;
+      recent_actors: Array<unknown>;
+      recommended_next_actions: Array<unknown>;
+      redacted_sources?: { count: number; namespaces?: string[] };
+    };
+
+    expect(result.found).toBe(false);
+    expect(result.current_state).toBeNull();
+    expect(result.recent_decisions).toHaveLength(0);
+    expect(result.open_loops).toHaveLength(0);
+    expect(result.recent_actors).toHaveLength(0);
+    expect(result.recommended_next_actions).toHaveLength(0);
+    expect(result.redacted_sources?.count).toBeGreaterThan(0);
+    expect(result.redacted_sources?.namespaces).toContain("projects/private-handoff");
+  });
+
+  it("does not surface false missing-status items when attention-worthy statuses are only redacted by classification", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/private-attention",
+      key: "status",
+      content: "Blocked confidential status",
+      tags: ["blocked"],
+      classification: "client-confidential",
+    });
+
+    const consumerOwnerCall = makeContextCallTool({
+      ...ownerContext(),
+      transportType: "consumer",
+      maxClassification: "internal",
+    });
+
+    const raw = await consumerOwnerCall("memory_attention", {
+      namespace_prefix: "projects/private-attention",
+    });
+    const result = parseToolResponse(raw) as {
+      items: Array<{ category: string }>;
+      message?: string;
+      redacted_sources?: { count: number; namespaces?: string[] };
+    };
+
+    expect(result.items).toHaveLength(0);
+    expect(result.message).toBe("No attention items are visible on this connection.");
+    expect(result.redacted_sources?.count).toBeGreaterThan(0);
+    expect(result.redacted_sources?.namespaces).toContain("projects/private-attention");
+  });
+});
+
 describe("memory_query", () => {
   beforeEach(async () => {
     await callTool("memory_write", {

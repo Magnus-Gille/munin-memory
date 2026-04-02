@@ -56,13 +56,16 @@ import {
 } from "./db.js";
 import {
   CLASSIFICATION_LEVELS,
+  buildLibrarianRuntimeSummary,
   classificationAllowed,
   enforceClassification,
+  filterSourcesByClassification,
   isClassificationLevel,
   isLibrarianEnabled,
   isRedactionLogEnabled,
   resolveNamespaceClassificationFloor,
   stripClassificationTags,
+  summarizeRedactedSources,
   type RedactableEntryMetadata,
 } from "./librarian.js";
 import {
@@ -238,6 +241,73 @@ function maybeRedactDirectEntry(
   sessionId?: string,
 ): Record<string, unknown> | null {
   return maybeRedactEntryMetadata(db, ctx, buildRedactableEntryMetadata(entry), toolName, sessionId);
+}
+
+function filterDerivedSources<T>(
+  db: Database.Database,
+  ctx: AccessContext,
+  sources: T[],
+  toolName: string,
+  getMetadata: (source: T) => RedactableEntryMetadata,
+  sessionId?: string,
+): { allowed: T[]; redacted: RedactableEntryMetadata[] } {
+  const filtered = filterSourcesByClassification(ctx, sources, getMetadata);
+
+  if (filtered.redacted.length > 0 && isRedactionLogEnabled()) {
+    for (const redacted of filtered.redacted) {
+      const enforcement = enforceClassification(ctx, redacted.metadata);
+      if (!enforcement.allowed) {
+        insertRedactionLog(db, {
+          sessionId,
+          principalId: ctx.principalId,
+          transportType: enforcement.transportType,
+          entryId: redacted.metadata.id,
+          entryNamespace: redacted.metadata.namespace,
+          entryClassification: redacted.metadata.classification,
+          connectionMaxClassification: enforcement.maxClassification,
+          toolName,
+        });
+      }
+    }
+  }
+
+  return {
+    allowed: filtered.allowed,
+    redacted: filtered.redacted.map((entry) => entry.metadata),
+  };
+}
+
+function combineRedactedSources(...groups: RedactableEntryMetadata[][]): RedactableEntryMetadata[] {
+  const combined: RedactableEntryMetadata[] = [];
+  const seen = new Set<string>();
+
+  for (const group of groups) {
+    for (const entry of group) {
+      const key = `${entry.id}:${entry.namespace}:${entry.classification}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      combined.push(entry);
+    }
+  }
+
+  return combined;
+}
+
+function buildAuditHistoryMetadata(
+  db: Database.Database,
+  entry: AuditHistoryEntry,
+): RedactableEntryMetadata {
+  const sourceEntry = entry.entry_id ? getById(db, entry.entry_id) : null;
+  if (sourceEntry) {
+    return buildRedactableEntryMetadata(parseEntry(sourceEntry));
+  }
+
+  return {
+    id: entry.entry_id ?? `audit:${entry.id}`,
+    namespace: entry.namespace,
+    key: entry.key,
+    classification: "client-restricted",
+  };
 }
 
 function formatQueryResult(
@@ -1014,6 +1084,24 @@ function assessTrackedStatus(row: TrackedStatusRow): TrackedStatusAssessment {
 function getTrackedStatusAssessments(db: Database.Database): Map<string, TrackedStatusAssessment> {
   const assessments = getTrackedStatuses(db).map(assessTrackedStatus);
   return new Map(assessments.map((assessment) => [assessment.entry.id, assessment]));
+}
+
+function getVisibleTrackedStatusAssessments(
+  db: Database.Database,
+  ctx: AccessContext,
+  toolName: string,
+  sessionId?: string,
+): { allowed: TrackedStatusAssessment[]; redacted: RedactableEntryMetadata[] } {
+  const accessible = [...getTrackedStatusAssessments(db).values()]
+    .filter((assessment) => canRead(ctx, assessment.row.namespace));
+  return filterDerivedSources(
+    db,
+    ctx,
+    accessible,
+    toolName,
+    (assessment) => buildRedactableEntryMetadata(parseEntry(assessment.entry)),
+    sessionId,
+  );
 }
 
 function getQueryHeuristicScore(
@@ -2286,9 +2374,11 @@ const COMMITMENT_RETROSPECTIVE_CUE =
 const COMMITMENT_FUTURE_COMPLETION_PHRASE =
   /\b(must|need to|needs to|should|will|plan to|planned to|target(?:ing)? to|aim to)\s+(?:be\s+)?(completed|finished|shipped|delivered|published|deployed)\b/i;
 
-function getTrackedStatusAssessmentByNamespace(db: Database.Database): Map<string, TrackedStatusAssessment> {
+function mapTrackedStatusAssessmentsByNamespace(
+  assessments: TrackedStatusAssessment[],
+): Map<string, TrackedStatusAssessment> {
   const byNamespace = new Map<string, TrackedStatusAssessment>();
-  for (const assessment of getTrackedStatusAssessments(db).values()) {
+  for (const assessment of assessments) {
     byNamespace.set(assessment.row.namespace, assessment);
   }
   return byNamespace;
@@ -2381,29 +2471,43 @@ function extractCommitmentsFromEntry(entry: Entry): DerivedCommitmentInput[] {
 function syncCommitmentsForScope(
   db: Database.Database,
   ctx: AccessContext,
+  toolName: string,
   namespace?: string,
   since?: string,
-): void {
+  sessionId?: string,
+): RedactableEntryMetadata[] {
   const entries = listEntriesForDerivation(db, { namespace, since })
     .filter((entry) => canRead(ctx, entry.namespace));
+  const filtered = filterDerivedSources(
+    db,
+    ctx,
+    entries,
+    toolName,
+    (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
+    sessionId,
+  );
 
-  for (const entry of entries) {
+  for (const entry of filtered.allowed) {
     syncCommitmentsForEntry(db, entry.id, extractCommitmentsFromEntry(entry));
   }
+
+  return filtered.redacted;
 }
 
 function listFreshCommitmentRows(
   db: Database.Database,
   ctx: AccessContext,
+  toolName: string,
   options: {
     namespace?: string;
     since?: string;
     limit: number;
     includeResolved?: boolean;
   },
-): CommitmentRow[] {
+  sessionId?: string,
+): { rows: CommitmentRow[]; redacted: RedactableEntryMetadata[] } {
   const { namespace, since, limit, includeResolved = true } = options;
-  syncCommitmentsForScope(db, ctx, namespace, since);
+  const redactedSources = syncCommitmentsForScope(db, ctx, toolName, namespace, since, sessionId);
 
   const refreshCandidates = listCommitments(db, {
     namespace,
@@ -2412,21 +2516,70 @@ function listFreshCommitmentRows(
     includeResolved: true,
   }).filter((row) => canRead(ctx, row.namespace));
 
+  const allowedRefreshCandidates = filterDerivedSources(
+    db,
+    ctx,
+    refreshCandidates,
+    toolName,
+    (row) => ({
+      id: row.source_entry_id,
+      namespace: row.namespace,
+      key: row.source_key,
+      classification: row.source_classification,
+    }),
+    sessionId,
+  );
+
   const seenSourceEntries = new Set<string>();
-  for (const row of refreshCandidates) {
+  for (const row of allowedRefreshCandidates.allowed) {
     if (seenSourceEntries.has(row.source_entry_id)) continue;
     seenSourceEntries.add(row.source_entry_id);
     const entry = getById(db, row.source_entry_id);
     if (!entry || !canRead(ctx, entry.namespace)) continue;
+    const entryFilter = filterDerivedSources(
+      db,
+      ctx,
+      [entry],
+      toolName,
+      (candidate) => buildRedactableEntryMetadata(parseEntry(candidate)),
+      sessionId,
+    );
+    if (entryFilter.allowed.length === 0) {
+      redactedSources.push(...entryFilter.redacted);
+      continue;
+    }
     syncCommitmentsForEntry(db, entry.id, extractCommitmentsFromEntry(entry));
   }
 
-  return listCommitments(db, {
+  const rows = listCommitments(db, {
     namespace,
     since,
     limit,
     includeResolved,
   }).filter((row) => canRead(ctx, row.namespace));
+
+  const visibleRows = filterDerivedSources(
+    db,
+    ctx,
+    rows,
+    toolName,
+    (row) => ({
+      id: row.source_entry_id,
+      namespace: row.namespace,
+      key: row.source_key,
+      classification: row.source_classification,
+    }),
+    sessionId,
+  );
+
+  return {
+    rows: visibleRows.allowed,
+    redacted: combineRedactedSources(
+      redactedSources,
+      allowedRefreshCandidates.redacted,
+      visibleRows.redacted,
+    ),
+  };
 }
 
 function buildCommitmentItem(row: CommitmentRow, reason?: string): CommitmentItem {
@@ -3447,6 +3600,8 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             // Read conventions and namespace list
             const conventions = ctx.principalType === "owner" ? readState(db, "meta/conventions", "conventions") : null;
             const namespaces = listNamespaces(db).filter(ns => canRead(ctx, ns.namespace));
+            const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_orient", sessionId);
+            const orientRedactedSources: RedactableEntryMetadata[] = [...visibleTrackedStatuses.redacted];
 
             const response: Record<string, unknown> = {};
 
@@ -3454,20 +3609,34 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             if (ctx.principalType !== "owner") {
               response.conventions = null;
             } else if (conventions) {
-              const parsed = parseEntry(conventions);
-              const content = detail === "full"
-                ? parsed.content
-                : compactConventions(parsed.updated_at);
-              const conv: Record<string, unknown> = {
-                content,
-                updated_at: parsed.updated_at,
-              };
-              if (detail !== "full") {
-                conv.compact = true;
-                conv.full_conventions_hint = 'memory_read("meta/conventions", "conventions")';
+              const filteredConventions = filterDerivedSources(
+                db,
+                ctx,
+                [conventions],
+                "memory_orient",
+                (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
+                sessionId,
+              );
+              orientRedactedSources.push(...filteredConventions.redacted);
+
+              if (filteredConventions.allowed.length > 0) {
+                const parsed = parseEntry(filteredConventions.allowed[0]);
+                const content = detail === "full"
+                  ? parsed.content
+                  : compactConventions(parsed.updated_at);
+                const conv: Record<string, unknown> = {
+                  content,
+                  updated_at: parsed.updated_at,
+                };
+                if (detail !== "full") {
+                  conv.compact = true;
+                  conv.full_conventions_hint = 'memory_read("meta/conventions", "conventions")';
+                }
+                if (isStale(parsed.updated_at)) conv.stale = true;
+                response.conventions = conv;
+              } else {
+                response.conventions = null;
               }
-              if (isStale(parsed.updated_at)) conv.stale = true;
-              response.conventions = conv;
             } else {
               response.conventions = {
                 content: null,
@@ -3476,8 +3645,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             }
 
             // Computed dashboard from tracked status entries
-            const trackedStatusAssessments = [...getTrackedStatusAssessments(db).values()]
-              .filter(a => canRead(ctx, a.row.namespace));
+            const trackedStatusAssessments = visibleTrackedStatuses.allowed;
             const dashboard: Record<string, DashboardEntry[]> = {
               active: [],
               blocked: [],
@@ -3507,7 +3675,10 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             }
 
             // Check for tracked namespaces that have entries but no status key
-            const trackedNsWithStatus = new Set(trackedStatusAssessments.map((assessment) => assessment.row.namespace));
+            const trackedNsWithStatus = new Set([
+              ...trackedStatusAssessments.map((assessment) => assessment.row.namespace),
+              ...visibleTrackedStatuses.redacted.map((entry) => entry.namespace),
+            ]);
             for (const ns of namespaces) {
               if (isTrackedNamespace(ns.namespace) && !trackedNsWithStatus.has(ns.namespace)) {
                 maintenanceNeeded.push({
@@ -3538,31 +3709,53 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             if (ctx.principalType === "owner") {
               const notes = readState(db, "meta", "workbench-notes");
               if (notes) {
-                response.notes = notes.content;
+                const filteredNotes = filterDerivedSources(
+                  db,
+                  ctx,
+                  [notes],
+                  "memory_orient",
+                  (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
+                  sessionId,
+                );
+                orientRedactedSources.push(...filteredNotes.redacted);
+                if (filteredNotes.allowed.length > 0) {
+                  response.notes = filteredNotes.allowed[0].content;
+                }
               }
 
               // Reference index — data-driven discoverability for key entries
               const refIndex = readState(db, "meta", "reference-index");
               if (refIndex) {
-                try {
-                  const parsed = JSON.parse(refIndex.content);
-                  if (parsed && Array.isArray(parsed.references)) {
-                    const validEntries = parsed.references.filter(
-                      (r: Record<string, unknown>) =>
-                        typeof r.namespace === "string" &&
-                        typeof r.key === "string" &&
-                        typeof r.title === "string" &&
-                        typeof r.when_to_load === "string",
-                    );
-                    if (validEntries.length > 0) {
-                      response.references = {
-                        entries: validEntries,
-                        updated_at: refIndex.updated_at,
-                      };
+                const filteredReferenceIndex = filterDerivedSources(
+                  db,
+                  ctx,
+                  [refIndex],
+                  "memory_orient",
+                  (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
+                  sessionId,
+                );
+                orientRedactedSources.push(...filteredReferenceIndex.redacted);
+                if (filteredReferenceIndex.allowed.length > 0) {
+                  try {
+                    const parsed = JSON.parse(filteredReferenceIndex.allowed[0].content);
+                    if (parsed && Array.isArray(parsed.references)) {
+                      const validEntries = parsed.references.filter(
+                        (r: Record<string, unknown>) =>
+                          typeof r.namespace === "string" &&
+                          typeof r.key === "string" &&
+                          typeof r.title === "string" &&
+                          typeof r.when_to_load === "string",
+                      );
+                      if (validEntries.length > 0) {
+                        response.references = {
+                          entries: validEntries,
+                          updated_at: filteredReferenceIndex.allowed[0].updated_at,
+                        };
+                      }
                     }
+                  } catch {
+                    // Malformed JSON — skip silently, don't break orient
                   }
-                } catch {
-                  // Malformed JSON — skip silently, don't break orient
                 }
               }
             }
@@ -3576,12 +3769,23 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             if (ctx.principalType === "owner") {
               const workbench = readState(db, "meta", "workbench");
               if (workbench) {
-                const parsed = parseEntry(workbench);
-                response.legacy_workbench = {
-                  content: parsed.content,
-                  updated_at: parsed.updated_at,
-                  deprecation_note: "The workbench is deprecated. The computed dashboard above is now the source of truth for project/client state. Delete meta/workbench when ready.",
-                };
+                const filteredWorkbench = filterDerivedSources(
+                  db,
+                  ctx,
+                  [workbench],
+                  "memory_orient",
+                  (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
+                  sessionId,
+                );
+                orientRedactedSources.push(...filteredWorkbench.redacted);
+                if (filteredWorkbench.allowed.length > 0) {
+                  const parsed = parseEntry(filteredWorkbench.allowed[0]);
+                  response.legacy_workbench = {
+                    content: parsed.content,
+                    updated_at: parsed.updated_at,
+                    deprecation_note: "The workbench is deprecated. The computed dashboard above is now the source of truth for project/client state. Delete meta/workbench when ready.",
+                  };
+                }
               }
             }
 
@@ -3602,6 +3806,15 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                 returned: limitedNamespaces.length,
                 truncated: limitedNamespaces.length < filteredNamespaces.length,
               };
+            }
+
+            const redactedSourcesSummary = summarizeRedactedSources(ctx, orientRedactedSources);
+            response.librarian_summary = buildLibrarianRuntimeSummary(ctx, {
+              redactedDashboardCount: visibleTrackedStatuses.redacted.length,
+              redactedSourceCount: orientRedactedSources.length,
+            });
+            if (redactedSourcesSummary) {
+              response.redacted_sources = redactedSourcesSummary;
             }
 
             // Analytics: log orient event (no result IDs — orient has no specific entries)
@@ -3640,13 +3853,22 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               }
             }
 
-            const trackedStatusAssessments = [...getTrackedStatusAssessments(db).values()]
+            const accessibleTrackedStatuses = [...getTrackedStatusAssessments(db).values()]
               .filter((assessment) => canRead(ctx, assessment.row.namespace));
-            const scope = resolveResumeScope(resumeArgs, trackedStatusAssessments);
+            const visibleTrackedStatuses = filterDerivedSources(
+              db,
+              ctx,
+              accessibleTrackedStatuses,
+              "memory_resume",
+              (assessment) => buildRedactableEntryMetadata(parseEntry(assessment.entry)),
+              sessionId,
+            );
+            const scope = resolveResumeScope(resumeArgs, accessibleTrackedStatuses);
             const hintTerms = extractResumeTerms(resumeArgs.opener, resumeArgs.project, scope);
+            const resumeRedactedSources: RedactableEntryMetadata[] = [...visibleTrackedStatuses.redacted];
 
             const candidates: ResumeCandidate[] = [];
-            const statusCandidates = trackedStatusAssessments
+            const statusCandidates = visibleTrackedStatuses.allowed
               .map((assessment) => buildResumeStatusCandidate(assessment, scope, hintTerms, includeAttention))
               .filter((candidate): candidate is ResumeCandidate => candidate !== null)
               .sort(compareResumeCandidates);
@@ -3654,13 +3876,22 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
 
             const focusNamespaces = new Set(statusCandidates.slice(0, 3).map((candidate) => candidate.item.namespace));
 
-            const logPool = queryEntriesByFilter(db, {
+            const rawLogPool = queryEntriesByFilter(db, {
               namespace: scope,
               entryType: "log",
               limit: scope ? Math.max(limit, 4) : Math.max(limit * 2, 8),
             }).filter((entry) => canRead(ctx, entry.namespace));
+            const logPool = filterDerivedSources(
+              db,
+              ctx,
+              rawLogPool,
+              "memory_resume",
+              (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
+              sessionId,
+            );
+            resumeRedactedSources.push(...logPool.redacted);
 
-            for (const entry of logPool) {
+            for (const entry of logPool.allowed) {
               const matchedTerms = countResumeTermMatches(`${entry.namespace} ${entry.content}`, hintTerms);
               if (!scope && focusNamespaces.size > 0 && !focusNamespaces.has(entry.namespace) && matchedTerms === 0) {
                 continue;
@@ -3670,7 +3901,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             }
 
             if (scope) {
-              const scopedStateEntries = queryEntriesByFilter(db, {
+              const rawScopedStateEntries = queryEntriesByFilter(db, {
                 namespace: scope,
                 entryType: "state",
                 includeExpired: true,
@@ -3678,15 +3909,33 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               })
                 .filter((entry) => canRead(ctx, entry.namespace))
                 .filter((entry) => entry.key !== "status");
+              const scopedStateEntries = filterDerivedSources(
+                db,
+                ctx,
+                rawScopedStateEntries,
+                "memory_resume",
+                (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
+                sessionId,
+              );
+              resumeRedactedSources.push(...scopedStateEntries.redacted);
 
-              for (const entry of scopedStateEntries) {
+              for (const entry of scopedStateEntries.allowed) {
                 candidates.push(buildResumeStateCandidate(entry, scope, hintTerms));
               }
             }
 
             if (includeHistory && scope) {
               const historyPage = getAuditHistoryPage(db, { namespace: scope, limit: 3 });
-              for (const entry of historyPage.entries.filter((historyEntry) => canRead(ctx, historyEntry.namespace))) {
+              const filteredHistory = filterDerivedSources(
+                db,
+                ctx,
+                historyPage.entries.filter((historyEntry) => canRead(ctx, historyEntry.namespace)),
+                "memory_resume",
+                (entry) => buildAuditHistoryMetadata(db, entry),
+                sessionId,
+              );
+              resumeRedactedSources.push(...filteredHistory.redacted);
+              for (const entry of filteredHistory.allowed) {
                 candidates.push(buildResumeHistoryCandidate(entry, scope));
               }
             }
@@ -3775,6 +4024,10 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               why_this_set: whyThisSet,
             };
             if (scope) response.target_namespace = scope;
+            const redactedSourcesSummary = summarizeRedactedSources(ctx, resumeRedactedSources);
+            if (redactedSourcesSummary) {
+              response.redacted_sources = redactedSourcesSummary;
+            }
 
             return okResult("resume", response);
           }
@@ -3863,19 +4116,53 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             const statusEntry = rawStatusEntry && canRead(ctx, rawStatusEntry.namespace)
               ? rawStatusEntry
               : null;
-            const logs = queryEntriesByFilter(db, {
+            const filteredStatusEntry = statusEntry
+              ? filterDerivedSources(
+                db,
+                ctx,
+                [statusEntry],
+                "memory_narrative",
+                (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
+                sessionId,
+              )
+              : { allowed: [] as Entry[], redacted: [] as RedactableEntryMetadata[] };
+            const rawLogs = queryEntriesByFilter(db, {
               namespace: narrativeArgs.namespace,
               entryType: "log",
               limit: Math.max(limit, 12),
               since: normalizedSince,
             }).filter((entry) => canRead(ctx, entry.namespace));
-            const history = getAuditHistoryPage(db, {
+            const filteredLogs = filterDerivedSources(
+              db,
+              ctx,
+              rawLogs,
+              "memory_narrative",
+              (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
+              sessionId,
+            );
+            const rawHistory = getAuditHistoryPage(db, {
               namespace: narrativeArgs.namespace,
               since: normalizedSince,
               limit: Math.max(limit * 2, 12),
             }).entries.filter((entry) => canRead(ctx, entry.namespace));
+            const filteredHistory = filterDerivedSources(
+              db,
+              ctx,
+              rawHistory,
+              "memory_narrative",
+              (entry) => buildAuditHistoryMetadata(db, entry),
+              sessionId,
+            );
+            const narrativeRedactedSources = combineRedactedSources(
+              filteredStatusEntry.redacted,
+              filteredLogs.redacted,
+              filteredHistory.redacted,
+            );
+            const visibleStatusEntry = filteredStatusEntry.allowed[0] ?? null;
+            const logs = filteredLogs.allowed;
+            const history = filteredHistory.allowed;
 
-            if (!statusEntry && logs.length === 0 && history.length === 0) {
+            if (!visibleStatusEntry && logs.length === 0 && history.length === 0) {
               const response: Record<string, unknown> = {
                 namespace: narrativeArgs.namespace,
                 summary: "No narrative context found.",
@@ -3883,12 +4170,14 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                 timeline: [],
               };
               if (narrativeArgs.include_sources) response.sources = [];
+              const redactedSourcesSummary = summarizeRedactedSources(ctx, narrativeRedactedSources);
+              if (redactedSourcesSummary) response.redacted_sources = redactedSourcesSummary;
               return okResult("narrative", response);
             }
 
-            const signals = buildNarrativeSignals(narrativeArgs.namespace, statusEntry, logs, history);
-            const timeline = buildNarrativeTimeline(statusEntry, logs, history, limit);
-            const sources = buildNarrativeSources(narrativeArgs.include_sources === true, statusEntry, logs, history);
+            const signals = buildNarrativeSignals(narrativeArgs.namespace, visibleStatusEntry, logs, history);
+            const timeline = buildNarrativeTimeline(visibleStatusEntry, logs, history, limit);
+            const sources = buildNarrativeSources(narrativeArgs.include_sources === true, visibleStatusEntry, logs, history);
 
             const recentActivity = timeline[0]?.timestamp;
             const summary = recentActivity
@@ -3902,6 +4191,8 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               timeline,
             };
             if (sources) response.sources = sources;
+            const redactedSourcesSummary = summarizeRedactedSources(ctx, narrativeRedactedSources);
+            if (redactedSourcesSummary) response.redacted_sources = redactedSourcesSummary;
 
             return okResult("narrative", response);
           }
@@ -3938,15 +4229,27 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               }
             }
 
-            const trackedStatusByNamespace = getTrackedStatusAssessmentByNamespace(db);
-            const rows = listFreshCommitmentRows(db, ctx, {
+            const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_commitments", sessionId);
+            const trackedStatusByNamespace = mapTrackedStatusAssessmentsByNamespace(visibleTrackedStatuses.allowed);
+            const { rows, redacted } = listFreshCommitmentRows(db, ctx, "memory_commitments", {
               namespace,
               since: normalizedSince,
               limit: Math.max(limit * 8, 80),
               includeResolved: true,
-            });
+            }, sessionId);
 
-            return okResult("commitments", classifyCommitments(rows, trackedStatusByNamespace, limit));
+            const response: Record<string, unknown> = {
+              ...classifyCommitments(rows, trackedStatusByNamespace, limit),
+            };
+            const redactedSourcesSummary = summarizeRedactedSources(
+              ctx,
+              combineRedactedSources(visibleTrackedStatuses.redacted, redacted),
+            );
+            if (redactedSourcesSummary) {
+              response.redacted_sources = redactedSourcesSummary;
+            }
+
+            return okResult("commitments", response);
           }
 
           case "memory_patterns": {
@@ -3981,10 +4284,19 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             }
 
             const topicNeedle = normalizeCompareText(topic ?? "");
-            const allEntries = listEntriesForDerivation(db, {
+            const rawEntries = listEntriesForDerivation(db, {
               namespace,
               since: normalizedSince,
             }).filter((entry) => canRead(ctx, entry.namespace));
+            const filteredEntries = filterDerivedSources(
+              db,
+              ctx,
+              rawEntries,
+              "memory_patterns",
+              (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
+              sessionId,
+            );
+            const allEntries = filteredEntries.allowed;
 
             const candidateEntries = topicNeedle
               ? allEntries.filter((entry) => normalizeCompareText(`${entry.namespace} ${entry.key ?? ""} ${entry.content}`).includes(topicNeedle))
@@ -4031,13 +4343,14 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               });
             }
 
-            const trackedStatusByNamespace = getTrackedStatusAssessmentByNamespace(db);
-            const commitmentRows = listFreshCommitmentRows(db, ctx, {
+            const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_patterns", sessionId);
+            const trackedStatusByNamespace = mapTrackedStatusAssessmentsByNamespace(visibleTrackedStatuses.allowed);
+            const { rows: commitmentRows, redacted: redactedCommitmentSources } = listFreshCommitmentRows(db, ctx, "memory_patterns", {
               namespace,
               since: normalizedSince,
               limit: 200,
               includeResolved: true,
-            });
+            }, sessionId);
 
             const undatedOpen = commitmentRows.filter((row) => row.status === "open" && !row.due_at);
             const undatedSources = new Set(undatedOpen.map((row) => row.source_entry_id));
@@ -4090,13 +4403,26 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             const allowedPatternSourceIds = new Set(sortedPatterns.flatMap((pattern) => pattern.source_entry_ids));
             const supportingSources = buildPatternSources(allEntries, allowedPatternSourceIds).slice(0, limit * 3);
 
-            return okResult("patterns", {
+            const response: Record<string, unknown> = {
               patterns: sortedPatterns,
               heuristics: heuristics
                 .filter((heuristic) => heuristic.source_entry_ids.some((id) => allowedPatternSourceIds.has(id)))
                 .slice(0, limit),
               supporting_sources: supportingSources,
-            });
+            };
+            const redactedSourcesSummary = summarizeRedactedSources(
+              ctx,
+              combineRedactedSources(
+                filteredEntries.redacted,
+                visibleTrackedStatuses.redacted,
+                redactedCommitmentSources,
+              ),
+            );
+            if (redactedSourcesSummary) {
+              response.redacted_sources = redactedSourcesSummary;
+            }
+
+            return okResult("patterns", response);
           }
 
           case "memory_handoff": {
@@ -4130,30 +4456,59 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               });
             }
 
-            const allEntries = listEntriesForDerivation(db, {
+            const rawEntries = listEntriesForDerivation(db, {
               namespace,
               since: normalizedSince,
             }).filter((entry) => canRead(ctx, entry.namespace));
+            const filteredEntries = filterDerivedSources(
+              db,
+              ctx,
+              rawEntries,
+              "memory_handoff",
+              (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
+              sessionId,
+            );
+            const allEntries = filteredEntries.allowed;
             const rawStatusEntry = resolveNarrativeStatusEntry(db, namespace);
             const statusEntry = rawStatusEntry && canRead(ctx, rawStatusEntry.namespace)
               ? rawStatusEntry
               : null;
+            const filteredStatusEntry = statusEntry
+              ? filterDerivedSources(
+                db,
+                ctx,
+                [statusEntry],
+                "memory_handoff",
+                (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
+                sessionId,
+              )
+              : { allowed: [] as Entry[], redacted: [] as RedactableEntryMetadata[] };
+            const visibleStatusEntry = filteredStatusEntry.allowed[0] ?? null;
             const logs = allEntries
               .filter((entry) => entry.entry_type === "log")
               .sort((a, b) => b.created_at.localeCompare(a.created_at));
-            const history = getAuditHistoryPage(db, {
-              namespace,
-              since: normalizedSince,
-              limit: Math.max(limit * 4, 20),
-            }).entries.filter((entry) => canRead(ctx, entry.namespace));
-            const commitmentRows = listFreshCommitmentRows(db, ctx, {
+            const filteredHistory = filterDerivedSources(
+              db,
+              ctx,
+              getAuditHistoryPage(db, {
+                namespace,
+                since: normalizedSince,
+                limit: Math.max(limit * 4, 20),
+              }).entries.filter((entry) => canRead(ctx, entry.namespace)),
+              "memory_handoff",
+              (entry) => buildAuditHistoryMetadata(db, entry),
+              sessionId,
+            );
+            const history = filteredHistory.allowed;
+            const { rows: commitmentRows, redacted: redactedCommitmentSources } = listFreshCommitmentRows(db, ctx, "memory_handoff", {
               namespace,
               since: normalizedSince,
               limit: 200,
               includeResolved: true,
-            });
-            const trackedStatusByNamespace = getTrackedStatusAssessmentByNamespace(db);
-            const currentState = buildHandoffCurrentState(namespace, statusEntry, allEntries);
+            }, sessionId);
+            const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_handoff", sessionId);
+            const trackedStatusByNamespace = mapTrackedStatusAssessmentsByNamespace(visibleTrackedStatuses.allowed);
+            const currentState = buildHandoffCurrentState(namespace, visibleStatusEntry, allEntries);
 
             const recentDecisions = logs
               .filter((entry) => isDecisionLikeLog(entry))
@@ -4166,7 +4521,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
 
             const openLoopSet = new Set<string>();
             const recommendedActionSet = new Set<string>();
-            const statusAssessment = statusEntry ? trackedStatusByNamespace.get(statusEntry.namespace) : undefined;
+            const statusAssessment = visibleStatusEntry ? trackedStatusByNamespace.get(visibleStatusEntry.namespace) : undefined;
             if (statusAssessment) {
               for (const loop of extractResumeOpenLoops(statusAssessment)) {
                 openLoopSet.add(loop.summary);
@@ -4201,7 +4556,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             }
 
             const found = Boolean(currentState) || recentDecisions.length > 0 || history.length > 0 || commitmentRows.length > 0;
-            return okResult("handoff", {
+            const response: Record<string, unknown> = {
               found,
               namespace,
               current_state: currentState,
@@ -4209,7 +4564,21 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               open_loops: [...openLoopSet].slice(0, limit),
               recent_actors: buildHandoffRecentActors(history, limit),
               recommended_next_actions: [...recommendedActionSet].slice(0, limit),
-            });
+            };
+            const redactedSourcesSummary = summarizeRedactedSources(
+              ctx,
+              combineRedactedSources(
+                filteredEntries.redacted,
+                filteredStatusEntry.redacted,
+                filteredHistory.redacted,
+                redactedCommitmentSources,
+                visibleTrackedStatuses.redacted,
+              ),
+            );
+            if (redactedSourcesSummary) {
+              response.redacted_sources = redactedSourcesSummary;
+            }
+            return okResult("handoff", response);
           }
 
           case "memory_write": {
@@ -4991,8 +5360,8 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             const includeMissingLifecycle = attentionArgs.include_missing_lifecycle !== false;
             const limit = clampOptionalLimit(attentionArgs.limit, 50) ?? 20;
 
-            const trackedStatusAssessments = [...getTrackedStatusAssessments(db).values()]
-              .filter(a => canRead(ctx, a.row.namespace));
+            const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_attention", sessionId);
+            const trackedStatusAssessments = visibleTrackedStatuses.allowed;
             const namespaces = listNamespaces(db).filter(ns => canRead(ctx, ns.namespace));
             const attentionItems: AttentionItem[] = [];
 
@@ -5028,7 +5397,10 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             }
 
             if (includeMissingStatus) {
-              const trackedNsWithStatus = new Set(trackedStatusAssessments.map((assessment) => assessment.row.namespace));
+              const trackedNsWithStatus = new Set([
+                ...trackedStatusAssessments.map((assessment) => assessment.row.namespace),
+                ...visibleTrackedStatuses.redacted.map((entry) => entry.namespace),
+              ]);
               for (const ns of namespaces) {
                 if (!isTrackedNamespace(ns.namespace)) continue;
                 if (trackedNsWithStatus.has(ns.namespace)) continue;
@@ -5070,8 +5442,14 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               summary,
               items: limitedItems,
             };
-            if (limitedItems.length === 0) {
+            const redactedSourcesSummary = summarizeRedactedSources(ctx, visibleTrackedStatuses.redacted);
+            if (redactedSourcesSummary) {
+              attentionResult.redacted_sources = redactedSourcesSummary;
+            }
+            if (limitedItems.length === 0 && !redactedSourcesSummary) {
               attentionResult.message = "All tracked projects appear healthy. No items need attention.";
+            } else if (limitedItems.length === 0 && redactedSourcesSummary) {
+              attentionResult.message = "No attention items are visible on this connection.";
             }
 
             return okResult("attention", attentionResult);

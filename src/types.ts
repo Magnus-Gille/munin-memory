@@ -216,6 +216,9 @@ export interface DashboardEntry {
   updated_at: string;
   lifecycle: string;
   needs_attention?: true;
+  classification?: ClassificationLevel;
+  redacted?: boolean;
+  redaction_reason?: string;
 }
 
 export interface MaintenanceItem {
@@ -407,6 +410,9 @@ export interface AttentionItem {
   preview: string;
   reason: string;
   suggested_action: string;
+  classification?: ClassificationLevel;
+  redacted?: boolean;
+  redaction_reason?: string;
 }
 
 export interface AttentionResponse {
@@ -418,6 +424,22 @@ export interface AttentionResponse {
     total: number;
   };
   items: AttentionItem[];
+  redacted_sources?: RedactedSourcesSummary;
+}
+
+export interface RedactedSourcesSummary {
+  count: number;
+  reason: string;
+  namespaces?: string[];
+}
+
+export interface LibrarianRuntimeSummary {
+  enabled: boolean;
+  transport_type: TransportType;
+  max_classification: ClassificationLevel;
+  redacted_dashboard_count?: number;
+  redacted_source_count?: number;
+  access_guidance?: string;
 }
 
 export interface ResumeItem {
@@ -453,6 +475,7 @@ export interface ResumeResponse {
   open_loops: ResumeOpenLoop[];
   suggested_reads: ResumeSuggestedRead[];
   why_this_set: string[];
+  redacted_sources?: RedactedSourcesSummary;
 }
 
 export interface ExtractSuggestion {
@@ -522,6 +545,7 @@ export interface NarrativeResponse {
   signals: NarrativeSignal[];
   timeline: NarrativeTimelineItem[];
   sources?: NarrativeSource[];
+  redacted_sources?: RedactedSourcesSummary;
 }
 
 export interface CommitmentItem {
@@ -547,6 +571,7 @@ export interface CommitmentsResponse {
   at_risk: CommitmentItem[];
   overdue: CommitmentItem[];
   completed_recently: CommitmentItem[];
+  redacted_sources?: RedactedSourcesSummary;
 }
 
 export interface PatternItem {
@@ -575,6 +600,7 @@ export interface PatternsResponse {
   patterns: PatternItem[];
   heuristics: HeuristicItem[];
   supporting_sources: PatternSource[];
+  redacted_sources?: RedactedSourcesSummary;
 }
 
 export interface HandoffDecision {
@@ -604,6 +630,7 @@ export interface HandoffResponse {
   open_loops: string[];
   recent_actors: HandoffActor[];
   recommended_next_actions: string[];
+  redacted_sources?: RedactedSourcesSummary;
 }
 
 // Retrieval insights types
