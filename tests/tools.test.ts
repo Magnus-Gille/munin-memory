@@ -1833,17 +1833,17 @@ describe("memory_narrative", () => {
     });
     await callTool("memory_log", {
       namespace: "projects/skuld",
-      content: "Decided to keep the first narrative layer source-backed.",
+      content: "Decided again to keep the first narrative layer source-backed for now.",
       tags: ["decision"],
     });
     await callTool("memory_log", {
       namespace: "projects/skuld",
-      content: "Decided to avoid background materialization for now.",
+      content: "Decided to avoid background materialization for now because attribution got muddier.",
       tags: ["decision"],
     });
     await callTool("memory_log", {
       namespace: "projects/skuld",
-      content: "Decision: keep the scope narrow and attributable.",
+      content: "Decision: narrow the scope instead of reopening the broader rollout plan.",
       tags: ["decision"],
     });
 
@@ -1954,6 +1954,44 @@ describe("memory_narrative", () => {
 
     expect(result.signals.some((signal) => signal.category === "decision_churn")).toBe(false);
     expect(result.signals.some((signal) => signal.category === "reversal_pattern")).toBe(false);
+  });
+
+  it("does not treat roadmap and planning decisions as churn on live-shaped history", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/munin-live-narrative",
+      phase: "Active",
+      current_work: "Roadmap follow-through",
+      blockers: "None.",
+      next_steps: ["Exercise the live heuristics"],
+      lifecycle: "active",
+    });
+    await callTool("memory_log", {
+      namespace: "projects/munin-live-narrative",
+      content: "Added full engineering-plan coverage for the roadmap. Decision: later phases are planned in enough detail to guide future work, but remain provisional where they depend on earlier implementation.",
+      tags: ["decision", "milestone", "topic:roadmap"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/munin-live-narrative",
+      content: "Added docs/phase-1-engineering-plan.md to convert Roadmap Phase 1 into a concrete implementation plan. Decision: use valid_until only and defer full temporal history for now.",
+      tags: ["decision", "topic:phase-1"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/munin-live-narrative",
+      content: "Locked in Munin's product direction after reviewing the docs. Decision: position Munin as sovereign operational memory, not a broad general-purpose AI memory platform.",
+      tags: ["decision", "topic:positioning"],
+    });
+
+    const raw = await callTool("memory_narrative", {
+      namespace: "projects/munin-live-narrative",
+      since: "2026-03-30T00:00:00Z",
+      include_sources: true,
+      limit: 6,
+    });
+    const result = parseToolResponse(raw) as {
+      signals: Array<{ category: string }>;
+    };
+
+    expect(result.signals.some((signal) => signal.category === "decision_churn")).toBe(false);
   });
 });
 
@@ -2283,6 +2321,35 @@ describe("memory_patterns", () => {
     });
     const result = parseToolResponse(raw) as {
       patterns: Array<{ kind: string }>;
+    };
+
+    expect(result.patterns.some((pattern) => pattern.kind === "decision_theme")).toBe(false);
+  });
+
+  it("omits decision_theme for live-shaped planning vocabulary", async () => {
+    await callTool("memory_log", {
+      namespace: "projects/munin-live-pattern-theme",
+      content: "Added full engineering-plan coverage for the roadmap. Decision: keep the design explicit and the implementation plan in docs.",
+      tags: ["decision", "topic:roadmap"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/munin-live-pattern-theme",
+      content: "Added docs/phase-1-engineering-plan.md to convert Roadmap Phase 1 into a concrete implementation plan with an explicit design boundary.",
+      tags: ["decision", "topic:phase-1"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/munin-live-pattern-theme",
+      content: "Locked in the product direction after reviewing the docs. Decision: keep the plan explicit and the design narrow.",
+      tags: ["decision", "topic:positioning"],
+    });
+
+    const raw = await callTool("memory_patterns", {
+      namespace: "projects/munin-live-pattern-theme",
+      since: "2026-03-30T00:00:00Z",
+      limit: 5,
+    });
+    const result = parseToolResponse(raw) as {
+      patterns: Array<{ kind: string; summary: string }>;
     };
 
     expect(result.patterns.some((pattern) => pattern.kind === "decision_theme")).toBe(false);

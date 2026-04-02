@@ -377,9 +377,11 @@ const PATTERN_GENERIC_TERMS = new Set([
   "around",
   "batch",
   "before",
+  "boundaries",
   "build",
   "clean",
   "current",
+  "design",
   "decision",
   "decisions",
   "deploy",
@@ -387,6 +389,7 @@ const PATTERN_GENERIC_TERMS = new Set([
   "deployment",
   "docs",
   "exact",
+  "explicit",
   "full",
   "from",
   "into",
@@ -396,12 +399,18 @@ const PATTERN_GENERIC_TERMS = new Set([
   "memory",
   "normal",
   "phase",
+  "plan",
+  "planned",
+  "planning",
+  "position",
+  "positioning",
   "project",
   "projects",
   "real",
   "release",
   "released",
   "review",
+  "roadmap",
   "source",
   "sources",
   "status",
@@ -439,6 +448,8 @@ const NARRATIVE_OPERATIONAL_RELEASE_TERMS =
   /\b(batch|build|ci|commit(?:ted)?|deploy(?:ed)?|fix(?:ed)?|format(?:ting)?|health|push(?:ed|ing)?|release(?:d)?|ship(?:ped|ping)?|status(?: update)?|sync(?:ed)?|test(?:s)?|verification|verified)\b/i;
 const NARRATIVE_DECISION_RATIONALE_TERMS =
   /\b(again|avoid|because|choose|chose|concern|concerns|defer|due to|keep|narrow|prefer|reason|revisit|risk|scope|settled|still|tradeoff|uncertainty)\b/i;
+const NARRATIVE_CHURN_MARKERS =
+  /\b(again|avoid|changed|defer|deferred|instead|reconsider|revisit|rework|rollback|tradeoff|uncertainty|for now)\b/i;
 const ORIENTATION_QUERY_PHRASES = [
   "orient me",
   "orientation",
@@ -1424,6 +1435,10 @@ function isChurnRelevantDecisionLog(entry: Entry): boolean {
   return isStrictDecisionLikeLog(entry) && !isNarrativeMetaDiscussion(entry.content) && !isOperationalReleaseDecisionLog(entry);
 }
 
+function hasNarrativeChurnMarker(entry: Entry): boolean {
+  return NARRATIVE_CHURN_MARKERS.test(entry.content);
+}
+
 function inferExtractLifecycle(line: string): ExtractSignals["lifecycle"] | undefined {
   if (/^lifecycle:/i.test(line)) {
     const value = line.replace(/^lifecycle:\s*/i, "").trim().toLowerCase();
@@ -1913,7 +1928,8 @@ function buildNarrativeSignals(
   }
 
   const decisionLogs = logs.filter((entry) => isChurnRelevantDecisionLog(entry));
-  if (decisionLogs.length >= NARRATIVE_DECISION_CHURN_THRESHOLD) {
+  const churnMarkerLogs = decisionLogs.filter((entry) => hasNarrativeChurnMarker(entry));
+  if (decisionLogs.length >= NARRATIVE_DECISION_CHURN_THRESHOLD && churnMarkerLogs.length >= 2) {
     const newest = decisionLogs[0];
     const oldest = decisionLogs.at(-1)!;
     const spanDays = Math.max(0, getDaysSince(oldest.created_at) - getDaysSince(newest.created_at));
@@ -1921,8 +1937,11 @@ function buildNarrativeSignals(
       category: "decision_churn",
       severity: decisionLogs.length >= 5 ? "high" : "medium",
       summary: `${decisionLogs.length} decision-like log entries landed across roughly ${spanDays} day${spanDays === 1 ? "" : "s"}.`,
-      reason: "A dense cluster of decision logs suggests active re-evaluation or churn.",
-      source_entry_ids: decisionLogs.slice(0, 5).map((entry) => entry.id),
+      reason: "A dense cluster of decision logs plus explicit re-evaluation language suggests active churn rather than ordinary planning activity.",
+      source_entry_ids: decisionLogs
+        .filter((entry) => hasNarrativeChurnMarker(entry))
+        .slice(0, 5)
+        .map((entry) => entry.id),
       source_audit_ids: [],
     });
   }
