@@ -13,11 +13,16 @@ import {
   updatePrincipal,
   rotateToken,
   testPrincipalAccess,
+  listClassificationFloors,
+  setClassificationFloor,
+  auditClassification,
   parseRules,
+  parseClassification,
   parseExpiresAt,
   parseArgs,
   type AddPrincipalOpts,
 } from "../src/admin-cli.js";
+import { writeState } from "../src/db.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -481,6 +486,53 @@ describe("testPrincipalAccess", () => {
 });
 
 // ---------------------------------------------------------------------------
+// classification admin
+// ---------------------------------------------------------------------------
+
+describe("classification admin", () => {
+  let db: Database.Database;
+  beforeEach(() => { db = makeDb(); });
+
+  it("lists seeded classification floors", () => {
+    const floors = listClassificationFloors(db);
+    expect(floors.some((floor) => floor.namespacePattern === "projects/*" && floor.minClassification === "internal")).toBe(true);
+    expect(floors.some((floor) => floor.namespacePattern === "clients/*" && floor.minClassification === "client-confidential")).toBe(true);
+  });
+
+  it("sets and updates a namespace floor", () => {
+    const created = setClassificationFloor(db, "contracts/*", "client-restricted");
+    expect(created.namespacePattern).toBe("contracts/*");
+    expect(created.minClassification).toBe("client-restricted");
+
+    const updated = setClassificationFloor(db, "contracts/*", "client-confidential");
+    expect(updated.minClassification).toBe("client-confidential");
+
+    const floors = listClassificationFloors(db);
+    expect(floors.find((floor) => floor.namespacePattern === "contracts/*")?.minClassification).toBe("client-confidential");
+  });
+
+  it("audits entries below their namespace floor", () => {
+    writeState(
+      db,
+      "clients/acme",
+      "notes",
+      "low classification override",
+      ["note"],
+      "owner",
+      undefined,
+      undefined,
+      { classification: "public", classificationOverride: true },
+    );
+
+    const items = auditClassification(db);
+    expect(items).toHaveLength(1);
+    expect(items[0].namespace).toBe("clients/acme");
+    expect(items[0].classification).toBe("public");
+    expect(items[0].namespaceFloor).toBe("client-confidential");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // parseExpiresAt
 // ---------------------------------------------------------------------------
 
@@ -499,6 +551,16 @@ describe("parseExpiresAt", () => {
 
   it("rejects unix timestamps", () => {
     expect(() => parseExpiresAt("1735689600")).toThrow("Must be ISO 8601");
+  });
+});
+
+describe("parseClassification", () => {
+  it("accepts valid classification values", () => {
+    expect(parseClassification("client-confidential")).toBe("client-confidential");
+  });
+
+  it("rejects invalid classification values", () => {
+    expect(() => parseClassification("secret")).toThrow("Must be one of");
   });
 });
 
@@ -596,6 +658,13 @@ describe("parseArgs", () => {
     const parsed = parseArgs(argv("principals test sara projects/munin"));
     expect(parsed.command).toBe("test");
     expect(parsed.positionals).toEqual(["sara", "projects/munin"]);
+  });
+
+  it("parses classification set-floor command", () => {
+    const parsed = parseArgs(argv("classification set-floor contracts/* client-restricted"));
+    expect(parsed.resource).toBe("classification");
+    expect(parsed.command).toBe("set-floor");
+    expect(parsed.positionals).toEqual(["contracts/*", "client-restricted"]);
   });
 });
 

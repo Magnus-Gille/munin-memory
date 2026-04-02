@@ -25,6 +25,7 @@ docs/*
 !docs/authorization-matrix.md
 !docs/competitive-analysis.md
 !docs/librarian-architecture.md
+!docs/librarian-engineering-plan.md
 
 # Debate files — keep only summaries and resolutions
 debate/*

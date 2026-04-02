@@ -6,6 +6,13 @@ export type SearchMode = "lexical" | "semantic" | "hybrid";
 export type OrientDetail = "compact" | "standard" | "full";
 export type AuditAction = "write" | "update" | "patch" | "delete" | "namespace_delete" | "log_append";
 export type CommitmentStatus = "open" | "done" | "cancelled";
+export type ClassificationLevel =
+  | "public"
+  | "internal"
+  | "client-confidential"
+  | "client-restricted";
+export type TransportType = "local" | "dpa_covered" | "consumer";
+export type AuthMethod = "stdio" | "legacy_bearer" | "bearer" | "oauth" | "agent_token";
 
 export interface EntryProvenance {
   principal_id: string;
@@ -24,6 +31,7 @@ export interface Entry {
   created_at: string;
   updated_at: string;
   valid_until: string | null;
+  classification: ClassificationLevel;
   embedding_status: EmbeddingStatus;
   embedding_model: string | null;
 }
@@ -41,6 +49,8 @@ export interface WriteParams {
   content?: string;
   tags?: string[];
   valid_until?: string | null;
+  classification?: ClassificationLevel;
+  classification_override?: boolean;
 }
 
 export interface StatusUpdateParams {
@@ -52,6 +62,8 @@ export interface StatusUpdateParams {
   notes?: string;
   lifecycle?: "active" | "blocked" | "completed" | "stopped" | "maintenance" | "archived";
   expected_updated_at?: string;
+  classification?: ClassificationLevel;
+  classification_override?: boolean;
 }
 
 export interface ReadParams {
@@ -135,6 +147,8 @@ export interface LogParams {
   namespace: string;
   content: string;
   tags?: string[];
+  classification?: ClassificationLevel;
+  classification_override?: boolean;
 }
 
 export interface ListParams {
@@ -222,6 +236,7 @@ export interface TrackedStatusRow {
   created_at: string;
   updated_at: string;
   valid_until: string | null;
+  classification: ClassificationLevel;
 }
 
 export interface ReadResponse {
@@ -234,8 +249,11 @@ export interface ReadResponse {
   created_at?: string;
   updated_at?: string;
   valid_until?: string | null;
+  classification?: ClassificationLevel;
   expired?: boolean;
   provenance?: EntryProvenance;
+  redacted?: boolean;
+  redaction_reason?: string;
   message?: string;
   hint?: string;
 }
@@ -251,23 +269,29 @@ export interface GetResponse {
   created_at?: string;
   updated_at?: string;
   valid_until?: string | null;
+  classification?: ClassificationLevel;
   expired?: boolean;
   provenance?: EntryProvenance;
+  redacted?: boolean;
+  redaction_reason?: string;
   message?: string;
 }
 
 export interface QueryResult {
-  id: string;
+  id?: string;
   namespace: string;
-  key: string | null;
-  entry_type: EntryType;
-  content_preview: string;
-  tags: string[];
-  created_at: string;
-  updated_at: string;
+  key?: string | null;
+  entry_type?: EntryType;
+  content_preview?: string;
+  tags?: string[];
+  created_at?: string;
+  updated_at?: string;
   valid_until?: string | null;
+  classification?: ClassificationLevel;
   expired?: boolean;
   provenance?: EntryProvenance;
+  redacted?: boolean;
+  redaction_reason?: string;
   match?: {
     heuristic_score: number;
     freshness_score?: number;
@@ -283,6 +307,7 @@ export interface QueryResult {
 export interface QueryResponse {
   results: QueryResult[];
   total: number;
+  redacted_count?: number;
   query?: string;
   search_mode: SearchMode | "filter";
   search_mode_actual?: SearchMode;
@@ -302,6 +327,7 @@ export interface LogResponse {
   id: string;
   namespace: string;
   timestamp: string;
+  classification?: ClassificationLevel;
   provenance?: EntryProvenance;
 }
 
@@ -313,21 +339,27 @@ export interface NamespaceSummary {
 }
 
 export interface LogPreview {
-  id: string;
-  content_preview: string;
-  tags: string[];
-  created_at: string;
+  id?: string;
+  content_preview?: string;
+  tags?: string[];
+  created_at?: string;
+  classification?: ClassificationLevel;
   provenance?: EntryProvenance;
+  redacted?: boolean;
+  redaction_reason?: string;
 }
 
 export interface NamespaceDetail {
   state_entries: Array<{
-    id: string;
-    key: string;
-    preview: string;
-    tags: string[];
-    updated_at: string;
+    id?: string;
+    key?: string;
+    preview?: string;
+    tags?: string[];
+    updated_at?: string;
+    classification?: ClassificationLevel;
     provenance?: EntryProvenance;
+    redacted?: boolean;
+    redaction_reason?: string;
   }>;
   log_summary: {
     log_count: number;
@@ -506,6 +538,7 @@ export interface CommitmentItem {
   updated_at: string;
   resolved_at: string | null;
   source_excerpt?: string;
+  source_classification?: ClassificationLevel;
   reason?: string;
 }
 
@@ -618,11 +651,14 @@ export interface AuditEntry {
   id: number;
   timestamp: string;
   agent_id: string;
-  action: AuditAction;
+  action: AuditAction | "delete_namespace" | "log";
   namespace: string;
   key: string | null;
   entry_id: string | null;
   detail: string | null;
+  classification?: ClassificationLevel;
+  redacted?: boolean;
+  redaction_reason?: string;
   provenance?: EntryProvenance;
 }
 

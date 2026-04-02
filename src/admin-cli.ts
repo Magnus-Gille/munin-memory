@@ -11,6 +11,9 @@
  *   munin-admin principals update <principal-id> [--rules ...] [--oauth-client-id ...] [--expires-at ...]
  *   munin-admin principals rotate-token <principal-id>
  *   munin-admin principals test <principal-id> <namespace>
+ *   munin-admin classification list-floors
+ *   munin-admin classification set-floor <namespace-pattern> <classification>
+ *   munin-admin classification audit [namespace-prefix]
  *
  * Global flags:
  *   --db <path>     Database path (default: ~/.munin-memory/memory.db)
@@ -23,7 +26,14 @@ import Database from "better-sqlite3";
 import { randomBytes, randomUUID, createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { initDatabase, nowUTC, resolveDbPath } from "./db.js";
+import {
+  initDatabase,
+  listEntriesBelowNamespaceFloor,
+  listNamespaceClassificationFloors,
+  nowUTC,
+  resolveDbPath,
+  setNamespaceClassificationFloor,
+} from "./db.js";
 import {
   validateNamespaceRules,
   canRead,
@@ -33,6 +43,12 @@ import {
   type NamespaceRule,
   type PrincipalType,
 } from "./access.js";
+import {
+  CLASSIFICATION_LEVELS,
+  isClassificationLevel,
+  validateClassificationPattern,
+} from "./librarian.js";
+import type { ClassificationLevel } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -104,6 +120,23 @@ export interface TestAccessResult {
 export interface RotateTokenResult {
   principalId: string;
   token: string;
+}
+
+export interface ClassificationFloorSummary {
+  namespacePattern: string;
+  minClassification: ClassificationLevel;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ClassificationAuditItem {
+  id: string;
+  namespace: string;
+  key: string | null;
+  entryType: "state" | "log";
+  classification: ClassificationLevel;
+  namespaceFloor: ClassificationLevel;
+  tags: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -188,6 +221,15 @@ export function parseExpiresAt(value: string): string {
     throw new Error(`Invalid date: "${value}".`);
   }
   return date.toISOString();
+}
+
+export function parseClassification(value: string): ClassificationLevel {
+  if (!isClassificationLevel(value)) {
+    throw new Error(
+      `Invalid classification "${value}". Must be one of: ${CLASSIFICATION_LEVELS.join(", ")}.`,
+    );
+  }
+  return value;
 }
 
 const VALID_TYPES = new Set<string>(["owner", "family", "agent", "external"]);
@@ -481,6 +523,47 @@ export function testPrincipalAccess(
   };
 }
 
+export function listClassificationFloors(
+  db: Database.Database,
+): ClassificationFloorSummary[] {
+  return listNamespaceClassificationFloors(db).map((row) => ({
+    namespacePattern: row.namespace_pattern,
+    minClassification: row.min_classification,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
+}
+
+export function setClassificationFloor(
+  db: Database.Database,
+  namespacePattern: string,
+  classification: ClassificationLevel,
+): ClassificationFloorSummary {
+  validateClassificationPattern(namespacePattern);
+  const row = setNamespaceClassificationFloor(db, namespacePattern, classification);
+  return {
+    namespacePattern: row.namespace_pattern,
+    minClassification: row.min_classification,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export function auditClassification(
+  db: Database.Database,
+  namespace?: string,
+): ClassificationAuditItem[] {
+  return listEntriesBelowNamespaceFloor(db, namespace).map((row) => ({
+    id: row.id,
+    namespace: row.namespace,
+    key: row.key,
+    entryType: row.entry_type,
+    classification: row.classification,
+    namespaceFloor: row.namespace_floor,
+    tags: JSON.parse(row.tags) as string[],
+  }));
+}
+
 // ---------------------------------------------------------------------------
 // CLI output formatting
 // ---------------------------------------------------------------------------
@@ -558,6 +641,34 @@ function formatTestResult(result: TestAccessResult): string {
   }
 
   return lines.join("\n");
+}
+
+function formatClassificationFloors(floors: ClassificationFloorSummary[]): string {
+  const headers = ["PATTERN", "MIN CLASSIFICATION", "UPDATED"];
+  const rows = floors.map((floor) => [
+    floor.namespacePattern,
+    floor.minClassification,
+    floor.updatedAt,
+  ]);
+  const widths = headers.map((header, index) =>
+    Math.max(header.length, ...rows.map((row) => row[index].length)),
+  );
+  return formatTable(headers, rows, widths);
+}
+
+function formatClassificationAudit(items: ClassificationAuditItem[]): string {
+  const headers = ["NAMESPACE", "KEY", "TYPE", "CLASSIFICATION", "FLOOR"];
+  const rows = items.map((item) => [
+    item.namespace,
+    item.key ?? "(log)",
+    item.entryType,
+    item.classification,
+    item.namespaceFloor,
+  ]);
+  const widths = headers.map((header, index) =>
+    Math.max(header.length, ...rows.map((row) => row[index].length)),
+  );
+  return formatTable(headers, rows, widths);
 }
 
 // ---------------------------------------------------------------------------
@@ -651,6 +762,9 @@ Usage:
   munin-admin principals update <principal-id> [--rules ...] [--email ...] [--expires-at ...]
   munin-admin principals rotate-token <principal-id>
   munin-admin principals test <principal-id> <namespace>
+  munin-admin classification list-floors
+  munin-admin classification set-floor <namespace-pattern> <classification>
+  munin-admin classification audit [namespace-prefix]
   munin-admin oauth-clients list [--principal <principal-id>]
   munin-admin oauth-clients remove <oauth-client-id>
   munin-admin oauth-clients clear <principal-id>
@@ -1030,6 +1144,53 @@ function handleOAuthClientsClear(
   }
 }
 
+function handleClassificationListFloors(
+  db: Database.Database,
+  jsonOutput: boolean,
+): void {
+  const floors = listClassificationFloors(db);
+  if (jsonOutput) {
+    console.log(JSON.stringify(floors, null, 2));
+    return;
+  }
+  if (floors.length === 0) {
+    console.log("No classification floors found.");
+    return;
+  }
+  console.log(formatClassificationFloors(floors));
+}
+
+function handleClassificationSetFloor(
+  db: Database.Database,
+  namespacePattern: string,
+  classification: string,
+  jsonOutput: boolean,
+): void {
+  const result = setClassificationFloor(db, namespacePattern, parseClassification(classification));
+  if (jsonOutput) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  console.log(`Set ${result.namespacePattern} -> ${result.minClassification}`);
+}
+
+function handleClassificationAudit(
+  db: Database.Database,
+  namespace: string | undefined,
+  jsonOutput: boolean,
+): void {
+  const items = auditClassification(db, namespace);
+  if (jsonOutput) {
+    console.log(JSON.stringify(items, null, 2));
+    return;
+  }
+  if (items.length === 0) {
+    console.log("No entries below their namespace floor.");
+    return;
+  }
+  console.log(formatClassificationAudit(items));
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -1049,11 +1210,15 @@ function main(): void {
     process.exit(0);
   }
 
-  if (parsed.resource !== "principals" && parsed.resource !== "oauth-clients") {
+  if (
+    parsed.resource !== "principals"
+    && parsed.resource !== "oauth-clients"
+    && parsed.resource !== "classification"
+  ) {
     if (!parsed.resource) {
-      console.error("Missing resource. Expected: munin-admin principals|oauth-clients <command>");
+      console.error("Missing resource. Expected: munin-admin principals|classification|oauth-clients <command>");
     } else {
-      console.error(`Unknown resource: ${parsed.resource}. Expected: principals or oauth-clients`);
+      console.error(`Unknown resource: ${parsed.resource}. Expected: principals, classification, or oauth-clients`);
     }
     console.error("\nRun 'munin-admin --help' for usage.");
     process.exit(1);
@@ -1062,7 +1227,9 @@ function main(): void {
   if (!parsed.command) {
     const cmds = parsed.resource === "oauth-clients"
       ? "list, remove, clear"
-      : "list, show, add, revoke, update, rotate-token, test";
+      : parsed.resource === "classification"
+        ? "list-floors, set-floor, audit"
+        : "list, show, add, revoke, update, rotate-token, test";
     console.error(`Missing command. Expected: ${cmds}`);
     console.error("\nRun 'munin-admin --help' for usage.");
     process.exit(1);
@@ -1095,6 +1262,29 @@ function main(): void {
           break;
         default:
           console.error(`Unknown oauth-clients command: ${parsed.command}`);
+          console.error("\nRun 'munin-admin --help' for usage.");
+          process.exit(1);
+      }
+      return;
+    }
+
+    if (parsed.resource === "classification") {
+      const arg1 = parsed.positionals[0];
+      const arg2 = parsed.positionals[1];
+      switch (parsed.command) {
+        case "list-floors":
+          handleClassificationListFloors(db, parsed.json);
+          break;
+        case "set-floor":
+          if (!arg1) throw new Error("Missing <namespace-pattern> argument.");
+          if (!arg2) throw new Error("Missing <classification> argument.");
+          handleClassificationSetFloor(db, arg1, arg2, parsed.json);
+          break;
+        case "audit":
+          handleClassificationAudit(db, arg1, parsed.json);
+          break;
+        default:
+          console.error(`Unknown classification command: ${parsed.command}`);
           console.error("\nRun 'munin-admin --help' for usage.");
           process.exit(1);
       }

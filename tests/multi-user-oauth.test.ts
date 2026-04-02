@@ -13,7 +13,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import Database from "better-sqlite3";
 import { createHash, randomUUID } from "node:crypto";
-import { runMigrations, getSchemaVersion } from "../src/migrations.js";
+import { runMigrations, getSchemaVersion, migrations } from "../src/migrations.js";
 import {
   resolveAccessContext,
   ownerContext,
@@ -142,7 +142,7 @@ describe("migration v6", () => {
 
   it("sets schema version to latest migration", () => {
     const db = makeDb();
-    expect(getSchemaVersion(db)).toBe(10);
+    expect(getSchemaVersion(db)).toBe(migrations[migrations.length - 1].version);
     db.close();
   });
 });

@@ -295,7 +295,7 @@ describe("initDatabase uses migrations", () => {
     const db = initDatabase(TEST_DB_PATH);
 
     // schema_version exists and has latest version
-    expect(getSchemaVersion(db)).toBe(10);
+    expect(getSchemaVersion(db)).toBe(migrations[migrations.length - 1].version);
 
     // Full CRUD works
     const result = writeState(db, "test/ns", "key1", "hello from migrations", ["test"]);
@@ -538,6 +538,52 @@ describe("migration v10 — owner_principal_id", () => {
       .prepare("SELECT owner_principal_id FROM entries WHERE id = 'owned-entry'")
       .get() as { owner_principal_id: string | null };
     expect(row.owner_principal_id).toBe("sara");
+    db.close();
+  });
+});
+
+describe("migration v11 — librarian classification", () => {
+  it("adds classification metadata tables and columns", () => {
+    const db = openRawDb();
+    runMigrations(db);
+
+    const entryCols = db
+      .prepare("PRAGMA table_info(entries)")
+      .all() as Array<{ name: string }>;
+    expect(entryCols.map((col) => col.name)).toContain("classification");
+
+    const principalCols = db
+      .prepare("PRAGMA table_info(principals)")
+      .all() as Array<{ name: string }>;
+    expect(principalCols.map((col) => col.name)).toEqual(expect.arrayContaining([
+      "max_classification",
+      "transport_type",
+    ]));
+
+    const commitmentCols = db
+      .prepare("PRAGMA table_info(commitments)")
+      .all() as Array<{ name: string }>;
+    expect(commitmentCols.map((col) => col.name)).toContain("source_classification");
+
+    const tables = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+      .all() as Array<{ name: string }>;
+    const names = tables.map((row) => row.name);
+    expect(names).toContain("namespace_classification");
+    expect(names).toContain("redaction_log");
+
+    db.close();
+  });
+
+  it("backfills entry classification and synced tag from namespace defaults", () => {
+    const db = openRawDb();
+    runMigrations(db);
+
+    writeState(db, "clients/acme", "status", "active", ["active"]);
+    const entry = readState(db, "clients/acme", "status");
+    expect(entry?.classification).toBe("client-confidential");
+    expect(JSON.parse(entry!.tags)).toContain("classification:client-confidential");
+
     db.close();
   });
 });

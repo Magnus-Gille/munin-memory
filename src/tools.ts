@@ -6,7 +6,16 @@ import {
 import { getSchemaVersion } from "./migrations.js";
 import type { CallToolRequest } from "@modelcontextprotocol/sdk/types.js";
 import type Database from "better-sqlite3";
-import { type AccessContext, ownerContext, canRead, canWrite, canReadSubtree, filterByAccess } from "./access.js";
+import {
+  type AccessContext,
+  ownerContext,
+  canRead,
+  canWrite,
+  canReadSubtree,
+  filterByAccess,
+  getContextMaxClassification,
+  getContextTransportType,
+} from "./access.js";
 import { randomBytes } from "node:crypto";
 import {
   writeState,
@@ -43,7 +52,19 @@ import {
   logRetrievalOutcome,
   getInsightsByEntry,
   getAuditHistoryPage,
+  insertRedactionLog,
 } from "./db.js";
+import {
+  CLASSIFICATION_LEVELS,
+  classificationAllowed,
+  enforceClassification,
+  isClassificationLevel,
+  isLibrarianEnabled,
+  isRedactionLogEnabled,
+  resolveNamespaceClassificationFloor,
+  stripClassificationTags,
+  type RedactableEntryMetadata,
+} from "./librarian.js";
 import {
   validateWriteInput,
   validateLogInput,
@@ -163,12 +184,227 @@ function serializeParsedEntry(entry: ReturnType<typeof parseEntry>) {
     created_at: entry.created_at,
     updated_at: entry.updated_at,
     valid_until: entry.valid_until ?? undefined,
+    classification: entry.classification,
     provenance: buildProvenance(entry.agent_id, entry.owner_principal_id),
+  };
+}
+
+function buildRedactableEntryMetadata(entry: ReturnType<typeof parseEntry>) {
+  return {
+    id: entry.id,
+    namespace: entry.namespace,
+    key: entry.key,
+    entry_type: entry.entry_type,
+    classification: entry.classification,
+    tags: entry.tags,
+    created_at: entry.created_at,
+    updated_at: entry.updated_at,
+  };
+}
+
+function maybeRedactEntryMetadata(
+  db: Database.Database,
+  ctx: AccessContext,
+  entry: RedactableEntryMetadata,
+  toolName: string,
+  sessionId?: string,
+): Record<string, unknown> | null {
+  const enforcement = enforceClassification(ctx, entry);
+  if (enforcement.allowed) {
+    return null;
+  }
+
+  if (isRedactionLogEnabled()) {
+    insertRedactionLog(db, {
+      sessionId,
+      principalId: ctx.principalId,
+      transportType: enforcement.transportType,
+      entryId: entry.id,
+      entryNamespace: entry.namespace,
+      entryClassification: entry.classification,
+      connectionMaxClassification: enforcement.maxClassification,
+      toolName,
+    });
+  }
+
+  return enforcement.response;
+}
+
+function maybeRedactDirectEntry(
+  db: Database.Database,
+  ctx: AccessContext,
+  entry: ReturnType<typeof parseEntry>,
+  toolName: string,
+  sessionId?: string,
+): Record<string, unknown> | null {
+  return maybeRedactEntryMetadata(db, ctx, buildRedactableEntryMetadata(entry), toolName, sessionId);
+}
+
+function formatQueryResult(
+  db: Database.Database,
+  ctx: AccessContext,
+  entry: Entry,
+  toolName: string,
+  sessionId: string | undefined,
+  explain: boolean,
+  queryLower: string | null,
+  trackedStatuses: ReturnType<typeof getTrackedStatusAssessments> | undefined,
+  actualMode: SearchMode,
+  lexicalById: Map<string, ReturnType<typeof queryEntriesLexicalScored>[number]>,
+  semanticById: Map<string, ReturnType<typeof queryEntriesSemanticScored>[number]>,
+  hybridById: Map<string, ReturnType<typeof queryEntriesHybridScored>[number]>,
+): QueryResult {
+  const parsed = parseEntry(entry);
+  const redacted = maybeRedactEntryMetadata(db, ctx, buildRedactableEntryMetadata(parsed), toolName, sessionId);
+  if (redacted) {
+    return redacted as unknown as QueryResult;
+  }
+
+  const result: QueryResult = {
+    id: entry.id,
+    namespace: entry.namespace,
+    key: entry.key,
+    entry_type: entry.entry_type,
+    content_preview: contentPreview(entry.content),
+    tags: parsed.tags,
+    created_at: entry.created_at,
+    updated_at: entry.updated_at,
+    valid_until: entry.valid_until ?? undefined,
+    classification: entry.classification,
+    provenance: buildProvenance(entry.agent_id, entry.owner_principal_id),
+  };
+  if (isEntryExpired(entry)) {
+    result.expired = true;
+  }
+
+  if (explain && queryLower !== null) {
+    const heuristicScore = getQueryHeuristicScore(entry, queryLower, trackedStatuses);
+    const match: NonNullable<QueryResult["match"]> = {
+      heuristic_score: heuristicScore,
+      freshness_score: getFreshnessScore(entry.updated_at),
+      reasons: [],
+    };
+
+    if (actualMode === "lexical") {
+      const lexical = lexicalById.get(entry.id);
+      if (lexical) {
+        match.lexical_rank = lexical.rank;
+        match.lexical_score = lexical.score;
+      }
+    } else if (actualMode === "semantic") {
+      const semantic = semanticById.get(entry.id);
+      if (semantic) {
+        match.semantic_rank = semantic.rank;
+        match.semantic_distance = semantic.distance;
+      }
+    } else if (actualMode === "hybrid") {
+      const hybrid = hybridById.get(entry.id);
+      if (hybrid) {
+        match.hybrid_score = hybrid.score;
+        if (hybrid.lexicalRank !== undefined) match.lexical_rank = hybrid.lexicalRank;
+        if (hybrid.lexicalScore !== undefined) match.lexical_score = hybrid.lexicalScore;
+        if (hybrid.semanticRank !== undefined) match.semantic_rank = hybrid.semanticRank;
+        if (hybrid.semanticDistance !== undefined) match.semantic_distance = hybrid.semanticDistance;
+      }
+    }
+
+    match.reasons = getQueryExplainReasons(entry, queryLower, trackedStatuses?.get(entry.id), match);
+    result.match = match;
+  }
+
+  return result;
+}
+
+function serializeHistoryAction(
+  action: AuditEntry["action"],
+): AuditEntry["action"] {
+  return action === "log_append"
+    ? "log"
+    : action === "namespace_delete"
+      ? "delete_namespace"
+      : action;
+}
+
+function formatHistoryEntry(
+  db: Database.Database,
+  ctx: AccessContext,
+  entry: AuditEntry,
+  sessionId?: string,
+): AuditEntry {
+  const action = serializeHistoryAction(entry.action);
+  const provenance = buildProvenance(entry.agent_id);
+  let sourceEntry = entry.entry_id ? getById(db, entry.entry_id) : null;
+  let classification = sourceEntry?.classification;
+
+  if (!classification && isLibrarianEnabled()) {
+    const namespaceFloor = resolveNamespaceClassificationFloor(db, entry.namespace);
+    if (!classificationAllowed(namespaceFloor, getContextMaxClassification(ctx))) {
+      classification = namespaceFloor;
+    }
+  }
+
+  if (classification) {
+    const metadata: RedactableEntryMetadata = sourceEntry
+      ? buildRedactableEntryMetadata(parseEntry(sourceEntry))
+      : {
+          id: entry.entry_id ?? `audit:${entry.id}`,
+          namespace: entry.namespace,
+          key: entry.key,
+          classification,
+        };
+    let redactionResponse: Record<string, unknown> | null = null;
+    if (sourceEntry) {
+      redactionResponse = maybeRedactEntryMetadata(db, ctx, metadata, "memory_history", sessionId);
+    } else {
+      const enforcement = enforceClassification(ctx, metadata);
+      if (!enforcement.allowed) {
+        redactionResponse = enforcement.response;
+      }
+    }
+
+    if (redactionResponse) {
+      const response: AuditEntry = {
+        id: entry.id,
+        timestamp: entry.timestamp,
+        agent_id: entry.agent_id,
+        action,
+        namespace: entry.namespace,
+        key: ctx.principalType === "owner" ? entry.key : null,
+        entry_id: ctx.principalType === "owner" ? entry.entry_id : null,
+        detail: null,
+        provenance,
+        redacted: true,
+        redaction_reason: redactionResponse.redaction_reason as string | undefined,
+      };
+      if (ctx.principalType === "owner") {
+        response.classification = classification;
+      }
+      return response;
+    }
+  }
+
+  return {
+    ...entry,
+    action,
+    provenance,
   };
 }
 
 function parseTags(tags: string): string[] {
   return JSON.parse(tags) as string[];
+}
+
+function validateClassificationInput(
+  classification: unknown,
+  classificationOverride: unknown,
+): string | null {
+  if (classification !== undefined && !isClassificationLevel(classification)) {
+    return `classification must be one of: ${CLASSIFICATION_LEVELS.join(", ")}.`;
+  }
+  if (classificationOverride !== undefined && typeof classificationOverride !== "boolean") {
+    return "classification_override must be a boolean.";
+  }
+  return null;
 }
 
 interface StructuredStatus {
@@ -682,6 +918,7 @@ function trackedStatusRowToEntry(row: TrackedStatusRow): Entry {
     created_at: row.created_at,
     updated_at: row.updated_at,
     valid_until: row.valid_until,
+    classification: row.classification,
     embedding_status: "pending",
     embedding_model: null,
   };
@@ -2207,6 +2444,7 @@ function buildCommitmentItem(row: CommitmentRow, reason?: string): CommitmentIte
     updated_at: row.updated_at,
     resolved_at: row.resolved_at,
     source_excerpt: row.source_excerpt,
+    source_classification: row.source_classification,
     reason,
   };
 }
@@ -2681,6 +2919,17 @@ const TOOL_DEFINITIONS = [
           description:
             'Optional freeform tags for cross-cutting queries. Must be a JSON array, e.g. ["decision", "active", "client:lofalk"]. Do NOT pass as a comma-separated string.',
         },
+        classification: {
+          type: "string",
+          enum: [...CLASSIFICATION_LEVELS],
+          description:
+            "Optional explicit classification. If omitted, the server uses the namespace floor or preserves an existing higher classification.",
+        },
+        classification_override: {
+          type: "boolean",
+          description:
+            "Optional owner-only escape hatch for writes below the namespace floor.",
+        },
         valid_until: {
           type: "string",
           description:
@@ -2741,6 +2990,15 @@ const TOOL_DEFINITIONS = [
           type: "string",
           enum: ["active", "blocked", "completed", "stopped", "maintenance", "archived"],
           description: "Optional. Sets the tracked lifecycle tag while preserving non-lifecycle tags.",
+        },
+        classification: {
+          type: "string",
+          enum: [...CLASSIFICATION_LEVELS],
+          description: "Optional. Sets or preserves the authoritative classification for this tracked status.",
+        },
+        classification_override: {
+          type: "boolean",
+          description: "Optional owner-only escape hatch for writing below the namespace floor.",
         },
         expected_updated_at: {
           type: "string",
@@ -2938,6 +3196,15 @@ const TOOL_DEFINITIONS = [
           type: "array",
           items: { type: "string" },
           description: 'Optional tags. Must be a JSON array, e.g. ["decision", "active"] or ["client:lofalk"].',
+        },
+        classification: {
+          type: "string",
+          enum: [...CLASSIFICATION_LEVELS],
+          description: "Optional explicit classification for the log entry.",
+        },
+        classification_override: {
+          type: "boolean",
+          description: "Optional owner-only escape hatch for writes below the namespace floor.",
         },
       },
       required: ["namespace", "content"],
@@ -3946,7 +4213,17 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
           }
 
           case "memory_write": {
-            const { namespace, key, content, tags, valid_until, expected_updated_at, patch } =
+            const {
+              namespace,
+              key,
+              content,
+              tags,
+              valid_until,
+              expected_updated_at,
+              patch,
+              classification,
+              classification_override,
+            } =
               args as unknown as WriteParams & { expected_updated_at?: string; patch?: PatchParams };
 
             // Validate namespace and key (always required)
@@ -3966,6 +4243,13 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             if (patch !== undefined && valid_until !== undefined) {
               return errResult("write", "validation_error", "valid_until is only supported on full memory_write calls, not patch updates.");
             }
+            const classificationInputError = validateClassificationInput(classification, classification_override);
+            if (classificationInputError) {
+              return errResult("write", "validation_error", classificationInputError);
+            }
+            if (classification_override === true && ctx.principalType !== "owner") {
+              return errResult("write", "access_denied", "classification_override is only available to the owner principal.");
+            }
 
             if (!canWrite(ctx, namespace)) {
               return accessDeniedResponse(ctx, "write");
@@ -3981,7 +4265,23 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                 }
               }
 
-              const patchResult = patchState(db, namespace, key, patch, ctx.principalId, expected_updated_at);
+              let patchResult;
+              try {
+                patchResult = patchState(
+                  db,
+                  namespace,
+                  key,
+                  patch,
+                  ctx.principalId,
+                  expected_updated_at,
+                  {
+                    classification,
+                    classificationOverride: classification_override,
+                  },
+                );
+              } catch (error) {
+                return errResult("write", "validation_error", (error as Error).message);
+              }
 
               if (patchResult.status === "not_found") {
                 return errResult("write", "not_found", `No entry found at ${namespace}/${key}. Use content (not patch) to create a new entry.`, { namespace, key });
@@ -4053,16 +4353,25 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               }
             }
 
-            const result = writeState(
-              db,
-              namespace,
-              key,
-              content,
-              effectiveTags,
-              ctx.principalId,
-              expected_updated_at,
-              normalizedValidUntil,
-            );
+            let result;
+            try {
+              result = writeState(
+                db,
+                namespace,
+                key,
+                content,
+                effectiveTags,
+                ctx.principalId,
+                expected_updated_at,
+                normalizedValidUntil,
+                {
+                  classification,
+                  classificationOverride: classification_override,
+                },
+              );
+            } catch (error) {
+              return errResult("write", "validation_error", (error as Error).message);
+            }
 
             if (result.status === "conflict") {
               return errResult("write", "conflict", result.message!, {
@@ -4084,6 +4393,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               namespace,
               key,
               updated_at: result.updated_at,
+              classification: result.classification,
               hint,
               provenance: buildProvenance(ctx.principalId, ctx.principalId),
             };
@@ -4125,6 +4435,8 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               notes,
               lifecycle,
               expected_updated_at,
+              classification,
+              classification_override,
             } = args as unknown as StatusUpdateParams;
 
             const nsCheck = validateNamespace(namespace);
@@ -4136,6 +4448,13 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             }
             if (!canWrite(ctx, namespace)) {
               return accessDeniedResponse(ctx, "update_status");
+            }
+            const classificationInputError = validateClassificationInput(classification, classification_override);
+            if (classificationInputError) {
+              return errResult("update_status", "validation_error", classificationInputError);
+            }
+            if (classification_override === true && ctx.principalType !== "owner") {
+              return errResult("update_status", "access_denied", "classification_override is only available to the owner principal.");
             }
             if (next_steps !== undefined && (!Array.isArray(next_steps) || next_steps.some((item) => typeof item !== "string"))) {
               return errResult("update_status", "validation_error", "next_steps must be an array of strings.");
@@ -4187,7 +4506,9 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             }
 
             const existingTags = existingParsed?.tags ?? [];
-            const retainedTags = existingTags.filter((tag) => !LIFECYCLE_TAGS.has(tag));
+            const retainedTags = stripClassificationTags(
+              existingTags.filter((tag) => !LIFECYCLE_TAGS.has(tag)),
+            );
             const lifecycleTag = lifecycle ?? getLifecycleTags(existingTags)[0];
             const effectiveTags = lifecycleTag ? [...retainedTags, lifecycleTag] : retainedTags;
 
@@ -4195,15 +4516,25 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               warnings.push(`No lifecycle tag set. Consider one of: ${[...LIFECYCLE_TAGS].join(", ")}.`);
             }
 
-            const result = writeState(
-              db,
-              namespace,
-              "status",
-              content,
-              effectiveTags,
-              ctx.principalId,
-              expected_updated_at ?? existingParsed?.updated_at,
-            );
+            let result;
+            try {
+              result = writeState(
+                db,
+                namespace,
+                "status",
+                content,
+                effectiveTags,
+                ctx.principalId,
+                expected_updated_at ?? existingParsed?.updated_at,
+                undefined,
+                {
+                  classification,
+                  classificationOverride: classification_override,
+                },
+              );
+            } catch (error) {
+              return errResult("update_status", "validation_error", (error as Error).message);
+            }
 
             if (result.status === "conflict") {
               return errResult("update_status", "conflict", result.message!, {
@@ -4233,6 +4564,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               namespace,
               key: "status",
               updated_at: result.updated_at,
+              classification: result.classification,
               content,
               structured_status: structured,
               warnings: warnings.length > 0 ? warnings : undefined,
@@ -4256,6 +4588,10 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             const entry = readState(db, namespace, key);
             if (entry) {
               const parsed = parseEntry(entry);
+              const redacted = maybeRedactDirectEntry(db, ctx, parsed, "memory_read", sessionId);
+              if (redacted) {
+                return okResult("read", { found: true, ...redacted });
+              }
               const response: Record<string, unknown> = { found: true, ...serializeParsedEntry(parsed) };
               if (isEntryExpired(parsed)) {
                 response.expired = true;
@@ -4305,6 +4641,10 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               const entry = readState(db, ns, k);
               if (entry) {
                 const parsed = parseEntry(entry);
+                const redacted = maybeRedactDirectEntry(db, ctx, parsed, "memory_read_batch", sessionId);
+                if (redacted) {
+                  return { found: true, ...redacted };
+                }
                 const result: Record<string, unknown> = { found: true, ...serializeParsedEntry(parsed) };
                 if (isEntryExpired(parsed)) {
                   result.expired = true;
@@ -4331,6 +4671,10 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             }
             if (entry) {
               const parsed = parseEntry(entry);
+              const redacted = maybeRedactDirectEntry(db, ctx, parsed, "memory_get", sessionId);
+              if (redacted) {
+                return okResult("get", { found: true, ...redacted });
+              }
               const response: Record<string, unknown> = { found: true, ...serializeParsedEntry(parsed) };
               if (isEntryExpired(parsed)) {
                 response.expired = true;
@@ -4384,30 +4728,27 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               });
               const filteredExpired = filterExpiredEntries(filterResults, includeExpired);
               filterResults = filterByAccess(ctx, filteredExpired.items).slice(0, requestedLimit);
-              const formatted = filterResults.map((entry) => {
-                const result: QueryResult = {
-                  id: entry.id,
-                  namespace: entry.namespace,
-                  key: entry.key,
-                  entry_type: entry.entry_type,
-                  content_preview: contentPreview(entry.content),
-                  tags: parseTags(entry.tags),
-                  created_at: entry.created_at,
-                  updated_at: entry.updated_at,
-                  valid_until: entry.valid_until ?? undefined,
-                  provenance: buildProvenance(entry.agent_id, entry.owner_principal_id),
-                };
-                if (isEntryExpired(entry)) {
-                  result.expired = true;
-                }
-                return result;
-              });
+              const formatted = filterResults.map((entry) => formatQueryResult(
+                db,
+                ctx,
+                entry,
+                "memory_query",
+                sessionId,
+                false,
+                null,
+                undefined,
+                "lexical",
+                new Map(),
+                new Map(),
+                new Map(),
+              ));
+              const redactedCount = formatted.filter((entry) => entry.redacted === true).length;
 
               // Analytics
               if (sessionId) {
-                const resultIds = formatted.map((r) => r.id);
-                const resultNamespaces = formatted.map((r) => r.namespace);
-                const resultRanks = formatted.map((_, i) => i + 1);
+                const resultIds = filterResults.map((entry) => entry.id);
+                const resultNamespaces = filterResults.map((entry) => entry.namespace);
+                const resultRanks = filterResults.map((_, i) => i + 1);
                 logRetrievalEvent(db, {
                   sessionId,
                   toolName: "memory_query",
@@ -4423,6 +4764,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               return okResult("query", {
                 results: formatted,
                 total: formatted.length,
+                redacted_count: redactedCount,
                 search_mode: "filter",
                 retrieval: {
                   reranked: false,
@@ -4579,64 +4921,27 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             const semanticById = new Map(semanticResults.map((result) => [result.entry.id, result] as const));
             const hybridById = new Map(hybridResults.map((result) => [result.entry.id, result] as const));
 
-            const formatted = results.map((entry) => {
-              const result: QueryResult = {
-                id: entry.id,
-                namespace: entry.namespace,
-                key: entry.key,
-                entry_type: entry.entry_type,
-                content_preview: contentPreview(entry.content),
-                tags: parseTags(entry.tags),
-                created_at: entry.created_at,
-                updated_at: entry.updated_at,
-                valid_until: entry.valid_until ?? undefined,
-                provenance: buildProvenance(entry.agent_id, entry.owner_principal_id),
-              };
-              if (isEntryExpired(entry)) {
-                result.expired = true;
-              }
-
-              if (explain) {
-                const heuristicScore = getQueryHeuristicScore(entry, query.toLowerCase(), trackedStatuses);
-                const match: NonNullable<QueryResult["match"]> = {
-                  heuristic_score: heuristicScore,
-                  freshness_score: getFreshnessScore(entry.updated_at),
-                  reasons: [],
-                };
-
-                if (actualMode === "lexical") {
-                  const lexical = lexicalById.get(entry.id);
-                  if (lexical) {
-                    match.lexical_rank = lexical.rank;
-                    match.lexical_score = lexical.score;
-                  }
-                } else if (actualMode === "semantic") {
-                  const semantic = semanticById.get(entry.id);
-                  if (semantic) {
-                    match.semantic_rank = semantic.rank;
-                    match.semantic_distance = semantic.distance;
-                  }
-                } else if (actualMode === "hybrid") {
-                  const hybrid = hybridById.get(entry.id);
-                  if (hybrid) {
-                    match.hybrid_score = hybrid.score;
-                    if (hybrid.lexicalRank !== undefined) match.lexical_rank = hybrid.lexicalRank;
-                    if (hybrid.lexicalScore !== undefined) match.lexical_score = hybrid.lexicalScore;
-                    if (hybrid.semanticRank !== undefined) match.semantic_rank = hybrid.semanticRank;
-                    if (hybrid.semanticDistance !== undefined) match.semantic_distance = hybrid.semanticDistance;
-                  }
-                }
-
-                match.reasons = getQueryExplainReasons(entry, query.toLowerCase(), trackedStatuses?.get(entry.id), match);
-                result.match = match;
-              }
-
-              return result;
-            });
+            const queryLower = query.toLowerCase();
+            const formatted = results.map((entry) => formatQueryResult(
+              db,
+              ctx,
+              entry,
+              "memory_query",
+              sessionId,
+              explain,
+              queryLower,
+              trackedStatuses,
+              actualMode,
+              lexicalById,
+              semanticById,
+              hybridById,
+            ));
+            const redactedCount = formatted.filter((entry) => entry.redacted === true).length;
 
             const response: Record<string, unknown> = {
               results: formatted,
               total: formatted.length,
+              redacted_count: redactedCount,
               query,
               search_mode: requestedMode,
             };
@@ -4657,9 +4962,9 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
 
             // Analytics: log retrieval event with result IDs and ranks
             if (sessionId) {
-              const resultIds = formatted.map((r) => r.id);
-              const resultNamespaces = formatted.map((r) => r.namespace);
-              const resultRanks = formatted.map((_, i) => i + 1);
+              const resultIds = results.map((entry) => entry.id);
+              const resultNamespaces = results.map((entry) => entry.namespace);
+              const resultRanks = results.map((_, i) => i + 1);
               logRetrievalEvent(db, {
                 sessionId,
                 toolName: "memory_query",
@@ -4773,15 +5078,30 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
           }
 
           case "memory_log": {
-            const { namespace, content, tags } = args as unknown as LogParams;
+            const { namespace, content, tags, classification, classification_override } = args as unknown as LogParams;
             const validation = validateLogInput(namespace, content, tags, maxContentSize);
             if (!validation.valid) {
               return errResult("log", "validation_error", validation.error!);
             }
+            const classificationInputError = validateClassificationInput(classification, classification_override);
+            if (classificationInputError) {
+              return errResult("log", "validation_error", classificationInputError);
+            }
+            if (classification_override === true && ctx.principalType !== "owner") {
+              return errResult("log", "access_denied", "classification_override is only available to the owner principal.");
+            }
             if (!canWrite(ctx, namespace)) {
               return accessDeniedResponse(ctx, "log");
             }
-            const result = appendLog(db, namespace, content, tags ?? [], ctx.principalId);
+            let result;
+            try {
+              result = appendLog(db, namespace, content, tags ?? [], ctx.principalId, {
+                classification,
+                classificationOverride: classification_override,
+              });
+            } catch (error) {
+              return errResult("log", "validation_error", (error as Error).message);
+            }
             const logEntry = getById(db, result.id);
             if (logEntry) {
               syncCommitmentsForEntry(db, logEntry.id, extractCommitmentsFromEntry(logEntry));
@@ -4798,6 +5118,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               id: result.id,
               namespace,
               timestamp: result.timestamp,
+              classification: result.classification,
               provenance: buildProvenance(ctx.principalId, ctx.principalId),
             });
           }
@@ -4826,27 +5147,61 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               return okResult("list", { namespace, state_entries: [], log_summary: { log_count: 0, earliest: null, latest: null, recent: [] } });
             }
             const { stateEntries, logSummary } = listNamespaceContents(db, namespace);
-            return okResult("list", {
-              namespace,
-              state_entries: stateEntries.map((e) => ({
+            const serializedStateEntries = stateEntries.map((e) => {
+              const tags = JSON.parse(e.tags) as string[];
+              const redacted = maybeRedactEntryMetadata(db, ctx, {
+                id: e.id,
+                namespace,
+                key: e.key,
+                entry_type: "state",
+                classification: e.classification,
+                tags,
+                updated_at: e.updated_at,
+              }, "memory_list", sessionId);
+              if (redacted) {
+                return redacted;
+              }
+              return {
                 id: e.id,
                 key: e.key,
                 preview: e.preview,
-                tags: JSON.parse(e.tags) as string[],
+                tags,
                 updated_at: e.updated_at,
+                classification: e.classification,
                 provenance: buildProvenance(e.agent_id, e.owner_principal_id),
-              })),
+              };
+            });
+            const serializedRecentLogs = logSummary.recent.map((l) => {
+              const tags = JSON.parse(l.tags) as string[];
+              const redacted = maybeRedactEntryMetadata(db, ctx, {
+                id: l.id,
+                namespace,
+                key: null,
+                entry_type: "log",
+                classification: l.classification,
+                tags,
+                created_at: l.created_at,
+              }, "memory_list", sessionId);
+              if (redacted) {
+                return redacted;
+              }
+              return {
+                id: l.id,
+                content_preview: l.content_preview,
+                tags,
+                created_at: l.created_at,
+                classification: l.classification,
+                provenance: buildProvenance(l.agent_id, l.owner_principal_id),
+              };
+            });
+            return okResult("list", {
+              namespace,
+              state_entries: serializedStateEntries,
               log_summary: {
                 log_count: logSummary.log_count,
                 earliest: logSummary.earliest,
                 latest: logSummary.latest,
-                recent: logSummary.recent.map((l) => ({
-                  id: l.id,
-                  content_preview: l.content_preview,
-                  tags: JSON.parse(l.tags) as string[],
-                  created_at: l.created_at,
-                  provenance: buildProvenance(l.agent_id, l.owner_principal_id),
-                })),
+                recent: serializedRecentLogs,
               },
             });
           }
@@ -4960,7 +5315,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
 
             const filteredEntries = historyPage.entries
               .filter(e => canRead(ctx, e.namespace))
-              .map(serializeAuditEntry);
+              .map((entry) => formatHistoryEntry(db, ctx, entry, sessionId));
 
             return okResult("history", {
               generated_at: new Date().toISOString(),
@@ -4991,6 +5346,12 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               principal: {
                 id: ctx.principalId,
                 type: ctx.principalType,
+              },
+              librarian: {
+                enabled: isLibrarianEnabled(),
+                redaction_logging: isRedactionLogEnabled(),
+                transport_type: getContextTransportType(ctx),
+                max_classification: getContextMaxClassification(ctx),
               },
             });
           }

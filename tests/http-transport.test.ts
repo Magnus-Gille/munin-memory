@@ -11,6 +11,8 @@ import {
 
 const TEST_DB_PATH = "/tmp/munin-memory-http-transport-test.db";
 const LEGACY_API_KEY = "http-transport-test-api-key";
+const DPA_API_KEY = "http-transport-test-dpa-api-key";
+const CONSUMER_API_KEY = "http-transport-test-consumer-api-key";
 const ISSUER_URL = "https://test.example.com";
 
 function cleanupTestDb() {
@@ -20,13 +22,33 @@ function cleanupTestDb() {
   }
 }
 
-function jsonRpcHeaders() {
+function jsonRpcHeaders(token = LEGACY_API_KEY) {
   return {
-    Authorization: `Bearer ${LEGACY_API_KEY}`,
+    Authorization: `Bearer ${token}`,
     Host: "127.0.0.1:3030",
     Accept: "application/json, text/event-stream",
     "Content-Type": "application/json",
   };
+}
+
+async function initializeClient(appInstance: ReturnType<typeof createHttpApp>["app"], token = LEGACY_API_KEY) {
+  await supertest(appInstance)
+    .post("/mcp")
+    .set(jsonRpcHeaders(token))
+    .send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-03-26",
+        capabilities: {},
+        clientInfo: {
+          name: "http-transport-test",
+          version: "1.0.0",
+        },
+      },
+    })
+    .expect(200);
 }
 
 function parseJsonRpcResponse(body: string): Record<string, unknown> {
@@ -50,6 +72,8 @@ beforeEach(() => {
   ({ app } = createHttpApp({
     database: db,
     apiKey: LEGACY_API_KEY,
+    apiKeyDpa: DPA_API_KEY,
+    apiKeyConsumer: CONSUMER_API_KEY,
     issuerUrl: ISSUER_URL,
     httpHost: "127.0.0.1",
     httpPort: 3030,
@@ -215,5 +239,69 @@ describe("request log attribution", () => {
       authType: "oauth",
       clientId: "oauth-client-id",
     });
+  });
+});
+
+describe("transport-aware HTTP access context", () => {
+  it("maps DPA bearer credentials into status metadata", async () => {
+    await initializeClient(app, DPA_API_KEY);
+
+    const toolResponse = await supertest(app)
+      .post("/mcp")
+      .set({
+        ...jsonRpcHeaders(DPA_API_KEY),
+        "mcp-protocol-version": "2025-03-26",
+      })
+      .send({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: {
+          name: "memory_status",
+          arguments: {},
+        },
+      })
+      .expect(200);
+
+    const toolPayload = parseJsonRpcResponse(toolResponse.text);
+    const result = toolPayload.result as Record<string, unknown>;
+    const content = result.content as Array<{ text: string }>;
+    const parsedContent = JSON.parse(content[0].text) as {
+      librarian: { transport_type: string; max_classification: string };
+    };
+
+    expect(parsedContent.librarian.transport_type).toBe("dpa_covered");
+    expect(parsedContent.librarian.max_classification).toBe("client-confidential");
+  });
+
+  it("maps consumer bearer credentials into status metadata", async () => {
+    await initializeClient(app, CONSUMER_API_KEY);
+
+    const toolResponse = await supertest(app)
+      .post("/mcp")
+      .set({
+        ...jsonRpcHeaders(CONSUMER_API_KEY),
+        "mcp-protocol-version": "2025-03-26",
+      })
+      .send({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: {
+          name: "memory_status",
+          arguments: {},
+        },
+      })
+      .expect(200);
+
+    const toolPayload = parseJsonRpcResponse(toolResponse.text);
+    const result = toolPayload.result as Record<string, unknown>;
+    const content = result.content as Array<{ text: string }>;
+    const parsedContent = JSON.parse(content[0].text) as {
+      librarian: { transport_type: string; max_classification: string };
+    };
+
+    expect(parsedContent.librarian.transport_type).toBe("consumer");
+    expect(parsedContent.librarian.max_classification).toBe("internal");
   });
 });

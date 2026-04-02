@@ -7,6 +7,8 @@ import {
   readState,
   getById,
   appendLog,
+  syncCommitmentsForEntry,
+  listCommitments,
   queryEntries,
   listNamespaces,
   listNamespaceContents,
@@ -64,7 +66,8 @@ describe("writeState + readState", () => {
     const entry = readState(db, "projects/test", "status");
     expect(entry).not.toBeNull();
     expect(entry!.content).toBe("All systems go");
-    expect(JSON.parse(entry!.tags)).toEqual(["active"]);
+    expect(JSON.parse(entry!.tags)).toEqual(["active", "classification:internal"]);
+    expect(entry!.classification).toBe("internal");
     expect(entry!.entry_type).toBe("state");
   });
 
@@ -78,7 +81,8 @@ describe("writeState + readState", () => {
 
     const entry = readState(db, "projects/test", "status");
     expect(entry!.content).toBe("Version 2");
-    expect(JSON.parse(entry!.tags)).toEqual(["updated"]);
+    expect(JSON.parse(entry!.tags)).toEqual(["updated", "classification:internal"]);
+    expect(entry!.classification).toBe("internal");
     expect(entry!.id).toBe(first.id);
   });
 
@@ -108,6 +112,31 @@ describe("writeState + readState", () => {
     expect(audits[0].action).toBe("write");
     expect(audits[1].action).toBe("update");
     expect(audits[1].detail).toMatch(/^updated \(\d+ → \d+ chars\)$/);
+  });
+
+  it("supports explicit classification above the namespace floor", () => {
+    writeState(
+      db,
+      "projects/test",
+      "status",
+      "sensitive",
+      ["active"],
+      "default",
+      undefined,
+      undefined,
+      { classification: "client-confidential" },
+    );
+
+    const entry = readState(db, "projects/test", "status");
+    expect(entry?.classification).toBe("client-confidential");
+    expect(JSON.parse(entry!.tags)).toContain("classification:client-confidential");
+  });
+
+  it("defaults client namespaces to client-confidential", () => {
+    writeState(db, "clients/acme", "notes", "hello", []);
+    const entry = readState(db, "clients/acme", "notes");
+    expect(entry?.classification).toBe("client-confidential");
+    expect(JSON.parse(entry!.tags)).toContain("classification:client-confidential");
   });
 });
 
@@ -156,6 +185,63 @@ describe("appendLog", () => {
       )
       .all("projects/test") as Array<{ content: string }>;
     expect(entries.map((e) => e.content)).toEqual(["Event 1", "Event 2", "Event 3"]);
+  });
+
+  it("defaults log classification from the namespace floor", () => {
+    const result = appendLog(db, "clients/acme", "Started the project", []);
+    const entry = getById(db, result.id);
+    expect(entry?.classification).toBe("client-confidential");
+    expect(JSON.parse(entry!.tags)).toContain("classification:client-confidential");
+  });
+});
+
+describe("commitment classification lifecycle", () => {
+  it("propagates source classification and scrubs client-restricted derivatives", () => {
+    const { id } = appendLog(
+      db,
+      "projects/test",
+      "Need to send update by 2026-04-10.",
+      [],
+      "default",
+      { classification: "client-confidential" },
+    );
+
+    syncCommitmentsForEntry(db, id, [{
+      sourceType: "explicit_dated_commitment",
+      fingerprint: "due:2026-04-10",
+      text: "Need to send update by 2026-04-10.",
+      dueAt: "2026-04-10T23:59:59.000Z",
+      confidence: 0.9,
+    }]);
+
+    let rows = listCommitments(db, { namespace: "projects/test" });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].source_classification).toBe("client-confidential");
+
+    writeState(
+      db,
+      "projects/test",
+      "notes",
+      "restricted source",
+      [],
+      "default",
+      undefined,
+      undefined,
+      { classification: "client-restricted" },
+    );
+
+    const source = readState(db, "projects/test", "notes");
+    syncCommitmentsForEntry(db, source!.id, [{
+      sourceType: "explicit_dated_commitment",
+      fingerprint: "restricted",
+      text: "Restricted commitment",
+      dueAt: "2026-04-11T23:59:59.000Z",
+      confidence: 0.8,
+    }]);
+
+    rows = listCommitments(db, { namespace: "projects/test" });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].source_entry_id).toBe(id);
   });
 });
 

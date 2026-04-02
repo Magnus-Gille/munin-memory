@@ -13,9 +13,9 @@ import { pathToFileURL } from "node:url";
 import { initDatabase, nowUTC, pruneRetrievalAnalytics } from "./db.js";
 import { registerTools } from "./tools.js";
 import { initEmbeddings, startEmbeddingWorker, stopEmbeddingWorker } from "./embeddings.js";
-import { resolveAccessContext, ownerContext } from "./access.js";
+import { resolveAccessContext } from "./access.js";
 import type { AccessContext } from "./access.js";
-import { MuninOAuthProvider } from "./oauth.js";
+import { MuninOAuthProvider, type ExtendedAuthInfo } from "./oauth.js";
 
 // Analytics retention (default 90 days)
 function getAnalyticsRetentionDays(): number {
@@ -29,6 +29,8 @@ const transportMode = process.env.MUNIN_TRANSPORT ?? "stdio";
 const httpPort = parseInt(process.env.MUNIN_HTTP_PORT ?? "3030", 10);
 const httpHost = process.env.MUNIN_HTTP_HOST ?? "127.0.0.1";
 const apiKey = process.env.MUNIN_API_KEY;
+const apiKeyDpa = process.env.MUNIN_API_KEY_DPA;
+const apiKeyConsumer = process.env.MUNIN_API_KEY_CONSUMER;
 const issuerUrl = process.env.MUNIN_OAUTH_ISSUER_URL ?? "http://localhost:3030";
 
 // --- Hardening constants ---
@@ -66,7 +68,9 @@ export interface RequestLogEntry {
 
 export interface HttpAppOptions {
   database: Database.Database;
-  apiKey: string;
+  apiKey?: string;
+  apiKeyDpa?: string;
+  apiKeyConsumer?: string;
   issuerUrl: string;
   httpHost: string;
   httpPort: number;
@@ -366,6 +370,14 @@ export function getRequestAuthLogContext(auth: AuthInfo | undefined): Pick<Reque
     return { authType: "none" };
   }
 
+  const extended = auth as ExtendedAuthInfo;
+  if (extended.authMethod && extended.authMethod !== "oauth") {
+    return {
+      authType: "bearer",
+      clientId: auth.clientId === "legacy-bearer" ? "legacy" : auth.clientId,
+    };
+  }
+
   if (auth.clientId === "legacy-bearer") {
     return {
       authType: "bearer",
@@ -432,12 +444,22 @@ function attachRequestLogger(
   };
 }
 
+function hasHttpBearerCredential(): boolean {
+  return Boolean(apiKey || apiKeyDpa || apiKeyConsumer);
+}
+
+function getHttpCredentialErrorMessage(): string {
+  return "Fatal: at least one bearer credential is required when MUNIN_TRANSPORT=http. Set MUNIN_API_KEY, MUNIN_API_KEY_DPA, or MUNIN_API_KEY_CONSUMER.";
+}
+
 // --- HTTP transport (Express) ---
 
 export function createHttpApp(options: HttpAppOptions): { app: express.Express; oauthProvider: MuninOAuthProvider } {
   const {
     database,
     apiKey,
+    apiKeyDpa,
+    apiKeyConsumer,
     issuerUrl,
     httpHost,
     httpPort,
@@ -454,7 +476,11 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
   }
 
   // OAuth provider with dual auth (legacy Bearer + OAuth tokens)
-  const oauthProvider = new MuninOAuthProvider(database, apiKey);
+  const oauthProvider = new MuninOAuthProvider(database, {
+    legacyApiKey: apiKey,
+    dpaApiKey: apiKeyDpa,
+    consumerApiKey: apiKeyConsumer,
+  });
 
   const app = express();
 
@@ -623,12 +649,14 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
     });
     // Use mcp-session-id header for correlation, fall back to caller-derived stable ID
     const mcpSessionId = getSessionHeader(req) ?? deriveSessionId(req.auth?.clientId ?? "anonymous");
-    const authInfo = req.auth as (AuthInfo & { principalId?: string }) | undefined;
+    const authInfo = req.auth as ExtendedAuthInfo | undefined;
     const accessContext = resolveAccessContext(
       database,
       authInfo?.clientId ?? "",
       authInfo?.token,
       authInfo?.principalId,
+      authInfo?.authMethod ?? "oauth",
+      authInfo?.transportTypeHint,
     );
     const mcpServer = createMcpServer(database, mcpSessionId, accessContext);
 
@@ -656,16 +684,16 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
 }
 
 async function startHttp(database: Database.Database) {
-  if (!apiKey) {
-    console.error(
-      "Fatal: MUNIN_API_KEY is required when MUNIN_TRANSPORT=http. Generate one with: openssl rand -hex 32",
-    );
+  if (!hasHttpBearerCredential()) {
+    console.error(getHttpCredentialErrorMessage());
     process.exit(1);
   }
 
   const { app, oauthProvider } = createHttpApp({
     database,
     apiKey,
+    apiKeyDpa,
+    apiKeyConsumer,
     issuerUrl,
     httpHost,
     httpPort,
@@ -694,7 +722,18 @@ async function startHttp(database: Database.Database) {
 async function startStdio(database: Database.Database) {
   // One session ID per stdio process — all tool calls in this process are correlated
   const stdioSessionId = randomUUID();
-  const server = createMcpServer(database, stdioSessionId, ownerContext());
+  const accessContext = resolveAccessContext(
+    database,
+    "principal:owner",
+    undefined,
+    undefined,
+    "stdio",
+    "local",
+  );
+  if (accessContext.principalType !== "owner") {
+    throw new Error("Failed to resolve owner access context for stdio transport.");
+  }
+  const server = createMcpServer(database, stdioSessionId, accessContext);
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
@@ -702,10 +741,8 @@ async function startStdio(database: Database.Database) {
 // --- Entry point ---
 
 async function main() {
-  if (transportMode === "http" && !apiKey) {
-    console.error(
-      "Fatal: MUNIN_API_KEY is required when MUNIN_TRANSPORT=http. Generate one with: openssl rand -hex 32",
-    );
+  if (transportMode === "http" && !hasHttpBearerCredential()) {
+    console.error(getHttpCredentialErrorMessage());
     process.exit(1);
   }
 

@@ -4,9 +4,30 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, chmodSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { homedir } from "node:os";
-import type { CommitmentStatus, Entry, AuditAction, AuditEntry, EntryType, TrackedStatusRow } from "./types.js";
+import type {
+  ClassificationLevel,
+  CommitmentStatus,
+  Entry,
+  AuditAction,
+  AuditEntry,
+  EntryType,
+  TrackedStatusRow,
+  TransportType,
+} from "./types.js";
 import { runMigrations } from "./migrations.js";
 import { scanForSecrets } from "./security.js";
+import {
+  compareClassificationLevels,
+  FALLBACK_RESTRICTED_CLASSIFICATION,
+  listNamespaceClassificationFloors as listNamespaceClassificationFloorsFromPolicy,
+  normalizeStoredClassification,
+  parseExplicitClassification,
+  resolveNamespaceClassificationFloor,
+  resolveNamespaceClassificationFloorFromRows,
+  resolveStoredClassification,
+  syncClassificationTag,
+  validateClassificationPattern,
+} from "./librarian.js";
 
 let _vecLoaded = false;
 
@@ -101,7 +122,7 @@ export function rebuildFTS(db: Database.Database): void {
 export function getTrackedStatuses(db: Database.Database): TrackedStatusRow[] {
   return db
     .prepare(
-      `SELECT id, namespace, key, substr(content, 1, 300) as content_preview, content, tags, agent_id, owner_principal_id, created_at, updated_at, valid_until
+      `SELECT id, namespace, key, substr(content, 1, 300) as content_preview, content, tags, agent_id, owner_principal_id, created_at, updated_at, valid_until, classification
        FROM entries
        WHERE entry_type = 'state' AND key = 'status'
          AND (namespace LIKE 'projects/%' ESCAPE '\\' OR namespace LIKE 'clients/%' ESCAPE '\\')
@@ -116,8 +137,15 @@ export interface WriteStateResult {
   status: "created" | "updated" | "conflict";
   id?: string;
   updated_at?: string;
+  classification?: ClassificationLevel;
+  tags?: string[];
   message?: string;
   current_updated_at?: string;
+}
+
+export interface ClassificationWriteOptions {
+  classification?: ClassificationLevel;
+  classificationOverride?: boolean;
 }
 
 export interface ExpirableEntryLike {
@@ -146,6 +174,33 @@ function insertAuditRow(
   ).run(timestamp, agentId, action, namespace, key, detail, entryId);
 }
 
+function resolveWriteClassification(
+  db: Database.Database,
+  namespace: string,
+  tags: string[],
+  options: ClassificationWriteOptions | undefined,
+  existingClassification?: string | null,
+): { classification: ClassificationLevel; tags: string[]; usedOverride: boolean } {
+  const explicitClassification = parseExplicitClassification({
+    classification: options?.classification,
+    tags,
+  });
+  const namespaceFloor = resolveNamespaceClassificationFloor(db, namespace);
+  const resolved = resolveStoredClassification({
+    namespace,
+    namespaceFloor,
+    explicitClassification,
+    existingClassification,
+    allowBelowFloorOverride: options?.classificationOverride === true,
+  });
+
+  return {
+    classification: resolved.classification,
+    tags: syncClassificationTag(tags, resolved.classification),
+    usedOverride: resolved.usedOverride,
+  };
+}
+
 export function writeState(
   db: Database.Database,
   namespace: string,
@@ -155,14 +210,21 @@ export function writeState(
   agentId = "default",
   expectedUpdatedAt?: string,
   validUntil?: string | null,
+  classificationOptions?: ClassificationWriteOptions,
 ): WriteStateResult {
   const now = nowUTC();
-  const tagsJson = JSON.stringify(tags);
 
   // Check if exists
   const existing = db.prepare(
-    "SELECT id, content, updated_at, valid_until, owner_principal_id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'",
-  ).get(namespace, key) as { id: string; content: string; updated_at: string; valid_until: string | null; owner_principal_id: string | null } | undefined;
+    "SELECT id, content, updated_at, valid_until, owner_principal_id, classification FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'",
+  ).get(namespace, key) as {
+    id: string;
+    content: string;
+    updated_at: string;
+    valid_until: string | null;
+    owner_principal_id: string | null;
+    classification: string | null;
+  } | undefined;
 
   // Compare-and-swap: reject if entry was modified since caller last read it
   if (expectedUpdatedAt && existing && existing.updated_at !== expectedUpdatedAt) {
@@ -173,30 +235,78 @@ export function writeState(
     };
   }
 
+  const resolvedClassification = resolveWriteClassification(
+    db,
+    namespace,
+    tags,
+    classificationOptions,
+    existing?.classification,
+  );
+  const tagsJson = JSON.stringify(resolvedClassification.tags);
+
   const txn = db.transaction(() => {
     if (existing) {
       const nextValidUntil = validUntil === undefined ? existing.valid_until : validUntil;
       db.prepare(
-        `UPDATE entries SET content = ?, tags = ?, updated_at = ?, valid_until = ?, agent_id = ?,
+        `UPDATE entries SET content = ?, tags = ?, updated_at = ?, valid_until = ?, classification = ?, agent_id = ?,
          embedding_status = 'pending', embedding_model = NULL
          WHERE namespace = ? AND key = ? AND entry_type = 'state'`,
-      ).run(content, tagsJson, now, nextValidUntil ?? null, agentId, namespace, key);
+      ).run(
+        content,
+        tagsJson,
+        now,
+        nextValidUntil ?? null,
+        resolvedClassification.classification,
+        agentId,
+        namespace,
+        key,
+      );
 
-      const updateDetail = `updated (${existing.content.length} → ${content.length} chars)`;
+      const overrideSuffix = resolvedClassification.usedOverride
+        ? `; classification_override ${resolvedClassification.classification}`
+        : "";
+      const updateDetail = `updated (${existing.content.length} → ${content.length} chars)${overrideSuffix}`;
       insertAuditRow(db, now, agentId, "update", namespace, key, updateDetail, existing.id);
 
-      return { status: "updated" as const, id: existing.id, updated_at: now };
+      return {
+        status: "updated" as const,
+        id: existing.id,
+        updated_at: now,
+        classification: resolvedClassification.classification,
+        tags: resolvedClassification.tags,
+      };
     } else {
       const id = randomUUID();
       db.prepare(
-        `INSERT INTO entries (id, namespace, key, entry_type, content, tags, agent_id, owner_principal_id, created_at, updated_at, valid_until)
-         VALUES (?, ?, ?, 'state', ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(id, namespace, key, content, tagsJson, agentId, agentId, now, now, validUntil ?? null);
+        `INSERT INTO entries (id, namespace, key, entry_type, content, tags, agent_id, owner_principal_id, created_at, updated_at, valid_until, classification)
+         VALUES (?, ?, ?, 'state', ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        id,
+        namespace,
+        key,
+        content,
+        tagsJson,
+        agentId,
+        agentId,
+        now,
+        now,
+        validUntil ?? null,
+        resolvedClassification.classification,
+      );
 
       const writePreview = content.length > 80 ? content.slice(0, 80) + "..." : content;
-      insertAuditRow(db, now, agentId, "write", namespace, key, writePreview, id);
+      const overrideSuffix = resolvedClassification.usedOverride
+        ? `; classification_override ${resolvedClassification.classification}`
+        : "";
+      insertAuditRow(db, now, agentId, "write", namespace, key, `${writePreview}${overrideSuffix}`, id);
 
-      return { status: "created" as const, id, updated_at: now };
+      return {
+        status: "created" as const,
+        id,
+        updated_at: now,
+        classification: resolvedClassification.classification,
+        tags: resolvedClassification.tags,
+      };
     }
   });
 
@@ -223,10 +333,17 @@ export function patchState(
   patch: PatchParams,
   agentId = "default",
   expectedUpdatedAt?: string,
+  classificationOptions?: ClassificationWriteOptions,
 ): PatchStateResult {
   const existing = db.prepare(
-    "SELECT id, content, tags, updated_at FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'",
-  ).get(namespace, key) as { id: string; content: string; tags: string; updated_at: string } | undefined;
+    "SELECT id, content, tags, updated_at, classification FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'",
+  ).get(namespace, key) as {
+    id: string;
+    content: string;
+    tags: string;
+    updated_at: string;
+    classification: string | null;
+  } | undefined;
 
   if (!existing) {
     return { status: "not_found" };
@@ -272,24 +389,38 @@ export function patchState(
   }
 
   const now = nowUTC();
-  const tagsJson = JSON.stringify(tags);
+  const resolvedClassification = resolveWriteClassification(
+    db,
+    namespace,
+    tags,
+    classificationOptions,
+    existing.classification,
+  );
+  const tagsJson = JSON.stringify(resolvedClassification.tags);
 
   const txn = db.transaction(() => {
     db.prepare(
-      `UPDATE entries SET content = ?, tags = ?, updated_at = ?, agent_id = ?,
+      `UPDATE entries SET content = ?, tags = ?, updated_at = ?, classification = ?, agent_id = ?,
        embedding_status = 'pending', embedding_model = NULL
        WHERE namespace = ? AND key = ? AND entry_type = 'state'`,
-    ).run(content, tagsJson, now, agentId, namespace, key);
+    ).run(
+      content,
+      tagsJson,
+      now,
+      resolvedClassification.classification,
+      agentId,
+      namespace,
+      key,
+    );
 
     const patchOps: string[] = [];
     if (patch.content_prepend !== undefined) patchOps.push("content_prepend");
     if (patch.content_append !== undefined) patchOps.push("content_append");
     if (patch.tags_add && patch.tags_add.length > 0) patchOps.push("tags_add");
     if (patch.tags_remove && patch.tags_remove.length > 0) patchOps.push("tags_remove");
+    if (resolvedClassification.usedOverride) patchOps.push(`classification_override:${resolvedClassification.classification}`);
     const patchDetail = patchOps.length > 0 ? patchOps.join(", ") : "no-op";
-    db.prepare(
-      "INSERT INTO audit_log (timestamp, agent_id, action, namespace, key, detail) VALUES (?, ?, ?, ?, ?, ?)",
-    ).run(now, agentId, "patch", namespace, key, patchDetail);
+    insertAuditRow(db, now, agentId, "patch", namespace, key, patchDetail, existing.id);
 
     return { status: "patched" as const, id: existing.id };
   });
@@ -325,23 +456,48 @@ export function appendLog(
   content: string,
   tags: string[],
   agentId = "default",
-): { id: string; timestamp: string } {
+  classificationOptions?: ClassificationWriteOptions,
+): { id: string; timestamp: string; classification: ClassificationLevel; tags: string[] } {
   const now = nowUTC();
   const id = randomUUID();
-  const tagsJson = JSON.stringify(tags);
+  const resolvedClassification = resolveWriteClassification(
+    db,
+    namespace,
+    tags,
+    classificationOptions,
+  );
+  const tagsJson = JSON.stringify(resolvedClassification.tags);
 
   const txn = db.transaction(() => {
     db.prepare(
-      `INSERT INTO entries (id, namespace, key, entry_type, content, tags, agent_id, owner_principal_id, created_at, updated_at)
-       VALUES (?, ?, NULL, 'log', ?, ?, ?, ?, ?, ?)`,
-    ).run(id, namespace, content, tagsJson, agentId, agentId, now, now);
+      `INSERT INTO entries (id, namespace, key, entry_type, content, tags, agent_id, owner_principal_id, created_at, updated_at, classification)
+       VALUES (?, ?, NULL, 'log', ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      id,
+      namespace,
+      content,
+      tagsJson,
+      agentId,
+      agentId,
+      now,
+      now,
+      resolvedClassification.classification,
+    );
 
     const logPreview = content.length > 80 ? content.slice(0, 80) + "..." : content;
-    insertAuditRow(db, now, agentId, "log_append", namespace, null, logPreview, id);
+    const overrideSuffix = resolvedClassification.usedOverride
+      ? `; classification_override ${resolvedClassification.classification}`
+      : "";
+    insertAuditRow(db, now, agentId, "log_append", namespace, null, `${logPreview}${overrideSuffix}`, id);
   });
 
   txn();
-  return { id, timestamp: now };
+  return {
+    id,
+    timestamp: now,
+    classification: resolvedClassification.classification,
+    tags: resolvedClassification.tags,
+  };
 }
 
 // --- Query / search operations ---
@@ -591,6 +747,7 @@ export interface StateEntryPreview {
   agent_id: string;
   owner_principal_id: string | null;
   updated_at: string;
+  classification: ClassificationLevel;
 }
 
 export interface LogPreview {
@@ -600,6 +757,7 @@ export interface LogPreview {
   agent_id: string;
   owner_principal_id: string | null;
   created_at: string;
+  classification: ClassificationLevel;
 }
 
 export interface LogSummary {
@@ -615,7 +773,7 @@ export function listNamespaceContents(
 ): { stateEntries: StateEntryPreview[]; logSummary: LogSummary } {
   const stateEntries = db
     .prepare(
-      `SELECT id, key, substr(content, 1, 100) as preview, tags, agent_id, owner_principal_id, updated_at
+      `SELECT id, key, substr(content, 1, 100) as preview, tags, agent_id, owner_principal_id, updated_at, classification
        FROM entries WHERE namespace = ? AND entry_type = 'state' ORDER BY key`,
     )
     .all(namespace) as StateEntryPreview[];
@@ -629,7 +787,7 @@ export function listNamespaceContents(
 
   const recentLogs = db
     .prepare(
-      `SELECT id, substr(content, 1, 200) as content_preview, tags, agent_id, owner_principal_id, created_at
+      `SELECT id, substr(content, 1, 200) as content_preview, tags, agent_id, owner_principal_id, created_at, classification
        FROM entries WHERE namespace = ? AND entry_type = 'log'
        ORDER BY rowid DESC LIMIT 5`,
     )
@@ -699,6 +857,7 @@ export interface CommitmentRow {
   resolved_at: string | null;
   source_key: string | null;
   source_excerpt: string;
+  source_classification: ClassificationLevel;
 }
 
 export interface ListCommitmentsOptions {
@@ -714,10 +873,17 @@ export function syncCommitmentsForEntry(
   derivedCommitments: DerivedCommitmentInput[],
 ): void {
   const source = db
-    .prepare("SELECT id, namespace, key, entry_type FROM entries WHERE id = ?")
-    .get(entryId) as { id: string; namespace: string; key: string | null; entry_type: EntryType } | undefined;
+    .prepare("SELECT id, namespace, key, entry_type, classification FROM entries WHERE id = ?")
+    .get(entryId) as {
+      id: string;
+      namespace: string;
+      key: string | null;
+      entry_type: EntryType;
+      classification: string | null;
+    } | undefined;
 
   if (!source) return;
+  const sourceClassification = normalizeStoredClassification(source.classification);
 
   const existingRows = db
     .prepare(
@@ -733,12 +899,12 @@ export function syncCommitmentsForEntry(
 
   const insertCommitment = db.prepare(
     `INSERT INTO commitments
-       (id, namespace, source_entry_id, source_type, source_fingerprint, text, due_at, status, confidence, created_at, updated_at, resolved_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, NULL)`,
+       (id, namespace, source_entry_id, source_type, source_fingerprint, text, due_at, status, confidence, created_at, updated_at, resolved_at, source_classification)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, NULL, ?)`,
   );
   const updateCommitment = db.prepare(
     `UPDATE commitments
-     SET namespace = ?, source_type = ?, text = ?, due_at = ?, confidence = ?, status = 'open', updated_at = ?, resolved_at = NULL
+     SET namespace = ?, source_type = ?, text = ?, due_at = ?, confidence = ?, status = 'open', updated_at = ?, resolved_at = NULL, source_classification = ?
      WHERE id = ?`,
   );
   const resolveCommitment = db.prepare(
@@ -748,6 +914,11 @@ export function syncCommitmentsForEntry(
   );
 
   const txn = db.transaction(() => {
+    if (sourceClassification === "client-restricted") {
+      db.prepare("DELETE FROM commitments WHERE source_entry_id = ?").run(source.id);
+      return;
+    }
+
     for (const commitment of derivedCommitments) {
       const existing = existingByFingerprint.get(commitment.fingerprint);
       if (existing) {
@@ -758,6 +929,7 @@ export function syncCommitmentsForEntry(
           commitment.dueAt ?? null,
           commitment.confidence,
           now,
+          sourceClassification,
           existing.id,
         );
         continue;
@@ -774,6 +946,7 @@ export function syncCommitmentsForEntry(
         commitment.confidence,
         now,
         now,
+        sourceClassification,
       );
     }
 
@@ -799,7 +972,8 @@ export function listCommitments(
   let sql = `
     SELECT c.*,
            e.key AS source_key,
-           substr(e.content, 1, 220) AS source_excerpt
+           substr(e.content, 1, 220) AS source_excerpt,
+           COALESCE(c.source_classification, e.classification, '${FALLBACK_RESTRICTED_CLASSIFICATION}') AS source_classification
     FROM commitments c
     JOIN entries e ON e.id = c.source_entry_id
     WHERE 1=1
@@ -830,6 +1004,178 @@ export function listCommitments(
   params.push(clampedLimit);
 
   return db.prepare(sql).all(...params) as CommitmentRow[];
+}
+
+export interface ClassificationFloorRow {
+  namespace_pattern: string;
+  min_classification: ClassificationLevel;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ClassificationAuditRow {
+  id: string;
+  namespace: string;
+  key: string | null;
+  entry_type: EntryType;
+  classification: ClassificationLevel;
+  namespace_floor: ClassificationLevel;
+  tags: string;
+}
+
+export interface RedactionLogInput {
+  sessionId?: string | null;
+  principalId: string;
+  transportType: TransportType;
+  entryId: string;
+  entryNamespace: string;
+  entryClassification: ClassificationLevel;
+  connectionMaxClassification: ClassificationLevel;
+  toolName: string;
+}
+
+export function listNamespaceClassificationFloors(
+  db: Database.Database,
+): ClassificationFloorRow[] {
+  return listNamespaceClassificationFloorsFromPolicy(db) as ClassificationFloorRow[];
+}
+
+export function setNamespaceClassificationFloor(
+  db: Database.Database,
+  namespacePattern: string,
+  minClassification: ClassificationLevel,
+  agentId = "munin-admin",
+): ClassificationFloorRow {
+  validateClassificationPattern(namespacePattern);
+  const now = nowUTC();
+  const existing = db.prepare(
+    `SELECT namespace_pattern, min_classification, created_at, updated_at
+     FROM namespace_classification
+     WHERE namespace_pattern = ?`,
+  ).get(namespacePattern) as ClassificationFloorRow | undefined;
+
+  const txn = db.transaction(() => {
+    if (existing) {
+      db.prepare(
+        `UPDATE namespace_classification
+         SET min_classification = ?, updated_at = ?
+         WHERE namespace_pattern = ?`,
+      ).run(minClassification, now, namespacePattern);
+      insertAuditRow(
+        db,
+        now,
+        agentId,
+        "classification_floor_update",
+        "admin/classification",
+        namespacePattern,
+        `min_classification ${existing.min_classification} -> ${minClassification}`,
+      );
+    } else {
+      db.prepare(
+        `INSERT INTO namespace_classification (namespace_pattern, min_classification, created_at, updated_at)
+         VALUES (?, ?, ?, ?)`,
+      ).run(namespacePattern, minClassification, now, now);
+      insertAuditRow(
+        db,
+        now,
+        agentId,
+        "classification_floor_set",
+        "admin/classification",
+        namespacePattern,
+        `min_classification ${minClassification}`,
+      );
+    }
+  });
+
+  txn();
+  return db.prepare(
+    `SELECT namespace_pattern, min_classification, created_at, updated_at
+     FROM namespace_classification
+     WHERE namespace_pattern = ?`,
+  ).get(namespacePattern) as ClassificationFloorRow;
+}
+
+export function listEntriesBelowNamespaceFloor(
+  db: Database.Database,
+  namespace?: string,
+): ClassificationAuditRow[] {
+  const floors = listNamespaceClassificationFloors(db);
+  let sql = `
+    SELECT id, namespace, key, entry_type, classification, tags
+    FROM entries
+    WHERE 1=1
+  `;
+  const params: unknown[] = [];
+
+  if (namespace) {
+    if (namespace.endsWith("/")) {
+      sql += " AND namespace LIKE ? ESCAPE '\\'";
+      params.push(escapeForLike(namespace) + "%");
+    } else {
+      sql += " AND (namespace = ? OR namespace LIKE ? ESCAPE '\\')";
+      params.push(namespace);
+      params.push(escapeForLike(namespace) + "/%");
+    }
+  }
+
+  sql += " ORDER BY namespace ASC, key ASC, id ASC";
+
+  const rows = db.prepare(sql).all(...params) as Array<{
+    id: string;
+    namespace: string;
+    key: string | null;
+    entry_type: EntryType;
+    classification: string | null;
+    tags: string;
+  }>;
+
+  return rows.flatMap((row) => {
+    const namespaceFloor = resolveNamespaceClassificationFloorFromRows(row.namespace, floors);
+    const classification = normalizeStoredClassification(row.classification);
+    if (compareClassificationLevels(classification, namespaceFloor) >= 0) {
+      return [];
+    }
+    return [{
+      id: row.id,
+      namespace: row.namespace,
+      key: row.key,
+      entry_type: row.entry_type,
+      classification,
+      namespace_floor: namespaceFloor,
+      tags: row.tags,
+    }];
+  });
+}
+
+export function insertRedactionLog(
+  db: Database.Database,
+  input: RedactionLogInput,
+): void {
+  db.prepare(
+    `INSERT INTO redaction_log
+       (id, session_id, principal_id, transport_type, entry_id, entry_namespace, entry_classification, connection_max_classification, tool_name, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    randomUUID(),
+    input.sessionId ?? null,
+    input.principalId,
+    input.transportType,
+    input.entryId,
+    input.entryNamespace,
+    input.entryClassification,
+    input.connectionMaxClassification,
+    input.toolName,
+    nowUTC(),
+  );
+}
+
+export function pruneRedactionLog(
+  db: Database.Database,
+  retentionDays: number,
+): number {
+  const cutoff = new Date(Date.now() - (retentionDays * 24 * 60 * 60 * 1000)).toISOString();
+  const result = db.prepare("DELETE FROM redaction_log WHERE created_at < ?").run(cutoff);
+  return result.changes;
 }
 
 // --- Delete operations ---

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
 import { initDatabase } from "../src/db.js";
-import { MuninOAuthProvider, MuninClientsStore } from "../src/oauth.js";
+import { MuninOAuthProvider, MuninClientsStore, type ExtendedAuthInfo } from "../src/oauth.js";
 import type { OAuthClientInformationFull } from "@modelcontextprotocol/sdk/shared/auth.js";
 
 const TEST_DB_PATH = "/tmp/munin-memory-oauth-test.db";
@@ -18,6 +18,8 @@ let db: Database.Database;
 let provider: MuninOAuthProvider;
 
 const LEGACY_API_KEY = "test-legacy-api-key-12345";
+const DPA_API_KEY = "test-dpa-api-key-67890";
+const CONSUMER_API_KEY = "test-consumer-api-key-54321";
 
 function makeTestClient(overrides: Partial<OAuthClientInformationFull> = {}): OAuthClientInformationFull {
   return {
@@ -363,6 +365,30 @@ describe("Token verification", () => {
     const info = await provider.verifyAccessToken(LEGACY_API_KEY);
     expect(info.clientId).toBe("legacy-bearer");
     expect(info.token).toBe(LEGACY_API_KEY);
+  });
+
+  it("verifies DPA bearer API key with transport hint", async () => {
+    const providerWithTransportKeys = new MuninOAuthProvider(db, {
+      legacyApiKey: LEGACY_API_KEY,
+      dpaApiKey: DPA_API_KEY,
+      consumerApiKey: CONSUMER_API_KEY,
+    });
+    const info = await providerWithTransportKeys.verifyAccessToken(DPA_API_KEY) as ExtendedAuthInfo;
+    expect(info.clientId).toBe("bearer-dpa");
+    expect(info.authMethod).toBe("bearer");
+    expect(info.transportTypeHint).toBe("dpa_covered");
+  });
+
+  it("verifies consumer bearer API key with transport hint", async () => {
+    const providerWithTransportKeys = new MuninOAuthProvider(db, {
+      legacyApiKey: LEGACY_API_KEY,
+      dpaApiKey: DPA_API_KEY,
+      consumerApiKey: CONSUMER_API_KEY,
+    });
+    const info = await providerWithTransportKeys.verifyAccessToken(CONSUMER_API_KEY) as ExtendedAuthInfo;
+    expect(info.clientId).toBe("bearer-consumer");
+    expect(info.authMethod).toBe("bearer");
+    expect(info.transportTypeHint).toBe("consumer");
   });
 
   it("rejects token with same length but different value (timing-safe)", async () => {

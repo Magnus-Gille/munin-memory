@@ -28,6 +28,7 @@ import type {
 import { InvalidTokenError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import { nowUTC } from "./db.js";
 import { renderConsentPage } from "./consent.js";
+import type { AuthMethod, TransportType } from "./types.js";
 
 // --- Configuration ---
 
@@ -87,6 +88,18 @@ interface OAuthTokenRow {
   created_at: string;
   refresh_token_ref: string | null;
   principal_id: string | null;
+}
+
+export type ExtendedAuthInfo = AuthInfo & {
+  principalId?: string;
+  authMethod?: AuthMethod;
+  transportTypeHint?: TransportType;
+};
+
+export interface OAuthProviderOptions {
+  legacyApiKey?: string;
+  dpaApiKey?: string;
+  consumerApiKey?: string;
 }
 
 // --- Clients Store ---
@@ -185,23 +198,36 @@ function hashOpaqueValue(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
+function matchesBearerToken(token: string, expected: Buffer | undefined): boolean {
+  if (!expected) return false;
+  const tokenBuf = Buffer.from(token);
+  return tokenBuf.length === expected.length && timingSafeEqual(tokenBuf, expected);
+}
+
 // --- OAuth Provider ---
 
 export class MuninOAuthProvider implements OAuthServerProvider {
   public readonly clientsStore: MuninClientsStore;
   private readonly legacyApiKey: string | undefined;
   private readonly legacyApiKeyBuf: Buffer | undefined;
+  private readonly dpaApiKeyBuf: Buffer | undefined;
+  private readonly consumerApiKeyBuf: Buffer | undefined;
   private readonly clientSecretWrapKey: Buffer | undefined;
   private readonly pendingAuths = new Map<string, PendingAuth>();
   private lastResolvedIdentity: { email: string; principalId: string | null } | undefined;
 
   constructor(
     private db: Database.Database,
-    legacyApiKey?: string,
+    legacyApiKeyOrOptions?: string | OAuthProviderOptions,
   ) {
-    this.legacyApiKey = legacyApiKey;
-    this.legacyApiKeyBuf = legacyApiKey ? Buffer.from(legacyApiKey) : undefined;
-    this.clientSecretWrapKey = getClientSecretWrapKey(legacyApiKey);
+    const options = typeof legacyApiKeyOrOptions === "string"
+      ? { legacyApiKey: legacyApiKeyOrOptions }
+      : (legacyApiKeyOrOptions ?? {});
+    this.legacyApiKey = options.legacyApiKey;
+    this.legacyApiKeyBuf = options.legacyApiKey ? Buffer.from(options.legacyApiKey) : undefined;
+    this.dpaApiKeyBuf = options.dpaApiKey ? Buffer.from(options.dpaApiKey) : undefined;
+    this.consumerApiKeyBuf = options.consumerApiKey ? Buffer.from(options.consumerApiKey) : undefined;
+    this.clientSecretWrapKey = getClientSecretWrapKey(options.legacyApiKey);
     this.clientsStore = new MuninClientsStore(db, this.clientSecretWrapKey);
   }
 
@@ -479,35 +505,50 @@ export class MuninOAuthProvider implements OAuthServerProvider {
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
-    // Check legacy API key first (backward compatibility)
-    // Use timing-safe comparison to prevent timing side-channel attacks
-    if (this.legacyApiKeyBuf) {
-      const tokenBuf = Buffer.from(token);
-      if (
-        tokenBuf.length === this.legacyApiKeyBuf.length &&
-        timingSafeEqual(tokenBuf, this.legacyApiKeyBuf)
-      ) {
-        // Far-future expiry — legacy tokens don't expire
-        const farFuture = Math.floor(Date.now() / 1000) + 365 * 24 * 3600;
-        return {
-          token,
-          clientId: "legacy-bearer",
-          scopes: [],
-          expiresAt: farFuture,
-        };
-      }
+    const farFuture = Math.floor(Date.now() / 1000) + 365 * 24 * 3600;
+
+    if (matchesBearerToken(token, this.dpaApiKeyBuf)) {
+      return {
+        token,
+        clientId: "bearer-dpa",
+        scopes: [],
+        expiresAt: farFuture,
+        authMethod: "bearer",
+        transportTypeHint: "dpa_covered",
+      } as ExtendedAuthInfo;
+    }
+
+    if (matchesBearerToken(token, this.consumerApiKeyBuf)) {
+      return {
+        token,
+        clientId: "bearer-consumer",
+        scopes: [],
+        expiresAt: farFuture,
+        authMethod: "bearer",
+        transportTypeHint: "consumer",
+      } as ExtendedAuthInfo;
+    }
+
+    if (matchesBearerToken(token, this.legacyApiKeyBuf)) {
+      return {
+        token,
+        clientId: "legacy-bearer",
+        scopes: [],
+        expiresAt: farFuture,
+        authMethod: "legacy_bearer",
+      } as ExtendedAuthInfo;
     }
 
     // Check agent service tokens (principals.token_hash)
     const serviceTokenHash = createHash("sha256").update(token).digest("hex");
     const principalRow = this.db
       .prepare(
-        `SELECT principal_id, principal_type, revoked_at, expires_at
+        `SELECT principal_id, principal_type, revoked_at, expires_at, transport_type
          FROM principals
          WHERE token_hash = ?`,
       )
       .get(serviceTokenHash) as
-      | { principal_id: string; principal_type: string; revoked_at: string | null; expires_at: string | null }
+      | { principal_id: string; principal_type: string; revoked_at: string | null; expires_at: string | null; transport_type: string | null }
       | undefined;
 
     if (principalRow) {
@@ -517,13 +558,15 @@ export class MuninOAuthProvider implements OAuthServerProvider {
       if (principalRow.expires_at !== null && principalRow.expires_at < new Date().toISOString()) {
         throw new InvalidTokenError("Agent token has expired");
       }
-      const farFuture = Math.floor(Date.now() / 1000) + 365 * 24 * 3600;
       return {
         token,
         clientId: `principal:${principalRow.principal_id}`,
         scopes: [],
         expiresAt: farFuture,
-      };
+        principalId: principalRow.principal_id,
+        authMethod: "agent_token",
+        transportTypeHint: (principalRow.transport_type as TransportType | null) ?? undefined,
+      } as ExtendedAuthInfo;
     }
 
     // Check OAuth tokens
@@ -543,17 +586,19 @@ export class MuninOAuthProvider implements OAuthServerProvider {
       throw new InvalidTokenError("Access token has expired");
     }
 
-    const authInfo: AuthInfo = {
+    const authInfo: ExtendedAuthInfo = {
       token,
       clientId: row.client_id,
       scopes: JSON.parse(row.scopes),
       expiresAt: row.expires_at,
       resource: row.resource ? new URL(row.resource) : undefined,
+      authMethod: "oauth",
+      transportTypeHint: "consumer",
     };
 
     // Attach principal_id for token-bound principal resolution (v6+)
     if (row.principal_id) {
-      (authInfo as AuthInfo & { principalId?: string }).principalId = row.principal_id;
+      authInfo.principalId = row.principal_id;
     }
 
     return authInfo;

@@ -29,8 +29,8 @@ function makeDb(): Database.Database {
 
 const INSERT_PRINCIPAL = `
   INSERT INTO principals
-    (id, principal_id, principal_type, oauth_client_id, token_hash, namespace_rules, created_at, revoked_at, expires_at)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    (id, principal_id, principal_type, oauth_client_id, token_hash, namespace_rules, max_classification, transport_type, created_at, revoked_at, expires_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `;
 
 function insertPrincipal(
@@ -42,6 +42,8 @@ function insertPrincipal(
     oauth_client_id?: string | null;
     token_hash?: string | null;
     namespace_rules?: NamespaceRule[];
+    max_classification?: string | null;
+    transport_type?: string | null;
     created_at?: string;
     revoked_at?: string | null;
     expires_at?: string | null;
@@ -54,6 +56,8 @@ function insertPrincipal(
     opts.oauth_client_id ?? null,
     opts.token_hash ?? null,
     JSON.stringify(opts.namespace_rules ?? []),
+    opts.max_classification ?? null,
+    opts.transport_type ?? null,
     opts.created_at ?? new Date().toISOString(),
     opts.revoked_at ?? null,
     opts.expires_at ?? null
@@ -339,6 +343,44 @@ describe("resolveAccessContext", () => {
     expect(ctx.principalId).toBe("owner");
   });
 
+  it("legacy bearer defaults to dpa-covered transport and classification ceiling", () => {
+    const previous = process.env.MUNIN_BEARER_TRANSPORT_TYPE;
+    delete process.env.MUNIN_BEARER_TRANSPORT_TYPE;
+
+    try {
+      const ctx = resolveAccessContext(
+        db,
+        "legacy-bearer",
+        undefined,
+        undefined,
+        "legacy_bearer",
+      );
+      expect(ctx.transportType).toBe("dpa_covered");
+      expect(ctx.maxClassification).toBe("client-confidential");
+    } finally {
+      if (previous === undefined) {
+        delete process.env.MUNIN_BEARER_TRANSPORT_TYPE;
+      } else {
+        process.env.MUNIN_BEARER_TRANSPORT_TYPE = previous;
+      }
+    }
+  });
+
+  it("static consumer bearer resolves as owner on consumer transport", () => {
+    const ctx = resolveAccessContext(
+      db,
+      "bearer-consumer",
+      undefined,
+      undefined,
+      "bearer",
+      "consumer",
+    );
+    expect(ctx.principalId).toBe("owner");
+    expect(ctx.principalType).toBe("owner");
+    expect(ctx.transportType).toBe("consumer");
+    expect(ctx.maxClassification).toBe("internal");
+  });
+
   it("known oauth_client_id resolves to correct AccessContext", () => {
     insertPrincipal(db, {
       principal_id: "sara",
@@ -352,6 +394,20 @@ describe("resolveAccessContext", () => {
     expect(ctx.principalType).toBe("family");
     expect(ctx.accessibleNamespaces).toHaveLength(1);
     expect(ctx.accessibleNamespaces[0].pattern).toBe("users/sara/*");
+  });
+
+  it("oauth clients respect the consumer transport ceiling", () => {
+    insertPrincipal(db, {
+      principal_id: "sara",
+      principal_type: "family",
+      oauth_client_id: "client-sara-consumer",
+      namespace_rules: [{ pattern: "users/sara/*", permissions: "rw" }],
+      max_classification: "client-confidential",
+    });
+
+    const ctx = resolveAccessContext(db, "client-sara-consumer", undefined, undefined, "oauth");
+    expect(ctx.transportType).toBe("consumer");
+    expect(ctx.maxClassification).toBe("internal");
   });
 
   it("'principal:<id>' prefix resolves by principal_id directly", () => {
@@ -380,6 +436,44 @@ describe("resolveAccessContext", () => {
     const ctx = resolveAccessContext(db, "unknown-client-id", rawToken);
     expect(ctx.principalId).toBe("service-hugin");
     expect(ctx.principalType).toBe("agent");
+  });
+
+  it("agent tokens cannot claim local transport over HTTP", () => {
+    const rawToken = "agent-local-over-http";
+    insertPrincipal(db, {
+      principal_id: "service-heimdall",
+      principal_type: "agent",
+      token_hash: hashToken(rawToken),
+      namespace_rules: [{ pattern: "signals/*", permissions: "rw" }],
+      max_classification: "client-confidential",
+      transport_type: "local",
+    });
+
+    const ctx = resolveAccessContext(
+      db,
+      "principal:service-heimdall",
+      rawToken,
+      "service-heimdall",
+      "agent_token",
+      "local",
+    );
+    expect(ctx.transportType).toBe("dpa_covered");
+    expect(ctx.maxClassification).toBe("client-confidential");
+  });
+
+  it("stdio owner resolution keeps local transport and full owner ceiling", () => {
+    const ctx = resolveAccessContext(
+      db,
+      "principal:owner",
+      undefined,
+      undefined,
+      "stdio",
+      "local",
+    );
+    expect(ctx.principalId).toBe("owner");
+    expect(ctx.principalType).toBe("owner");
+    expect(ctx.transportType).toBe("local");
+    expect(ctx.maxClassification).toBe("client-restricted");
   });
 
   it("unknown clientId with no token returns zero-access", () => {

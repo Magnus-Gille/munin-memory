@@ -1,6 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { nowUTC } from "./db.js";
+import {
+  DEFAULT_NAMESPACE_CLASSIFICATION_FLOORS,
+  FALLBACK_RESTRICTED_CLASSIFICATION,
+  parseExplicitClassification,
+  resolveNamespaceClassificationFloorFromRows,
+  syncClassificationTag,
+} from "./librarian.js";
 
 export interface Migration {
   version: number;
@@ -403,6 +410,129 @@ export const migrations: Migration[] = [
           ON entries(namespace, owner_principal_id)
           WHERE owner_principal_id IS NOT NULL;
       `);
+    },
+  },
+  {
+    version: 11,
+    description: "Add Librarian classification schema and backfill entry + commitment classifications",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS namespace_classification (
+          namespace_pattern TEXT PRIMARY KEY,
+          min_classification TEXT NOT NULL
+            CHECK(min_classification IN ('public', 'internal', 'client-confidential', 'client-restricted')),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        ALTER TABLE entries ADD COLUMN classification TEXT NOT NULL DEFAULT 'internal'
+          CHECK(classification IN ('public', 'internal', 'client-confidential', 'client-restricted'));
+
+        CREATE INDEX idx_entries_classification ON entries(classification);
+        CREATE INDEX idx_entries_ns_classification ON entries(namespace, classification);
+
+        CREATE TABLE IF NOT EXISTS redaction_log (
+          id TEXT PRIMARY KEY,
+          session_id TEXT,
+          principal_id TEXT NOT NULL,
+          transport_type TEXT NOT NULL,
+          entry_id TEXT NOT NULL,
+          entry_namespace TEXT NOT NULL,
+          entry_classification TEXT NOT NULL,
+          connection_max_classification TEXT NOT NULL,
+          tool_name TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX idx_redaction_log_created ON redaction_log(created_at DESC);
+        CREATE INDEX idx_redaction_log_entry ON redaction_log(entry_id);
+      `);
+
+      const hasPrincipals = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'principals'")
+        .get();
+      if (hasPrincipals) {
+        db.exec(`
+          ALTER TABLE principals ADD COLUMN max_classification TEXT DEFAULT NULL
+            CHECK(max_classification IN ('public', 'internal', 'client-confidential', 'client-restricted'));
+
+          ALTER TABLE principals ADD COLUMN transport_type TEXT DEFAULT NULL
+            CHECK(transport_type IN ('local', 'dpa_covered', 'consumer'));
+        `);
+      }
+
+      const hasCommitments = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'commitments'")
+        .get();
+      if (hasCommitments) {
+        db.exec(`
+          ALTER TABLE commitments ADD COLUMN source_classification TEXT DEFAULT 'internal'
+            CHECK(source_classification IN ('public', 'internal', 'client-confidential', 'client-restricted'));
+        `);
+      }
+
+      const now = nowUTC();
+      const insertFloor = db.prepare(
+        `INSERT OR IGNORE INTO namespace_classification
+           (namespace_pattern, min_classification, created_at, updated_at)
+         VALUES (?, ?, ?, ?)`,
+      );
+      for (const floor of DEFAULT_NAMESPACE_CLASSIFICATION_FLOORS) {
+        insertFloor.run(floor.pattern, floor.minClassification, now, now);
+      }
+
+      const floorRows = db.prepare(
+        `SELECT namespace_pattern, min_classification
+         FROM namespace_classification
+         ORDER BY LENGTH(namespace_pattern) DESC, namespace_pattern ASC`,
+      ).all() as Array<{ namespace_pattern: string; min_classification: "public" | "internal" | "client-confidential" | "client-restricted" }>;
+
+      const entries = db.prepare(
+        "SELECT id, namespace, tags FROM entries",
+      ).all() as Array<{ id: string; namespace: string; tags: string }>;
+      const updateEntry = db.prepare(
+        "UPDATE entries SET classification = ?, tags = ? WHERE id = ?",
+      );
+
+      for (const entry of entries) {
+        let parsedTags: string[] = [];
+        try {
+          const raw = JSON.parse(entry.tags) as unknown;
+          if (Array.isArray(raw)) {
+            parsedTags = raw.filter((tag): tag is string => typeof tag === "string");
+          }
+        } catch {
+          parsedTags = [];
+        }
+
+        let classification = resolveNamespaceClassificationFloorFromRows(entry.namespace, floorRows);
+        try {
+          const explicitClassification = parseExplicitClassification({ tags: parsedTags });
+          if (explicitClassification) {
+            classification = explicitClassification;
+          }
+        } catch {
+          classification = FALLBACK_RESTRICTED_CLASSIFICATION;
+        }
+
+        const syncedTags = syncClassificationTag(parsedTags, classification);
+        updateEntry.run(classification, JSON.stringify(syncedTags), entry.id);
+      }
+
+      if (hasCommitments) {
+        db.exec(`
+          UPDATE commitments
+          SET source_classification = COALESCE(
+            (SELECT classification FROM entries WHERE entries.id = commitments.source_entry_id),
+            source_classification
+          );
+
+          DELETE FROM commitments
+          WHERE source_entry_id IN (
+            SELECT id FROM entries WHERE classification = 'client-restricted'
+          );
+        `);
+      }
     },
   },
 ];

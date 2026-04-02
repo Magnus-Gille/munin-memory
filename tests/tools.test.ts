@@ -34,6 +34,22 @@ async function callTool(name: string, args: Record<string, unknown> = {}): Promi
   throw new Error("Cannot access tool handler");
 }
 
+function makeContextCallTool(ctx: AccessContext, sessionId?: string) {
+  const contextServer = new Server(
+    { name: "test-munin-context", version: "0.0.1" },
+    { capabilities: { tools: {} } },
+  );
+  registerTools(contextServer, db, sessionId, ctx);
+
+  return async (name: string, args: Record<string, unknown> = {}) => {
+    const handler = (contextServer as unknown as { _requestHandlers: Map<string, Function> })._requestHandlers?.get("tools/call");
+    if (handler) {
+      return handler({ method: "tools/call", params: { name, arguments: args } });
+    }
+    throw new Error("Cannot access tool handler");
+  };
+}
+
 function parseToolResponse(response: unknown): unknown {
   const resp = response as { content: Array<{ text: string }> };
   return JSON.parse(resp.content[0].text);
@@ -176,6 +192,49 @@ describe("memory_write", () => {
     const result = parseToolResponse(raw) as { error: string };
     expect(result.error).toBe("validation_error");
   });
+
+  it("supports explicit classification above the namespace floor", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "status",
+      content: "Client-sensitive status",
+      tags: ["active"],
+      classification: "client-confidential",
+    });
+
+    const readRaw = await callTool("memory_read", {
+      namespace: "projects/test",
+      key: "status",
+    });
+    const entry = parseToolResponse(readRaw) as { classification: string; tags: string[] };
+    expect(entry.classification).toBe("client-confidential");
+    expect(entry.tags).toContain("classification:client-confidential");
+  });
+
+  it("rejects writes below the namespace floor without override", async () => {
+    const raw = await callTool("memory_write", {
+      namespace: "clients/acme",
+      key: "notes",
+      content: "too open",
+      classification: "public",
+    });
+    const result = parseToolResponse(raw) as { error: string; message: string };
+    expect(result.error).toBe("validation_error");
+    expect(result.message).toMatch(/below namespace floor/);
+  });
+
+  it("allows owner override for below-floor writes", async () => {
+    const raw = await callTool("memory_write", {
+      namespace: "clients/acme",
+      key: "notes",
+      content: "owner override",
+      classification: "public",
+      classification_override: true,
+    });
+    const result = parseToolResponse(raw) as { status: string; classification: string };
+    expect(result.status).toBe("created");
+    expect(result.classification).toBe("public");
+  });
 });
 
 describe("memory_write patch", () => {
@@ -198,7 +257,7 @@ describe("memory_write patch", () => {
     const readRaw = await callTool("memory_read", { namespace: "projects/test", key: "notes" });
     const entry = parseToolResponse(readRaw) as { content: string; tags: string[] };
     expect(entry.content).toBe("line one\nline two");
-    expect(entry.tags).toEqual(["active"]); // tags unchanged
+    expect(entry.tags).toEqual(["active", "classification:internal"]); // tags unchanged aside from synced classification
   });
 
   it("prepends content to existing entry", async () => {
@@ -235,7 +294,7 @@ describe("memory_write patch", () => {
 
     const readRaw = await callTool("memory_read", { namespace: "projects/test", key: "notes" });
     const entry = parseToolResponse(readRaw) as { tags: string[] };
-    expect(entry.tags).toEqual(["active", "decision", "architecture"]);
+    expect(entry.tags).toEqual(["active", "decision", "architecture", "classification:internal"]);
   });
 
   it("removes specified tags", async () => {
@@ -254,7 +313,7 @@ describe("memory_write patch", () => {
 
     const readRaw = await callTool("memory_read", { namespace: "projects/test", key: "notes" });
     const entry = parseToolResponse(readRaw) as { tags: string[] };
-    expect(entry.tags).toEqual(["active", "architecture"]);
+    expect(entry.tags).toEqual(["active", "architecture", "classification:internal"]);
   });
 
   it("returns not_found for non-existent entry", async () => {
@@ -377,6 +436,29 @@ describe("memory_update_status", () => {
     expect(result.structured_status.notes).toBe("Carry forward");
     expect(result.content).toContain("- Ship it");
   });
+
+  it("preserves an existing higher classification when not re-specified", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/status-tool",
+      phase: "Active",
+      current_work: "Sensitive work",
+      lifecycle: "active",
+      classification: "client-confidential",
+    });
+
+    await callTool("memory_update_status", {
+      namespace: "projects/status-tool",
+      blockers: "None.",
+    });
+
+    const readRaw = await callTool("memory_read", {
+      namespace: "projects/status-tool",
+      key: "status",
+    });
+    const entry = parseToolResponse(readRaw) as { classification: string; tags: string[] };
+    expect(entry.classification).toBe("client-confidential");
+    expect(entry.tags).toContain("classification:client-confidential");
+  });
 });
 
 describe("memory_read", () => {
@@ -399,7 +481,7 @@ describe("memory_read", () => {
     };
     expect(result.found).toBe(true);
     expect(result.content).toBe("All good");
-    expect(result.tags).toEqual(["active"]);
+    expect(result.tags).toEqual(["active", "classification:internal"]);
     expect(result.provenance.principal_id).toBe("owner");
   });
 
@@ -481,6 +563,293 @@ describe("memory_get", () => {
     expect(result.found).toBe(true);
     expect(result.valid_until).toBe("2020-01-01T00:00:00.000Z");
     expect(result.expired).toBe(true);
+  });
+});
+
+describe("Librarian direct-entry enforcement", () => {
+  beforeEach(() => {
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+    delete process.env.MUNIN_REDACTION_LOG_ENABLED;
+  });
+
+  afterEach(() => {
+    delete process.env.MUNIN_LIBRARIAN_ENABLED;
+    delete process.env.MUNIN_REDACTION_LOG_ENABLED;
+  });
+
+  it("redacts owner reads on downgraded consumer transport and logs the redaction", async () => {
+    await callTool("memory_write", {
+      namespace: "clients/lofalk",
+      key: "status",
+      content: "Active retainer and billing note",
+      tags: ["active"],
+      classification: "client-confidential",
+    });
+
+    const consumerOwnerCall = makeContextCallTool(
+      {
+        ...ownerContext(),
+        transportType: "consumer",
+        maxClassification: "internal",
+      },
+      "owner-consumer-session",
+    );
+
+    const raw = await consumerOwnerCall("memory_read", {
+      namespace: "clients/lofalk",
+      key: "status",
+    });
+    const result = parseToolResponse(raw) as Record<string, unknown>;
+
+    expect(result.found).toBe(true);
+    expect(result.redacted).toBe(true);
+    expect(result.namespace).toBe("clients/lofalk");
+    expect(result.key).toBe("status");
+    expect(result.classification).toBe("client-confidential");
+    expect(result.content).toBeUndefined();
+    expect(result.redaction_reason).toContain("allows up to internal");
+
+    const logRow = db.prepare(
+      `SELECT principal_id, transport_type, entry_namespace, entry_classification, connection_max_classification, tool_name
+       FROM redaction_log
+       WHERE entry_namespace = ?`,
+    ).get("clients/lofalk") as {
+      principal_id: string;
+      transport_type: string;
+      entry_namespace: string;
+      entry_classification: string;
+      connection_max_classification: string;
+      tool_name: string;
+    };
+
+    expect(logRow).toMatchObject({
+      principal_id: "owner",
+      transport_type: "consumer",
+      entry_namespace: "clients/lofalk",
+      entry_classification: "client-confidential",
+      connection_max_classification: "internal",
+      tool_name: "memory_read",
+    });
+  });
+
+  it("returns minimal metadata for non-owner redaction on memory_get", async () => {
+    const writeRaw = await callTool("memory_write", {
+      namespace: "shared/family/calendar",
+      key: "events",
+      content: "Private client dinner schedule",
+      classification: "client-confidential",
+    });
+    const writeResult = parseToolResponse(writeRaw) as { id: string };
+
+    const familyCall = makeContextCallTool(
+      {
+        principalId: "sara",
+        principalType: "family",
+        accessibleNamespaces: [{ pattern: "shared/family/*", permissions: "rw" }],
+        transportType: "consumer",
+        maxClassification: "internal",
+      },
+      "family-redaction-session",
+    );
+
+    const raw = await familyCall("memory_get", { id: writeResult.id });
+    const result = parseToolResponse(raw) as Record<string, unknown>;
+
+    expect(result.found).toBe(true);
+    expect(result.redacted).toBe(true);
+    expect(result.namespace).toBe("shared/family/calendar");
+    expect(result.redaction_reason).toBe("Some entries in this namespace exceed your classification level.");
+    expect(result.key).toBeUndefined();
+    expect(result.classification).toBeUndefined();
+    expect(result.tags).toBeUndefined();
+    expect(result.content).toBeUndefined();
+    expect(result.created_at).toBeUndefined();
+    expect(result.updated_at).toBeUndefined();
+  });
+
+  it("redacts only over-classified items in memory_read_batch", async () => {
+    await callTool("memory_write", {
+      namespace: "shared/family/notes",
+      key: "visible",
+      content: "Internal family note",
+    });
+    await callTool("memory_write", {
+      namespace: "shared/family/notes",
+      key: "restricted",
+      content: "Client-confidential note",
+      classification: "client-confidential",
+    });
+
+    const familyCall = makeContextCallTool({
+      principalId: "sara",
+      principalType: "family",
+      accessibleNamespaces: [{ pattern: "shared/family/*", permissions: "rw" }],
+      transportType: "consumer",
+      maxClassification: "internal",
+    });
+
+    const raw = await familyCall("memory_read_batch", {
+      reads: [
+        { namespace: "shared/family/notes", key: "visible" },
+        { namespace: "shared/family/notes", key: "restricted" },
+      ],
+    });
+    const result = parseToolResponse(raw) as { results: Array<Record<string, unknown>> };
+
+    expect(result.results).toHaveLength(2);
+    expect(result.results[0].found).toBe(true);
+    expect(result.results[0].content).toBe("Internal family note");
+    expect(result.results[0].redacted).toBeUndefined();
+
+    expect(result.results[1].found).toBe(true);
+    expect(result.results[1].redacted).toBe(true);
+    expect(result.results[1].namespace).toBe("shared/family/notes");
+    expect(result.results[1].content).toBeUndefined();
+  });
+});
+
+describe("Librarian Pattern A enforcement for query/list/history", () => {
+  beforeEach(() => {
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+    delete process.env.MUNIN_REDACTION_LOG_ENABLED;
+  });
+
+  afterEach(() => {
+    delete process.env.MUNIN_LIBRARIAN_ENABLED;
+    delete process.env.MUNIN_REDACTION_LOG_ENABLED;
+  });
+
+  it("redacts classified query results for owner consumer transport and suppresses explain metadata", async () => {
+    await callTool("memory_write", {
+      namespace: "clients/lofalk",
+      key: "status",
+      content: "Unique billing review marker for classified query result",
+      classification: "client-confidential",
+    });
+
+    const consumerOwnerCall = makeContextCallTool({
+      ...ownerContext(),
+      transportType: "consumer",
+      maxClassification: "internal",
+    });
+
+    const raw = await consumerOwnerCall("memory_query", {
+      query: "Unique billing review marker",
+      search_mode: "lexical",
+      explain: true,
+    });
+    const result = parseToolResponse(raw) as {
+      total: number;
+      redacted_count: number;
+      results: Array<Record<string, unknown>>;
+    };
+
+    expect(result.total).toBeGreaterThanOrEqual(1);
+    expect(result.redacted_count).toBeGreaterThanOrEqual(1);
+    expect(result.results[0].redacted).toBe(true);
+    expect(result.results[0].namespace).toBe("clients/lofalk");
+    expect(result.results[0].classification).toBe("client-confidential");
+    expect(result.results[0].content_preview).toBeUndefined();
+    expect(result.results[0].match).toBeUndefined();
+  });
+
+  it("uses minimal metadata for non-owner redacted query results", async () => {
+    await callTool("memory_write", {
+      namespace: "shared/family/notes",
+      key: "private-client",
+      content: "Family-visible namespace but classified note marker",
+      classification: "client-confidential",
+    });
+
+    const familyCall = makeContextCallTool({
+      principalId: "sara",
+      principalType: "family",
+      accessibleNamespaces: [{ pattern: "shared/family/*", permissions: "rw" }],
+      transportType: "consumer",
+      maxClassification: "internal",
+    });
+
+    const raw = await familyCall("memory_query", {
+      query: "classified note marker",
+      search_mode: "lexical",
+      explain: true,
+    });
+    const result = parseToolResponse(raw) as { results: Array<Record<string, unknown>> };
+
+    expect(result.results[0].redacted).toBe(true);
+    expect(result.results[0].namespace).toBe("shared/family/notes");
+    expect(result.results[0].redaction_reason).toBe("Some entries in this namespace exceed your classification level.");
+    expect(result.results[0].id).toBeUndefined();
+    expect(result.results[0].key).toBeUndefined();
+    expect(result.results[0].classification).toBeUndefined();
+    expect(result.results[0].content_preview).toBeUndefined();
+    expect(result.results[0].match).toBeUndefined();
+  });
+
+  it("redacts previews in memory_list for classified state and log entries", async () => {
+    await callTool("memory_write", {
+      namespace: "clients/lofalk",
+      key: "status",
+      content: "List preview should not leak",
+      classification: "client-confidential",
+    });
+    await callTool("memory_log", {
+      namespace: "clients/lofalk",
+      content: "List log preview should not leak",
+      classification: "client-confidential",
+    });
+
+    const consumerOwnerCall = makeContextCallTool({
+      ...ownerContext(),
+      transportType: "consumer",
+      maxClassification: "internal",
+    });
+
+    const raw = await consumerOwnerCall("memory_list", { namespace: "clients/lofalk" });
+    const result = parseToolResponse(raw) as {
+      state_entries: Array<Record<string, unknown>>;
+      log_summary: { recent: Array<Record<string, unknown>> };
+    };
+
+    expect(result.state_entries[0].redacted).toBe(true);
+    expect(result.state_entries[0].classification).toBe("client-confidential");
+    expect(result.state_entries[0].preview).toBeUndefined();
+
+    expect(result.log_summary.recent[0].redacted).toBe(true);
+    expect(result.log_summary.recent[0].classification).toBe("client-confidential");
+    expect(result.log_summary.recent[0].content_preview).toBeUndefined();
+  });
+
+  it("redacts audit detail in memory_history for classified entries", async () => {
+    await callTool("memory_write", {
+      namespace: "clients/lofalk",
+      key: "status",
+      content: "History billing note should not leak",
+      classification: "client-confidential",
+    });
+    await callTool("memory_log", {
+      namespace: "clients/lofalk",
+      content: "History log note should not leak",
+      classification: "client-confidential",
+    });
+
+    const consumerOwnerCall = makeContextCallTool({
+      ...ownerContext(),
+      transportType: "consumer",
+      maxClassification: "internal",
+    });
+
+    const raw = await consumerOwnerCall("memory_history", { namespace: "clients/lofalk" });
+    const result = parseToolResponse(raw) as { entries: Array<Record<string, unknown>> };
+
+    expect(result.entries.length).toBeGreaterThanOrEqual(2);
+    for (const entry of result.entries) {
+      expect(entry.namespace).toBe("clients/lofalk");
+      expect(entry.redacted).toBe(true);
+      expect(entry.detail).toBeNull();
+      expect(entry.classification).toBe("client-confidential");
+    }
+    expect(result.entries.some((entry) => String(entry.detail ?? "").includes("should not leak"))).toBe(false);
   });
 });
 
@@ -1042,6 +1411,20 @@ describe("memory_log", () => {
     expect(result.status).toBe("logged");
     expect(result.id).toBeTruthy();
     expect(result.timestamp).toBeTruthy();
+  });
+
+  it("defaults log classification from the namespace floor", async () => {
+    const raw = await callTool("memory_log", {
+      namespace: "clients/acme",
+      content: "Client call notes",
+    });
+    const result = parseToolResponse(raw) as { id: string; classification: string };
+    expect(result.classification).toBe("client-confidential");
+
+    const getRaw = await callTool("memory_get", { id: result.id });
+    const entry = parseToolResponse(getRaw) as { classification: string; tags: string[] };
+    expect(entry.classification).toBe("client-confidential");
+    expect(entry.tags).toContain("classification:client-confidential");
   });
 
   it("rejects invalid namespace", async () => {
@@ -2917,7 +3300,7 @@ describe("memory_list recent logs", () => {
     expect(result.log_summary.recent[0].content_preview).toBe("Third event");
     expect(result.log_summary.recent[1].content_preview).toBe("Second event");
     expect(result.log_summary.recent[2].content_preview).toBe("First event");
-    expect(result.log_summary.recent[0].tags).toEqual([]);
+    expect(result.log_summary.recent[0].tags).toEqual(["classification:internal"]);
     expect(result.log_summary.recent[0].id).toBeTruthy();
     expect(result.log_summary.recent[0].created_at).toBeTruthy();
   });
@@ -3334,6 +3717,12 @@ describe("memory_status", () => {
       features: { embeddings: boolean; semantic_search: boolean; hybrid_search: boolean };
       tools: { count: number; names: string[] };
       principal: { id: string; type: string };
+      librarian: {
+        enabled: boolean;
+        redaction_logging: boolean;
+        transport_type: string;
+        max_classification: string;
+      };
     };
 
     expect(result.server).toBeDefined();
@@ -3351,6 +3740,12 @@ describe("memory_status", () => {
     expect(result.tools).toBeDefined();
     expect(typeof result.tools.count).toBe("number");
     expect(Array.isArray(result.tools.names)).toBe(true);
+
+    expect(result.librarian).toBeDefined();
+    expect(typeof result.librarian.enabled).toBe("boolean");
+    expect(typeof result.librarian.redaction_logging).toBe("boolean");
+    expect(typeof result.librarian.transport_type).toBe("string");
+    expect(typeof result.librarian.max_classification).toBe("string");
   });
 
   it("tools.count matches tools.names.length", async () => {
@@ -3367,8 +3762,13 @@ describe("memory_status", () => {
 
   it("principal reflects the calling context for owner", async () => {
     const raw = await callTool("memory_status", {});
-    const result = parseToolResponse(raw) as { principal: { id: string; type: string } };
+    const result = parseToolResponse(raw) as {
+      principal: { id: string; type: string };
+      librarian: { transport_type: string; max_classification: string };
+    };
     expect(result.principal.type).toBe("owner");
+    expect(result.librarian.transport_type).toBe("local");
+    expect(result.librarian.max_classification).toBe("client-restricted");
   });
 
   it("principal reflects a non-owner context", async () => {

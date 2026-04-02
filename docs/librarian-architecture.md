@@ -5,6 +5,7 @@
 **Author:** Magnus Gille + Claude (Opus 4.6)
 **Reviewed by:** Codex (GPT-5.4) — adversarial review, 2 rounds, 15 critique points
 **Status:** Architecture approved — ready for implementation planning
+**Engineering plan:** `docs/librarian-engineering-plan.md`
 **Depends on:** Multi-principal access control (Feature 5, implemented)
 **Debate record:** `debate/librarian-summary.md`
 

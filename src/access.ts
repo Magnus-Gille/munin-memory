@@ -11,6 +11,7 @@
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import { nowUTC } from "./db.js";
+import type { AuthMethod, ClassificationLevel, TransportType } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -27,6 +28,8 @@ export interface AccessContext {
   principalId: string; // "magnus", "sara", "agent:skuld"
   principalType: PrincipalType;
   accessibleNamespaces: NamespaceRule[];
+  maxClassification?: ClassificationLevel;
+  transportType?: TransportType;
 }
 
 // ---------------------------------------------------------------------------
@@ -37,6 +40,28 @@ const ZERO_ACCESS: AccessContext = {
   principalId: "anonymous",
   principalType: "external",
   accessibleNamespaces: [],
+  maxClassification: "public",
+  transportType: "consumer",
+};
+
+const CLASSIFICATION_RANKS: Record<ClassificationLevel, number> = {
+  public: 0,
+  internal: 1,
+  "client-confidential": 2,
+  "client-restricted": 3,
+};
+
+const PRINCIPAL_DEFAULT_MAX_CLASSIFICATION: Record<PrincipalType, ClassificationLevel> = {
+  owner: "client-restricted",
+  family: "internal",
+  agent: "internal",
+  external: "public",
+};
+
+const TRANSPORT_MAX_CLASSIFICATION: Record<TransportType, ClassificationLevel> = {
+  local: "client-restricted",
+  dpa_covered: "client-confidential",
+  consumer: "internal",
 };
 
 // ---------------------------------------------------------------------------
@@ -52,7 +77,88 @@ export function ownerContext(): AccessContext {
     principalId: "owner",
     principalType: "owner",
     accessibleNamespaces: [],
+    maxClassification: "client-restricted",
+    transportType: "local",
   };
+}
+
+function compareClassification(a: ClassificationLevel, b: ClassificationLevel): number {
+  return CLASSIFICATION_RANKS[a] - CLASSIFICATION_RANKS[b];
+}
+
+export function getDefaultMaxClassificationForPrincipalType(
+  principalType: PrincipalType,
+): ClassificationLevel {
+  return PRINCIPAL_DEFAULT_MAX_CLASSIFICATION[principalType];
+}
+
+export function getTransportMaxClassification(
+  transportType: TransportType,
+): ClassificationLevel {
+  return TRANSPORT_MAX_CLASSIFICATION[transportType];
+}
+
+function resolveLegacyBearerTransportType(): TransportType {
+  const configured = process.env.MUNIN_BEARER_TRANSPORT_TYPE?.trim();
+  if (configured === "consumer" || configured === "dpa_covered" || configured === "local") {
+    return configured;
+  }
+  return "dpa_covered";
+}
+
+export function normalizeTransportType(
+  authMethod: AuthMethod,
+  transportTypeHint?: string | null,
+): TransportType {
+  let transportType: TransportType;
+
+  if (authMethod === "stdio") {
+    transportType = "local";
+  } else if (transportTypeHint === "local" || transportTypeHint === "dpa_covered" || transportTypeHint === "consumer") {
+    transportType = transportTypeHint;
+  } else if (authMethod === "oauth") {
+    transportType = "consumer";
+  } else if (authMethod === "legacy_bearer") {
+    transportType = resolveLegacyBearerTransportType();
+  } else {
+    transportType = "consumer";
+  }
+
+  if (transportType === "local" && authMethod !== "stdio") {
+    return "dpa_covered";
+  }
+
+  return transportType;
+}
+
+export function resolveEffectiveMaxClassification(
+  principalType: PrincipalType,
+  transportType: TransportType,
+  principalMaxClassification?: string | null,
+): ClassificationLevel {
+  const basePrincipalMax = (
+    principalMaxClassification === "public"
+    || principalMaxClassification === "internal"
+    || principalMaxClassification === "client-confidential"
+    || principalMaxClassification === "client-restricted"
+  )
+    ? principalMaxClassification
+    : getDefaultMaxClassificationForPrincipalType(principalType);
+  const transportMax = getTransportMaxClassification(transportType);
+  return compareClassification(basePrincipalMax, transportMax) <= 0
+    ? basePrincipalMax
+    : transportMax;
+}
+
+export function getContextMaxClassification(ctx: AccessContext): ClassificationLevel {
+  return ctx.maxClassification ?? getDefaultMaxClassificationForPrincipalType(ctx.principalType);
+}
+
+export function getContextTransportType(ctx: AccessContext): TransportType {
+  if (ctx.transportType === "local" || ctx.transportType === "dpa_covered" || ctx.transportType === "consumer") {
+    return ctx.transportType;
+  }
+  return ctx.principalType === "owner" ? "local" : "consumer";
 }
 
 // ---------------------------------------------------------------------------
@@ -255,7 +361,7 @@ export function filterByAccess<T extends { namespace: string }>(
  * Resolves an AccessContext from the database for the given OAuth client ID.
  *
  * Resolution order:
- *   1. "legacy-bearer"     → ownerContext() immediately
+ *   1. static bearer creds  → owner context with transport-derived ceiling
  *   2. "principal:<id>"    → direct lookup by principal_id
  *   3. tokenPrincipalId    → token carries its own principal_id (v6+, set at consent time)
  *   4. clientId            → JOIN principal_oauth_clients → principals (v6+)
@@ -270,11 +376,24 @@ export function resolveAccessContext(
   clientId: string,
   token?: string,
   tokenPrincipalId?: string,
+  authMethod: AuthMethod = clientId === "legacy-bearer"
+    ? "legacy_bearer"
+    : clientId.startsWith("principal:")
+      ? "agent_token"
+      : "oauth",
+  transportTypeHint?: string,
 ): AccessContext {
   try {
-    // 1. Legacy bearer token clients are always owner
-    if (clientId === "legacy-bearer") {
-      return ownerContext();
+    // 1. Static bearer credentials are always owner, but not necessarily local
+    if (clientId === "legacy-bearer" || clientId === "bearer-dpa" || clientId === "bearer-consumer") {
+      const transportType = normalizeTransportType(authMethod, transportTypeHint);
+      return {
+        principalId: "owner",
+        principalType: "owner",
+        accessibleNamespaces: [],
+        transportType,
+        maxClassification: resolveEffectiveMaxClassification("owner", transportType),
+      };
     }
 
     let row: PrincipalRow | undefined;
@@ -284,7 +403,7 @@ export function resolveAccessContext(
       const principalId = clientId.slice("principal:".length);
       row = db
         .prepare(
-          `SELECT principal_id, principal_type, namespace_rules, revoked_at, expires_at
+          `SELECT principal_id, principal_type, namespace_rules, revoked_at, expires_at, max_classification, transport_type
            FROM principals
            WHERE principal_id = ?`
         )
@@ -295,7 +414,7 @@ export function resolveAccessContext(
     if (row === undefined && tokenPrincipalId) {
       row = db
         .prepare(
-          `SELECT principal_id, principal_type, namespace_rules, revoked_at, expires_at
+          `SELECT principal_id, principal_type, namespace_rules, revoked_at, expires_at, max_classification, transport_type
            FROM principals
            WHERE principal_id = ?`
         )
@@ -306,7 +425,7 @@ export function resolveAccessContext(
     if (row === undefined && !clientId.startsWith("principal:")) {
       row = db
         .prepare(
-          `SELECT p.principal_id, p.principal_type, p.namespace_rules, p.revoked_at, p.expires_at
+          `SELECT p.principal_id, p.principal_type, p.namespace_rules, p.revoked_at, p.expires_at, p.max_classification, p.transport_type
            FROM principal_oauth_clients poc
            JOIN principals p ON poc.principal_id = p.principal_id
            WHERE poc.oauth_client_id = ? AND poc.revoked_at IS NULL`
@@ -317,7 +436,7 @@ export function resolveAccessContext(
       if (row === undefined) {
         row = db
           .prepare(
-            `SELECT principal_id, principal_type, namespace_rules, revoked_at, expires_at
+            `SELECT principal_id, principal_type, namespace_rules, revoked_at, expires_at, max_classification, transport_type
              FROM principals
              WHERE oauth_client_id = ?`
           )
@@ -330,7 +449,7 @@ export function resolveAccessContext(
       const tokenHash = createHash("sha256").update(token).digest("hex");
       row = db
         .prepare(
-          `SELECT principal_id, principal_type, namespace_rules, revoked_at, expires_at
+          `SELECT principal_id, principal_type, namespace_rules, revoked_at, expires_at, max_classification, transport_type
            FROM principals
            WHERE token_hash = ?`
         )
@@ -361,10 +480,18 @@ export function resolveAccessContext(
       return { ...ZERO_ACCESS };
     }
 
+    const transportType = normalizeTransportType(authMethod, transportTypeHint ?? row.transport_type);
+
     return {
       principalId: row.principal_id,
       principalType: row.principal_type as PrincipalType,
       accessibleNamespaces: rules,
+      transportType,
+      maxClassification: resolveEffectiveMaxClassification(
+        row.principal_type as PrincipalType,
+        transportType,
+        row.max_classification,
+      ),
     };
   } catch {
     // Any unexpected error → fail-closed
@@ -382,4 +509,6 @@ interface PrincipalRow {
   namespace_rules: string; // JSON string
   revoked_at: string | null;
   expires_at: string | null;
+  max_classification: string | null;
+  transport_type: string | null;
 }
