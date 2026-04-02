@@ -1980,11 +1980,11 @@ const COMMITMENT_COMPLETED_RECENT_DAYS = 14;
 const COMMITMENT_ACTION_VERB =
   /\b(send|ship|deliver|finish|complete|publish|deploy|update|write|call|review|rerun|check)\b/i;
 const COMMITMENT_FORWARD_CUE =
-  /\b(will|must|need to|needs to|plan to|planned|should|target(?:ing)?|aim to|follow up|follow-up|before|by|due)\b/i;
+  /\b(will|must|need to|needs to|plan to|planned|should|target(?:ing)?|aim to|by|due)\b/i;
 const COMMITMENT_IMPERATIVE_PREFIX =
   /^(?:next(?:\s+steps?)?:\s*)?(send|ship|deliver|finish|complete|publish|deploy|update|write|call|review|rerun|check)\b/i;
 const COMMITMENT_RETROSPECTIVE_CUE =
-  /\b(completed|finished|shipped|delivered|published|deployed|resolved|closed|landed|wrapped up|done)\b/i;
+  /\b(committed|completed|finished|pushed|shipped|delivered|published|deployed|resolved|closed|landed|wrapped up|done)\b/i;
 const COMMITMENT_FUTURE_COMPLETION_PHRASE =
   /\b(must|need to|needs to|should|will|plan to|planned to|target(?:ing)? to|aim to)\s+(?:be\s+)?(completed|finished|shipped|delivered|published|deployed)\b/i;
 

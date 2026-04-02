@@ -8,6 +8,8 @@ import { ownerContext } from "../src/access.js";
 import type { AccessContext } from "../src/access.js";
 
 const TEST_DB_PATH = "/tmp/munin-memory-tools-test.db";
+const RETROSPECTIVE_CI_FIX_LOG =
+  "Follow-up CI fix committed and pushed on 2026-03-12 as b74ed58 after GitHub Actions failed on prettier --check. Root cause: six TypeScript files from the security hardening commit were not Prettier-formatted. Local verification after formatting: npm run build, npm test (131/131), and npm run format:check all passed before pushing.";
 
 function cleanupTestDb() {
   for (const suffix of ["", "-wal", "-shm"]) {
@@ -2014,6 +2016,29 @@ describe("memory_commitments", () => {
       expect.objectContaining({ id: "stale-forseti-2", status: "cancelled" }),
     ]));
   });
+
+  it("does not treat retrospective CI fix logs as overdue commitments", async () => {
+    await callTool("memory_log", {
+      namespace: "projects/fortnox-mcp",
+      content: RETROSPECTIVE_CI_FIX_LOG,
+      tags: ["milestone"],
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/fortnox-mcp",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<unknown>;
+      at_risk: Array<unknown>;
+      overdue: Array<unknown>;
+      completed_recently: Array<unknown>;
+    };
+
+    expect(result.open).toHaveLength(0);
+    expect(result.at_risk).toHaveLength(0);
+    expect(result.overdue).toHaveLength(0);
+    expect(result.completed_recently).toHaveLength(0);
+  });
 });
 
 describe("memory_patterns", () => {
@@ -2143,6 +2168,23 @@ describe("memory_patterns", () => {
 
     expect(result.patterns.some((pattern) => pattern.kind === "decision_theme")).toBe(false);
   });
+
+  it("does not derive commitment_slip from retrospective CI fix logs", async () => {
+    await callTool("memory_log", {
+      namespace: "projects/fortnox-mcp",
+      content: RETROSPECTIVE_CI_FIX_LOG,
+      tags: ["milestone"],
+    });
+
+    const raw = await callTool("memory_patterns", {
+      namespace: "projects/fortnox-mcp",
+    });
+    const result = parseToolResponse(raw) as {
+      patterns: Array<{ kind: string }>;
+    };
+
+    expect(result.patterns.some((pattern) => pattern.kind === "commitment_slip")).toBe(false);
+  });
 });
 
 describe("memory_handoff", () => {
@@ -2241,6 +2283,31 @@ describe("memory_handoff", () => {
     const raw = await callTool("memory_handoff", {
       namespace: "projects/vidar-since",
       since: "2026-04-01T00:00:00.000Z",
+    });
+    const result = parseToolResponse(raw) as {
+      open_loops: string[];
+    };
+
+    expect(result.open_loops.some((loop) => /overdue commitment/i.test(loop))).toBe(false);
+  });
+
+  it("does not surface overdue loops from retrospective CI fix logs", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/fortnox-mcp",
+      phase: "Active",
+      current_work: "Post-CI cleanup",
+      blockers: "None.",
+      next_steps: [],
+      lifecycle: "active",
+    });
+    await callTool("memory_log", {
+      namespace: "projects/fortnox-mcp",
+      content: RETROSPECTIVE_CI_FIX_LOG,
+      tags: ["milestone"],
+    });
+
+    const raw = await callTool("memory_handoff", {
+      namespace: "projects/fortnox-mcp",
     });
     const result = parseToolResponse(raw) as {
       open_loops: string[];
