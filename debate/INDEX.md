@@ -26,3 +26,4 @@
 | 2026-03-27 | [Debate self-improvement mechanisms](debate-self-improvement-summary.md) | 2 | Harden Step 2 with topic-specific checklist + mandatory draft sections; use existing impact field before adding new metrics | 13 | 2/13 (15%) |
 | 2026-04-01 | [Multi-principal Phase 1](multi-principal-p1-summary.md) | 2 | Input-level auth for aggregate tools; owner-only shared delete; add oauth_client_id column; specify agent token flow | 18 | 0/18 (0%) |
 | 2026-04-01 | [munin-admin CLI](admin-cli-summary.md) | 2 | Add rotate-token; audit all mutations; refuse missing DB; strict expires-at; owner guard; --json everywhere | 15 | 3/15 (20%) |
+| 2026-04-02 | [Librarian architecture](librarian-summary.md) | 2 | Pre-synthesis filtering for derived tools; DB-driven namespace floors; transport attestation via dedicated credentials; mandatory audit before enforcement | 15 | 2/15 (13%) |

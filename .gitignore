@@ -24,6 +24,7 @@ docs/*
 !docs/claude-md-template.md
 !docs/authorization-matrix.md
 !docs/competitive-analysis.md
+!docs/librarian-architecture.md
 
 # Debate files — keep only summaries and resolutions
 debate/*
