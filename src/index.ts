@@ -15,6 +15,7 @@ import { registerTools } from "./tools.js";
 import { initEmbeddings, startEmbeddingWorker, stopEmbeddingWorker } from "./embeddings.js";
 import { resolveAccessContext } from "./access.js";
 import type { AccessContext } from "./access.js";
+import { getLibrarianConfigWarnings } from "./librarian.js";
 import { MuninOAuthProvider, type ExtendedAuthInfo } from "./oauth.js";
 
 // Analytics retention (default 90 days)
@@ -462,6 +463,12 @@ function getHttpCredentialErrorMessage(): string {
   return "Fatal: at least one bearer credential is required when MUNIN_TRANSPORT=http. Set MUNIN_API_KEY, MUNIN_API_KEY_DPA, or MUNIN_API_KEY_CONSUMER.";
 }
 
+function logHttpLibrarianConfigWarnings(): void {
+  for (const warning of getLibrarianConfigWarnings({ transportMode: "http" })) {
+    console.error(`Librarian config warning: ${warning}`);
+  }
+}
+
 // --- HTTP transport (Express) ---
 
 export function createHttpApp(options: HttpAppOptions): { app: express.Express; oauthProvider: MuninOAuthProvider } {
@@ -724,6 +731,7 @@ async function startHttp(database: Database.Database) {
     console.error(`Munin-memory HTTP server listening on ${httpHost}:${httpPort}`);
     console.error(`Allowed hosts: ${[...buildAllowedHosts(httpHost, httpPort)].join(", ")}`);
     console.error(`OAuth issuer: ${issuerUrl}`);
+    logHttpLibrarianConfigWarnings();
   });
 }
 

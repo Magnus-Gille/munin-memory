@@ -161,6 +161,33 @@ export function isRedactionLogEnabled(): boolean {
   return (process.env.MUNIN_REDACTION_LOG_ENABLED ?? "true") !== "false";
 }
 
+export function getLibrarianConfigWarnings(
+  options: {
+    transportMode?: string;
+    librarianEnabled?: boolean;
+    hasDpaBearerCredential?: boolean;
+    hasConsumerBearerCredential?: boolean;
+  } = {},
+): string[] {
+  const transportMode = options.transportMode ?? process.env.MUNIN_TRANSPORT ?? "stdio";
+  const librarianEnabled = options.librarianEnabled ?? isLibrarianEnabled();
+  const hasDpaBearerCredential = options.hasDpaBearerCredential ?? Boolean(process.env.MUNIN_API_KEY_DPA?.trim());
+  const hasConsumerBearerCredential = options.hasConsumerBearerCredential ?? Boolean(process.env.MUNIN_API_KEY_CONSUMER?.trim());
+
+  const warnings: string[] = [];
+  if (!librarianEnabled) {
+    warnings.push("MUNIN_LIBRARIAN_ENABLED is false; classification enforcement is disabled.");
+  }
+  if (transportMode === "http" && !hasDpaBearerCredential) {
+    warnings.push("MUNIN_API_KEY_DPA is not configured; DPA-covered HTTP transport cannot be exercised on this host.");
+  }
+  if (transportMode === "http" && !hasConsumerBearerCredential) {
+    warnings.push("MUNIN_API_KEY_CONSUMER is not configured; consumer HTTP transport cannot be exercised on this host.");
+  }
+
+  return warnings;
+}
+
 export function getClassificationTag(classification: ClassificationLevel): string {
   return `${CLASSIFICATION_TAG_PREFIX}${classification}`;
 }

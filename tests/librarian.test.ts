@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   CLASSIFICATION_LEVELS,
   compareClassificationLevels,
+  getLibrarianConfigWarnings,
   parseExplicitClassification,
   resolveNamespaceClassificationFloorFromRows,
   resolveStoredClassification,
@@ -97,5 +98,29 @@ describe("resolveStoredClassification", () => {
     });
     expect(resolved.classification).toBe("public");
     expect(resolved.usedOverride).toBe(true);
+  });
+});
+
+describe("getLibrarianConfigWarnings", () => {
+  it("reports disabled enforcement and missing HTTP transport credentials", () => {
+    expect(getLibrarianConfigWarnings({
+      transportMode: "http",
+      librarianEnabled: false,
+      hasDpaBearerCredential: false,
+      hasConsumerBearerCredential: false,
+    })).toEqual([
+      "MUNIN_LIBRARIAN_ENABLED is false; classification enforcement is disabled.",
+      "MUNIN_API_KEY_DPA is not configured; DPA-covered HTTP transport cannot be exercised on this host.",
+      "MUNIN_API_KEY_CONSUMER is not configured; consumer HTTP transport cannot be exercised on this host.",
+    ]);
+  });
+
+  it("returns no warnings when HTTP librarian config is complete", () => {
+    expect(getLibrarianConfigWarnings({
+      transportMode: "http",
+      librarianEnabled: true,
+      hasDpaBearerCredential: true,
+      hasConsumerBearerCredential: true,
+    })).toEqual([]);
   });
 });

@@ -63,6 +63,7 @@ import {
   buildLibrarianRuntimeSummary,
   enforceClassification,
   filterSourcesByClassification,
+  getLibrarianConfigWarnings,
   isClassificationLevel,
   isLibrarianEnabled,
   isRedactionLogEnabled,
@@ -5768,6 +5769,16 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
 
           case "memory_status": {
             const schemaVersion = getSchemaVersion(db);
+            const librarian = {
+              enabled: isLibrarianEnabled(),
+              redaction_logging: isRedactionLogEnabled(),
+              transport_type: getContextTransportType(ctx),
+              max_classification: getContextMaxClassification(ctx),
+            } as Record<string, unknown>;
+            const configWarnings = getLibrarianConfigWarnings();
+            if (configWarnings.length > 0) {
+              librarian.config_warnings = configWarnings;
+            }
             return okResult("status", {
               server: {
                 name: "munin-memory",
@@ -5787,12 +5798,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                 id: ctx.principalId,
                 type: ctx.principalType,
               },
-              librarian: {
-                enabled: isLibrarianEnabled(),
-                redaction_logging: isRedactionLogEnabled(),
-                transport_type: getContextTransportType(ctx),
-                max_classification: getContextMaxClassification(ctx),
-              },
+              librarian,
             });
           }
 

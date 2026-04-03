@@ -4349,6 +4349,52 @@ describe("memory_status", () => {
     expect(result.librarian.max_classification).toBe("client-restricted");
   });
 
+  it("surfaces librarian config warnings when HTTP enforcement config is incomplete", async () => {
+    const originalTransport = process.env.MUNIN_TRANSPORT;
+    const originalEnabled = process.env.MUNIN_LIBRARIAN_ENABLED;
+    const originalDpa = process.env.MUNIN_API_KEY_DPA;
+    const originalConsumer = process.env.MUNIN_API_KEY_CONSUMER;
+
+    process.env.MUNIN_TRANSPORT = "http";
+    process.env.MUNIN_LIBRARIAN_ENABLED = "false";
+    delete process.env.MUNIN_API_KEY_DPA;
+    delete process.env.MUNIN_API_KEY_CONSUMER;
+
+    try {
+      const raw = await callTool("memory_status", {});
+      const result = parseToolResponse(raw) as {
+        librarian: { config_warnings?: string[] };
+      };
+
+      expect(result.librarian.config_warnings).toEqual([
+        "MUNIN_LIBRARIAN_ENABLED is false; classification enforcement is disabled.",
+        "MUNIN_API_KEY_DPA is not configured; DPA-covered HTTP transport cannot be exercised on this host.",
+        "MUNIN_API_KEY_CONSUMER is not configured; consumer HTTP transport cannot be exercised on this host.",
+      ]);
+    } finally {
+      if (originalTransport === undefined) {
+        delete process.env.MUNIN_TRANSPORT;
+      } else {
+        process.env.MUNIN_TRANSPORT = originalTransport;
+      }
+      if (originalEnabled === undefined) {
+        delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      } else {
+        process.env.MUNIN_LIBRARIAN_ENABLED = originalEnabled;
+      }
+      if (originalDpa === undefined) {
+        delete process.env.MUNIN_API_KEY_DPA;
+      } else {
+        process.env.MUNIN_API_KEY_DPA = originalDpa;
+      }
+      if (originalConsumer === undefined) {
+        delete process.env.MUNIN_API_KEY_CONSUMER;
+      } else {
+        process.env.MUNIN_API_KEY_CONSUMER = originalConsumer;
+      }
+    }
+  });
+
   it("principal reflects a non-owner context", async () => {
     const agentCtx: AccessContext = {
       principalId: "agent:test",
