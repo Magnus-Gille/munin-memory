@@ -4,11 +4,13 @@ import { describe, expect, it } from "vitest";
 const TOOLS_SOURCE = readFileSync(new URL("../src/tools.ts", import.meta.url), "utf8");
 
 const ENFORCEMENT_EXPECTATIONS: Record<string, string[]> = {
-  memory_read: ["maybeRedactDirectEntry("],
+  memory_write: ["buildWriteHint("],
+  memory_read: ["maybeRedactDirectEntry(", "buildReadMissHint("],
   memory_read_batch: ["maybeRedactDirectEntry("],
   memory_get: ["maybeRedactDirectEntry("],
   memory_query: ["formatQueryResult("],
   memory_list: ["listVisibleNamespaces(", "maybeRedactEntryMetadata("],
+  memory_delete: ["previewDeleteByClassification("],
   memory_history: ["formatHistoryEntry("],
   memory_orient: ["getVisibleTrackedStatusAssessments(", "filterDerivedSources("],
   memory_resume: ["getVisibleTrackedStatusAssessments(", "filterDerivedSources("],

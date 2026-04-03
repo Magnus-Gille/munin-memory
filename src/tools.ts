@@ -39,6 +39,7 @@ import {
   listNamespaceContents,
   summarizeNamespaceLogsByClassification,
   previewDelete,
+  previewDeleteByClassification,
   executeDelete,
   listCommitments,
   syncCommitmentsForEntry,
@@ -55,6 +56,7 @@ import {
   getInsightsByEntry,
   getAuditHistoryPage,
   insertRedactionLog,
+  getOtherKeysInNamespaceByClassification,
 } from "./db.js";
 import {
   CLASSIFICATION_LEVELS,
@@ -318,6 +320,56 @@ function listVisibleNamespaces(
     return listNamespaces(db);
   }
   return listNamespacesByClassification(db, getContextMaxClassification(ctx));
+}
+
+function getVisibleOtherKeysInNamespace(
+  db: Database.Database,
+  ctx: AccessContext,
+  namespace: string,
+  excludeKey?: string,
+): string[] {
+  if (!isLibrarianEnabled()) {
+    return getOtherKeysInNamespace(db, namespace, excludeKey);
+  }
+  return getOtherKeysInNamespaceByClassification(
+    db,
+    namespace,
+    getContextMaxClassification(ctx),
+    excludeKey,
+  );
+}
+
+function buildWriteHint(
+  db: Database.Database,
+  ctx: AccessContext,
+  namespace: string,
+  key: string,
+): string {
+  const otherKeys = getVisibleOtherKeysInNamespace(db, ctx, namespace, key);
+  if (otherKeys.length === 0) {
+    return isLibrarianEnabled()
+      ? "No other visible entries in this namespace."
+      : "This is the first entry in this namespace.";
+  }
+  return isLibrarianEnabled()
+    ? `Related visible entries in this namespace: ${otherKeys.join(", ")}`
+    : `Related entries in this namespace: ${otherKeys.join(", ")}`;
+}
+
+function buildReadMissHint(
+  db: Database.Database,
+  ctx: AccessContext,
+  namespace: string,
+): string {
+  const otherKeys = getVisibleOtherKeysInNamespace(db, ctx, namespace);
+  if (otherKeys.length > 0) {
+    return isLibrarianEnabled()
+      ? `Other visible keys in this namespace: ${otherKeys.join(", ")}`
+      : `Other keys in this namespace: ${otherKeys.join(", ")}`;
+  }
+  return isLibrarianEnabled()
+    ? `No visible entries found in namespace "${namespace}".`
+    : `No entries found in namespace "${namespace}".`;
 }
 
 function formatQueryResult(
@@ -4666,10 +4718,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                 return errResult("write", "validation_error", patchResult.error!);
               }
 
-              const otherKeysPatch = getOtherKeysInNamespace(db, namespace, key);
-              const hintPatch = otherKeysPatch.length === 0
-                ? "This is the first entry in this namespace."
-                : `Related entries in this namespace: ${otherKeysPatch.join(", ")}`;
+              const hintPatch = buildWriteHint(db, ctx, namespace, key);
 
               if (sessionId) {
                 logRetrievalOutcome(db, sessionId, { outcomeType: "write_in_result_namespace", namespace });
@@ -4752,11 +4801,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               });
             }
 
-            const otherKeys = getOtherKeysInNamespace(db, namespace, key);
-            const isFirstEntry = otherKeys.length === 0;
-            const hint = isFirstEntry
-              ? "This is the first entry in this namespace."
-              : `Related entries in this namespace: ${otherKeys.join(", ")}`;
+            const hint = buildWriteHint(db, ctx, namespace, key);
 
             const response: Record<string, unknown> = {
               status: result.status,
@@ -4980,10 +5025,7 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               }
               return okResult("read", response);
             }
-            const otherKeys = getOtherKeysInNamespace(db, namespace);
-            const hint = otherKeys.length > 0
-              ? `Other keys in this namespace: ${otherKeys.join(", ")}`
-              : `No entries found in namespace "${namespace}".`;
+            const hint = buildReadMissHint(db, ctx, namespace);
             return okResult("read", {
               found: false,
               namespace,
@@ -5629,7 +5671,16 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
             }
 
             // Preview
-            const info = previewDelete(db, namespace, key, ctx.principalId, allowGlobalNamespaceDelete);
+            const info = isLibrarianEnabled()
+              ? previewDeleteByClassification(
+                  db,
+                  namespace,
+                  getContextMaxClassification(ctx),
+                  key,
+                  ctx.principalId,
+                  allowGlobalNamespaceDelete,
+                )
+              : previewDelete(db, namespace, key, ctx.principalId, allowGlobalNamespaceDelete);
             const token = generateDeleteToken(namespace, key);
             const target = key ? `entry "${key}" in "${namespace}"` : `all entries in "${namespace}"`;
             return okResult("delete", {
@@ -5642,7 +5693,9 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
                 keys: info.keys.length > 0 ? info.keys : undefined,
               },
               delete_token: token,
-              message: `Will delete ${info.stateCount} state entries and ${info.logCount} log entries (${target}). Call again with delete_token to confirm.`,
+              message: isLibrarianEnabled()
+                ? `Delete preview generated for visible entries on this connection (${target}). Call again with delete_token to confirm.`
+                : `Will delete ${info.stateCount} state entries and ${info.logCount} log entries (${target}). Call again with delete_token to confirm.`,
             });
           }
 

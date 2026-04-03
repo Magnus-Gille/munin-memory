@@ -1235,6 +1235,10 @@ export interface DeleteInfo {
   keys: string[];
 }
 
+function classificationInClause(levels: ClassificationLevel[]): string {
+  return levels.map(() => "?").join(", ");
+}
+
 export function previewDelete(
   db: Database.Database,
   namespace: string,
@@ -1265,6 +1269,72 @@ export function previewDelete(
     ? "SELECT COUNT(*) as cnt FROM entries WHERE namespace = ? AND entry_type = 'log'"
     : "SELECT COUNT(*) as cnt FROM entries WHERE namespace = ? AND entry_type = 'log' AND COALESCE(owner_principal_id, agent_id) = ?";
   const logParams = allowGlobalNamespaceDelete ? [namespace] : [namespace, agentId];
+  const logCount = (db.prepare(logSql).get(...logParams) as { cnt: number }).cnt;
+
+  return {
+    stateCount: stateKeys.length,
+    logCount,
+    keys: stateKeys.map((r) => r.key),
+  };
+}
+
+export function previewDeleteByClassification(
+  db: Database.Database,
+  namespace: string,
+  maxClassification: ClassificationLevel,
+  key?: string,
+  agentId = "default",
+  allowGlobalNamespaceDelete = false,
+): DeleteInfo {
+  const visibleLevels = getVisibleClassificationLevels(maxClassification);
+  const placeholders = classificationInClause(visibleLevels);
+
+  if (key) {
+    const sql = allowGlobalNamespaceDelete
+      ? `SELECT id FROM entries
+         WHERE namespace = ? AND key = ? AND entry_type = 'state'
+           AND classification IN (${placeholders})`
+      : `SELECT id FROM entries
+         WHERE namespace = ? AND key = ? AND entry_type = 'state'
+           AND COALESCE(owner_principal_id, agent_id) = ?
+           AND classification IN (${placeholders})`;
+    const params = allowGlobalNamespaceDelete
+      ? [namespace, key, ...visibleLevels]
+      : [namespace, key, agentId, ...visibleLevels];
+    const entry = db.prepare(sql).get(...params) as { id: string } | undefined;
+    return {
+      stateCount: entry ? 1 : 0,
+      logCount: 0,
+      keys: entry ? [key] : [],
+    };
+  }
+
+  const stateSql = allowGlobalNamespaceDelete
+    ? `SELECT key FROM entries
+       WHERE namespace = ? AND entry_type = 'state'
+         AND classification IN (${placeholders})
+       ORDER BY key`
+    : `SELECT key FROM entries
+       WHERE namespace = ? AND entry_type = 'state'
+         AND COALESCE(owner_principal_id, agent_id) = ?
+         AND classification IN (${placeholders})
+       ORDER BY key`;
+  const stateParams = allowGlobalNamespaceDelete
+    ? [namespace, ...visibleLevels]
+    : [namespace, agentId, ...visibleLevels];
+  const stateKeys = db.prepare(stateSql).all(...stateParams) as Array<{ key: string }>;
+
+  const logSql = allowGlobalNamespaceDelete
+    ? `SELECT COUNT(*) as cnt FROM entries
+       WHERE namespace = ? AND entry_type = 'log'
+         AND classification IN (${placeholders})`
+    : `SELECT COUNT(*) as cnt FROM entries
+       WHERE namespace = ? AND entry_type = 'log'
+         AND COALESCE(owner_principal_id, agent_id) = ?
+         AND classification IN (${placeholders})`;
+  const logParams = allowGlobalNamespaceDelete
+    ? [namespace, ...visibleLevels]
+    : [namespace, agentId, ...visibleLevels];
   const logCount = (db.prepare(logSql).get(...logParams) as { cnt: number }).cnt;
 
   return {
@@ -2036,5 +2106,25 @@ export function getOtherKeysInNamespace(
       "SELECT key FROM entries WHERE namespace = ? AND entry_type = 'state' AND key != ? ORDER BY key",
     )
     .all(namespace, excludeKey ?? "") as Array<{ key: string }>;
+  return rows.map((r) => r.key);
+}
+
+export function getOtherKeysInNamespaceByClassification(
+  db: Database.Database,
+  namespace: string,
+  maxClassification: ClassificationLevel,
+  excludeKey?: string,
+): string[] {
+  const visibleLevels = getVisibleClassificationLevels(maxClassification);
+  const rows = db
+    .prepare(
+      `SELECT key FROM entries
+       WHERE namespace = ?
+         AND entry_type = 'state'
+         AND key != ?
+         AND classification IN (${classificationInClause(visibleLevels)})
+       ORDER BY key`,
+    )
+    .all(namespace, excludeKey ?? "", ...visibleLevels) as Array<{ key: string }>;
   return rows.map((r) => r.key);
 }

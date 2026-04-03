@@ -753,6 +753,57 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
     expect(result.results[0].match).toBeUndefined();
   });
 
+  it("filters classified key names out of memory_write hints on downgraded transports", async () => {
+    await callTool("memory_write", {
+      namespace: "clients/lofalk",
+      key: "secret-key",
+      content: "Hidden confidential note",
+      classification: "client-confidential",
+    });
+
+    const consumerOwnerCall = makeContextCallTool({
+      ...ownerContext(),
+      transportType: "consumer",
+      maxClassification: "internal",
+    });
+
+    const raw = await consumerOwnerCall("memory_write", {
+      namespace: "clients/lofalk",
+      key: "public-note",
+      content: "Visible internal note",
+      classification: "client-confidential",
+    });
+    const result = parseToolResponse(raw) as { hint: string };
+
+    expect(result.hint).not.toContain("secret-key");
+    expect(result.hint).toBe("No other visible entries in this namespace.");
+  });
+
+  it("filters classified key names out of memory_read miss hints on downgraded transports", async () => {
+    await callTool("memory_write", {
+      namespace: "clients/lofalk",
+      key: "secret-key",
+      content: "Hidden confidential note",
+      classification: "client-confidential",
+    });
+
+    const consumerOwnerCall = makeContextCallTool({
+      ...ownerContext(),
+      transportType: "consumer",
+      maxClassification: "internal",
+    });
+
+    const raw = await consumerOwnerCall("memory_read", {
+      namespace: "clients/lofalk",
+      key: "missing-key",
+    });
+    const result = parseToolResponse(raw) as { found: boolean; hint: string };
+
+    expect(result.found).toBe(false);
+    expect(result.hint).not.toContain("secret-key");
+    expect(result.hint).toBe('No visible entries found in namespace "clients/lofalk".');
+  });
+
   it("uses minimal metadata for non-owner redacted query results", async () => {
     await callTool("memory_write", {
       namespace: "shared/family/notes",
@@ -874,6 +925,39 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
     expect(detailResult.log_summary.log_count).toBe(1);
     expect(detailResult.log_summary.recent).toHaveLength(2);
     expect(detailResult.log_summary.recent.some((entry) => entry.redacted === true)).toBe(true);
+  });
+
+  it("filters classified keys and counts out of memory_delete preview on downgraded transports", async () => {
+    await callTool("memory_write", {
+      namespace: "clients/lofalk",
+      key: "secret-key",
+      content: "Hidden confidential note",
+      classification: "client-confidential",
+    });
+    await callTool("memory_log", {
+      namespace: "clients/lofalk",
+      content: "Hidden confidential log",
+      classification: "client-confidential",
+    });
+
+    const consumerOwnerCall = makeContextCallTool({
+      ...ownerContext(),
+      transportType: "consumer",
+      maxClassification: "internal",
+    });
+
+    const raw = await consumerOwnerCall("memory_delete", { namespace: "clients/lofalk" });
+    const result = parseToolResponse(raw) as {
+      phase: string;
+      will_delete: { state_count: number; log_count: number; keys?: string[] };
+      message: string;
+    };
+
+    expect(result.phase).toBe("preview");
+    expect(result.will_delete.state_count).toBe(0);
+    expect(result.will_delete.log_count).toBe(0);
+    expect(result.will_delete.keys).toBeUndefined();
+    expect(result.message).toContain("visible entries on this connection");
   });
 
   it("redacts audit detail in memory_history for classified entries", async () => {
