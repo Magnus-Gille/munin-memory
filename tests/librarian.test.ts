@@ -102,25 +102,38 @@ describe("resolveStoredClassification", () => {
 });
 
 describe("getLibrarianConfigWarnings", () => {
-  it("reports disabled enforcement and missing HTTP transport credentials", () => {
+  it("reports disabled enforcement and missing dpa-covered bearer access", () => {
     expect(getLibrarianConfigWarnings({
       transportMode: "http",
       librarianEnabled: false,
+      hasLegacyBearerCredential: false,
       hasDpaBearerCredential: false,
-      hasConsumerBearerCredential: false,
+      legacyBearerTransportType: "dpa_covered",
     })).toEqual([
       "MUNIN_LIBRARIAN_ENABLED is false; classification enforcement is disabled.",
-      "MUNIN_API_KEY_DPA is not configured; DPA-covered HTTP transport cannot be exercised on this host.",
-      "MUNIN_API_KEY_CONSUMER is not configured; consumer HTTP transport cannot be exercised on this host.",
+      "No HTTP bearer credential currently resolves to dpa_covered; configure MUNIN_API_KEY_DPA or set MUNIN_API_KEY with MUNIN_BEARER_TRANSPORT_TYPE=dpa_covered.",
     ]);
   });
 
-  it("returns no warnings when HTTP librarian config is complete", () => {
+  it("returns no warnings when legacy bearer already provides dpa-covered access", () => {
     expect(getLibrarianConfigWarnings({
       transportMode: "http",
       librarianEnabled: true,
-      hasDpaBearerCredential: true,
-      hasConsumerBearerCredential: true,
+      hasLegacyBearerCredential: true,
+      hasDpaBearerCredential: false,
+      legacyBearerTransportType: "dpa_covered",
     })).toEqual([]);
+  });
+
+  it("warns when legacy bearer is configured as consumer and no dpa key exists", () => {
+    expect(getLibrarianConfigWarnings({
+      transportMode: "http",
+      librarianEnabled: true,
+      hasLegacyBearerCredential: true,
+      hasDpaBearerCredential: false,
+      legacyBearerTransportType: "consumer",
+    })).toEqual([
+      "No HTTP bearer credential currently resolves to dpa_covered; configure MUNIN_API_KEY_DPA or set MUNIN_API_KEY with MUNIN_BEARER_TRANSPORT_TYPE=dpa_covered.",
+    ]);
   });
 });

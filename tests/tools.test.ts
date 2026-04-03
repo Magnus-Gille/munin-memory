@@ -6,6 +6,7 @@ import { initDatabase } from "../src/db.js";
 import { registerTools } from "../src/tools.js";
 import { ownerContext } from "../src/access.js";
 import type { AccessContext } from "../src/access.js";
+import type { LibrarianRuntimeConfig } from "../src/librarian.js";
 
 const TEST_DB_PATH = "/tmp/munin-memory-tools-test.db";
 const RETROSPECTIVE_CI_FIX_LOG =
@@ -34,12 +35,16 @@ async function callTool(name: string, args: Record<string, unknown> = {}): Promi
   throw new Error("Cannot access tool handler");
 }
 
-function makeContextCallTool(ctx: AccessContext, sessionId?: string) {
+function makeContextCallTool(
+  ctx: AccessContext,
+  sessionId?: string,
+  runtimeConfig?: LibrarianRuntimeConfig,
+) {
   const contextServer = new Server(
     { name: "test-munin-context", version: "0.0.1" },
     { capabilities: { tools: {} } },
   );
-  registerTools(contextServer, db, sessionId, ctx);
+  registerTools(contextServer, db, sessionId, ctx, runtimeConfig);
 
   return async (name: string, args: Record<string, unknown> = {}) => {
     const handler = (contextServer as unknown as { _requestHandlers: Map<string, Function> })._requestHandlers?.get("tools/call");
@@ -4349,50 +4354,74 @@ describe("memory_status", () => {
     expect(result.librarian.max_classification).toBe("client-restricted");
   });
 
-  it("surfaces librarian config warnings when HTTP enforcement config is incomplete", async () => {
-    const originalTransport = process.env.MUNIN_TRANSPORT;
-    const originalEnabled = process.env.MUNIN_LIBRARIAN_ENABLED;
-    const originalDpa = process.env.MUNIN_API_KEY_DPA;
-    const originalConsumer = process.env.MUNIN_API_KEY_CONSUMER;
+  it("surfaces owner-only Librarian config warnings from the runtime config", async () => {
+    const ownerCall = makeContextCallTool(
+      ownerContext(),
+      undefined,
+      {
+        transportMode: "http",
+        librarianEnabled: false,
+        hasLegacyBearerCredential: false,
+        hasDpaBearerCredential: false,
+        legacyBearerTransportType: "dpa_covered",
+      },
+    );
 
-    process.env.MUNIN_TRANSPORT = "http";
-    process.env.MUNIN_LIBRARIAN_ENABLED = "false";
-    delete process.env.MUNIN_API_KEY_DPA;
-    delete process.env.MUNIN_API_KEY_CONSUMER;
+    const raw = await ownerCall("memory_status", {});
+    const result = parseToolResponse(raw) as {
+      librarian: { config_warnings?: string[] };
+    };
 
-    try {
-      const raw = await callTool("memory_status", {});
-      const result = parseToolResponse(raw) as {
-        librarian: { config_warnings?: string[] };
-      };
+    expect(result.librarian.config_warnings).toEqual([
+      "MUNIN_LIBRARIAN_ENABLED is false; classification enforcement is disabled.",
+      "No HTTP bearer credential currently resolves to dpa_covered; configure MUNIN_API_KEY_DPA or set MUNIN_API_KEY with MUNIN_BEARER_TRANSPORT_TYPE=dpa_covered.",
+    ]);
+  });
 
-      expect(result.librarian.config_warnings).toEqual([
-        "MUNIN_LIBRARIAN_ENABLED is false; classification enforcement is disabled.",
-        "MUNIN_API_KEY_DPA is not configured; DPA-covered HTTP transport cannot be exercised on this host.",
-        "MUNIN_API_KEY_CONSUMER is not configured; consumer HTTP transport cannot be exercised on this host.",
-      ]);
-    } finally {
-      if (originalTransport === undefined) {
-        delete process.env.MUNIN_TRANSPORT;
-      } else {
-        process.env.MUNIN_TRANSPORT = originalTransport;
-      }
-      if (originalEnabled === undefined) {
-        delete process.env.MUNIN_LIBRARIAN_ENABLED;
-      } else {
-        process.env.MUNIN_LIBRARIAN_ENABLED = originalEnabled;
-      }
-      if (originalDpa === undefined) {
-        delete process.env.MUNIN_API_KEY_DPA;
-      } else {
-        process.env.MUNIN_API_KEY_DPA = originalDpa;
-      }
-      if (originalConsumer === undefined) {
-        delete process.env.MUNIN_API_KEY_CONSUMER;
-      } else {
-        process.env.MUNIN_API_KEY_CONSUMER = originalConsumer;
-      }
-    }
+  it("does not expose Librarian config warnings to non-owner callers", async () => {
+    const agentCall = makeContextCallTool(
+      {
+        principalId: "agent:test",
+        principalType: "agent",
+        namespaceRules: [],
+      },
+      undefined,
+      {
+        transportMode: "http",
+        librarianEnabled: false,
+        hasLegacyBearerCredential: false,
+        hasDpaBearerCredential: false,
+        legacyBearerTransportType: "dpa_covered",
+      },
+    );
+
+    const raw = await agentCall("memory_status", {});
+    const result = parseToolResponse(raw) as {
+      librarian: { config_warnings?: string[] };
+    };
+
+    expect(result.librarian.config_warnings).toBeUndefined();
+  });
+
+  it("does not warn when legacy bearer already provides dpa-covered access", async () => {
+    const ownerCall = makeContextCallTool(
+      ownerContext(),
+      undefined,
+      {
+        transportMode: "http",
+        librarianEnabled: true,
+        hasLegacyBearerCredential: true,
+        hasDpaBearerCredential: false,
+        legacyBearerTransportType: "dpa_covered",
+      },
+    );
+
+    const raw = await ownerCall("memory_status", {});
+    const result = parseToolResponse(raw) as {
+      librarian: { config_warnings?: string[] };
+    };
+
+    expect(result.librarian.config_warnings).toBeUndefined();
   });
 
   it("principal reflects a non-owner context", async () => {

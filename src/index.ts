@@ -13,9 +13,9 @@ import { pathToFileURL } from "node:url";
 import { initDatabase, nowUTC, pruneRedactionLog, pruneRetrievalAnalytics } from "./db.js";
 import { registerTools } from "./tools.js";
 import { initEmbeddings, startEmbeddingWorker, stopEmbeddingWorker } from "./embeddings.js";
-import { resolveAccessContext } from "./access.js";
+import { getConfiguredLegacyBearerTransportType, resolveAccessContext } from "./access.js";
 import type { AccessContext } from "./access.js";
-import { getLibrarianConfigWarnings } from "./librarian.js";
+import { getLibrarianConfigWarnings, type LibrarianRuntimeConfig } from "./librarian.js";
 import { MuninOAuthProvider, type ExtendedAuthInfo } from "./oauth.js";
 
 // Analytics retention (default 90 days)
@@ -106,12 +106,17 @@ let activeDb: Database.Database | undefined;
 
 // --- MCP server factory ---
 
-function createMcpServer(database: Database.Database, sessionId?: string, accessContext?: AccessContext): Server {
+function createMcpServer(
+  database: Database.Database,
+  sessionId?: string,
+  accessContext?: AccessContext,
+  runtimeConfig?: LibrarianRuntimeConfig,
+): Server {
   const server = new Server(
     { name: "munin-memory", version: "0.1.0" },
     { capabilities: { tools: {} } },
   );
-  registerTools(server, database, sessionId, accessContext);
+  registerTools(server, database, sessionId, accessContext, runtimeConfig);
   return server;
 }
 
@@ -463,8 +468,26 @@ function getHttpCredentialErrorMessage(): string {
   return "Fatal: at least one bearer credential is required when MUNIN_TRANSPORT=http. Set MUNIN_API_KEY, MUNIN_API_KEY_DPA, or MUNIN_API_KEY_CONSUMER.";
 }
 
-function logHttpLibrarianConfigWarnings(): void {
-  for (const warning of getLibrarianConfigWarnings({ transportMode: "http" })) {
+function buildLibrarianRuntimeConfig(
+  transportMode: "http" | "stdio",
+  options: {
+    apiKey?: string;
+    apiKeyDpa?: string;
+    apiKeyConsumer?: string;
+  } = {},
+): LibrarianRuntimeConfig {
+  return {
+    transportMode,
+    librarianEnabled: (process.env.MUNIN_LIBRARIAN_ENABLED ?? "false") === "true",
+    hasLegacyBearerCredential: Boolean(options.apiKey ?? process.env.MUNIN_API_KEY),
+    hasDpaBearerCredential: Boolean(options.apiKeyDpa ?? process.env.MUNIN_API_KEY_DPA),
+    hasConsumerBearerCredential: Boolean(options.apiKeyConsumer ?? process.env.MUNIN_API_KEY_CONSUMER),
+    legacyBearerTransportType: getConfiguredLegacyBearerTransportType(),
+  };
+}
+
+function logHttpLibrarianConfigWarnings(runtimeConfig: LibrarianRuntimeConfig): void {
+  for (const warning of getLibrarianConfigWarnings(runtimeConfig)) {
     console.error(`Librarian config warning: ${warning}`);
   }
 }
@@ -483,6 +506,7 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
     requestLogger = logRequest,
   } = options;
   const allowedHosts = buildAllowedHosts(httpHost, httpPort);
+  const runtimeConfig = buildLibrarianRuntimeConfig("http", { apiKey, apiKeyDpa, apiKeyConsumer });
   const rateLimiter = createRateLimiter();
   const consentAuth = getConsentAuthConfig();
   const issuer = new URL(issuerUrl);
@@ -675,7 +699,7 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
       authInfo?.authMethod ?? "oauth",
       authInfo?.transportTypeHint,
     );
-    const mcpServer = createMcpServer(database, mcpSessionId, accessContext);
+    const mcpServer = createMcpServer(database, mcpSessionId, accessContext, runtimeConfig);
 
     try {
       await mcpServer.connect(transport);
@@ -706,6 +730,7 @@ async function startHttp(database: Database.Database) {
     process.exit(1);
   }
 
+  const runtimeConfig = buildLibrarianRuntimeConfig("http", { apiKey, apiKeyDpa, apiKeyConsumer });
   const { app, oauthProvider } = createHttpApp({
     database,
     apiKey,
@@ -731,7 +756,7 @@ async function startHttp(database: Database.Database) {
     console.error(`Munin-memory HTTP server listening on ${httpHost}:${httpPort}`);
     console.error(`Allowed hosts: ${[...buildAllowedHosts(httpHost, httpPort)].join(", ")}`);
     console.error(`OAuth issuer: ${issuerUrl}`);
-    logHttpLibrarianConfigWarnings();
+    logHttpLibrarianConfigWarnings(runtimeConfig);
   });
 }
 
@@ -751,7 +776,12 @@ async function startStdio(database: Database.Database) {
   if (accessContext.principalType !== "owner") {
     throw new Error("Failed to resolve owner access context for stdio transport.");
   }
-  const server = createMcpServer(database, stdioSessionId, accessContext);
+  const server = createMcpServer(
+    database,
+    stdioSessionId,
+    accessContext,
+    buildLibrarianRuntimeConfig("stdio"),
+  );
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

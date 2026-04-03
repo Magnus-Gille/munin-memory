@@ -304,4 +304,82 @@ describe("transport-aware HTTP access context", () => {
     expect(parsedContent.librarian.transport_type).toBe("consumer");
     expect(parsedContent.librarian.max_classification).toBe("internal");
   });
+
+  it("uses createHttpApp credential options instead of ambient env when computing owner warnings", async () => {
+    const originalEnabled = process.env.MUNIN_LIBRARIAN_ENABLED;
+    const originalLegacy = process.env.MUNIN_API_KEY;
+    const originalDpa = process.env.MUNIN_API_KEY_DPA;
+    const originalConsumer = process.env.MUNIN_API_KEY_CONSUMER;
+
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+    delete process.env.MUNIN_API_KEY;
+    delete process.env.MUNIN_API_KEY_DPA;
+    delete process.env.MUNIN_API_KEY_CONSUMER;
+
+    try {
+      const freshLogs: RequestLogEntry[] = [];
+      const { app: optionBackedApp } = createHttpApp({
+        database: db,
+        apiKey: LEGACY_API_KEY,
+        apiKeyDpa: DPA_API_KEY,
+        apiKeyConsumer: CONSUMER_API_KEY,
+        issuerUrl: ISSUER_URL,
+        httpHost: "127.0.0.1",
+        httpPort: 3030,
+        requestLogger: (entry) => {
+          freshLogs.push(entry);
+        },
+      });
+
+      await initializeClient(optionBackedApp, LEGACY_API_KEY);
+
+      const toolResponse = await supertest(optionBackedApp)
+        .post("/mcp")
+        .set({
+          ...jsonRpcHeaders(LEGACY_API_KEY),
+          "mcp-protocol-version": "2025-03-26",
+        })
+        .send({
+          jsonrpc: "2.0",
+          id: 2,
+          method: "tools/call",
+          params: {
+            name: "memory_status",
+            arguments: {},
+          },
+        })
+        .expect(200);
+
+      const toolPayload = parseJsonRpcResponse(toolResponse.text);
+      const result = toolPayload.result as Record<string, unknown>;
+      const content = result.content as Array<{ text: string }>;
+      const parsedContent = JSON.parse(content[0].text) as {
+        librarian: { config_warnings?: string[] };
+      };
+
+      expect(parsedContent.librarian.config_warnings).toBeUndefined();
+      expect(freshLogs.at(-1)?.toolName).toBe("memory_status");
+    } finally {
+      if (originalEnabled === undefined) {
+        delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      } else {
+        process.env.MUNIN_LIBRARIAN_ENABLED = originalEnabled;
+      }
+      if (originalLegacy === undefined) {
+        delete process.env.MUNIN_API_KEY;
+      } else {
+        process.env.MUNIN_API_KEY = originalLegacy;
+      }
+      if (originalDpa === undefined) {
+        delete process.env.MUNIN_API_KEY_DPA;
+      } else {
+        process.env.MUNIN_API_KEY_DPA = originalDpa;
+      }
+      if (originalConsumer === undefined) {
+        delete process.env.MUNIN_API_KEY_CONSUMER;
+      } else {
+        process.env.MUNIN_API_KEY_CONSUMER = originalConsumer;
+      }
+    }
+  });
 });

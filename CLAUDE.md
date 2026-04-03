@@ -127,6 +127,9 @@ npm run dev      # tsx watch src/index.ts
 The Pi needs a `.env` file at the project root:
 ```
 MUNIN_API_KEY=<generate with: openssl rand -hex 32>
+MUNIN_API_KEY_DPA=<optional dedicated DPA bearer token>
+MUNIN_API_KEY_CONSUMER=<optional dedicated consumer bearer token>
+MUNIN_LIBRARIAN_ENABLED=false
 MUNIN_OAUTH_ISSUER_URL=https://<your-domain>
 MUNIN_ALLOWED_HOSTS=<your-domain>,<your-domain>:443
 ```
@@ -534,6 +537,11 @@ See `technical-spec.md` § Security Module for the full pattern list.
 | `MUNIN_HTTP_PORT` | `3030` | HTTP server port (http mode only) |
 | `MUNIN_HTTP_HOST` | `127.0.0.1` | HTTP bind address (http mode only) |
 | `MUNIN_API_KEY` | — | Bearer token for auth (required in http mode) |
+| `MUNIN_API_KEY_DPA` | — | Optional dedicated bearer token that attests `dpa_covered` HTTP transport |
+| `MUNIN_API_KEY_CONSUMER` | — | Optional dedicated bearer token that attests `consumer` HTTP transport |
+| `MUNIN_BEARER_TRANSPORT_TYPE` | `dpa_covered` | Transport type for legacy `MUNIN_API_KEY` in HTTP mode; `local` is normalized to `dpa_covered` over HTTP |
+| `MUNIN_LIBRARIAN_ENABLED` | `false` | Enable classification enforcement / redaction behavior |
+| `MUNIN_CLASSIFICATION_DEFAULT` | `internal` | Default namespace floor for namespaces without an explicit classification rule |
 | `MUNIN_EMBEDDINGS_ENABLED` | `true` | Load embedding model + run worker |
 | `MUNIN_SEMANTIC_ENABLED` | `true` | Gate 1: accept `search_mode: "semantic"` |
 | `MUNIN_HYBRID_ENABLED` | `true` | Gate 2: accept `search_mode: "hybrid"` |

@@ -98,7 +98,7 @@ export function getTransportMaxClassification(
   return TRANSPORT_MAX_CLASSIFICATION[transportType];
 }
 
-function resolveLegacyBearerTransportType(): TransportType {
+export function getConfiguredLegacyBearerTransportType(): TransportType {
   const configured = process.env.MUNIN_BEARER_TRANSPORT_TYPE?.trim();
   if (configured === "consumer" || configured === "dpa_covered" || configured === "local") {
     return configured;
@@ -119,7 +119,7 @@ export function normalizeTransportType(
   } else if (authMethod === "oauth") {
     transportType = "consumer";
   } else if (authMethod === "legacy_bearer") {
-    transportType = resolveLegacyBearerTransportType();
+    transportType = getConfiguredLegacyBearerTransportType();
   } else {
     transportType = "consumer";
   }

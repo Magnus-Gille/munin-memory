@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import {
+  getConfiguredLegacyBearerTransportType,
   getContextMaxClassification,
   getContextTransportType,
   namespaceMatchesPattern,
@@ -67,6 +68,15 @@ export interface ResolveStoredClassificationOptions {
   explicitClassification?: ClassificationLevel;
   existingClassification?: string | null;
   allowBelowFloorOverride?: boolean;
+}
+
+export interface LibrarianRuntimeConfig {
+  transportMode?: string;
+  librarianEnabled?: boolean;
+  hasLegacyBearerCredential?: boolean;
+  hasDpaBearerCredential?: boolean;
+  hasConsumerBearerCredential?: boolean;
+  legacyBearerTransportType?: TransportType;
 }
 
 export interface ResolvedStoredClassification {
@@ -162,27 +172,24 @@ export function isRedactionLogEnabled(): boolean {
 }
 
 export function getLibrarianConfigWarnings(
-  options: {
-    transportMode?: string;
-    librarianEnabled?: boolean;
-    hasDpaBearerCredential?: boolean;
-    hasConsumerBearerCredential?: boolean;
-  } = {},
+  options: LibrarianRuntimeConfig = {},
 ): string[] {
   const transportMode = options.transportMode ?? process.env.MUNIN_TRANSPORT ?? "stdio";
   const librarianEnabled = options.librarianEnabled ?? isLibrarianEnabled();
+  const hasLegacyBearerCredential = options.hasLegacyBearerCredential ?? Boolean(process.env.MUNIN_API_KEY?.trim());
   const hasDpaBearerCredential = options.hasDpaBearerCredential ?? Boolean(process.env.MUNIN_API_KEY_DPA?.trim());
-  const hasConsumerBearerCredential = options.hasConsumerBearerCredential ?? Boolean(process.env.MUNIN_API_KEY_CONSUMER?.trim());
+  const legacyBearerTransportType = options.legacyBearerTransportType ?? getConfiguredLegacyBearerTransportType();
 
   const warnings: string[] = [];
   if (!librarianEnabled) {
     warnings.push("MUNIN_LIBRARIAN_ENABLED is false; classification enforcement is disabled.");
   }
-  if (transportMode === "http" && !hasDpaBearerCredential) {
-    warnings.push("MUNIN_API_KEY_DPA is not configured; DPA-covered HTTP transport cannot be exercised on this host.");
-  }
-  if (transportMode === "http" && !hasConsumerBearerCredential) {
-    warnings.push("MUNIN_API_KEY_CONSUMER is not configured; consumer HTTP transport cannot be exercised on this host.");
+
+  const hasLegacyDpaFallback = hasLegacyBearerCredential && legacyBearerTransportType !== "consumer";
+  if (transportMode === "http" && !hasDpaBearerCredential && !hasLegacyDpaFallback) {
+    warnings.push(
+      "No HTTP bearer credential currently resolves to dpa_covered; configure MUNIN_API_KEY_DPA or set MUNIN_API_KEY with MUNIN_BEARER_TRANSPORT_TYPE=dpa_covered.",
+    );
   }
 
   return warnings;

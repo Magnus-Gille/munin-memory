@@ -69,6 +69,7 @@ import {
   isRedactionLogEnabled,
   stripClassificationTags,
   summarizeRedactedSources,
+  type LibrarianRuntimeConfig,
   type RedactableEntryMetadata,
 } from "./librarian.js";
 import {
@@ -3635,7 +3636,13 @@ function computeEntryInsight(row: {
   };
 }
 
-export function registerTools(server: Server, db: Database.Database, sessionId?: string, ctx: AccessContext = ownerContext()): void {
+export function registerTools(
+  server: Server,
+  db: Database.Database,
+  sessionId?: string,
+  ctx: AccessContext = ownerContext(),
+  runtimeConfig?: LibrarianRuntimeConfig,
+): void {
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: TOOL_DEFINITIONS,
   }));
@@ -5775,7 +5782,9 @@ export function registerTools(server: Server, db: Database.Database, sessionId?:
               transport_type: getContextTransportType(ctx),
               max_classification: getContextMaxClassification(ctx),
             } as Record<string, unknown>;
-            const configWarnings = getLibrarianConfigWarnings();
+            const configWarnings = ctx.principalType === "owner"
+              ? getLibrarianConfigWarnings(runtimeConfig)
+              : [];
             if (configWarnings.length > 0) {
               librarian.config_warnings = configWarnings;
             }
