@@ -965,6 +965,73 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
     expect(result.message).toContain("visible entries on this connection");
   });
 
+  it("confirmed delete only removes entries within classification ceiling", async () => {
+    // projects/* floor is "internal", so we can write both internal and client-confidential
+    await callTool("memory_write", {
+      namespace: "projects/delete-test",
+      key: "visible-note",
+      content: "Visible internal note",
+      classification: "internal",
+    });
+    await callTool("memory_write", {
+      namespace: "projects/delete-test",
+      key: "secret-note",
+      content: "Hidden confidential note",
+      classification: "client-confidential",
+    });
+    await callTool("memory_log", {
+      namespace: "projects/delete-test",
+      content: "Internal log entry",
+      classification: "internal",
+    });
+    await callTool("memory_log", {
+      namespace: "projects/delete-test",
+      content: "Confidential log entry",
+      classification: "client-confidential",
+    });
+
+    const consumerOwnerCall = makeContextCallTool({
+      ...ownerContext(),
+      transportType: "consumer",
+      maxClassification: "internal",
+    });
+
+    // Preview — should only show the internal entry
+    const previewRaw = await consumerOwnerCall("memory_delete", { namespace: "projects/delete-test" });
+    const preview = parseToolResponse(previewRaw) as {
+      phase: string;
+      will_delete: { state_count: number; log_count: number; keys?: string[] };
+      delete_token: string;
+    };
+    expect(preview.phase).toBe("preview");
+    expect(preview.will_delete.state_count).toBe(1);
+    expect(preview.will_delete.keys).toEqual(["visible-note"]);
+    expect(preview.will_delete.log_count).toBe(1);
+
+    // Confirm — should only delete the internal entries, not the confidential ones
+    const deleteRaw = await consumerOwnerCall("memory_delete", {
+      namespace: "projects/delete-test",
+      delete_token: preview.delete_token,
+    });
+    const deleteResult = parseToolResponse(deleteRaw) as {
+      phase: string;
+      deleted_count: number;
+    };
+    expect(deleteResult.phase).toBe("confirmed");
+    expect(deleteResult.deleted_count).toBe(2); // 1 state + 1 log (internal only)
+
+    // Verify: confidential entries still exist
+    const confidentialState = db.prepare(
+      "SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'",
+    ).get("projects/delete-test", "secret-note") as { id: string } | undefined;
+    expect(confidentialState).toBeDefined();
+
+    const confidentialLog = db.prepare(
+      "SELECT COUNT(*) AS cnt FROM entries WHERE namespace = ? AND entry_type = 'log' AND classification = 'client-confidential'",
+    ).get("projects/delete-test") as { cnt: number };
+    expect(confidentialLog.cnt).toBe(1);
+  });
+
   it("redacts audit detail in memory_history for classified entries", async () => {
     await callTool("memory_write", {
       namespace: "clients/lofalk",

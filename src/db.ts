@@ -1347,6 +1347,90 @@ export function previewDeleteByClassification(
   };
 }
 
+export function executeDeleteByClassification(
+  db: Database.Database,
+  namespace: string,
+  maxClassification: ClassificationLevel,
+  key?: string,
+  agentId = "default",
+  allowGlobalNamespaceDelete = false,
+): number {
+  const now = nowUTC();
+  const visibleLevels = getVisibleClassificationLevels(maxClassification);
+  const placeholders = classificationInClause(visibleLevels);
+
+  const txn = db.transaction(() => {
+    // App-level vec cleanup (no SQL trigger — extension may not be loaded)
+    if (_vecLoaded) {
+      if (key) {
+        const selectSql = allowGlobalNamespaceDelete
+          ? `SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND classification IN (${placeholders})`
+          : `SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND COALESCE(owner_principal_id, agent_id) = ? AND classification IN (${placeholders})`;
+        const selectParams = allowGlobalNamespaceDelete
+          ? [namespace, key, ...visibleLevels]
+          : [namespace, key, agentId, ...visibleLevels];
+        const entry = db.prepare(selectSql).get(...selectParams) as { id: string } | undefined;
+        if (entry) {
+          db.prepare("DELETE FROM entries_vec WHERE entry_id = ?").run(entry.id);
+        }
+      } else {
+        const idsSql = allowGlobalNamespaceDelete
+          ? `SELECT id FROM entries WHERE namespace = ? AND classification IN (${placeholders})`
+          : `SELECT id FROM entries WHERE namespace = ? AND COALESCE(owner_principal_id, agent_id) = ? AND classification IN (${placeholders})`;
+        const idsParams = allowGlobalNamespaceDelete
+          ? [namespace, ...visibleLevels]
+          : [namespace, agentId, ...visibleLevels];
+        const ids = db.prepare(idsSql).all(...idsParams) as Array<{ id: string }>;
+        const deleteVec = db.prepare("DELETE FROM entries_vec WHERE entry_id = ?");
+        for (const { id } of ids) {
+          deleteVec.run(id);
+        }
+      }
+    }
+
+    let deletedCount: number;
+
+    if (key) {
+      const selectSql = allowGlobalNamespaceDelete
+        ? `SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND classification IN (${placeholders})`
+        : `SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND COALESCE(owner_principal_id, agent_id) = ? AND classification IN (${placeholders})`;
+      const selectParams = allowGlobalNamespaceDelete
+        ? [namespace, key, ...visibleLevels]
+        : [namespace, key, agentId, ...visibleLevels];
+      const entry = db.prepare(selectSql).get(...selectParams) as { id: string } | undefined;
+      const deleteSql = allowGlobalNamespaceDelete
+        ? `DELETE FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND classification IN (${placeholders})`
+        : `DELETE FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND COALESCE(owner_principal_id, agent_id) = ? AND classification IN (${placeholders})`;
+      const deleteParams = allowGlobalNamespaceDelete
+        ? [namespace, key, ...visibleLevels]
+        : [namespace, key, agentId, ...visibleLevels];
+      const result = db.prepare(deleteSql).run(...deleteParams);
+      deletedCount = result.changes;
+
+      if (deletedCount > 0) {
+        insertAuditRow(db, now, agentId, "delete", namespace, key, null, entry?.id ?? null);
+      }
+    } else {
+      const deleteSql = allowGlobalNamespaceDelete
+        ? `DELETE FROM entries WHERE namespace = ? AND classification IN (${placeholders})`
+        : `DELETE FROM entries WHERE namespace = ? AND COALESCE(owner_principal_id, agent_id) = ? AND classification IN (${placeholders})`;
+      const deleteParams = allowGlobalNamespaceDelete
+        ? [namespace, ...visibleLevels]
+        : [namespace, agentId, ...visibleLevels];
+      const result = db.prepare(deleteSql).run(...deleteParams);
+      deletedCount = result.changes;
+
+      if (deletedCount > 0) {
+        insertAuditRow(db, now, agentId, "namespace_delete", namespace, null, `deleted ${deletedCount} entries (classification-scoped)`);
+      }
+    }
+
+    return deletedCount;
+  });
+
+  return txn();
+}
+
 export function executeDelete(
   db: Database.Database,
   namespace: string,

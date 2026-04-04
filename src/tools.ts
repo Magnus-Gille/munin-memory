@@ -41,6 +41,7 @@ import {
   previewDelete,
   previewDeleteByClassification,
   executeDelete,
+  executeDeleteByClassification,
   listCommitments,
   syncCommitmentsForEntry,
   type DerivedCommitmentInput,
@@ -5667,7 +5668,9 @@ export function registerTools(
               if (!consumeDeleteToken(delete_token, namespace, key)) {
                 return errResult("delete", "invalid_token", "Delete token is invalid, expired, or doesn't match the requested namespace/key. Request a new preview first.");
               }
-              const deletedCount = executeDelete(db, namespace, key, ctx.principalId, allowGlobalNamespaceDelete);
+              const deletedCount = isLibrarianEnabled()
+                ? executeDeleteByClassification(db, namespace, getContextMaxClassification(ctx), key, ctx.principalId, allowGlobalNamespaceDelete)
+                : executeDelete(db, namespace, key, ctx.principalId, allowGlobalNamespaceDelete);
               const target = key ? `entry "${key}" in "${namespace}"` : `all entries in "${namespace}"`;
               return okResult("delete", {
                 phase: "confirmed",
