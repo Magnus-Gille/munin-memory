@@ -752,6 +752,27 @@ export interface ConsolidationCandidate {
   last_consolidated_at: string | null;
 }
 
+export interface SynthesisResult {
+  status_content: string;
+  tags: string[];
+  cross_references: Array<{
+    target_namespace: string;
+    reference_type: CrossReferenceType;
+    context: string;
+    confidence: number;
+  }>;
+}
+
+export interface ConsolidationRunResult {
+  namespace: string;
+  logs_processed: number;
+  synthesis_model: string;
+  token_count: number | null;
+  duration_ms: number;
+  cross_references_found: number;
+  error?: string;
+}
+
 // Audit log entry
 export interface AuditEntry {
   id: number;
