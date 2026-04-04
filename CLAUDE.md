@@ -36,6 +36,7 @@ Part of the Hugin & Munin personal AI system. See `prd.md` for full product cont
 | `memory_list` | Browse namespaces and their contents (with recent log previews; demo and completed task namespaces hidden by default) |
 | `memory_delete` | Delete entries (with token-based confirmation) |
 | `memory_insights` | Inspect retrieval usage signals per entry: impressions, open rate, follow-through rate, staleness pressure, learned signals. Phase 1 of outcome-aware retrieval (observe only, no ranking changes). |
+| `memory_consolidate` | Manually trigger consolidation for a specific namespace or all eligible tracked namespaces. Synthesizes unincorporated logs into an enriched 'synthesis' key via OpenRouter LLM call. Owner-only. |
 
 ## Project structure
 
@@ -56,6 +57,7 @@ munin-memory/
 │   ├── tools.ts           # MCP tool definitions and handlers
 │   ├── access.ts          # Multi-principal access control (AccessContext, namespace rules)
 │   ├── admin-cli.ts       # munin-admin CLI for principal management (bin entry)
+│   ├── consolidation.ts   # Background consolidation worker (OpenRouter, synthesis + cross-refs)
 │   ├── security.ts        # Secret pattern detection + input validation
 │   └── types.ts           # TypeScript type definitions
 ├── tests/
@@ -66,6 +68,8 @@ munin-memory/
 │   ├── http-transport.test.ts   # Stateless HTTP route tests
 │   ├── oauth.test.ts              # OAuth provider unit tests
 │   ├── oauth-integration.test.ts  # OAuth end-to-end tests (supertest)
+│   ├── consolidation-db.test.ts    # Consolidation schema + DB function tests
+│   ├── consolidation.test.ts       # Synthesis module + worker lifecycle tests
 │   ├── tools.test.ts
 │   ├── access.test.ts             # Access control unit tests
 │   ├── access-enforcement.test.ts # Authorization matrix integration tests
@@ -572,6 +576,13 @@ See `technical-spec.md` § Security Module for the full pattern list.
 | `MUNIN_OAUTH_IDENTITY_HEADER` | — | Header containing authenticated user's email for multi-user consent resolution (e.g. `cf-access-authenticated-user-email`) |
 | `MUNIN_ANALYTICS_RETENTION_DAYS` | `90` | Retention period for retrieval analytics (retrieval_events/outcomes). Sessions pruned at 7 days. |
 | `MUNIN_DISPLAY_TIMEZONE` | `Europe/Stockholm` | IANA timezone for human-friendly local timestamps in tool responses (display-layer only, storage remains UTC) |
+| `MUNIN_CONSOLIDATION_ENABLED` | `false` | Enable the consolidation background worker |
+| `MUNIN_CONSOLIDATION_MODEL` | `anthropic/claude-haiku-4-5-20251001` | OpenRouter model ID for synthesis |
+| `MUNIN_CONSOLIDATION_INTERVAL_MS` | `60000` | Worker poll interval (ms) |
+| `MUNIN_CONSOLIDATION_BATCH_SIZE` | `5` | Max namespaces per consolidation run |
+| `MUNIN_CONSOLIDATION_MIN_LOGS` | `3` | Minimum unincorporated logs to trigger consolidation |
+| `MUNIN_CONSOLIDATION_MAX_FAILURES` | `3` | Circuit breaker failure threshold |
+| `OPENROUTER_API_KEY` | — | OpenRouter API key for consolidation worker (required when consolidation enabled) |
 
 ## Spec amendments from adversarial review
 
