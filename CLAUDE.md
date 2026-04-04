@@ -244,6 +244,20 @@ Unprefixed tags remain valid for lifecycle (`active`, `blocked`, etc.) and categ
 - `/mcp` runs in stateless Streamable HTTP mode: fresh transport and fresh MCP `Server` per POST request
 - `agent_id` field included in schema for future multi-agent support
 
+## Usage convention — what belongs in Munin vs. elsewhere
+
+Munin is a **memory**, not a tracker. Route information to the right system:
+
+| Information type | Where it goes | Why |
+|------------------|---------------|-----|
+| Bugs, feature requests, tasks | **GitHub Issues** (on the relevant repo) | Issues need status workflows, filtering, triage, and PR linking. Munin has none of that. |
+| Project phase, blockers, strategic context | **Munin** (`projects/<name>/status`) | This is what `memory_orient` surfaces — high-level "where are we" for cross-environment continuity. |
+| Decisions and rationale | **Munin** (`memory_log` or `decisions/<topic>`) | Decisions are contextual memory that Claude needs across conversations. |
+| Context behind a fix or architecture choice | **Munin** (`memory_log`) | GitHub Issues capture *what* to do; Munin captures *why* we chose this path. |
+| Individual TODO items for current session | **Local state file** (STATUS.md, TODO.md) | Ephemeral, session-scoped — not worth persisting in Munin. |
+
+**Rule of thumb:** if it's about *what needs doing*, it belongs in a tracker (GitHub Issues). If it's about *what Claude needs to know across conversations*, it belongs in Munin. Filing issues in Munin pollutes the namespace with transient items, drowns strategic signal in `memory_orient`, and forces manual cleanup that a proper tracker handles automatically.
+
 ## Semantic search architecture (Feature 2)
 
 ### Overview
