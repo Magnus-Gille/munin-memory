@@ -535,6 +535,42 @@ export const migrations: Migration[] = [
       }
     },
   },
+  {
+    version: 12,
+    description: "Add consolidation_metadata and cross_references tables",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS consolidation_metadata (
+          namespace TEXT PRIMARY KEY,
+          last_consolidated_at TEXT NOT NULL,
+          last_log_id TEXT,
+          last_log_created_at TEXT,
+          synthesis_model TEXT NOT NULL,
+          synthesis_token_count INTEGER,
+          run_duration_ms INTEGER,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS cross_references (
+          id TEXT PRIMARY KEY,
+          source_namespace TEXT NOT NULL,
+          target_namespace TEXT NOT NULL,
+          reference_type TEXT NOT NULL CHECK(reference_type IN (
+            'depends_on', 'blocks', 'related_to', 'supersedes', 'feeds_into'
+          )),
+          context TEXT,
+          confidence REAL NOT NULL DEFAULT 1.0,
+          extracted_at TEXT NOT NULL,
+          source_synthesis_id TEXT,
+          UNIQUE(source_namespace, target_namespace, reference_type)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_cross_refs_source ON cross_references(source_namespace);
+        CREATE INDEX IF NOT EXISTS idx_cross_refs_target ON cross_references(target_namespace);
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

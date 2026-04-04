@@ -674,6 +674,82 @@ export interface AuditHistoryParams {
   cursor?: number;
 }
 
+// Intake / quality-gate types
+
+export type IntakeMode = "strict" | "advisory" | "passthrough";
+
+export interface IntakeFlag {
+  check:
+    | "duplicate_key"
+    | "content_overlap"
+    | "consolidation_candidate"
+    | "low_relevance"
+    | "tag_inconsistency"
+    | "namespace_depth";
+  severity: "error" | "warning" | "info";
+  message: string;
+  related_entry_id?: string;
+}
+
+export interface RelatedKeyRef {
+  namespace: string;
+  key: string | null;
+  relationship: string;
+}
+
+export interface RedundancyInfo {
+  existing_key: string | null;
+  similarity: number;
+}
+
+export interface IntakeMetadata {
+  intake_score: number;
+  intake_mode: IntakeMode;
+  related_keys: RelatedKeyRef[];
+  redundancy_flag: RedundancyInfo | null;
+  intake_timestamp: string;
+}
+
+export interface IntakeResult {
+  status: "accepted" | "flagged" | "rejected";
+  flags: IntakeFlag[];
+  metadata: IntakeMetadata;
+  rejection_reason?: string;
+}
+
+// Consolidation types
+
+export interface ConsolidationMetadata {
+  namespace: string;
+  last_consolidated_at: string;
+  last_log_id: string | null;
+  last_log_created_at: string | null;
+  synthesis_model: string;
+  synthesis_token_count: number | null;
+  run_duration_ms: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CrossReference {
+  id: string;
+  source_namespace: string;
+  target_namespace: string;
+  reference_type: "depends_on" | "blocks" | "related_to" | "supersedes" | "feeds_into";
+  context: string | null;
+  confidence: number;
+  extracted_at: string;
+  source_synthesis_id: string | null;
+}
+
+export type CrossReferenceType = CrossReference["reference_type"];
+
+export interface ConsolidationCandidate {
+  namespace: string;
+  unincorporated_log_count: number;
+  last_consolidated_at: string | null;
+}
+
 // Audit log entry
 export interface AuditEntry {
   id: number;

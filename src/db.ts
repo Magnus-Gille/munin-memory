@@ -13,6 +13,9 @@ import type {
   EntryType,
   TrackedStatusRow,
   TransportType,
+  ConsolidationMetadata,
+  ConsolidationCandidate,
+  CrossReference,
 } from "./types.js";
 import { runMigrations } from "./migrations.js";
 import { scanForSecrets } from "./security.js";
@@ -2127,4 +2130,195 @@ export function getOtherKeysInNamespaceByClassification(
     )
     .all(namespace, excludeKey ?? "", ...visibleLevels) as Array<{ key: string }>;
   return rows.map((r) => r.key);
+}
+
+/**
+ * Return all state entries in a namespace. Used for tag-based relational linking.
+ */
+export function getNamespaceStateEntries(
+  db: Database.Database,
+  namespace: string,
+): Entry[] {
+  return db
+    .prepare(
+      "SELECT * FROM entries WHERE namespace = ? AND entry_type = 'state' ORDER BY key",
+    )
+    .all(namespace) as Entry[];
+}
+
+/**
+ * Return the unique set of tags used across all state entries in a namespace.
+ * Used for tag vocabulary / consistency checking.
+ */
+export function getNamespaceTagVocabulary(
+  db: Database.Database,
+  namespace: string,
+): string[] {
+  const rows = db
+    .prepare(
+      "SELECT DISTINCT value FROM entries, json_each(entries.tags) WHERE namespace = ? AND entry_type = 'state'",
+    )
+    .all(namespace) as Array<{ value: string }>;
+  return rows.map((r) => r.value);
+}
+
+// --- Consolidation operations ---
+
+/**
+ * Return namespaces (projects/*, clients/*) that have at least minLogs unincorporated
+ * log entries — i.e., logs created after the last consolidation checkpoint.
+ */
+export function getNamespacesNeedingConsolidation(
+  db: Database.Database,
+  minLogs: number = 3,
+): ConsolidationCandidate[] {
+  const sql = `
+    SELECT
+      e.namespace,
+      COUNT(*) as unincorporated_log_count,
+      cm.last_consolidated_at
+    FROM entries e
+    LEFT JOIN consolidation_metadata cm ON cm.namespace = e.namespace
+    WHERE e.entry_type = 'log'
+      AND (e.namespace LIKE 'projects/%' ESCAPE '\\' OR e.namespace LIKE 'clients/%' ESCAPE '\\')
+      AND e.created_at > COALESCE(cm.last_log_created_at, '1970-01-01T00:00:00.000Z')
+    GROUP BY e.namespace
+    HAVING COUNT(*) >= ?
+    ORDER BY unincorporated_log_count DESC
+  `;
+  return db.prepare(sql).all(minLogs) as ConsolidationCandidate[];
+}
+
+/**
+ * Fetch log entries for a namespace, optionally filtered to entries created after
+ * sinceTimestamp. Returns entries ordered by created_at ASC.
+ */
+export function getLogsForConsolidation(
+  db: Database.Database,
+  namespace: string,
+  sinceTimestamp?: string | null,
+): Entry[] {
+  if (sinceTimestamp) {
+    return db
+      .prepare(
+        `SELECT * FROM entries
+         WHERE namespace = ? AND entry_type = 'log' AND created_at > ?
+         ORDER BY created_at ASC`,
+      )
+      .all(namespace, sinceTimestamp) as Entry[];
+  }
+  return db
+    .prepare(
+      `SELECT * FROM entries
+       WHERE namespace = ? AND entry_type = 'log'
+       ORDER BY created_at ASC`,
+    )
+    .all(namespace) as Entry[];
+}
+
+/**
+ * Retrieve consolidation metadata for a namespace, or null if not yet consolidated.
+ */
+export function getConsolidationMetadata(
+  db: Database.Database,
+  namespace: string,
+): ConsolidationMetadata | null {
+  return (
+    db
+      .prepare("SELECT * FROM consolidation_metadata WHERE namespace = ?")
+      .get(namespace) as ConsolidationMetadata | undefined
+  ) ?? null;
+}
+
+/**
+ * Insert or update consolidation metadata for a namespace.
+ * created_at is set on first insert; updated_at is always set to nowUTC().
+ */
+export function upsertConsolidationMetadata(
+  db: Database.Database,
+  metadata: Omit<ConsolidationMetadata, "created_at" | "updated_at">,
+): void {
+  const now = nowUTC();
+  db
+    .prepare(
+      `INSERT INTO consolidation_metadata
+         (namespace, last_consolidated_at, last_log_id, last_log_created_at,
+          synthesis_model, synthesis_token_count, run_duration_ms,
+          created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(namespace) DO UPDATE SET
+         last_consolidated_at = excluded.last_consolidated_at,
+         last_log_id = excluded.last_log_id,
+         last_log_created_at = excluded.last_log_created_at,
+         synthesis_model = excluded.synthesis_model,
+         synthesis_token_count = excluded.synthesis_token_count,
+         run_duration_ms = excluded.run_duration_ms,
+         updated_at = excluded.updated_at`,
+    )
+    .run(
+      metadata.namespace,
+      metadata.last_consolidated_at,
+      metadata.last_log_id ?? null,
+      metadata.last_log_created_at ?? null,
+      metadata.synthesis_model,
+      metadata.synthesis_token_count ?? null,
+      metadata.run_duration_ms ?? null,
+      now,
+      now,
+    );
+}
+
+/**
+ * Replace all cross-references from sourceNamespace with a new set.
+ * Runs in a transaction: deletes existing refs then inserts the new ones.
+ */
+export function replaceCrossReferences(
+  db: Database.Database,
+  sourceNamespace: string,
+  refs: Array<Omit<CrossReference, "id" | "extracted_at" | "source_synthesis_id">>,
+  sourceSynthesisId?: string,
+): void {
+  const txn = db.transaction(() => {
+    db.prepare("DELETE FROM cross_references WHERE source_namespace = ?").run(sourceNamespace);
+
+    const insert = db.prepare(
+      `INSERT INTO cross_references
+         (id, source_namespace, target_namespace, reference_type, context,
+          confidence, extracted_at, source_synthesis_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+
+    const extractedAt = nowUTC();
+    for (const ref of refs) {
+      insert.run(
+        randomUUID(),
+        ref.source_namespace,
+        ref.target_namespace,
+        ref.reference_type,
+        ref.context ?? null,
+        ref.confidence,
+        extractedAt,
+        sourceSynthesisId ?? null,
+      );
+    }
+  });
+
+  txn();
+}
+
+/**
+ * Return all cross-references where namespace is either source or target,
+ * ordered by extracted_at DESC.
+ */
+export function getCrossReferences(
+  db: Database.Database,
+  namespace: string,
+): CrossReference[] {
+  return db
+    .prepare(
+      `SELECT * FROM cross_references
+       WHERE source_namespace = ? OR target_namespace = ?
+       ORDER BY extracted_at DESC`,
+    )
+    .all(namespace, namespace) as CrossReference[];
 }
