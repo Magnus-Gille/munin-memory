@@ -214,6 +214,7 @@ export interface DashboardEntry {
   namespace: string;
   summary: string;
   updated_at: string;
+  updated_at_local?: string;
   lifecycle: string;
   needs_attention?: true;
   classification?: ClassificationLevel;
@@ -289,6 +290,7 @@ export interface QueryResult {
   tags?: string[];
   created_at?: string;
   updated_at?: string;
+  updated_at_local?: string;
   valid_until?: string | null;
   classification?: ClassificationLevel;
   expired?: boolean;

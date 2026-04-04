@@ -167,6 +167,30 @@ setInterval(() => {
   }
 }, 30_000);
 
+// --- Display timestamp formatting ---
+
+const displayTimezone = process.env.MUNIN_DISPLAY_TIMEZONE ?? "Europe/Stockholm";
+
+const localTimeFormatter = new Intl.DateTimeFormat("en-SE", {
+  timeZone: displayTimezone,
+  weekday: "short",
+  month: "short",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+  timeZoneName: "short",
+});
+
+/** Convert an ISO 8601 UTC timestamp to a human-friendly local display string. */
+function toLocalDisplay(iso: string): string {
+  try {
+    return localTimeFormatter.format(new Date(iso));
+  } catch {
+    return iso;
+  }
+}
+
 function parseEntry(entry: Entry) {
   return {
     ...entry,
@@ -191,6 +215,7 @@ function serializeParsedEntry(entry: ReturnType<typeof parseEntry>) {
     tags: entry.tags,
     created_at: entry.created_at,
     updated_at: entry.updated_at,
+    updated_at_local: toLocalDisplay(entry.updated_at),
     valid_until: entry.valid_until ?? undefined,
     classification: entry.classification,
     provenance: buildProvenance(entry.agent_id, entry.owner_principal_id),
@@ -407,6 +432,7 @@ function formatQueryResult(
     tags: parsed.tags,
     created_at: entry.created_at,
     updated_at: entry.updated_at,
+    updated_at_local: toLocalDisplay(entry.updated_at),
     valid_until: entry.valid_until ?? undefined,
     classification: entry.classification,
     provenance: buildProvenance(entry.agent_id, entry.owner_principal_id),
@@ -3735,6 +3761,7 @@ export function registerTools(
                 namespace: assessment.row.namespace,
                 summary: assessment.row.content_preview.slice(0, 150),
                 updated_at: assessment.row.updated_at,
+                updated_at_local: toLocalDisplay(assessment.row.updated_at),
                 lifecycle: assessment.lifecycle,
               };
 
@@ -5390,6 +5417,17 @@ export function registerTools(
               search_recency_weight: searchRecencyWeight,
               expired_filtered_count: expiredFilteredCount,
             };
+            if (actualMode === "hybrid" && hybridResults.length > 0) {
+              const inFts = hybridResults.filter((r) => r.lexicalRank !== undefined).length;
+              const inSemantic = hybridResults.filter((r) => r.semanticRank !== undefined).length;
+              const inBoth = hybridResults.filter((r) => r.lexicalRank !== undefined && r.semanticRank !== undefined).length;
+              response.search_meta = {
+                fts5_matches: inFts,
+                semantic_matches: inSemantic,
+                both_matches: inBoth,
+                mode_effective: inFts === 0 ? "semantic_only" : inSemantic === 0 ? "lexical_only" : "hybrid",
+              };
+            }
 
             // Analytics: log retrieval event with result IDs and ranks
             if (sessionId) {
@@ -5558,6 +5596,7 @@ export function registerTools(
               id: result.id,
               namespace,
               timestamp: result.timestamp,
+              timestamp_local: toLocalDisplay(result.timestamp),
               classification: result.classification,
               provenance: buildProvenance(ctx.principalId, ctx.principalId),
             });
@@ -5577,7 +5616,11 @@ export function registerTools(
                 return true;
               });
               const { namespaces, total, has_more } = listNamespacesPaged(filtered, resolvedLimit, resolvedOffset);
-              return okResult("list", { namespaces, total, returned: namespaces.length, has_more });
+              const namespacesWithLocal = namespaces.map((ns) => ({
+                ...ns,
+                last_activity_at_local: toLocalDisplay(ns.last_activity_at),
+              }));
+              return okResult("list", { namespaces: namespacesWithLocal, total, returned: namespacesWithLocal.length, has_more });
             }
             const nsCheck = validateNamespace(namespace);
             if (!nsCheck.valid) {
@@ -5614,6 +5657,7 @@ export function registerTools(
                 preview: e.preview,
                 tags,
                 updated_at: e.updated_at,
+                updated_at_local: toLocalDisplay(e.updated_at),
                 classification: e.classification,
                 provenance: buildProvenance(e.agent_id, e.owner_principal_id),
               };
@@ -5637,6 +5681,7 @@ export function registerTools(
                 content_preview: l.content_preview,
                 tags,
                 created_at: l.created_at,
+                created_at_local: toLocalDisplay(l.created_at),
                 classification: l.classification,
                 provenance: buildProvenance(l.agent_id, l.owner_principal_id),
               };

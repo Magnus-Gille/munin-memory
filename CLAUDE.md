@@ -571,6 +571,7 @@ See `technical-spec.md` § Security Module for the full pattern list.
 | `MUNIN_OAUTH_CLIENT_SECRET_KEY` | — | Optional dedicated wrapping key for encrypting confidential OAuth client secrets at rest; defaults to `MUNIN_API_KEY` |
 | `MUNIN_OAUTH_IDENTITY_HEADER` | — | Header containing authenticated user's email for multi-user consent resolution (e.g. `cf-access-authenticated-user-email`) |
 | `MUNIN_ANALYTICS_RETENTION_DAYS` | `90` | Retention period for retrieval analytics (retrieval_events/outcomes). Sessions pruned at 7 days. |
+| `MUNIN_DISPLAY_TIMEZONE` | `Europe/Stockholm` | IANA timezone for human-friendly local timestamps in tool responses (display-layer only, storage remains UTC) |
 
 ## Spec amendments from adversarial review
 
