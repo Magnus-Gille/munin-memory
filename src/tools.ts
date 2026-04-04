@@ -255,11 +255,13 @@ function filterDerivedSources<T>(
   toolName: string,
   getMetadata: (source: T) => RedactableEntryMetadata,
   sessionId?: string,
+  loggedEntryIds?: Set<string>,
 ): { allowed: T[]; redacted: RedactableEntryMetadata[] } {
   const filtered = filterSourcesByClassification(ctx, sources, getMetadata);
 
   if (filtered.redacted.length > 0 && isRedactionLogEnabled()) {
     for (const redacted of filtered.redacted) {
+      if (loggedEntryIds?.has(redacted.metadata.id)) continue;
       const enforcement = enforceClassification(ctx, redacted.metadata);
       if (!enforcement.allowed) {
         insertRedactionLog(db, {
@@ -272,6 +274,7 @@ function filterDerivedSources<T>(
           connectionMaxClassification: enforcement.maxClassification,
           toolName,
         });
+        loggedEntryIds?.add(redacted.metadata.id);
       }
     }
   }
@@ -2533,6 +2536,7 @@ function syncCommitmentsForScope(
   namespace?: string,
   since?: string,
   sessionId?: string,
+  loggedEntryIds?: Set<string>,
 ): RedactableEntryMetadata[] {
   const entries = listEntriesForDerivation(db, { namespace, since })
     .filter((entry) => canRead(ctx, entry.namespace));
@@ -2543,6 +2547,7 @@ function syncCommitmentsForScope(
     toolName,
     (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
     sessionId,
+    loggedEntryIds,
   );
 
   for (const entry of filtered.allowed) {
@@ -2565,7 +2570,8 @@ function listFreshCommitmentRows(
   sessionId?: string,
 ): { rows: CommitmentRow[]; redacted: RedactableEntryMetadata[] } {
   const { namespace, since, limit, includeResolved = true } = options;
-  const redactedSources = syncCommitmentsForScope(db, ctx, toolName, namespace, since, sessionId);
+  const loggedEntryIds = new Set<string>();
+  const redactedSources = syncCommitmentsForScope(db, ctx, toolName, namespace, since, sessionId, loggedEntryIds);
 
   const refreshCandidates = listCommitments(db, {
     namespace,
@@ -2586,6 +2592,7 @@ function listFreshCommitmentRows(
       classification: row.source_classification,
     }),
     sessionId,
+    loggedEntryIds,
   );
 
   const seenSourceEntries = new Set<string>();
@@ -2601,6 +2608,7 @@ function listFreshCommitmentRows(
       toolName,
       (candidate) => buildRedactableEntryMetadata(parseEntry(candidate)),
       sessionId,
+      loggedEntryIds,
     );
     if (entryFilter.allowed.length === 0) {
       redactedSources.push(...entryFilter.redacted);
@@ -2628,6 +2636,7 @@ function listFreshCommitmentRows(
       classification: row.source_classification,
     }),
     sessionId,
+    loggedEntryIds,
   );
 
   return {
@@ -5764,16 +5773,16 @@ export function registerTools(
               cursor,
             });
 
-            const filteredEntries = historyPage.entries
-              .filter(e => canRead(ctx, e.namespace))
-              .map((entry) => formatHistoryEntry(db, ctx, entry, sessionId));
+            const accessFiltered = historyPage.entries.filter(e => canRead(ctx, e.namespace));
+            const filteredEntries = accessFiltered.map((entry) => formatHistoryEntry(db, ctx, entry, sessionId));
+            const entriesWereFiltered = accessFiltered.length < historyPage.entries.length;
 
             return okResult("history", {
               generated_at: new Date().toISOString(),
               count: filteredEntries.length,
               entries: filteredEntries,
               next_cursor: historyPage.nextCursor,
-              has_more: historyPage.hasMore,
+              has_more: historyPage.hasMore || entriesWereFiltered,
             });
           }
 

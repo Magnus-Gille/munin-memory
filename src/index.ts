@@ -481,7 +481,6 @@ function buildLibrarianRuntimeConfig(
     librarianEnabled: (process.env.MUNIN_LIBRARIAN_ENABLED ?? "false") === "true",
     hasLegacyBearerCredential: Boolean(options.apiKey ?? process.env.MUNIN_API_KEY),
     hasDpaBearerCredential: Boolean(options.apiKeyDpa ?? process.env.MUNIN_API_KEY_DPA),
-    hasConsumerBearerCredential: Boolean(options.apiKeyConsumer ?? process.env.MUNIN_API_KEY_CONSUMER),
     legacyBearerTransportType: getConfiguredLegacyBearerTransportType(),
   };
 }

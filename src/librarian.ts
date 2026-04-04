@@ -75,7 +75,6 @@ export interface LibrarianRuntimeConfig {
   librarianEnabled?: boolean;
   hasLegacyBearerCredential?: boolean;
   hasDpaBearerCredential?: boolean;
-  hasConsumerBearerCredential?: boolean;
   legacyBearerTransportType?: TransportType;
 }
 
