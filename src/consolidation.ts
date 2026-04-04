@@ -55,6 +55,7 @@ async function callOpenRouter(prompt: string): Promise<ChatCompletionResponse> {
       model: config.model,
       max_tokens: 2048,
       messages: [{ role: "user", content: prompt }],
+      provider: { zdr: true },
     }),
   });
 
