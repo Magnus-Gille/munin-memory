@@ -1,4 +1,3 @@
-import Anthropic from "@anthropic-ai/sdk";
 import type Database from "better-sqlite3";
 import {
   getNamespacesNeedingConsolidation,
@@ -13,24 +12,59 @@ import type { Entry, SynthesisResult, ConsolidationRunResult, CrossReferenceType
 
 // --- Configuration from env vars ---
 
+const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions";
+
 const config = {
   enabled: (process.env.MUNIN_CONSOLIDATION_ENABLED ?? "false") === "true",
-  model: process.env.MUNIN_CONSOLIDATION_MODEL ?? "claude-haiku-4-5-20251001",
+  model: process.env.MUNIN_CONSOLIDATION_MODEL ?? "anthropic/claude-haiku-4-5-20251001",
   intervalMs: parseInt(process.env.MUNIN_CONSOLIDATION_INTERVAL_MS ?? "60000", 10) || 60000,
   batchSize: parseInt(process.env.MUNIN_CONSOLIDATION_BATCH_SIZE ?? "5", 10) || 5,
   minLogs: parseInt(process.env.MUNIN_CONSOLIDATION_MIN_LOGS ?? "3", 10) || 3,
   maxFailures: parseInt(process.env.MUNIN_CONSOLIDATION_MAX_FAILURES ?? "3", 10) || 3,
 };
 
+// --- OpenRouter API types ---
+
+interface ChatCompletionResponse {
+  choices: Array<{ message: { content: string } }>;
+  usage?: { prompt_tokens: number; completion_tokens: number };
+}
+
 // --- Module state ---
 
-let client: Anthropic | null = null;
+let apiKey: string | null = null;
 let circuitBreakerFailures = 0;
 let circuitBreakerTripped = false;
 let workerTimer: ReturnType<typeof setTimeout> | null = null;
 let workerProcessing = false;
 let workerInflightPromise: Promise<void> | null = null;
 let workerDb: Database.Database | null = null;
+
+// --- API call ---
+
+async function callOpenRouter(prompt: string): Promise<ChatCompletionResponse> {
+  const response = await fetch(OPENROUTER_BASE_URL, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      "HTTP-Referer": "https://munin-memory.gille.ai",
+      "X-Title": "Munin Memory Consolidation",
+    },
+    body: JSON.stringify({
+      model: config.model,
+      max_tokens: 2048,
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(`OpenRouter API error ${response.status}: ${body.slice(0, 200)}`);
+  }
+
+  return response.json() as Promise<ChatCompletionResponse>;
+}
 
 // --- Lifecycle exports ---
 
@@ -39,17 +73,18 @@ export function initConsolidation(): boolean {
     return false;
   }
 
-  if (!process.env.ANTHROPIC_API_KEY) {
-    console.warn("MUNIN_CONSOLIDATION_ENABLED=true but ANTHROPIC_API_KEY is not set — consolidation disabled");
+  const key = process.env.OPENROUTER_API_KEY;
+  if (!key) {
+    console.warn("MUNIN_CONSOLIDATION_ENABLED=true but OPENROUTER_API_KEY is not set — consolidation disabled");
     return false;
   }
 
-  client = new Anthropic();
+  apiKey = key;
   return true;
 }
 
 export function startConsolidationWorker(db: Database.Database): void {
-  if (client === null) return;
+  if (apiKey === null) return;
   workerDb = db;
   scheduleNextRun();
 }
@@ -67,7 +102,7 @@ export async function stopConsolidationWorker(): Promise<void> {
 }
 
 export function isConsolidationAvailable(): boolean {
-  return config.enabled && client !== null && !circuitBreakerTripped;
+  return config.enabled && apiKey !== null && !circuitBreakerTripped;
 }
 
 export function resetConsolidationCircuitBreaker(): void {
@@ -89,7 +124,7 @@ function scheduleNextRun(): void {
 }
 
 export async function processConsolidationBatch(): Promise<void> {
-  if (!workerDb || !client || circuitBreakerTripped) return;
+  if (!workerDb || !apiKey || circuitBreakerTripped) return;
   workerProcessing = true;
 
   try {
@@ -122,7 +157,7 @@ export async function processConsolidationBatch(): Promise<void> {
 export async function consolidateNamespace(
   db: Database.Database,
   namespace: string,
-  apiClient?: Anthropic,
+  callApi?: (prompt: string) => Promise<ChatCompletionResponse>,
 ): Promise<ConsolidationRunResult> {
   // Step 1: Read current state
   const metadata = getConsolidationMetadata(db, namespace);
@@ -157,8 +192,8 @@ export async function consolidateNamespace(
     logs,
   );
 
-  const activeClient = apiClient ?? client;
-  if (!activeClient) {
+  const doCall = callApi ?? callOpenRouter;
+  if (!callApi && !apiKey) {
     return {
       namespace,
       logs_processed: 0,
@@ -166,29 +201,22 @@ export async function consolidateNamespace(
       token_count: null,
       duration_ms: 0,
       cross_references_found: 0,
-      error: "No API client available — consolidation not initialized",
+      error: "No API key available — consolidation not initialized",
     };
   }
+
   const startTime = Date.now();
 
-  let response: Awaited<ReturnType<typeof activeClient.messages.create>>;
-  let result: SynthesisResult;
-
   try {
-    response = await activeClient.messages.create({
-      model: config.model,
-      max_tokens: 2048,
-      messages: [{ role: "user", content: prompt }],
-    });
-
+    const response = await doCall(prompt);
     const durationMs = Date.now() - startTime;
 
     // Step 4: Parse response
-    const firstBlock = response.content[0];
-    if (!firstBlock || firstBlock.type !== "text") {
-      throw new Error("Unexpected response format: first content block is not text");
+    const text = response.choices?.[0]?.message?.content;
+    if (!text) {
+      throw new Error("Unexpected response format: no content in first choice");
     }
-    result = parseSynthesisResponse(firstBlock.text);
+    const result = parseSynthesisResponse(text);
 
     // Step 5: Write results
     const lastLog = logs[logs.length - 1];
@@ -213,7 +241,7 @@ export async function consolidateNamespace(
       last_log_id: lastLog.id,
       last_log_created_at: lastLog.created_at,
       synthesis_model: config.model,
-      synthesis_token_count: response.usage?.output_tokens ?? null,
+      synthesis_token_count: response.usage?.completion_tokens ?? null,
       run_duration_ms: durationMs,
     });
 
@@ -221,7 +249,7 @@ export async function consolidateNamespace(
       namespace,
       logs_processed: logs.length,
       synthesis_model: config.model,
-      token_count: response.usage?.output_tokens ?? null,
+      token_count: response.usage?.completion_tokens ?? null,
       duration_ms: durationMs,
       cross_references_found: result.cross_references.length,
     };
@@ -414,8 +442,10 @@ export function parseSynthesisResponse(text: string): SynthesisResult {
 
 // --- Test helpers (exported for vitest only) ---
 
-export function _setClient(c: Anthropic | null): void {
-  client = c;
+export type { ChatCompletionResponse };
+
+export function _setApiKey(key: string | null): void {
+  apiKey = key;
 }
 
 export function _setWorkerDb(d: Database.Database | null): void {
