@@ -1218,6 +1218,31 @@ describe("memory_history — access enforcement", () => {
 // Meta-test: every registered tool has at least one test in this file
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// memory_consolidate
+// ---------------------------------------------------------------------------
+
+describe("memory_consolidate — access enforcement", () => {
+  it("owner memory_consolidate → returns unavailable (consolidation disabled in test env)", async () => {
+    const raw = await ownerCall("memory_consolidate");
+    const result = parse(raw);
+    // Consolidation is not enabled in test env — expect unavailable error
+    expect(result.error).toBe("unavailable");
+  });
+
+  it("family memory_consolidate → denied (invisible)", async () => {
+    const raw = await familyCall("memory_consolidate");
+    const result = parse(raw);
+    expect(result.found).toBe(false);
+  });
+
+  it("agent memory_consolidate → denied", async () => {
+    const raw = await agentCall("memory_consolidate");
+    const result = parse(raw);
+    expect(result.error).toBe("access_denied");
+  });
+});
+
 describe("meta: all registered tools are covered", () => {
   it("every tool returned by ListTools has at least one access enforcement test", async () => {
     const server = new Server(
@@ -1257,6 +1282,7 @@ describe("meta: all registered tools are covered", () => {
       "memory_delete",
       "memory_insights",
       "memory_history",
+      "memory_consolidate",
       "memory_status",
     ]);
 

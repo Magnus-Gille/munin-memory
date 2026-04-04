@@ -58,6 +58,7 @@ import {
   getAuditHistoryPage,
   insertRedactionLog,
   getOtherKeysInNamespaceByClassification,
+  getNamespacesNeedingConsolidation,
 } from "./db.js";
 import {
   CLASSIFICATION_LEVELS,
@@ -88,6 +89,10 @@ import {
   isHybridEnabled,
   getSearchModeUnavailableReason,
 } from "./embeddings.js";
+import {
+  consolidateNamespace,
+  isConsolidationAvailable,
+} from "./consolidation.js";
 import type {
   WriteParams,
   StatusUpdateParams,
@@ -132,6 +137,7 @@ import type {
   HandoffResponse,
   AuditAction,
   AuditEntry,
+  ConsolidationRunResult,
 } from "./types.js";
 
 // In-memory delete token store (debate resolution #9)
@@ -3578,6 +3584,22 @@ const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: "memory_consolidate",
+    description:
+      "Manually trigger memory consolidation for a specific namespace or all eligible tracked namespaces. Consolidation synthesizes unincorporated log entries into an enriched 'synthesis' status summary using an LLM, and extracts cross-namespace references. The background worker runs automatically when enabled, but this tool allows on-demand consolidation. Owner-only.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        namespace: {
+          type: "string",
+          description:
+            "Optional. Consolidate a specific namespace (e.g. 'projects/hugin'). If omitted, consolidates all eligible tracked namespaces (those with enough unincorporated log entries).",
+        },
+      },
+      required: [],
+    },
+  },
+  {
     name: "memory_status",
     description:
       "Returns server capabilities, version, and feature availability. Use to discover what search modes, tools, and features are available on this server instance.",
@@ -5831,6 +5853,65 @@ export function registerTools(
             });
           }
 
+          case "memory_consolidate": {
+            if (ctx.principalType !== "owner") {
+              return accessDeniedResponse(ctx, "consolidate");
+            }
+
+            if (!isConsolidationAvailable()) {
+              return errResult("consolidate", "unavailable",
+                "Consolidation is not available. Ensure the feature is enabled and an API key is configured.");
+            }
+
+            const { namespace: consolidateNs } = (args ?? {}) as { namespace?: string };
+
+            if (consolidateNs) {
+              const nsCheck = validateNamespace(consolidateNs);
+              if (!nsCheck.valid) {
+                return errResult("consolidate", "validation_error", nsCheck.error!);
+              }
+
+              const result = await consolidateNamespace(db, consolidateNs);
+              if (result.error) {
+                return errResult("consolidate", "synthesis_error", result.error);
+              }
+              return okResult("consolidate", {
+                status: "completed",
+                results: [result],
+              });
+            }
+
+            const candidates = getNamespacesNeedingConsolidation(db);
+            if (candidates.length === 0) {
+              return okResult("consolidate", {
+                status: "no_candidates",
+                message: "No namespaces have enough unincorporated logs to consolidate.",
+                results: [],
+              });
+            }
+
+            const consolidateResults: ConsolidationRunResult[] = [];
+            for (const candidate of candidates) {
+              const result = await consolidateNamespace(db, candidate.namespace);
+              consolidateResults.push(result);
+            }
+
+            const succeeded = consolidateResults.filter((r) => !r.error).length;
+            const failed = consolidateResults.filter((r) => r.error).length;
+
+            return okResult("consolidate", {
+              status: failed === 0 ? "completed" : "partial",
+              summary: {
+                candidates: candidates.length,
+                succeeded,
+                failed,
+                total_logs_processed: consolidateResults.reduce((sum, r) => sum + r.logs_processed, 0),
+                total_cross_references: consolidateResults.reduce((sum, r) => sum + r.cross_references_found, 0),
+              },
+              results: consolidateResults,
+            });
+          }
+
           case "memory_status": {
             const schemaVersion = getSchemaVersion(db);
             const librarian = {
@@ -5855,6 +5936,7 @@ export function registerTools(
                 embeddings: isEmbeddingAvailable(),
                 semantic_search: isSemanticEnabled(),
                 hybrid_search: isHybridEnabled(),
+                consolidation: isConsolidationAvailable(),
               },
               tools: {
                 count: TOOL_DEFINITIONS.length,

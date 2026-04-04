@@ -13,6 +13,7 @@ import { pathToFileURL } from "node:url";
 import { initDatabase, nowUTC, pruneRedactionLog, pruneRetrievalAnalytics } from "./db.js";
 import { registerTools } from "./tools.js";
 import { initEmbeddings, startEmbeddingWorker, stopEmbeddingWorker } from "./embeddings.js";
+import { initConsolidation, startConsolidationWorker, stopConsolidationWorker } from "./consolidation.js";
 import { getConfiguredLegacyBearerTransportType, resolveAccessContext } from "./access.js";
 import type { AccessContext } from "./access.js";
 import { getLibrarianConfigWarnings, type LibrarianRuntimeConfig } from "./librarian.js";
@@ -808,6 +809,15 @@ async function main() {
     console.error("Embedding pipeline not available — semantic search will degrade to lexical");
   }
 
+  // Initialize consolidation worker (soft dependency — server works without it)
+  const consolidationReady = initConsolidation();
+  if (consolidationReady) {
+    startConsolidationWorker(database);
+    console.error("Consolidation worker initialized and started");
+  } else {
+    console.error("Consolidation worker not available — disabled or missing API key");
+  }
+
   if (transportMode === "http") {
     await startHttp(database);
   } else {
@@ -822,6 +832,7 @@ async function shutdown() {
     cleanupTimerId = undefined;
   }
   await stopEmbeddingWorker();
+  await stopConsolidationWorker();
   activeDb?.close();
   activeDb = undefined;
   process.exit(0);
@@ -842,6 +853,7 @@ if (isMainModule) {
       cleanupTimerId = undefined;
     }
     await stopEmbeddingWorker();
+    await stopConsolidationWorker();
     activeDb?.close();
     activeDb = undefined;
     process.exit(1);
