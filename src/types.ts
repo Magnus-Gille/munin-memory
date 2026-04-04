@@ -210,6 +210,18 @@ export interface StatusUpdateResponse extends WriteResponse {
   };
 }
 
+export interface DashboardSynthesis {
+  summary: string;
+  updated_at: string;
+  updated_at_local?: string;
+  cross_references: Array<{
+    target_namespace: string;
+    reference_type: string;
+    context: string | null;
+    confidence: number;
+  }>;
+}
+
 export interface DashboardEntry {
   namespace: string;
   summary: string;
@@ -217,6 +229,7 @@ export interface DashboardEntry {
   updated_at_local?: string;
   lifecycle: string;
   needs_attention?: true;
+  synthesis?: DashboardSynthesis;
   classification?: ClassificationLevel;
   redacted?: boolean;
   redaction_reason?: string;

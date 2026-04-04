@@ -59,6 +59,7 @@ import {
   insertRedactionLog,
   getOtherKeysInNamespaceByClassification,
   getNamespacesNeedingConsolidation,
+  getCrossReferences,
 } from "./db.js";
 import {
   CLASSIFICATION_LEVELS,
@@ -118,6 +119,7 @@ import type {
   SearchMode,
   OrientDetail,
   DashboardEntry,
+  DashboardSynthesis,
   MaintenanceItem,
   TrackedStatusRow,
   QueryResult,
@@ -3791,6 +3793,23 @@ export function registerTools(
                 entry.needs_attention = true;
               }
               maintenanceNeeded.push(...assessment.maintenanceItems);
+
+              // Enrich with synthesis if available
+              const synthesis = readState(db, assessment.row.namespace, "synthesis");
+              if (synthesis) {
+                const crossRefs = getCrossReferences(db, assessment.row.namespace);
+                entry.synthesis = {
+                  summary: contentPreview(synthesis.content),
+                  updated_at: synthesis.updated_at,
+                  updated_at_local: toLocalDisplay(synthesis.updated_at),
+                  cross_references: crossRefs.map((ref) => ({
+                    target_namespace: ref.target_namespace === assessment.row.namespace ? ref.source_namespace : ref.target_namespace,
+                    reference_type: ref.reference_type,
+                    context: ref.context,
+                    confidence: ref.confidence,
+                  })),
+                };
+              }
 
               const group = dashboard[assessment.lifecycle] ?? dashboard.uncategorized;
               group.push(entry);
