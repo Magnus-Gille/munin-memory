@@ -97,19 +97,19 @@ export async function processConsolidationBatch(): Promise<void> {
     const candidates = getNamespacesNeedingConsolidation(db, config.minLogs).slice(0, config.batchSize);
 
     for (const candidate of candidates) {
-      try {
-        await consolidateNamespace(db, candidate.namespace);
-        circuitBreakerFailures = 0;
-      } catch (err) {
+      const result = await consolidateNamespace(db, candidate.namespace);
+
+      if (result.error) {
         circuitBreakerFailures++;
-        const message = err instanceof Error ? err.message : String(err);
-        console.error(`Consolidation failed for ${candidate.namespace} (${circuitBreakerFailures}/${config.maxFailures}): ${message}`);
+        console.error(`Consolidation failed for ${candidate.namespace} (${circuitBreakerFailures}/${config.maxFailures}): ${result.error}`);
 
         if (circuitBreakerFailures >= config.maxFailures) {
           circuitBreakerTripped = true;
           console.warn("Consolidation circuit breaker tripped — consolidation disabled until reset");
           break;
         }
+      } else {
+        circuitBreakerFailures = 0;
       }
     }
   } finally {
@@ -157,7 +157,18 @@ export async function consolidateNamespace(
     logs,
   );
 
-  const activeClient = apiClient ?? client!;
+  const activeClient = apiClient ?? client;
+  if (!activeClient) {
+    return {
+      namespace,
+      logs_processed: 0,
+      synthesis_model: config.model,
+      token_count: null,
+      duration_ms: 0,
+      cross_references_found: 0,
+      error: "No API client available — consolidation not initialized",
+    };
+  }
   const startTime = Date.now();
 
   let response: Awaited<ReturnType<typeof activeClient.messages.create>>;
@@ -399,6 +410,16 @@ export function parseSynthesisResponse(text: string): SynthesisResult {
     tags: obj.tags as string[],
     cross_references: obj.cross_references as SynthesisResult["cross_references"],
   };
+}
+
+// --- Test helpers (exported for vitest only) ---
+
+export function _setClient(c: Anthropic | null): void {
+  client = c;
+}
+
+export function _setWorkerDb(d: Database.Database | null): void {
+  workerDb = d;
 }
 
 export { config as _consolidationConfig };

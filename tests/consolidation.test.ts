@@ -21,6 +21,8 @@ import {
   resetConsolidationCircuitBreaker,
   processConsolidationBatch,
   _consolidationConfig,
+  _setClient,
+  _setWorkerDb,
 } from "../src/consolidation.js";
 import type { Entry } from "../src/types.js";
 
@@ -331,6 +333,17 @@ describe("consolidateNamespace", () => {
     expect(mockClient.messages.create).not.toHaveBeenCalled();
   });
 
+  it("returns error when no API client is available", async () => {
+    for (let i = 0; i < 3; i++) {
+      appendLog(db, "projects/no-client", `Log ${i}`, []);
+    }
+
+    // Call without apiClient and without module-level client initialized
+    const result = await consolidateNamespace(db, "projects/no-client");
+    expect(result.error).toContain("No API client available");
+    expect(result.logs_processed).toBe(0);
+  });
+
   it("respects sinceTimestamp from prior metadata", async () => {
     // Insert 2 old logs
     const r1 = appendLog(db, "projects/delta", "Old log 1", []);
@@ -412,78 +425,118 @@ describe("startConsolidationWorker / stopConsolidationWorker", () => {
 // ─── Circuit breaker ─────────────────────────────────────────────────────────
 
 describe("circuit breaker", () => {
-  it("trips after maxFailures consecutive API failures", async () => {
+  const failingClient = {
+    messages: {
+      create: vi.fn().mockRejectedValue(new Error("API error")),
+    },
+  } as unknown as Anthropic;
+
+  it("trips after maxFailures consecutive failures in processConsolidationBatch", async () => {
     const failCount = _consolidationConfig.maxFailures;
 
-    const failingClient = {
+    // Create enough namespaces with enough logs
+    for (let ns = 0; ns < failCount + 1; ns++) {
+      for (let i = 0; i < _consolidationConfig.minLogs; i++) {
+        appendLog(db, `projects/cb${ns}`, `Log ${i}`, []);
+      }
+    }
+
+    // Inject the failing client and db into the module
+    _setClient(failingClient);
+    _setWorkerDb(db);
+
+    await processConsolidationBatch();
+
+    // Circuit breaker should have tripped — isConsolidationAvailable checks it
+    // We need config.enabled=true for the full check, but we can verify
+    // the batch processor stops calling after maxFailures by checking call count
+    expect((failingClient.messages.create as ReturnType<typeof vi.fn>).mock.calls.length).toBe(failCount);
+
+    // Clean up
+    _setClient(null);
+    _setWorkerDb(null);
+  });
+
+  it("resets failure count on successful consolidation", async () => {
+    // Create 2 failing namespaces then 1 succeeding then 1 more failing
+    for (let i = 0; i < _consolidationConfig.minLogs; i++) {
+      appendLog(db, "projects/fail1", `Log ${i}`, []);
+      appendLog(db, "projects/ok1", `Log ${i}`, []);
+    }
+
+    let callCount = 0;
+    const mixedClient = {
       messages: {
-        create: vi.fn().mockRejectedValue(new Error("API error")),
+        create: vi.fn().mockImplementation(() => {
+          callCount++;
+          if (callCount === 1) {
+            return Promise.reject(new Error("Fail 1"));
+          }
+          // Second call succeeds
+          return Promise.resolve({
+            content: [{ type: "text", text: JSON.stringify(cannedSynthesisResult) }],
+            usage: { input_tokens: 100, output_tokens: 100 },
+          });
+        }),
       },
     } as unknown as Anthropic;
 
-    // Create enough namespaces with enough logs for the batch
-    for (let ns = 0; ns < failCount + 1; ns++) {
-      for (let i = 0; i < _consolidationConfig.minLogs; i++) {
-        appendLog(db, `projects/ns${ns}`, `Log ${i}`, []);
-      }
-    }
+    _setClient(mixedClient);
+    _setWorkerDb(db);
 
-    // Manually set client so processConsolidationBatch uses it via consolidateNamespace
-    // We'll call consolidateNamespace directly in a loop to simulate circuit breaker tripping
-    for (let i = 0; i < failCount; i++) {
-      try {
-        await consolidateNamespace(db, `projects/ns${i}`, failingClient);
-      } catch {
-        // consolidateNamespace returns errors in the result, not throws
-      }
-      // Simulate the processConsolidationBatch failure counting by calling incrementing manually
-      // We need to test processConsolidationBatch directly
-    }
-
-    // Reset and test processConsolidationBatch directly by setting up the internal client
-    // The circuit breaker in processConsolidationBatch tracks failures internally
-    // Let's test via a different approach: verify the circuit breaker resets properly
-    resetConsolidationCircuitBreaker();
-    expect(isConsolidationAvailable()).toBe(false); // client is null since not enabled
-  });
-
-  it("resetConsolidationCircuitBreaker clears state", () => {
-    resetConsolidationCircuitBreaker();
-    // After reset, circuit breaker flags are cleared
-    // isConsolidationAvailable depends on client being set too
-    // Just verify the function runs without error
-    resetConsolidationCircuitBreaker();
-  });
-
-  it("resets circuitBreakerFailures on successful consolidation", async () => {
-    // Consolidate successfully
-    for (let i = 0; i < 3; i++) {
-      appendLog(db, "projects/success", `Log ${i}`, []);
-    }
-
-    const result = await consolidateNamespace(db, "projects/success", mockClient);
-    expect(result.error).toBeUndefined();
-    expect(result.logs_processed).toBe(3);
-    // Circuit breaker failures would have been reset to 0 if processConsolidationBatch was used
-    // Direct consolidateNamespace call doesn't affect the module-level circuit breaker
-    // Just verify successful result
-  });
-});
-
-// ─── processConsolidationBatch circuit breaker tests ────────────────────────
-
-describe("processConsolidationBatch (circuit breaker integration)", () => {
-  it("does not process when circuitBreakerTripped", async () => {
-    // processConsolidationBatch checks circuitBreakerTripped internally
-    // When workerDb is null and client is null (disabled), it returns early
     await processConsolidationBatch();
-    // Should not throw
+
+    // Both namespaces should have been attempted (failure didn't trip breaker since count < maxFailures)
+    expect(callCount).toBe(2);
+
+    _setClient(null);
+    _setWorkerDb(null);
+  });
+
+  it("resetConsolidationCircuitBreaker clears tripped state", async () => {
+    // Trip the breaker first
+    for (let ns = 0; ns < _consolidationConfig.maxFailures; ns++) {
+      for (let i = 0; i < _consolidationConfig.minLogs; i++) {
+        appendLog(db, `projects/trip${ns}`, `Log ${i}`, []);
+      }
+    }
+
+    const tripper = {
+      messages: {
+        create: vi.fn().mockRejectedValue(new Error("fail")),
+      },
+    } as unknown as Anthropic;
+
+    _setClient(tripper);
+    _setWorkerDb(db);
+    await processConsolidationBatch();
+
+    // Breaker is tripped — batch should be a no-op now
+    (tripper.messages.create as ReturnType<typeof vi.fn>).mockClear();
+    await processConsolidationBatch();
+    expect((tripper.messages.create as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+
+    // Reset and verify it processes again
+    resetConsolidationCircuitBreaker();
+
+    for (let i = 0; i < _consolidationConfig.minLogs; i++) {
+      appendLog(db, "projects/after-reset", `Log ${i}`, []);
+    }
+
+    await processConsolidationBatch();
+    expect((tripper.messages.create as ReturnType<typeof vi.fn>)).toHaveBeenCalled();
+
+    _setClient(null);
+    _setWorkerDb(null);
   });
 
   it("skips batch processing when no workerDb set", async () => {
-    // With workerDb = null (not started), batch processing is a no-op
+    _setClient(mockClient);
+    _setWorkerDb(null);
     await processConsolidationBatch();
-    // No error
+    // mockClient should not have been called
+    expect(mockClient.messages.create).not.toHaveBeenCalled();
+    _setClient(null);
   });
 });
 
