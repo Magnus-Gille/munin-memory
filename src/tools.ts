@@ -2461,7 +2461,7 @@ function buildNarrativeSources(
 const COMMITMENT_SOON_DAYS = 3;
 const COMMITMENT_COMPLETED_RECENT_DAYS = 14;
 const COMMITMENT_ACTION_VERB =
-  /\b(send|ship|deliver|finish|complete|publish|deploy|update|write|call|review|rerun|check)\b/i;
+  /\b(send|ship|deliver|finish|complete|publish|deploy|update|write|call|review|rerun|check|prepare|create|build|submit|investigate|resolve|schedule|organize|migrate|refactor|test|validate|research|draft|design|implement|configure|setup|set up|run|file|fix|address|handle|ensure|confirm)\b/i;
 const COMMITMENT_FORWARD_CUE =
   /\b(will|must|need to|needs to|plan to|planned|should|target(?:ing)?|aim to|by|due)\b/i;
 const COMMITMENT_IMPERATIVE_PREFIX =
@@ -2470,6 +2470,8 @@ const COMMITMENT_RETROSPECTIVE_CUE =
   /\b(committed|completed|finished|pushed|shipped|delivered|published|deployed|resolved|closed|landed|wrapped up|done)\b/i;
 const COMMITMENT_FUTURE_COMPLETION_PHRASE =
   /\b(must|need to|needs to|should|will|plan to|planned to|target(?:ing)? to|aim to)\s+(?:be\s+)?(completed|finished|shipped|delivered|published|deployed)\b/i;
+const COMMITMENT_EXPLICIT_PREFIX =
+  /^(?:commitment|i commit to|we (?:agreed|commit) to):\s*/i;
 
 function mapTrackedStatusAssessmentsByNamespace(
   assessments: TrackedStatusAssessment[],
@@ -2567,6 +2569,21 @@ function extractCommitmentsFromEntry(entry: Entry): DerivedCommitmentInput[] {
   }
 
   for (const segment of extractCandidateSegments(entry.content)) {
+    if (COMMITMENT_EXPLICIT_PREFIX.test(segment)) {
+      if (looksLikeRetrospectiveCompletion(segment)) continue;
+      const normalized = normalizeCommitmentText(segment);
+      if (!normalized) continue;
+      const dueAt = extractDueAtFromText(segment);
+      pushCommitment({
+        sourceType: "explicit_commitment",
+        fingerprint: `explicit_commitment:${normalized}`,
+        text: segment.trim(),
+        dueAt,
+        confidence: computeCommitmentConfidence("explicit_commitment", entry.updated_at, !!dueAt),
+      }, normalized);
+      continue;
+    }
+
     const dueAt = extractDueAtFromText(segment);
     if (!dueAt) continue;
     if (!isForwardLookingDatedCommitment(segment)) continue;

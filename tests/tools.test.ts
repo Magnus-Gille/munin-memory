@@ -3287,6 +3287,93 @@ describe("memory_commitments", () => {
     expect(result.open.length).toBeGreaterThan(0);
     expect(result.reason).toBeUndefined();
   });
+
+  it("detects explicit 'Commitment:' prefix in log entries", async () => {
+    await callTool("memory_log", {
+      namespace: "projects/explicit-commitment-test",
+      content: "Commitment: I will prepare the quarterly report",
+      tags: ["decision"],
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/explicit-commitment-test",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ text: string; source_type: string }>;
+      overdue: Array<{ text: string; source_type: string }>;
+    };
+
+    const allCommitments = [...result.open, ...result.overdue];
+    expect(allCommitments).toContainEqual(expect.objectContaining({
+      text: "Commitment: I will prepare the quarterly report",
+      source_type: "explicit_commitment",
+    }));
+  });
+
+  it("detects 'We agreed to' prefix in log entries", async () => {
+    await callTool("memory_log", {
+      namespace: "projects/we-agreed-test",
+      content: "We agreed to: migrate the database by 2027-06-01",
+      tags: ["decision"],
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/we-agreed-test",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ text: string; source_type: string }>;
+      overdue: Array<{ text: string; source_type: string }>;
+    };
+
+    const allCommitments = [...result.open, ...result.overdue];
+    expect(allCommitments).toContainEqual(expect.objectContaining({
+      source_type: "explicit_commitment",
+    }));
+  });
+
+  it("detects 'I commit to' prefix in log entries", async () => {
+    await callTool("memory_log", {
+      namespace: "projects/i-commit-test",
+      content: "I commit to: reviewing the PR before EOD",
+      tags: ["decision"],
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/i-commit-test",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ text: string; source_type: string }>;
+      overdue: Array<{ text: string; source_type: string }>;
+    };
+
+    const allCommitments = [...result.open, ...result.overdue];
+    expect(allCommitments).toContainEqual(expect.objectContaining({
+      source_type: "explicit_commitment",
+    }));
+  });
+
+  it("still extracts commitments from status next-steps (regression)", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/regression-next-steps",
+      phase: "Active",
+      current_work: "Working on feature X",
+      blockers: "None.",
+      next_steps: ["Ship feature X by 2027-08-01", "Write tests"],
+      lifecycle: "active",
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/regression-next-steps",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ text: string; source_type: string }>;
+    };
+
+    expect(result.open).toContainEqual(expect.objectContaining({
+      text: "Ship feature X by 2027-08-01",
+      source_type: "tracked_next_step",
+    }));
+  });
 });
 
 describe("memory_patterns", () => {
