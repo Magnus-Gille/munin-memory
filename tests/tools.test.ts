@@ -3640,6 +3640,42 @@ describe("memory_patterns", () => {
     expect(result.patterns.length).toBeGreaterThan(0);
     expect(result.reason).toBeUndefined();
   });
+
+  it("does not surface common English stopwords as recurring pattern terms", async () => {
+    await callTool("memory_log", {
+      namespace: "projects/stopword-test",
+      content: "Decision: still blocked because database migration is still delayed. Also, kubernetes rollout deferred.",
+      tags: ["decision"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/stopword-test",
+      content: "Decided to also defer the kubernetes deployment because database capacity is still insufficient.",
+      tags: ["decision"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/stopword-test",
+      content: "Decision: kubernetes cluster still degraded also because of database connection limits.",
+      tags: ["decision"],
+    });
+
+    const raw = await callTool("memory_patterns", {
+      namespace: "projects/stopword-test",
+    });
+    const result = parseToolResponse(raw) as {
+      patterns: Array<{ kind: string; summary: string }>;
+    };
+
+    const summaries = result.patterns.map((p) => p.summary.toLowerCase());
+    const allSummaryText = summaries.join(" ");
+
+    expect(allSummaryText).not.toMatch(/\bstill\b/);
+    expect(allSummaryText).not.toMatch(/\balso\b/);
+    expect(allSummaryText).not.toMatch(/\bbecause\b/);
+
+    if (result.patterns.some((p) => p.kind === "decision_theme")) {
+      expect(allSummaryText).toMatch(/kubernetes|database/);
+    }
+  });
 });
 
 describe("memory_handoff", () => {
