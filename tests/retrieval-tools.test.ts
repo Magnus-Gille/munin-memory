@@ -302,4 +302,53 @@ describe("memory_insights tool", () => {
     const tools = (toolList as { tools: Array<{ name: string }> }).tools;
     expect(tools.some((t) => t.name === "memory_insights")).toBe(true);
   });
+
+  it("clamps followthrough_rate to at most 1.0 when outcomes exceed impressions", async () => {
+    // Create an entry to reference
+    const { writeState } = await import("../src/db.js");
+    writeState(db, "projects/clamp-test", "status", "clamp test entry", ["active"]);
+    const entry = db
+      .prepare("SELECT id FROM entries WHERE namespace = 'projects/clamp-test' AND key = 'status'")
+      .get() as { id: string };
+
+    const now = new Date().toISOString();
+
+    // Insert 2 retrieval events (impressions = 2) for this entry
+    const eventIds = ["evt-clamp-1", "evt-clamp-2"];
+    for (const evtId of eventIds) {
+      db.prepare(
+        `INSERT INTO retrieval_events (id, session_id, timestamp, tool_name, result_ids, result_namespaces, result_ranks)
+         VALUES (?, 'session-clamp', ?, 'memory_query', json_array(?), '[]', '[]')`,
+      ).run(evtId, now, entry.id);
+    }
+
+    // Insert outcomes that exceed impressions:
+    // opens=2, write_outcomes=2, log_outcomes=2 → sum=6 > impressions=2
+    let outcomeIdx = 0;
+    for (const evtId of eventIds) {
+      db.prepare(
+        `INSERT INTO retrieval_outcomes (id, retrieval_event_id, timestamp, outcome_type, entry_id)
+         VALUES (?, ?, ?, 'opened_result', ?)`,
+      ).run(`out-open-${outcomeIdx++}`, evtId, now, entry.id);
+
+      db.prepare(
+        `INSERT INTO retrieval_outcomes (id, retrieval_event_id, timestamp, outcome_type, entry_id)
+         VALUES (?, ?, ?, 'write_in_result_namespace', ?)`,
+      ).run(`out-write-${outcomeIdx++}`, evtId, now, entry.id);
+
+      db.prepare(
+        `INSERT INTO retrieval_outcomes (id, retrieval_event_id, timestamp, outcome_type, entry_id)
+         VALUES (?, ?, ?, 'log_in_result_namespace', ?)`,
+      ).run(`out-log-${outcomeIdx++}`, evtId, now, entry.id);
+    }
+
+    const raw = await callTool("memory_insights", { min_impressions: 1 });
+    const result = parseToolResponse(raw) as {
+      entries: Array<{ entry_id: string; followthrough_rate: number }>;
+    };
+
+    const clampEntry = result.entries.find((e) => e.entry_id === entry.id);
+    expect(clampEntry).toBeDefined();
+    expect(clampEntry!.followthrough_rate).toBeLessThanOrEqual(1.0);
+  });
 });

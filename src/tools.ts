@@ -3660,10 +3660,10 @@ function computeEntryInsight(row: {
   updated_at: string;
 }): EntryInsight {
   const { entry_id, namespace, impressions, opens, write_outcomes, log_outcomes, opened_when_stale_count } = row;
-  const follthrough = impressions > 0
-    ? (opens + write_outcomes + log_outcomes) / impressions
+  const followthrough = impressions > 0
+    ? Math.min(1, (opens + write_outcomes + log_outcomes) / impressions)
     : 0;
-  const stalenessPresure = opens > 0 ? opened_when_stale_count / opens : 0;
+  const stalenessPressure = opens > 0 ? opened_when_stale_count / opens : 0;
 
   const signals: string[] = [];
   if (impressions > 0 && opens / impressions > SIGNAL_OPENS_RATE_THRESHOLD) {
@@ -3675,11 +3675,11 @@ function computeEntryInsight(row: {
   if (impressions > 0 && log_outcomes / impressions > SIGNAL_LOG_RATE_THRESHOLD) {
     signals.push("often followed by logs");
   }
-  if (stalenessPresure > SIGNAL_STALENESS_PRESSURE_THRESHOLD) {
+  if (stalenessPressure > SIGNAL_STALENESS_PRESSURE_THRESHOLD) {
     signals.push("frequently stale when opened");
   }
   if (
-    follthrough < SIGNAL_NO_FOLLOWTHROUGH_THRESHOLD &&
+    followthrough < SIGNAL_NO_FOLLOWTHROUGH_THRESHOLD &&
     impressions >= SIGNAL_NO_FOLLOWTHROUGH_MIN_IMPRESSIONS
   ) {
     signals.push("no follow-through");
@@ -3690,8 +3690,8 @@ function computeEntryInsight(row: {
     namespace,
     impressions,
     opens,
-    followthrough_rate: follthrough,
-    staleness_pressure: stalenessPresure,
+    followthrough_rate: followthrough,
+    staleness_pressure: stalenessPressure,
     learned_signals: signals,
   };
 }
