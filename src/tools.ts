@@ -3677,7 +3677,9 @@ const SIGNAL_NO_FOLLOWTHROUGH_MIN_IMPRESSIONS = 5;
 
 function computeEntryInsight(row: {
   entry_id: string;
-  namespace: string;
+  namespace: string | null;
+  key: string | null;
+  content_preview: string | null;
   impressions: number;
   opens: number;
   write_outcomes: number;
@@ -3685,7 +3687,7 @@ function computeEntryInsight(row: {
   opened_when_stale_count: number;
   updated_at: string;
 }): EntryInsight {
-  const { entry_id, namespace, impressions, opens, write_outcomes, log_outcomes, opened_when_stale_count } = row;
+  const { entry_id, namespace, key, content_preview, impressions, opens, write_outcomes, log_outcomes, opened_when_stale_count } = row;
   const followthrough = impressions > 0
     ? Math.min(1, (opens + write_outcomes + log_outcomes) / impressions)
     : 0;
@@ -3714,6 +3716,8 @@ function computeEntryInsight(row: {
   return {
     entry_id,
     namespace,
+    key: key ?? null,
+    content_preview: content_preview ?? null,
     impressions,
     opens,
     followthrough_rate: followthrough,

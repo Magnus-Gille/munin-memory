@@ -659,7 +659,9 @@ export interface InsightsParams {
 
 export interface EntryInsight {
   entry_id: string;
-  namespace: string;
+  namespace: string | null;
+  key: string | null;
+  content_preview: string | null;
   impressions: number;
   opens: number;
   followthrough_rate: number;

@@ -1755,7 +1755,9 @@ export interface RetrievalOutcomeInput {
 
 export interface EntryInsightRow {
   entry_id: string;
-  namespace: string;
+  namespace: string | null;
+  key: string | null;
+  content_preview: string | null;
   impressions: number;
   opens: number;
   write_outcomes: number;
@@ -1916,15 +1918,15 @@ export function getInsightsByEntry(
 ): EntryInsightRow[] {
   const clampedLimit = Math.min(Math.max(limit, 1), 50);
 
-  // Build namespace filter clause (applies to nl.namespace from namespace_lookup CTE)
+  // Build namespace filter clause (applies to e.namespace from LEFT JOIN entries)
   let nsFilter = "";
   const nsParams: unknown[] = [];
   if (namespace) {
     if (namespace.endsWith("/")) {
-      nsFilter = "AND nl.namespace LIKE ? ESCAPE '\\'";
+      nsFilter = "AND e.namespace LIKE ? ESCAPE '\\'";
       nsParams.push(namespace.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_") + "%");
     } else {
-      nsFilter = "AND nl.namespace = ?";
+      nsFilter = "AND e.namespace = ?";
       nsParams.push(namespace);
     }
   }
@@ -1945,28 +1947,25 @@ export function getInsightsByEntry(
       FROM retrieval_outcomes ro
       WHERE ro.outcome_type = 'opened_result'
         AND ro.entry_id IS NOT NULL
-    ),
-    namespace_lookup AS (
-      -- Map entry_id to namespace via the entries table
-      SELECT id AS entry_id, namespace, updated_at
-      FROM entries
     )
     SELECT
       imp.entry_id,
-      nl.namespace,
+      e.namespace,
+      e.key,
+      SUBSTR(e.content, 1, 60) AS content_preview,
       COUNT(DISTINCT imp.event_id) AS impressions,
       COUNT(DISTINCT op.retrieval_event_id) AS opens,
       COUNT(DISTINCT CASE WHEN ro_w.outcome_type = 'write_in_result_namespace' THEN ro_w.retrieval_event_id END) AS write_outcomes,
       COUNT(DISTINCT CASE WHEN ro_l.outcome_type = 'log_in_result_namespace' THEN ro_l.retrieval_event_id END) AS log_outcomes,
       COUNT(DISTINCT CASE
         WHEN op.retrieval_event_id IS NOT NULL
-          AND nl.updated_at IS NOT NULL
-          AND (julianday(ro_open.timestamp) - julianday(nl.updated_at)) > 14
+          AND e.updated_at IS NOT NULL
+          AND (julianday(ro_open.timestamp) - julianday(e.updated_at)) > 14
         THEN op.retrieval_event_id
       END) AS opened_when_stale_count,
-      COALESCE(nl.updated_at, '') AS updated_at
+      COALESCE(e.updated_at, '') AS updated_at
     FROM impressions_cte imp
-    LEFT JOIN namespace_lookup nl ON nl.entry_id = imp.entry_id
+    LEFT JOIN entries e ON e.id = imp.entry_id
     LEFT JOIN opens_cte op ON op.entry_id = imp.entry_id AND op.retrieval_event_id = imp.event_id
     LEFT JOIN retrieval_outcomes ro_open ON ro_open.entry_id = imp.entry_id
       AND ro_open.outcome_type = 'opened_result'
@@ -1975,9 +1974,9 @@ export function getInsightsByEntry(
       AND ro_w.outcome_type = 'write_in_result_namespace'
     LEFT JOIN retrieval_outcomes ro_l ON ro_l.retrieval_event_id = imp.event_id
       AND ro_l.outcome_type = 'log_in_result_namespace'
-    WHERE nl.entry_id IS NOT NULL
+    WHERE TRUE
       ${nsFilter}
-    GROUP BY imp.entry_id, nl.namespace, nl.updated_at
+    GROUP BY imp.entry_id, e.namespace, e.updated_at
     HAVING COUNT(DISTINCT imp.event_id) >= ?
     ORDER BY impressions DESC
     LIMIT ?

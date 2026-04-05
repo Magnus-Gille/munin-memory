@@ -303,6 +303,68 @@ describe("memory_insights tool", () => {
     expect(tools.some((t) => t.name === "memory_insights")).toBe(true);
   });
 
+  it("includes key and content_preview in insight entries for existing entries", async () => {
+    const { writeState } = await import("../src/db.js");
+    const content = "This is a content preview test entry with enough text";
+    writeState(db, "projects/preview-test", "preview-key", content, []);
+    const entry = db
+      .prepare("SELECT id FROM entries WHERE namespace = 'projects/preview-test' AND key = 'preview-key'")
+      .get() as { id: string };
+
+    const now = new Date().toISOString();
+
+    // Insert enough retrieval events to exceed min_impressions
+    for (let i = 0; i < 4; i++) {
+      db.prepare(
+        `INSERT INTO retrieval_events (id, session_id, timestamp, tool_name, result_ids, result_namespaces, result_ranks)
+         VALUES (?, 'session-preview', ?, 'memory_query', json_array(?), '[]', '[]')`,
+      ).run(`evt-preview-${i}`, now, entry.id);
+    }
+
+    const raw = await callTool("memory_insights", { min_impressions: 3 });
+    const result = parseToolResponse(raw) as {
+      entries: Array<{ entry_id: string; key: string | null; content_preview: string | null }>;
+    };
+
+    const found = result.entries.find((e) => e.entry_id === entry.id);
+    expect(found).toBeDefined();
+    expect(found!.key).toBe("preview-key");
+    // content_preview should be truncated to 60 chars
+    expect(found!.content_preview).toBe(content.substring(0, 60));
+    expect(found!.content_preview!.length).toBeLessThanOrEqual(60);
+  });
+
+  it("shows null key and content_preview for deleted entries", async () => {
+    const { writeState } = await import("../src/db.js");
+    writeState(db, "projects/deleted-test", "deleted-key", "entry that will be deleted", []);
+    const entry = db
+      .prepare("SELECT id FROM entries WHERE namespace = 'projects/deleted-test' AND key = 'deleted-key'")
+      .get() as { id: string };
+
+    const now = new Date().toISOString();
+
+    // Insert enough retrieval events to exceed min_impressions
+    for (let i = 0; i < 4; i++) {
+      db.prepare(
+        `INSERT INTO retrieval_events (id, session_id, timestamp, tool_name, result_ids, result_namespaces, result_ranks)
+         VALUES (?, 'session-deleted', ?, 'memory_query', json_array(?), '[]', '[]')`,
+      ).run(`evt-deleted-${i}`, now, entry.id);
+    }
+
+    // Now delete the entry to simulate a deleted entry
+    db.prepare("DELETE FROM entries WHERE id = ?").run(entry.id);
+
+    const raw = await callTool("memory_insights", { min_impressions: 3 });
+    const result = parseToolResponse(raw) as {
+      entries: Array<{ entry_id: string; key: string | null; content_preview: string | null }>;
+    };
+
+    const found = result.entries.find((e) => e.entry_id === entry.id);
+    expect(found).toBeDefined();
+    expect(found!.key).toBeNull();
+    expect(found!.content_preview).toBeNull();
+  });
+
   it("clamps followthrough_rate to at most 1.0 when outcomes exceed impressions", async () => {
     // Create an entry to reference
     const { writeState } = await import("../src/db.js");
