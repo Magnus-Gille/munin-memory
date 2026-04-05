@@ -3026,6 +3026,66 @@ describe("memory_narrative", () => {
 
     expect(result.signals.some((signal) => signal.category === "decision_churn")).toBe(false);
   });
+
+  it("does not emit time_in_phase for a status updated today (0 days)", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/narrative-fresh",
+      phase: "Active",
+      current_work: "Just started",
+      blockers: "None.",
+      next_steps: ["Continue"],
+      lifecycle: "active",
+    });
+
+    const raw = await callTool("memory_narrative", { namespace: "projects/narrative-fresh" });
+    const result = parseToolResponse(raw) as {
+      signals: Array<{ category: string }>;
+      reason?: string;
+    };
+
+    expect(result.signals.some((signal) => signal.category === "time_in_phase")).toBe(false);
+  });
+
+  it("emits time_in_phase for a status entry older than 3 days", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/narrative-stale",
+      phase: "Active",
+      current_work: "Ongoing work",
+      blockers: "None.",
+      next_steps: ["Keep going"],
+      lifecycle: "active",
+    });
+    db.prepare("UPDATE entries SET updated_at = '2026-03-31T00:00:00.000Z' WHERE namespace = 'projects/narrative-stale' AND key = 'status'").run();
+
+    const raw = await callTool("memory_narrative", { namespace: "projects/narrative-stale" });
+    const result = parseToolResponse(raw) as {
+      signals: Array<{ category: string }>;
+    };
+
+    expect(result.signals.some((signal) => signal.category === "time_in_phase")).toBe(true);
+  });
+
+  it("includes a reason field when no signals are found", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/narrative-quiet",
+      phase: "Active",
+      current_work: "Quiet period",
+      blockers: "None.",
+      next_steps: ["Monitor"],
+      lifecycle: "active",
+    });
+
+    const raw = await callTool("memory_narrative", { namespace: "projects/narrative-quiet" });
+    const result = parseToolResponse(raw) as {
+      signals: Array<{ category: string }>;
+      reason?: string;
+    };
+
+    if (result.signals.length === 0) {
+      expect(result.reason).toBeTruthy();
+      expect(typeof result.reason).toBe("string");
+    }
+  });
 });
 
 describe("memory_commitments", () => {

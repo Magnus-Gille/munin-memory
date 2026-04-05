@@ -2220,7 +2220,7 @@ function buildExtractSuggestions(
 
 const NARRATIVE_LONG_GAP_DAYS = 14;
 const NARRATIVE_BLOCKER_DAYS = 3;
-const NARRATIVE_DECISION_CHURN_THRESHOLD = 3;
+const NARRATIVE_DECISION_CHURN_THRESHOLD = 2;
 const NARRATIVE_REVERSAL_KEYWORDS = /\b(reopen|reopened|resume|resumed|paused|parked|on hold|unblocked|rolled back|active again)\b/i;
 const NARRATIVE_STRONG_REVERSAL_RESUME = /\b(reopen|reopened|resume|resumed|unblocked|active again)\b/i;
 const NARRATIVE_STRONG_REVERSAL_PAUSE = /\b(pause|pausing|paused|parked|parking|on hold|rolled back|rollback)\b/i;
@@ -2299,14 +2299,16 @@ function buildNarrativeSignals(
     const phase = structured.phase ?? lifecycle ?? "Unspecified";
     const daysInPhase = getDaysSince(statusEntry.updated_at);
 
-    pushSignal({
-      category: "time_in_phase",
-      severity: daysInPhase > NARRATIVE_LONG_GAP_DAYS && (lifecycle === "active" || lifecycle === "blocked") ? "medium" : "low",
-      summary: `Current phase "${phase}" has held for ${daysInPhase} day${daysInPhase === 1 ? "" : "s"}.`,
-      reason: "Derived from the current tracked status timestamp.",
-      source_entry_ids: [statusEntry.id],
-      source_audit_ids: [],
-    });
+    if (daysInPhase >= 3) {
+      pushSignal({
+        category: "time_in_phase",
+        severity: daysInPhase > NARRATIVE_LONG_GAP_DAYS && (lifecycle === "active" || lifecycle === "blocked") ? "medium" : "low",
+        summary: `Current phase "${phase}" has held for ${daysInPhase} day${daysInPhase === 1 ? "" : "s"}.`,
+        reason: "Derived from the current tracked status timestamp.",
+        source_entry_ids: [statusEntry.id],
+        source_audit_ids: [],
+      });
+    }
 
     const blockerText = structured.blockers?.trim();
     if (
@@ -4330,6 +4332,11 @@ export function registerTools(
               signals,
               timeline,
             };
+            if (signals.length === 0) {
+              const entryCount = (visibleStatusEntry ? 1 : 0) + logs.length;
+              const logCount = logs.length;
+              response.reason = `Scanned ${entryCount} entries (${logCount} logs). No signals exceeded detection thresholds. Narrative signals are derived from: phase duration (3+ days), blocker age (3+ days), decision churn (2+ similar decisions), long gaps between updates (14+ days), and reversal patterns.`;
+            }
             if (sources) response.sources = sources;
             const redactedSourcesSummary = summarizeRedactedSources(ctx, narrativeRedactedSources);
             if (redactedSourcesSummary) response.redacted_sources = redactedSourcesSummary;
