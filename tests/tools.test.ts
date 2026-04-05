@@ -2590,6 +2590,48 @@ describe("memory_resume", () => {
       namespace: "projects/grimnir",
     }));
   });
+
+  it("resolves a full namespace path with slash as-is (not prepending projects/)", async () => {
+    await callTool("memory_write", {
+      namespace: "testing/opus-review",
+      key: "status",
+      content: "## Phase\nActive\n\n## Current Work\nOpus review run.\n\n## Blockers\nNone.\n\n## Next Steps\n- Finish review",
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_resume", { project: "testing/opus-review" });
+    const result = parseToolResponse(raw) as { target_namespace?: string };
+
+    expect(result.target_namespace).toBe("testing/opus-review");
+  });
+
+  it("still prepends projects/ for a simple name without a slash", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/munin-memory",
+      key: "status",
+      content: "## Phase\nActive\n\n## Current Work\nBug fixes.\n\n## Blockers\nNone.\n\n## Next Steps\n- Ship fix",
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_resume", { project: "munin-memory" });
+    const result = parseToolResponse(raw) as { target_namespace?: string };
+
+    expect(result.target_namespace).toBe("projects/munin-memory");
+  });
+
+  it("uses an already-prefixed projects/ path as-is", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/munin-memory",
+      key: "status",
+      content: "## Phase\nActive\n\n## Current Work\nPrefix test.\n\n## Blockers\nNone.\n\n## Next Steps\n- Confirm prefix",
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_resume", { project: "projects/munin-memory" });
+    const result = parseToolResponse(raw) as { target_namespace?: string };
+
+    expect(result.target_namespace).toBe("projects/munin-memory");
+  });
 });
 
 describe("memory_extract", () => {

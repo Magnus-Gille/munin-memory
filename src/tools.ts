@@ -1577,6 +1577,8 @@ function resolveResumeScope(
     .sort();
   if (suffixMatches.length > 0) return suffixMatches[0];
 
+  if (project.includes("/")) return project;
+
   return `projects/${project}`;
 }
 
