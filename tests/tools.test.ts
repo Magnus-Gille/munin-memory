@@ -3185,6 +3185,48 @@ describe("memory_commitments", () => {
     expect(result.overdue).toHaveLength(0);
     expect(result.completed_recently).toHaveLength(0);
   });
+
+  it("returns a reason when no tracked status entries exist for the namespace", async () => {
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/empty-commitments-reason-test",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<unknown>;
+      at_risk: Array<unknown>;
+      overdue: Array<unknown>;
+      completed_recently: Array<unknown>;
+      reason?: string;
+    };
+
+    expect(result.open).toHaveLength(0);
+    expect(result.at_risk).toHaveLength(0);
+    expect(result.overdue).toHaveLength(0);
+    expect(result.completed_recently).toHaveLength(0);
+    expect(result.reason).toBeDefined();
+    expect(result.reason).toMatch(/no tracked status entries/i);
+  });
+
+  it("does not include reason when commitments are found", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/commitments-reason-check",
+      phase: "Active",
+      current_work: "Building the feature",
+      blockers: "None.",
+      next_steps: ["Ship the feature by 2027-06-01"],
+      lifecycle: "active",
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/commitments-reason-check",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<unknown>;
+      reason?: string;
+    };
+
+    expect(result.open.length).toBeGreaterThan(0);
+    expect(result.reason).toBeUndefined();
+  });
 });
 
 describe("memory_patterns", () => {
@@ -3386,6 +3428,70 @@ describe("memory_patterns", () => {
     };
 
     expect(result.patterns.some((pattern) => pattern.kind === "decision_theme")).toBe(false);
+  });
+
+  it("returns a reason explaining no entries when namespace is empty", async () => {
+    const raw = await callTool("memory_patterns", {
+      namespace: "projects/empty-namespace-reason-test",
+    });
+    const result = parseToolResponse(raw) as {
+      patterns: Array<unknown>;
+      reason?: string;
+    };
+
+    expect(result.patterns).toHaveLength(0);
+    expect(result.reason).toBeDefined();
+    expect(result.reason).toMatch(/no entries found/i);
+    expect(result.reason).toContain("projects/empty-namespace-reason-test");
+  });
+
+  it("returns a reason about threshold when entries exist but produce no patterns", async () => {
+    await callTool("memory_log", {
+      namespace: "projects/threshold-reason-test",
+      content: "Decision: we chose to use postgres for the database.",
+      tags: ["decision"],
+    });
+
+    const raw = await callTool("memory_patterns", {
+      namespace: "projects/threshold-reason-test",
+    });
+    const result = parseToolResponse(raw) as {
+      patterns: Array<unknown>;
+      reason?: string;
+    };
+
+    expect(result.patterns).toHaveLength(0);
+    expect(result.reason).toBeDefined();
+    expect(result.reason).toMatch(/scanned.*entries.*threshold|no recurring terms exceeded|filtered as generic/i);
+  });
+
+  it("does not include reason when patterns are found", async () => {
+    await callTool("memory_log", {
+      namespace: "projects/odin-reason-check",
+      content: "Decision: ARM64 support still looks fragile because maintainer risk remains high.",
+      tags: ["decision"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/odin-reason-check",
+      content: "Decided to defer rollout again due to ARM64 uncertainty and single maintainer risk.",
+      tags: ["decision"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/odin-reason-check",
+      content: "Decision review: maintainer risk and ARM64 support are still the blocking concerns.",
+      tags: ["decision"],
+    });
+
+    const raw = await callTool("memory_patterns", {
+      namespace: "projects/odin-reason-check",
+    });
+    const result = parseToolResponse(raw) as {
+      patterns: Array<unknown>;
+      reason?: string;
+    };
+
+    expect(result.patterns.length).toBeGreaterThan(0);
+    expect(result.reason).toBeUndefined();
   });
 });
 

@@ -4378,9 +4378,31 @@ export function registerTools(
               includeResolved: true,
             }, sessionId);
 
-            const response: Record<string, unknown> = {
-              ...classifyCommitments(rows, trackedStatusByNamespace, limit),
-            };
+            const classified = classifyCommitments(rows, trackedStatusByNamespace, limit);
+            const response: Record<string, unknown> = { ...classified };
+
+            const allBucketsEmpty =
+              classified.open.length === 0 &&
+              classified.at_risk.length === 0 &&
+              classified.overdue.length === 0 &&
+              classified.completed_recently.length === 0;
+
+            if (allBucketsEmpty) {
+              const statusEntryCount = visibleTrackedStatuses.allowed.length;
+              if (statusEntryCount === 0) {
+                response.reason =
+                  `No tracked status entries (projects/*/status or clients/*/status) found matching the scope. Commitments are derived from 'Next Steps' sections in status entries and from log entries containing commitment phrases.`;
+              } else {
+                const scopeEntries = listEntriesForDerivation(db, {
+                  namespace,
+                  since: normalizedSince,
+                }).filter((entry) => canRead(ctx, entry.namespace));
+                const logEntryCount = scopeEntries.filter((e) => e.entry_type === "log").length;
+                response.reason =
+                  `Scanned ${statusEntryCount} status entries and ${logEntryCount} log entries. No commitment-like content detected. Commitments are extracted from: (1) bullet points under 'Next Steps' in status entries, (2) log entries with forward-looking phrases ('will', 'need to', 'plan to') paired with action verbs, (3) explicit 'Commitment:' prefixes.`;
+              }
+            }
+
             const redactedSourcesSummary = summarizeRedactedSources(
               ctx,
               combineRedactedSources(visibleTrackedStatuses.redacted, redacted),
@@ -4550,6 +4572,18 @@ export function registerTools(
                 .slice(0, limit),
               supporting_sources: supportingSources,
             };
+
+            if (sortedPatterns.length === 0) {
+              const entryCount = candidateEntries.length;
+              if (entryCount === 0) {
+                response.reason = `No entries found in namespace '${namespace ?? "(all)"}'. Patterns require log or state entries with enough textual content.`;
+              } else if (termSources.size === 0) {
+                response.reason = `Scanned ${entryCount} entries but all recurring terms were filtered as generic/stopwords. Content may be too diverse for term-frequency patterns.`;
+              } else {
+                response.reason = `Scanned ${entryCount} entries but no recurring terms exceeded the frequency threshold. This namespace may not have enough decision logs yet (recommend 5+).`;
+              }
+            }
+
             const redactedSourcesSummary = summarizeRedactedSources(
               ctx,
               combineRedactedSources(
