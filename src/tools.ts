@@ -2520,6 +2520,25 @@ function isForwardLookingDatedCommitment(segment: string): boolean {
   return COMMITMENT_FORWARD_CUE.test(segment) || COMMITMENT_IMPERATIVE_PREFIX.test(segment);
 }
 
+export function computeCommitmentConfidence(
+  sourceType: string,
+  entryUpdatedAt: string,
+  hasDueDate: boolean,
+): number {
+  const baseByType: Record<string, number> = {
+    tracked_next_step: 0.90,
+    forward_looking_dated: 0.80,
+    explicit_commitment: 0.95,
+  };
+  const baseConfidence = baseByType[sourceType] ?? 0.70;
+
+  const daysSinceUpdate =
+    (Date.now() - new Date(entryUpdatedAt).getTime()) / (1000 * 60 * 60 * 24);
+  const decayFactor = Math.max(0.5, 1.0 - daysSinceUpdate / 60);
+
+  return Math.min(1.0, Math.max(0.35, baseConfidence * decayFactor + (hasDueDate ? 0.05 : 0)));
+}
+
 function extractCommitmentsFromEntry(entry: Entry): DerivedCommitmentInput[] {
   const commitments: DerivedCommitmentInput[] = [];
   const seenNormalized = new Set<string>();
@@ -2536,12 +2555,13 @@ function extractCommitmentsFromEntry(entry: Entry): DerivedCommitmentInput[] {
       if (isNoneLikeStatusText(step)) continue;
       const normalized = normalizeCommitmentText(step);
       if (!normalized) continue;
+      const dueAtStep = extractDueAtFromText(step);
       pushCommitment({
         sourceType: "tracked_next_step",
         fingerprint: `tracked_next_step:${normalized}`,
         text: step.trim(),
-        dueAt: extractDueAtFromText(step),
-        confidence: 0.96,
+        dueAt: dueAtStep,
+        confidence: computeCommitmentConfidence("tracked_next_step", entry.updated_at, !!dueAtStep),
       }, normalized);
     }
   }
@@ -2558,7 +2578,7 @@ function extractCommitmentsFromEntry(entry: Entry): DerivedCommitmentInput[] {
       fingerprint: `explicit_dated_commitment:${normalized}`,
       text: segment.trim(),
       dueAt,
-      confidence: 0.78,
+      confidence: computeCommitmentConfidence("explicit_dated_commitment", entry.updated_at, !!dueAt),
     }, normalized);
   }
 
@@ -2747,7 +2767,9 @@ function classifyCommitments(
     const blockedNamespace = assessment?.lifecycle === "blocked";
     const attentionNamespace = assessment?.needsAttention ?? false;
 
-    if (dueSoon || blockedNamespace || attentionNamespace) {
+    const lowConfidence = row.confidence < 0.60;
+
+    if (dueSoon || blockedNamespace || attentionNamespace || lowConfidence) {
       let reason = row.due_at
         ? `Due soon at ${row.due_at}.`
         : "Source namespace needs attention.";
@@ -2755,6 +2777,8 @@ function classifyCommitments(
         reason = "Source namespace is currently blocked.";
       } else if (attentionNamespace && assessment?.maintenanceItems[0]) {
         reason = assessment.maintenanceItems[0].suggestion;
+      } else if (lowConfidence) {
+        reason = "Low confidence: commitment may be stale or from an uncertain source.";
       }
       atRisk.push(buildCommitmentItem(row, reason));
       continue;

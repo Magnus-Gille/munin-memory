@@ -3,7 +3,7 @@ import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { initDatabase } from "../src/db.js";
-import { registerTools } from "../src/tools.js";
+import { registerTools, computeCommitmentConfidence } from "../src/tools.js";
 import { ownerContext } from "../src/access.js";
 import type { AccessContext } from "../src/access.js";
 import type { LibrarianRuntimeConfig } from "../src/librarian.js";
@@ -4687,5 +4687,51 @@ describe("unknown tool", () => {
     const raw = await callTool("memory_nonexistent", {});
     const result = parseToolResponse(raw) as { error: string };
     expect(result.error).toBe("unknown_tool");
+  });
+});
+
+describe("computeCommitmentConfidence", () => {
+  const now = new Date().toISOString();
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const sixtyDaysAgo = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString();
+
+  it("fresh tracked_next_step has confidence close to 0.90", () => {
+    const confidence = computeCommitmentConfidence("tracked_next_step", now, false);
+    expect(confidence).toBeGreaterThanOrEqual(0.88);
+    expect(confidence).toBeLessThanOrEqual(0.92);
+  });
+
+  it("30-day-old commitment has lower confidence than fresh one", () => {
+    const fresh = computeCommitmentConfidence("tracked_next_step", now, false);
+    const stale = computeCommitmentConfidence("tracked_next_step", thirtyDaysAgo, false);
+    expect(stale).toBeLessThan(fresh);
+  });
+
+  it("commitment with due date has higher confidence than one without", () => {
+    const withDue = computeCommitmentConfidence("tracked_next_step", now, true);
+    const withoutDue = computeCommitmentConfidence("tracked_next_step", now, false);
+    expect(withDue).toBeGreaterThan(withoutDue);
+  });
+
+  it("different source types produce different base confidences", () => {
+    const trackedStep = computeCommitmentConfidence("tracked_next_step", now, false);
+    const explicitCommitment = computeCommitmentConfidence("explicit_commitment", now, false);
+    const forwardLooking = computeCommitmentConfidence("forward_looking_dated", now, false);
+    const unknown = computeCommitmentConfidence("unknown_type", now, false);
+
+    expect(explicitCommitment).toBeGreaterThan(trackedStep);
+    expect(trackedStep).toBeGreaterThan(forwardLooking);
+    expect(forwardLooking).toBeGreaterThan(unknown);
+  });
+
+  it("confidence never exceeds 1.0", () => {
+    expect(computeCommitmentConfidence("explicit_commitment", now, true)).toBeLessThanOrEqual(1.0);
+    expect(computeCommitmentConfidence("tracked_next_step", now, true)).toBeLessThanOrEqual(1.0);
+  });
+
+  it("confidence never drops below 0.35", () => {
+    // 60+ days old with unknown source type and no due date should hit the floor
+    const veryStale = computeCommitmentConfidence("unknown_type", sixtyDaysAgo, false);
+    expect(veryStale).toBeGreaterThanOrEqual(0.35);
   });
 });
