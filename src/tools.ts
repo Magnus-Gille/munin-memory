@@ -4569,16 +4569,24 @@ export function registerTools(
             if (allBucketsEmpty) {
               const statusEntryCount = visibleTrackedStatuses.allowed.length;
               if (statusEntryCount === 0) {
-                response.reason =
-                  `No tracked status entries (projects/*/status or clients/*/status) found matching the scope. Commitments are derived from 'Next Steps' sections in status entries and from log entries containing commitment phrases.`;
+                const scopeEntries = listEntriesForDerivation(db, {
+                  namespace,
+                  since: normalizedSince,
+                }).filter((entry) => canRead(ctx, entry.namespace));
+                const totalEntryCount = scopeEntries.length;
+                if (totalEntryCount === 0) {
+                  response.reason = `Namespace has no status or log entries to scan`;
+                } else {
+                  response.reason = `No commitment-like phrases detected in ${totalEntryCount} scanned entries. Commitments are extracted from status next-steps and log entries containing phrases like 'I will...', 'We agreed to...'`;
+                }
               } else {
                 const scopeEntries = listEntriesForDerivation(db, {
                   namespace,
                   since: normalizedSince,
                 }).filter((entry) => canRead(ctx, entry.namespace));
-                const logEntryCount = scopeEntries.filter((e) => e.entry_type === "log").length;
+                const totalEntryCount = scopeEntries.length;
                 response.reason =
-                  `Scanned ${statusEntryCount} status entries and ${logEntryCount} log entries. No commitment-like content detected. Commitments are extracted from: (1) bullet points under 'Next Steps' in status entries, (2) log entries with forward-looking phrases ('will', 'need to', 'plan to') paired with action verbs, (3) explicit 'Commitment:' prefixes.`;
+                  `No commitment-like phrases detected in ${totalEntryCount} scanned entries. Commitments are extracted from status next-steps and log entries containing phrases like 'I will...', 'We agreed to...'`;
               }
             }
 
@@ -4754,12 +4762,11 @@ export function registerTools(
 
             if (sortedPatterns.length === 0) {
               const entryCount = candidateEntries.length;
+              const logCount = decisionLogs.length;
               if (entryCount === 0) {
-                response.reason = `No entries found in namespace '${namespace ?? "(all)"}'. Patterns require log or state entries with enough textual content.`;
-              } else if (termSources.size === 0) {
-                response.reason = `Scanned ${entryCount} entries but all recurring terms were filtered as generic/stopwords. Content may be too diverse for term-frequency patterns.`;
+                response.reason = `Namespace has ${logCount} log entries — minimum 5 required for pattern detection`;
               } else {
-                response.reason = `Scanned ${entryCount} entries but no recurring terms exceeded the frequency threshold. This namespace may not have enough decision logs yet (recommend 5+).`;
+                response.reason = `${entryCount} entries scanned, no recurring terms above frequency threshold`;
               }
             }
 

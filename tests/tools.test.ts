@@ -3305,7 +3305,7 @@ describe("memory_commitments", () => {
     expect(result.overdue).toHaveLength(0);
     expect(result.completed_recently).toHaveLength(0);
     expect(result.reason).toBeDefined();
-    expect(result.reason).toMatch(/no tracked status entries/i);
+    expect(result.reason).toMatch(/namespace has no status or log entries to scan/i);
   });
 
   it("does not include reason when commitments are found", async () => {
@@ -3415,6 +3415,45 @@ describe("memory_commitments", () => {
       text: "Ship feature X by 2027-08-01",
       source_type: "tracked_next_step",
     }));
+  });
+
+  it("includes a reason string in empty results and omits it in non-empty results", async () => {
+    // Empty namespace — no entries at all
+    const emptyRaw = await callTool("memory_commitments", {
+      namespace: "projects/commitments-reason-field-empty",
+    });
+    const emptyResult = parseToolResponse(emptyRaw) as {
+      open: Array<unknown>;
+      at_risk: Array<unknown>;
+      overdue: Array<unknown>;
+      completed_recently: Array<unknown>;
+      reason?: string;
+    };
+
+    expect(emptyResult.open).toHaveLength(0);
+    expect(emptyResult.reason).toBeDefined();
+    expect(typeof emptyResult.reason).toBe("string");
+    expect(emptyResult.reason!.length).toBeGreaterThan(0);
+
+    // Non-empty namespace — commitments found
+    await callTool("memory_update_status", {
+      namespace: "projects/commitments-reason-field-nonempty",
+      phase: "Active",
+      current_work: "Building things",
+      blockers: "None.",
+      next_steps: ["Deliver feature by 2027-09-01"],
+      lifecycle: "active",
+    });
+    const nonEmptyRaw = await callTool("memory_commitments", {
+      namespace: "projects/commitments-reason-field-nonempty",
+    });
+    const nonEmptyResult = parseToolResponse(nonEmptyRaw) as {
+      open: Array<unknown>;
+      reason?: string;
+    };
+
+    expect(nonEmptyResult.open.length).toBeGreaterThan(0);
+    expect(nonEmptyResult.reason).toBeUndefined();
   });
 });
 
@@ -3630,8 +3669,7 @@ describe("memory_patterns", () => {
 
     expect(result.patterns).toHaveLength(0);
     expect(result.reason).toBeDefined();
-    expect(result.reason).toMatch(/no entries found/i);
-    expect(result.reason).toContain("projects/empty-namespace-reason-test");
+    expect(result.reason).toMatch(/namespace has \d+ log entries — minimum \d+ required for pattern detection/i);
   });
 
   it("returns a reason about threshold when entries exist but produce no patterns", async () => {
@@ -3651,7 +3689,7 @@ describe("memory_patterns", () => {
 
     expect(result.patterns).toHaveLength(0);
     expect(result.reason).toBeDefined();
-    expect(result.reason).toMatch(/scanned.*entries.*threshold|no recurring terms exceeded|filtered as generic/i);
+    expect(result.reason).toMatch(/\d+ entries scanned, no recurring terms above frequency threshold/i);
   });
 
   it("does not include reason when patterns are found", async () => {
@@ -3717,6 +3755,50 @@ describe("memory_patterns", () => {
     if (result.patterns.some((p) => p.kind === "decision_theme")) {
       expect(allSummaryText).toMatch(/kubernetes|database/);
     }
+  });
+
+  it("includes a reason string in empty results and omits it in non-empty results", async () => {
+    // Empty namespace — no entries at all
+    const emptyRaw = await callTool("memory_patterns", {
+      namespace: "projects/patterns-reason-field-empty",
+    });
+    const emptyResult = parseToolResponse(emptyRaw) as {
+      patterns: Array<unknown>;
+      reason?: string;
+    };
+
+    expect(emptyResult.patterns).toHaveLength(0);
+    expect(emptyResult.reason).toBeDefined();
+    expect(typeof emptyResult.reason).toBe("string");
+    expect(emptyResult.reason!.length).toBeGreaterThan(0);
+
+    // Non-empty namespace — patterns found
+    await callTool("memory_log", {
+      namespace: "projects/patterns-reason-field-nonempty",
+      content: "Decision: ARM64 support still looks fragile because maintainer risk remains high.",
+      tags: ["decision"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/patterns-reason-field-nonempty",
+      content: "Decided to defer rollout again due to ARM64 uncertainty and single maintainer risk.",
+      tags: ["decision"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/patterns-reason-field-nonempty",
+      content: "Decision review: maintainer risk and ARM64 support are still the blocking concerns.",
+      tags: ["decision"],
+    });
+
+    const nonEmptyRaw = await callTool("memory_patterns", {
+      namespace: "projects/patterns-reason-field-nonempty",
+    });
+    const nonEmptyResult = parseToolResponse(nonEmptyRaw) as {
+      patterns: Array<unknown>;
+      reason?: string;
+    };
+
+    expect(nonEmptyResult.patterns.length).toBeGreaterThan(0);
+    expect(nonEmptyResult.reason).toBeUndefined();
   });
 });
 
