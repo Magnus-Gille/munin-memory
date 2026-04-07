@@ -214,6 +214,9 @@ export interface DashboardSynthesis {
   summary: string;
   updated_at: string;
   updated_at_local?: string;
+  synthesis_age_days: number;
+  logs_incorporated: number | null;
+  origin: "auto" | "manual";
   cross_references: Array<{
     target_namespace: string;
     reference_type: string;

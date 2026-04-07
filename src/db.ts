@@ -2554,6 +2554,30 @@ export function replaceCrossReferences(
 }
 
 /**
+ * Count log entries in a namespace that were incorporated into synthesis
+ * (created_at <= last_log_created_at from consolidation_metadata).
+ * Returns null if the namespace has no consolidation metadata.
+ */
+export function countLogsIncorporated(
+  db: Database.Database,
+  namespace: string,
+): number | null {
+  const meta = (
+    db
+      .prepare("SELECT last_log_created_at FROM consolidation_metadata WHERE namespace = ?")
+      .get(namespace) as { last_log_created_at: string | null } | undefined
+  );
+  if (!meta || !meta.last_log_created_at) return null;
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) as cnt FROM entries
+       WHERE namespace = ? AND entry_type = 'log' AND created_at <= ?`,
+    )
+    .get(namespace, meta.last_log_created_at) as { cnt: number };
+  return row.cnt;
+}
+
+/**
  * Return all cross-references where namespace is either source or target,
  * ordered by extracted_at DESC.
  */

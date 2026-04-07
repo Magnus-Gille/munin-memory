@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { initDatabase } from "../src/db.js";
+import { initDatabase, upsertConsolidationMetadata } from "../src/db.js";
 import { registerTools, computeCommitmentConfidence } from "../src/tools.js";
 import { ownerContext } from "../src/access.js";
 import type { AccessContext } from "../src/access.js";
@@ -2425,6 +2425,172 @@ describe("memory_orient", () => {
     expect(result.namespaces_meta.total).toBeGreaterThan(1);
     expect(result.namespaces_meta.returned).toBe(1);
     expect(result.namespaces_meta.truncated).toBe(true);
+  });
+});
+
+describe("synthesis freshness metadata", () => {
+  it("memory_orient includes synthesis_age_days, logs_incorporated, and origin when synthesis exists", async () => {
+    // Write status and synthesis entries
+    await callTool("memory_write", {
+      namespace: "projects/synth-test",
+      key: "status",
+      content: "Active project with synthesis",
+      tags: ["active"],
+    });
+    // Write a synthesis entry with a known timestamp
+    const synthesisTime = "2026-03-31T12:00:00.000Z";
+    await callTool("memory_write", {
+      namespace: "projects/synth-test",
+      key: "synthesis",
+      content: "## Phase: Active\n\nConsolidated synthesis content.",
+      tags: ["active"],
+    });
+    // Backdate synthesis to synthesisTime so age_days is predictable
+    db.prepare("UPDATE entries SET updated_at = ? WHERE namespace = ? AND key = 'synthesis'").run(
+      synthesisTime,
+      "projects/synth-test",
+    );
+    // Write 3 log entries then add consolidation metadata
+    await callTool("memory_log", { namespace: "projects/synth-test", content: "Log 1", tags: ["decision"] });
+    await callTool("memory_log", { namespace: "projects/synth-test", content: "Log 2", tags: ["milestone"] });
+    await callTool("memory_log", { namespace: "projects/synth-test", content: "Log 3", tags: ["decision"] });
+    // Backdate all logs so they are before last_log_created_at
+    const logTime = "2026-03-30T10:00:00.000Z";
+    db.prepare("UPDATE entries SET created_at = ?, updated_at = ? WHERE namespace = ? AND entry_type = 'log'").run(
+      logTime,
+      logTime,
+      "projects/synth-test",
+    );
+    // Insert consolidation metadata referencing all 3 logs
+    upsertConsolidationMetadata(db, {
+      namespace: "projects/synth-test",
+      last_consolidated_at: synthesisTime,
+      last_log_id: null,
+      last_log_created_at: logTime,
+      synthesis_model: "test-model",
+      synthesis_token_count: 800,
+      run_duration_ms: 500,
+    });
+
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as {
+      dashboard: {
+        active: Array<{
+          namespace: string;
+          synthesis?: {
+            synthesis_age_days: number;
+            logs_incorporated: number | null;
+            origin: string;
+          };
+        }>;
+      };
+    };
+
+    const entry = result.dashboard.active.find((e) => e.namespace === "projects/synth-test");
+    expect(entry).toBeDefined();
+    expect(entry!.synthesis).toBeDefined();
+    expect(typeof entry!.synthesis!.synthesis_age_days).toBe("number");
+    expect(entry!.synthesis!.synthesis_age_days).toBeGreaterThanOrEqual(0);
+    expect(entry!.synthesis!.logs_incorporated).toBe(3);
+    expect(entry!.synthesis!.origin).toBe("auto");
+  });
+
+  it("synthesis.logs_incorporated is null when no consolidation metadata exists", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/no-meta",
+      key: "status",
+      content: "Active project without consolidation",
+      tags: ["active"],
+    });
+    await callTool("memory_write", {
+      namespace: "projects/no-meta",
+      key: "synthesis",
+      content: "Manually written synthesis.",
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as {
+      dashboard: {
+        active: Array<{
+          namespace: string;
+          synthesis?: { logs_incorporated: number | null; origin: string; synthesis_age_days: number };
+        }>;
+      };
+    };
+
+    const entry = result.dashboard.active.find((e) => e.namespace === "projects/no-meta");
+    expect(entry!.synthesis).toBeDefined();
+    expect(entry!.synthesis!.logs_incorporated).toBeNull();
+    expect(entry!.synthesis!.origin).toBe("auto");
+    expect(typeof entry!.synthesis!.synthesis_age_days).toBe("number");
+  });
+
+  it("memory_read for key=synthesis includes freshness metadata", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/read-synth",
+      key: "synthesis",
+      content: "## Synthesis content",
+      tags: ["active"],
+    });
+    const synthesisTime = "2026-03-28T08:00:00.000Z";
+    db.prepare("UPDATE entries SET updated_at = ? WHERE namespace = ? AND key = 'synthesis'").run(
+      synthesisTime,
+      "projects/read-synth",
+    );
+    await callTool("memory_log", { namespace: "projects/read-synth", content: "Log A", tags: ["decision"] });
+    await callTool("memory_log", { namespace: "projects/read-synth", content: "Log B", tags: ["decision"] });
+    const logTime = "2026-03-27T10:00:00.000Z";
+    db.prepare("UPDATE entries SET created_at = ?, updated_at = ? WHERE namespace = ? AND entry_type = 'log'").run(
+      logTime,
+      logTime,
+      "projects/read-synth",
+    );
+    upsertConsolidationMetadata(db, {
+      namespace: "projects/read-synth",
+      last_consolidated_at: synthesisTime,
+      last_log_id: null,
+      last_log_created_at: logTime,
+      synthesis_model: "test-model",
+      synthesis_token_count: 400,
+      run_duration_ms: 300,
+    });
+
+    const raw = await callTool("memory_read", { namespace: "projects/read-synth", key: "synthesis" });
+    const result = parseToolResponse(raw) as {
+      found: boolean;
+      synthesis_age_days: number;
+      logs_incorporated: number | null;
+      origin: string;
+    };
+
+    expect(result.found).toBe(true);
+    expect(typeof result.synthesis_age_days).toBe("number");
+    expect(result.synthesis_age_days).toBeGreaterThanOrEqual(0);
+    expect(result.logs_incorporated).toBe(2);
+    expect(result.origin).toBe("auto");
+  });
+
+  it("memory_read for non-synthesis keys does NOT include freshness metadata", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/no-synth-key",
+      key: "status",
+      content: "Regular status entry",
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_read", { namespace: "projects/no-synth-key", key: "status" });
+    const result = parseToolResponse(raw) as {
+      found: boolean;
+      synthesis_age_days?: number;
+      logs_incorporated?: number;
+      origin?: string;
+    };
+
+    expect(result.found).toBe(true);
+    expect(result.synthesis_age_days).toBeUndefined();
+    expect(result.logs_incorporated).toBeUndefined();
+    expect(result.origin).toBeUndefined();
   });
 });
 

@@ -62,6 +62,8 @@ import {
   getOtherKeysInNamespaceByClassification,
   getNamespacesNeedingConsolidation,
   getCrossReferences,
+  countLogsIncorporated,
+  getConsolidationMetadata,
 } from "./db.js";
 import {
   CLASSIFICATION_LEVELS,
@@ -3972,10 +3974,17 @@ export function registerTools(
               const synthesis = readState(db, assessment.row.namespace, "synthesis");
               if (synthesis) {
                 const crossRefs = getCrossReferences(db, assessment.row.namespace);
+                const synthesisMeta = getConsolidationMetadata(db, assessment.row.namespace);
+                const synthesisAgeMs = Date.now() - new Date(synthesis.updated_at).getTime();
+                const synthesisAgeDays = Math.floor(synthesisAgeMs / (1000 * 60 * 60 * 24));
+                const logsIncorporated = countLogsIncorporated(db, assessment.row.namespace);
                 entry.synthesis = {
                   summary: contentPreview(synthesis.content),
                   updated_at: synthesis.updated_at,
                   updated_at_local: toLocalDisplay(synthesis.updated_at),
+                  synthesis_age_days: synthesisAgeDays,
+                  logs_incorporated: logsIncorporated,
+                  origin: synthesisMeta ? "auto" : "auto",
                   cross_references: crossRefs.map((ref) => ({
                     target_namespace: ref.target_namespace === assessment.row.namespace ? ref.source_namespace : ref.target_namespace,
                     reference_type: ref.reference_type,
@@ -5320,6 +5329,14 @@ export function registerTools(
               }
               if (isStale(parsed.updated_at)) {
                 response.stale = true;
+              }
+              // Attach freshness metadata when reading a synthesis entry
+              if (key === "synthesis") {
+                const synthesisMeta = getConsolidationMetadata(db, namespace);
+                const synthesisAgeMs = Date.now() - new Date(parsed.updated_at).getTime();
+                response.synthesis_age_days = Math.floor(synthesisAgeMs / (1000 * 60 * 60 * 24));
+                response.logs_incorporated = countLogsIncorporated(db, namespace);
+                response.origin = synthesisMeta ? "auto" : "auto";
               }
               // Analytics: log opened_result outcome
               if (sessionId) {
