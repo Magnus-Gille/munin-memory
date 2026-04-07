@@ -4857,46 +4857,70 @@ describe("unknown tool", () => {
 
 describe("computeCommitmentConfidence", () => {
   const now = new Date().toISOString();
+  const fiveDaysAgo = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString();
   const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
   const sixtyDaysAgo = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString();
 
   it("fresh tracked_next_step has confidence close to 0.90", () => {
     const confidence = computeCommitmentConfidence("tracked_next_step", now, false);
-    expect(confidence).toBeGreaterThanOrEqual(0.88);
-    expect(confidence).toBeLessThanOrEqual(0.92);
+    expect(confidence).toBeCloseTo(0.90, 1);
   });
 
-  it("30-day-old commitment has lower confidence than fresh one", () => {
-    const fresh = computeCommitmentConfidence("tracked_next_step", now, false);
+  // Source type ordering: status next-steps > explicit phrases > implicit mentions
+  it("status next-steps (tracked_next_step) have higher confidence than log-extracted items", () => {
+    const statusNextStep = computeCommitmentConfidence("tracked_next_step", now, false);
+    const explicitPhrase = computeCommitmentConfidence("explicit_commitment", now, false);
+    const implicit = computeCommitmentConfidence("explicit_dated_commitment", now, false);
+    expect(statusNextStep).toBeGreaterThan(explicitPhrase);
+    expect(explicitPhrase).toBeGreaterThan(implicit);
+  });
+
+  // Staleness: discrete multipliers — 30+ days = ×0.7, 60+ days = ×0.5
+  it("old commitments have lower confidence than fresh ones", () => {
+    const fresh = computeCommitmentConfidence("tracked_next_step", fiveDaysAgo, false);
+    const stale30 = computeCommitmentConfidence("tracked_next_step", thirtyDaysAgo, false);
+    const stale60 = computeCommitmentConfidence("tracked_next_step", sixtyDaysAgo, false);
+    expect(stale30).toBeLessThan(fresh);
+    expect(stale60).toBeLessThan(stale30);
+  });
+
+  it("30-day staleness applies ×0.7 multiplier to base score", () => {
     const stale = computeCommitmentConfidence("tracked_next_step", thirtyDaysAgo, false);
-    expect(stale).toBeLessThan(fresh);
+    expect(stale).toBeCloseTo(0.90 * 0.7, 5);
   });
 
-  it("commitment with due date has higher confidence than one without", () => {
+  it("60-day staleness applies ×0.5 multiplier to base score", () => {
+    const stale = computeCommitmentConfidence("tracked_next_step", sixtyDaysAgo, false);
+    expect(stale).toBeCloseTo(0.90 * 0.5, 5);
+  });
+
+  // Specificity: dates score higher than vague ones
+  it("commitments with dates score higher than vague ones", () => {
     const withDue = computeCommitmentConfidence("tracked_next_step", now, true);
     const withoutDue = computeCommitmentConfidence("tracked_next_step", now, false);
     expect(withDue).toBeGreaterThan(withoutDue);
   });
 
-  it("different source types produce different base confidences", () => {
-    const trackedStep = computeCommitmentConfidence("tracked_next_step", now, false);
-    const explicitCommitment = computeCommitmentConfidence("explicit_commitment", now, false);
-    const forwardLooking = computeCommitmentConfidence("forward_looking_dated", now, false);
-    const unknown = computeCommitmentConfidence("unknown_type", now, false);
-
-    expect(explicitCommitment).toBeGreaterThan(trackedStep);
-    expect(trackedStep).toBeGreaterThan(forwardLooking);
-    expect(forwardLooking).toBeGreaterThan(unknown);
+  it("commitments with specific names score higher than generic ones", () => {
+    const withName = computeCommitmentConfidence("tracked_next_step", now, false, "Review PR from Alice before Friday");
+    const withoutName = computeCommitmentConfidence("tracked_next_step", now, false, "review the pr");
+    expect(withName).toBeGreaterThan(withoutName);
   });
 
+  it("vague terms reduce confidence", () => {
+    const vague = computeCommitmentConfidence("explicit_commitment", now, false, "will eventually fix the issue someday");
+    const nonVague = computeCommitmentConfidence("explicit_commitment", now, false, "will fix the issue");
+    expect(vague).toBeLessThan(nonVague);
+  });
+
+  // Clamping to [0.0, 1.0]
   it("confidence never exceeds 1.0", () => {
+    expect(computeCommitmentConfidence("tracked_next_step", now, true, "Fix by 2026-01-01 with Alice")).toBeLessThanOrEqual(1.0);
     expect(computeCommitmentConfidence("explicit_commitment", now, true)).toBeLessThanOrEqual(1.0);
-    expect(computeCommitmentConfidence("tracked_next_step", now, true)).toBeLessThanOrEqual(1.0);
   });
 
-  it("confidence never drops below 0.35", () => {
-    // 60+ days old with unknown source type and no due date should hit the floor
-    const veryStale = computeCommitmentConfidence("unknown_type", sixtyDaysAgo, false);
-    expect(veryStale).toBeGreaterThanOrEqual(0.35);
+  it("confidence never drops below 0.0", () => {
+    const veryStale = computeCommitmentConfidence("unknown_type", sixtyDaysAgo, false, "maybe someday eventually");
+    expect(veryStale).toBeGreaterThanOrEqual(0.0);
   });
 });
