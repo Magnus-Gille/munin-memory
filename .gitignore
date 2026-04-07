@@ -38,3 +38,9 @@ debate/tm-tailscale-summary.md
 debate/ortelius-collab-summary.md
 docs/pi-github-account-plan.md
 tasks/
+
+# Benchmark data (real data, not committed)
+benchmark/fixtures/
+benchmark/reports/
+benchmark/queries/*.jsonl
+!benchmark/queries/example.jsonl

@@ -1,0 +1,3 @@
+{"id":"ex-001","query":"project status","source":"synthetic","category":"project-status","search_mode":"hybrid","expected_namespaces":["projects/munin-memory"],"notes":"Should find status entries in project namespaces"}
+{"id":"ex-002","query":"what was decided about authentication","source":"synthetic","category":"decision-lookup","search_mode":"hybrid","expected_namespaces":["decisions/auth"],"notes":"Should find decision entries about auth"}
+{"id":"ex-003","query":"conventions for writing to munin","source":"synthetic","category":"broad-orientation","search_mode":"hybrid","expected_namespaces":["meta/conventions"],"notes":"Should find conventions state entry"}

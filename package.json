@@ -30,7 +30,8 @@
     "admin": "tsx src/admin-cli.ts",
     "dev": "tsx watch src/index.ts",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "benchmark": "MUNIN_BENCHMARK=true vitest run tests/benchmark.test.ts"
   },
   "dependencies": {
     "@huggingface/transformers": "^3.8.1",
