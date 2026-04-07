@@ -6,6 +6,8 @@ import {
   writeState,
   logRetrievalEvent,
   logRetrievalOutcome,
+  logRetrievalFeedback,
+  getRetrievalAggregates,
   getInsightsByEntry,
   pruneRetrievalAnalytics,
   nowUTC,
@@ -470,5 +472,209 @@ describe("pruneRetrievalAnalytics", () => {
 
   it("never throws", () => {
     expect(() => pruneRetrievalAnalytics(db, 90)).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// logRetrievalFeedback
+// ---------------------------------------------------------------------------
+
+describe("logRetrievalFeedback", () => {
+  it("inserts feedback and returns an ID", () => {
+    const id = logRetrievalFeedback(db, {
+      sessionId: "session-fb-1",
+      feedbackType: "bad_results",
+      queryText: "test query",
+      detail: "results were irrelevant",
+    });
+
+    expect(id).toBeTruthy();
+
+    const row = db
+      .prepare("SELECT * FROM retrieval_feedback WHERE id = ?")
+      .get(id) as Record<string, unknown>;
+    expect(row.feedback_type).toBe("bad_results");
+    expect(row.query_text).toBe("test query");
+    expect(row.detail).toBe("results were irrelevant");
+    expect(row.session_id).toBe("session-fb-1");
+    expect(row.retrieval_event_id).toBeNull(); // no prior event
+  });
+
+  it("auto-links to most recent retrieval event in session within window", () => {
+    const eventId = logRetrievalEvent(db, {
+      sessionId: "session-fb-2",
+      toolName: "memory_query",
+      queryText: "find something",
+      resultIds: ["id-1"],
+      resultNamespaces: ["projects/foo"],
+      resultRanks: [1],
+    });
+
+    const fbId = logRetrievalFeedback(db, {
+      sessionId: "session-fb-2",
+      feedbackType: "missing_result",
+      expectedNamespace: "projects/bar",
+      expectedKey: "status",
+    });
+
+    expect(fbId).toBeTruthy();
+    const row = db
+      .prepare("SELECT * FROM retrieval_feedback WHERE id = ?")
+      .get(fbId) as Record<string, unknown>;
+    expect(row.retrieval_event_id).toBe(eventId);
+    expect(row.expected_namespace).toBe("projects/bar");
+    expect(row.expected_key).toBe("status");
+  });
+
+  it("does not link to event outside correlation window", () => {
+    // Insert an event with a timestamp far in the past
+    const oldTimestamp = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    db.prepare(
+      `INSERT INTO retrieval_events
+         (id, session_id, timestamp, tool_name, result_ids, result_namespaces, result_ranks)
+       VALUES ('old-event', 'session-fb-3', ?, 'memory_query', '[]', '[]', '[]')`,
+    ).run(oldTimestamp);
+    db.prepare(
+      `INSERT INTO retrieval_sessions (session_id, last_event_id, last_event_timestamp, created_at)
+       VALUES ('session-fb-3', 'old-event', ?, ?)`,
+    ).run(oldTimestamp, oldTimestamp);
+
+    const fbId = logRetrievalFeedback(db, {
+      sessionId: "session-fb-3",
+      feedbackType: "stale_results",
+    });
+
+    const row = db
+      .prepare("SELECT * FROM retrieval_feedback WHERE id = ?")
+      .get(fbId) as Record<string, unknown>;
+    expect(row.retrieval_event_id).toBeNull();
+  });
+
+  it("stores all optional fields", () => {
+    const id = logRetrievalFeedback(db, {
+      sessionId: "session-fb-4",
+      feedbackType: "missing_result",
+      queryText: "find the project",
+      expectedNamespace: "projects/hugin",
+      expectedKey: "status",
+      expectedEntryId: "uuid-123",
+      detail: "should have found hugin status",
+    });
+
+    const row = db
+      .prepare("SELECT * FROM retrieval_feedback WHERE id = ?")
+      .get(id) as Record<string, unknown>;
+    expect(row.expected_namespace).toBe("projects/hugin");
+    expect(row.expected_key).toBe("status");
+    expect(row.expected_entry_id).toBe("uuid-123");
+    expect(row.detail).toBe("should have found hugin status");
+  });
+
+  it("records good_results feedback", () => {
+    const id = logRetrievalFeedback(db, {
+      sessionId: "session-fb-5",
+      feedbackType: "good_results",
+      detail: "exactly what I needed",
+    });
+
+    const row = db
+      .prepare("SELECT * FROM retrieval_feedback WHERE id = ?")
+      .get(id) as Record<string, unknown>;
+    expect(row.feedback_type).toBe("good_results");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getRetrievalAggregates
+// ---------------------------------------------------------------------------
+
+describe("getRetrievalAggregates", () => {
+  it("returns zero counts on empty DB", () => {
+    const agg = getRetrievalAggregates(db);
+    expect(agg.total_events).toBe(0);
+    expect(agg.total_outcomes).toBe(0);
+    expect(agg.reformulation_count).toBe(0);
+    expect(agg.positive_outcome_count).toBe(0);
+    expect(agg.total_feedback).toBe(0);
+    expect(agg.feedback_counts).toEqual({});
+  });
+
+  it("counts events and outcomes correctly", () => {
+    const eventId = logRetrievalEvent(db, {
+      sessionId: "agg-session",
+      toolName: "memory_query",
+      queryText: "test",
+      resultIds: ["id-1"],
+      resultNamespaces: ["projects/foo"],
+      resultRanks: [1],
+    });
+
+    logRetrievalOutcome(db, "agg-session", {
+      outcomeType: "opened_result",
+      entryId: "id-1",
+      namespace: "projects/foo",
+    });
+
+    const agg = getRetrievalAggregates(db);
+    expect(agg.total_events).toBe(1);
+    expect(agg.total_outcomes).toBe(1);
+    expect(agg.positive_outcome_count).toBe(1);
+    expect(agg.reformulation_count).toBe(0);
+  });
+
+  it("counts reformulations", () => {
+    // First query — no outcomes
+    logRetrievalEvent(db, {
+      sessionId: "reform-session",
+      toolName: "memory_query",
+      queryText: "bad query",
+      resultIds: ["id-1"],
+      resultNamespaces: ["projects/foo"],
+      resultRanks: [1],
+    });
+
+    // Second query in same session — triggers reformulation detection
+    logRetrievalEvent(db, {
+      sessionId: "reform-session",
+      toolName: "memory_query",
+      queryText: "better query",
+      resultIds: ["id-2"],
+      resultNamespaces: ["projects/bar"],
+      resultRanks: [1],
+    });
+
+    const agg = getRetrievalAggregates(db);
+    expect(agg.reformulation_count).toBe(1);
+  });
+
+  it("counts feedback by type", () => {
+    logRetrievalFeedback(db, {
+      sessionId: "fb-agg-1",
+      feedbackType: "bad_results",
+    });
+    logRetrievalFeedback(db, {
+      sessionId: "fb-agg-2",
+      feedbackType: "bad_results",
+    });
+    logRetrievalFeedback(db, {
+      sessionId: "fb-agg-3",
+      feedbackType: "good_results",
+    });
+
+    const agg = getRetrievalAggregates(db);
+    expect(agg.total_feedback).toBe(3);
+    expect(agg.feedback_counts.bad_results).toBe(2);
+    expect(agg.feedback_counts.good_results).toBe(1);
+  });
+
+  it("respects time window filters", () => {
+    logRetrievalFeedback(db, {
+      sessionId: "window-1",
+      feedbackType: "good_results",
+    });
+
+    const futureDate = new Date(Date.now() + 86400000).toISOString();
+    const agg = getRetrievalAggregates(db, futureDate);
+    expect(agg.total_feedback).toBe(0);
   });
 });

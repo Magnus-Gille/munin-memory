@@ -55,6 +55,8 @@ import {
   logRetrievalEvent,
   logRetrievalOutcome,
   getInsightsByEntry,
+  logRetrievalFeedback,
+  getRetrievalAggregates,
   getAuditHistoryPage,
   insertRedactionLog,
   getOtherKeysInNamespaceByClassification,
@@ -140,6 +142,8 @@ import type {
   AuditAction,
   AuditEntry,
   ConsolidationRunResult,
+  RetrievalFeedbackParams,
+  RetrievalAggregates,
 } from "./types.js";
 
 // In-memory delete token store (debate resolution #9)
@@ -3677,6 +3681,48 @@ const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: "memory_retrieval_feedback",
+    description:
+      "Submit explicit feedback on retrieval quality. Use after a search/query returned poor results, missed an expected entry, returned stale content, or ranked results badly. Also use to confirm good results. Auto-links to the most recent retrieval event in the current session. Owner-only. Feedback with missing_result + expected entry info feeds into benchmark ground truth candidates.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        feedback_type: {
+          type: "string",
+          enum: ["bad_results", "missing_result", "wrong_order", "stale_results", "good_results"],
+          description:
+            "Type of feedback: bad_results (irrelevant results), missing_result (expected entry not returned), wrong_order (relevant but poorly ranked), stale_results (outdated content surfaced), good_results (retrieval worked well).",
+        },
+        query: {
+          type: "string",
+          description:
+            "Optional. The query that produced the results. Defaults to the query from the most recent retrieval event in this session.",
+        },
+        expected_namespace: {
+          type: "string",
+          description:
+            "Optional. The namespace of the entry that should have been returned (for missing_result/wrong_order).",
+        },
+        expected_key: {
+          type: "string",
+          description:
+            "Optional. The key of the entry that should have been returned.",
+        },
+        expected_entry_id: {
+          type: "string",
+          description:
+            "Optional. The UUID of the entry that should have been returned.",
+        },
+        detail: {
+          type: "string",
+          description:
+            "Optional. Free-text explanation of what went wrong or why results were good.",
+        },
+      },
+      required: ["feedback_type"],
+    },
+  },
+  {
     name: "memory_consolidate",
     description:
       "Manually trigger memory consolidation for a specific namespace or all eligible tracked namespaces. Consolidation synthesizes unincorporated log entries into an enriched 'synthesis' status summary using an LLM, and extracts cross-namespace references. The background worker runs automatically when enabled, but this tool allows on-demand consolidation. Owner-only.",
@@ -5952,10 +5998,69 @@ export function registerTools(
             const rows = getInsightsByEntry(db, insightsArgs.namespace, minImpressions, insightsLimit);
             const entries: EntryInsight[] = rows.map(computeEntryInsight);
 
+            // Include aggregate retrieval health metrics
+            const rawAgg = getRetrievalAggregates(db);
+            const aggregates: RetrievalAggregates = {
+              period_start: rawAgg.period_start,
+              period_end: rawAgg.period_end,
+              total_events: rawAgg.total_events,
+              total_outcomes: rawAgg.total_outcomes,
+              reformulation_rate: rawAgg.total_events > 0
+                ? rawAgg.reformulation_count / rawAgg.total_events
+                : 0,
+              positive_outcome_rate: rawAgg.total_events > 0
+                ? rawAgg.positive_outcome_count / rawAgg.total_events
+                : 0,
+              feedback_counts: rawAgg.feedback_counts as Record<RetrievalFeedbackParams["feedback_type"], number>,
+              total_feedback: rawAgg.total_feedback,
+            };
+
             return okResult("insights", {
               entries,
               total: entries.length,
               min_impressions: minImpressions,
+              aggregates,
+            });
+          }
+
+          case "memory_retrieval_feedback": {
+            if (ctx.principalType !== "owner") {
+              return accessDeniedResponse(ctx, "retrieval_feedback");
+            }
+
+            const fbArgs = (args ?? {}) as unknown as RetrievalFeedbackParams;
+            if (!fbArgs.feedback_type) {
+              return errResult("retrieval_feedback", "validation_error", "feedback_type is required.");
+            }
+
+            const validTypes = ["bad_results", "missing_result", "wrong_order", "stale_results", "good_results"];
+            if (!validTypes.includes(fbArgs.feedback_type)) {
+              return errResult(
+                "retrieval_feedback",
+                "validation_error",
+                `Invalid feedback_type "${fbArgs.feedback_type}". Must be one of: ${validTypes.join(", ")}`,
+              );
+            }
+
+            const feedbackId = logRetrievalFeedback(db, {
+              sessionId: sessionId ?? "unknown",
+              feedbackType: fbArgs.feedback_type,
+              queryText: fbArgs.query,
+              expectedNamespace: fbArgs.expected_namespace,
+              expectedKey: fbArgs.expected_key,
+              expectedEntryId: fbArgs.expected_entry_id,
+              detail: fbArgs.detail,
+            });
+
+            if (!feedbackId) {
+              return errResult("retrieval_feedback", "internal_error", "Failed to record feedback.");
+            }
+
+            return okResult("retrieval_feedback", {
+              id: feedbackId,
+              feedback_type: fbArgs.feedback_type,
+              linked_to_event: true, // logRetrievalFeedback auto-links when possible
+              message: "Feedback recorded. Thank you — this helps improve retrieval quality.",
             });
           }
 

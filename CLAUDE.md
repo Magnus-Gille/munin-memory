@@ -35,7 +35,8 @@ Part of the Hugin & Munin personal AI system. See `prd.md` for full product cont
 | `memory_log` | Append a chronological log entry to a namespace |
 | `memory_list` | Browse namespaces and their contents (with recent log previews; demo and completed task namespaces hidden by default) |
 | `memory_delete` | Delete entries (with token-based confirmation) |
-| `memory_insights` | Inspect retrieval usage signals per entry: impressions, open rate, follow-through rate, staleness pressure, learned signals. Phase 1 of outcome-aware retrieval (observe only, no ranking changes). |
+| `memory_insights` | Inspect retrieval usage signals per entry: impressions, open rate, follow-through rate, staleness pressure, learned signals. Now also returns aggregate retrieval health metrics (reformulation rate, positive outcome rate, feedback counts). |
+| `memory_retrieval_feedback` | Submit explicit feedback on retrieval quality. Supports: bad_results, missing_result, wrong_order, stale_results, good_results. Auto-links to most recent retrieval event. Owner-only. Feeds benchmark ground truth pipeline. |
 | `memory_consolidate` | Manually trigger consolidation for a specific namespace or all eligible tracked namespaces. Synthesizes unincorporated logs into an enriched 'synthesis' key via OpenRouter LLM call. Owner-only. |
 
 ## Project structure

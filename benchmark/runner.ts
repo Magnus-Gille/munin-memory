@@ -14,6 +14,7 @@ import {
   queryEntriesLexicalScored,
   queryEntriesHybridScored,
   queryEntriesSemanticScored,
+  setVecLoaded,
   type QueryOptions,
   type HybridQueryOptions,
   type SemanticQueryOptions,
@@ -181,6 +182,7 @@ export async function runBenchmark(
   // Open snapshot DB read-only
   const db = new Database(snapshotPath, { readonly: true });
   sqliteVec.load(db);
+  setVecLoaded(true);
 
   // Get DB metadata
   const schemaRow = db.prepare("SELECT MAX(version) as v FROM schema_version").get() as { v: number } | undefined;

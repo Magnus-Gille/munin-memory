@@ -94,6 +94,14 @@ export function vecLoaded(): boolean {
 }
 
 /**
+ * Mark sqlite-vec as loaded externally (e.g. benchmark runner
+ * that opens its own DB and calls sqliteVec.load() directly).
+ */
+export function setVecLoaded(loaded: boolean): void {
+  _vecLoaded = loaded;
+}
+
+/**
  * Idempotently create the entries_vec vec0 table.
  * Called on every startup when sqlite-vec is available.
  * NOT part of the migration system — vec0 tables can't be created
@@ -2018,6 +2026,162 @@ export function pruneRetrievalAnalytics(
   } catch {
     // Never interrupt startup or cleanup
   }
+}
+
+// --- Retrieval feedback ---
+
+export interface RetrievalFeedbackInput {
+  sessionId: string;
+  feedbackType: "bad_results" | "missing_result" | "wrong_order" | "stale_results" | "good_results";
+  queryText?: string;
+  expectedNamespace?: string;
+  expectedKey?: string;
+  expectedEntryId?: string;
+  detail?: string;
+}
+
+/**
+ * Log explicit retrieval quality feedback.
+ * Auto-links to the most recent retrieval event in the session (if within correlation window).
+ * Never throws.
+ */
+export function logRetrievalFeedback(
+  db: Database.Database,
+  input: RetrievalFeedbackInput,
+): string | null {
+  try {
+    const now = nowUTC();
+    const id = randomUUID();
+    const nowMs = new Date(now).getTime();
+
+    // Try to link to most recent retrieval event in session
+    let eventId: string | null = null;
+    const sessionRow = db
+      .prepare(
+        "SELECT last_event_id, last_event_timestamp FROM retrieval_sessions WHERE session_id = ?",
+      )
+      .get(input.sessionId) as
+      | { last_event_id: string | null; last_event_timestamp: string }
+      | undefined;
+
+    if (sessionRow?.last_event_id) {
+      const priorTs = new Date(sessionRow.last_event_timestamp).getTime();
+      if (nowMs - priorTs <= RETRIEVAL_CORRELATION_WINDOW_MS) {
+        eventId = sessionRow.last_event_id;
+      }
+    }
+
+    db.prepare(
+      `INSERT INTO retrieval_feedback
+         (id, retrieval_event_id, session_id, feedback_type, query_text,
+          expected_namespace, expected_key, expected_entry_id, detail, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      id,
+      eventId,
+      input.sessionId,
+      input.feedbackType,
+      input.queryText ?? null,
+      input.expectedNamespace ?? null,
+      input.expectedKey ?? null,
+      input.expectedEntryId ?? null,
+      input.detail ?? null,
+      now,
+    );
+
+    return id;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Compute aggregate retrieval health metrics over a time window.
+ */
+export function getRetrievalAggregates(
+  db: Database.Database,
+  since?: string,
+  until?: string,
+): {
+  period_start: string;
+  period_end: string;
+  total_events: number;
+  total_outcomes: number;
+  reformulation_count: number;
+  positive_outcome_count: number;
+  feedback_counts: Record<string, number>;
+  total_feedback: number;
+} {
+  const periodEnd = until ?? nowUTC();
+  const periodStart = since ?? new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+
+  const eventCount = (
+    db
+      .prepare("SELECT COUNT(*) as cnt FROM retrieval_events WHERE timestamp >= ? AND timestamp <= ?")
+      .get(periodStart, periodEnd) as { cnt: number }
+  ).cnt;
+
+  const outcomeCount = (
+    db
+      .prepare(
+        `SELECT COUNT(*) as cnt FROM retrieval_outcomes ro
+         JOIN retrieval_events re ON re.id = ro.retrieval_event_id
+         WHERE re.timestamp >= ? AND re.timestamp <= ?`,
+      )
+      .get(periodStart, periodEnd) as { cnt: number }
+  ).cnt;
+
+  const reformulationCount = (
+    db
+      .prepare(
+        `SELECT COUNT(*) as cnt FROM retrieval_outcomes ro
+         JOIN retrieval_events re ON re.id = ro.retrieval_event_id
+         WHERE ro.outcome_type = 'query_reformulated'
+           AND re.timestamp >= ? AND re.timestamp <= ?`,
+      )
+      .get(periodStart, periodEnd) as { cnt: number }
+  ).cnt;
+
+  const positiveOutcomeCount = (
+    db
+      .prepare(
+        `SELECT COUNT(*) as cnt FROM retrieval_outcomes ro
+         JOIN retrieval_events re ON re.id = ro.retrieval_event_id
+         WHERE ro.outcome_type IN (
+           'opened_result', 'opened_namespace_context',
+           'write_in_result_namespace', 'log_in_result_namespace'
+         )
+         AND re.timestamp >= ? AND re.timestamp <= ?`,
+      )
+      .get(periodStart, periodEnd) as { cnt: number }
+  ).cnt;
+
+  // Feedback counts by type
+  const feedbackRows = db
+    .prepare(
+      `SELECT feedback_type, COUNT(*) as cnt FROM retrieval_feedback
+       WHERE created_at >= ? AND created_at <= ?
+       GROUP BY feedback_type`,
+    )
+    .all(periodStart, periodEnd) as Array<{ feedback_type: string; cnt: number }>;
+
+  const feedbackCounts: Record<string, number> = {};
+  let totalFeedback = 0;
+  for (const row of feedbackRows) {
+    feedbackCounts[row.feedback_type] = row.cnt;
+    totalFeedback += row.cnt;
+  }
+
+  return {
+    period_start: periodStart,
+    period_end: periodEnd,
+    total_events: eventCount,
+    total_outcomes: outcomeCount,
+    reformulation_count: reformulationCount,
+    positive_outcome_count: positiveOutcomeCount,
+    feedback_counts: feedbackCounts,
+    total_feedback: totalFeedback,
+  };
 }
 
 // --- Audit history ---

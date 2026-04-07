@@ -1243,6 +1243,38 @@ describe("memory_consolidate — access enforcement", () => {
   });
 });
 
+// memory_retrieval_feedback
+// ---------------------------------------------------------------------------
+
+describe("memory_retrieval_feedback — access enforcement", () => {
+  it("owner memory_retrieval_feedback → succeeds", async () => {
+    const raw = await ownerCall("memory_retrieval_feedback", {
+      feedback_type: "good_results",
+      detail: "test feedback",
+    });
+    const result = parse(raw) as { ok: boolean; feedback_type: string; id: string };
+    expect(result.ok).toBe(true);
+    expect(result.feedback_type).toBe("good_results");
+    expect(result.id).toBeDefined();
+  });
+
+  it("family memory_retrieval_feedback → denied (invisible)", async () => {
+    const raw = await familyCall("memory_retrieval_feedback", {
+      feedback_type: "bad_results",
+    });
+    const result = parse(raw) as { found: boolean };
+    expect(result.found).toBe(false);
+  });
+
+  it("agent memory_retrieval_feedback → denied", async () => {
+    const raw = await agentCall("memory_retrieval_feedback", {
+      feedback_type: "bad_results",
+    });
+    const result = parse(raw) as { error: string };
+    expect(result.error).toBe("access_denied");
+  });
+});
+
 describe("meta: all registered tools are covered", () => {
   it("every tool returned by ListTools has at least one access enforcement test", async () => {
     const server = new Server(
@@ -1283,6 +1315,7 @@ describe("meta: all registered tools are covered", () => {
       "memory_insights",
       "memory_history",
       "memory_consolidate",
+      "memory_retrieval_feedback",
       "memory_status",
     ]);
 

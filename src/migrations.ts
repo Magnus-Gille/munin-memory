@@ -571,6 +571,37 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 13,
+    description: "Add retrieval_feedback table for explicit quality feedback",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS retrieval_feedback (
+          id TEXT PRIMARY KEY,
+          retrieval_event_id TEXT REFERENCES retrieval_events(id) ON DELETE SET NULL,
+          session_id TEXT NOT NULL,
+          feedback_type TEXT NOT NULL CHECK(feedback_type IN (
+            'bad_results', 'missing_result', 'wrong_order', 'stale_results', 'good_results'
+          )),
+          query_text TEXT,
+          expected_namespace TEXT,
+          expected_key TEXT,
+          expected_entry_id TEXT,
+          detail TEXT,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_retrieval_feedback_event
+          ON retrieval_feedback(retrieval_event_id) WHERE retrieval_event_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_retrieval_feedback_session
+          ON retrieval_feedback(session_id);
+        CREATE INDEX IF NOT EXISTS idx_retrieval_feedback_created
+          ON retrieval_feedback(created_at);
+        CREATE INDEX IF NOT EXISTS idx_retrieval_feedback_type
+          ON retrieval_feedback(feedback_type);
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

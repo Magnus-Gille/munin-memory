@@ -673,6 +673,49 @@ export interface InsightsResponse {
   entries: EntryInsight[];
   total: number;
   min_impressions: number;
+  aggregates?: RetrievalAggregates;
+}
+
+// Retrieval feedback types
+
+export type RetrievalFeedbackType =
+  | "bad_results"
+  | "missing_result"
+  | "wrong_order"
+  | "stale_results"
+  | "good_results";
+
+export interface RetrievalFeedbackParams {
+  feedback_type: RetrievalFeedbackType;
+  query?: string;
+  expected_namespace?: string;
+  expected_key?: string;
+  expected_entry_id?: string;
+  detail?: string;
+}
+
+export interface RetrievalFeedbackRow {
+  id: string;
+  retrieval_event_id: string | null;
+  session_id: string;
+  feedback_type: RetrievalFeedbackType;
+  query_text: string | null;
+  expected_namespace: string | null;
+  expected_key: string | null;
+  expected_entry_id: string | null;
+  detail: string | null;
+  created_at: string;
+}
+
+export interface RetrievalAggregates {
+  period_start: string;
+  period_end: string;
+  total_events: number;
+  total_outcomes: number;
+  reformulation_rate: number;
+  positive_outcome_rate: number;
+  feedback_counts: Record<RetrievalFeedbackType, number>;
+  total_feedback: number;
 }
 
 // Security types
