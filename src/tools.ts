@@ -3830,12 +3830,15 @@ function computeEntryInsight(row: {
   opens: number;
   write_outcomes: number;
   log_outcomes: number;
+  followthrough_events: number;
   opened_when_stale_count: number;
   updated_at: string;
 }): EntryInsight {
-  const { entry_id, namespace, key, content_preview, impressions, opens, write_outcomes, log_outcomes, opened_when_stale_count } = row;
+  const { entry_id, namespace, key, content_preview, impressions, opens, write_outcomes, log_outcomes, followthrough_events, opened_when_stale_count } = row;
+  // Use the pre-computed followthrough_events (distinct events with any follow-through action)
+  // to avoid double-counting events that had multiple outcome types. Math.min is a safety clamp.
   const followthrough = impressions > 0
-    ? Math.min(1, (opens + write_outcomes + log_outcomes) / impressions)
+    ? Math.min(1, followthrough_events / impressions)
     : 0;
   const stalenessPressure = opens > 0 ? opened_when_stale_count / opens : 0;
 

@@ -1770,6 +1770,8 @@ export interface EntryInsightRow {
   opens: number;
   write_outcomes: number;
   log_outcomes: number;
+  /** Events where any follow-through action occurred (open, write, or log). Always ≤ impressions. */
+  followthrough_events: number;
   opened_when_stale_count: number;
   updated_at: string;
 }
@@ -1965,6 +1967,16 @@ export function getInsightsByEntry(
       COUNT(DISTINCT op.retrieval_event_id) AS opens,
       COUNT(DISTINCT CASE WHEN ro_w.outcome_type = 'write_in_result_namespace' THEN ro_w.retrieval_event_id END) AS write_outcomes,
       COUNT(DISTINCT CASE WHEN ro_l.outcome_type = 'log_in_result_namespace' THEN ro_l.retrieval_event_id END) AS log_outcomes,
+      -- followthrough_events: distinct impression events where ANY follow-through action occurred.
+      -- Counting a single combined column avoids double-counting events that have multiple
+      -- outcome types (e.g. both opened_result AND write_in_result_namespace), which would
+      -- inflate (opens + write_outcomes + log_outcomes) / impressions above 1.0.
+      COUNT(DISTINCT CASE
+        WHEN op.retrieval_event_id IS NOT NULL
+          OR ro_w.retrieval_event_id IS NOT NULL
+          OR ro_l.retrieval_event_id IS NOT NULL
+        THEN imp.event_id
+      END) AS followthrough_events,
       COUNT(DISTINCT CASE
         WHEN op.retrieval_event_id IS NOT NULL
           AND e.updated_at IS NOT NULL

@@ -384,6 +384,64 @@ describe("getInsightsByEntry", () => {
     const rows = getInsightsByEntry(db, undefined, 1, 20);
     expect(rows.find((r) => r.entry_id === entry.id)).toBeUndefined();
   });
+
+  it("followthrough_events is bounded by impressions when multiple outcome types fire per event (fix #9)", () => {
+    // Regression test: an entry with opened_result + write_in_result_namespace +
+    // log_in_result_namespace all on the same retrieval event used to produce
+    // (opens + write_outcomes + log_outcomes) / impressions = 3, exceeding 1.0.
+    // The SQL now computes followthrough_events as the count of distinct impression
+    // events that had ANY follow-through action, so the ratio is naturally ≤ 1.0.
+    writeState(db, "projects/followthrough-test", "status", "ft entry", ["active"]);
+    const entry = db
+      .prepare(
+        "SELECT id FROM entries WHERE namespace = 'projects/followthrough-test' AND key = 'status'",
+      )
+      .get() as { id: string };
+
+    const now = nowUTC();
+
+    // Two impression events, each with all three outcome types
+    const eventIds = ["ft-evt-1", "ft-evt-2"];
+    for (const evtId of eventIds) {
+      db.prepare(
+        `INSERT INTO retrieval_events (id, session_id, timestamp, tool_name, result_ids, result_namespaces, result_ranks)
+         VALUES (?, 'session-ft', ?, 'memory_query', json_array(?), '[]', '[]')`,
+      ).run(evtId, now, entry.id);
+    }
+
+    let idx = 0;
+    for (const evtId of eventIds) {
+      // opened_result (entry-scoped)
+      db.prepare(
+        `INSERT INTO retrieval_outcomes (id, retrieval_event_id, timestamp, outcome_type, entry_id)
+         VALUES (?, ?, ?, 'opened_result', ?)`,
+      ).run(`ft-out-${idx++}`, evtId, now, entry.id);
+
+      // write_in_result_namespace (namespace-scoped, no entry_id)
+      db.prepare(
+        `INSERT INTO retrieval_outcomes (id, retrieval_event_id, timestamp, outcome_type)
+         VALUES (?, ?, ?, 'write_in_result_namespace')`,
+      ).run(`ft-out-${idx++}`, evtId, now);
+
+      // log_in_result_namespace (namespace-scoped, no entry_id)
+      db.prepare(
+        `INSERT INTO retrieval_outcomes (id, retrieval_event_id, timestamp, outcome_type)
+         VALUES (?, ?, ?, 'log_in_result_namespace')`,
+      ).run(`ft-out-${idx++}`, evtId, now);
+    }
+
+    const rows = getInsightsByEntry(db, undefined, 1, 50);
+    const row = rows.find((r) => r.entry_id === entry.id);
+    expect(row).toBeDefined();
+    expect(row!.impressions).toBe(2);
+    // followthrough_events must not exceed impressions
+    expect(row!.followthrough_events).toBeLessThanOrEqual(row!.impressions);
+    expect(row!.followthrough_events).toBe(2); // both events had follow-through
+    // Computed rate must be in [0, 1]
+    const rate = row!.impressions > 0 ? row!.followthrough_events / row!.impressions : 0;
+    expect(rate).toBeGreaterThanOrEqual(0);
+    expect(rate).toBeLessThanOrEqual(1.0);
+  });
 });
 
 describe("pruneRetrievalAnalytics", () => {
