@@ -3981,8 +3981,10 @@ export function registerTools(
                 const synthesisAgeMs = Date.now() - new Date(synthesis.updated_at).getTime();
                 const synthesisAgeDays = Math.floor(synthesisAgeMs / (1000 * 60 * 60 * 24));
                 const logsIncorporated = countLogsIncorporated(db, assessment.row.namespace);
+                const synthesisIsStale =
+                  new Date(synthesis.updated_at) < new Date(assessment.row.updated_at);
                 entry.synthesis = {
-                  summary: contentPreview(synthesis.content),
+                  ...(synthesisIsStale ? { stale: true as const } : { summary: contentPreview(synthesis.content) }),
                   updated_at: synthesis.updated_at,
                   updated_at_local: toLocalDisplay(synthesis.updated_at),
                   synthesis_age_days: synthesisAgeDays,

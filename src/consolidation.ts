@@ -299,10 +299,22 @@ export function buildSynthesisPrompt(
     logsSection = `[${omittedCount} older log entries omitted due to length]\n\n${logsSection}`;
   }
 
+  const groundingSection = existingStatus
+    ? `## Ground Truth (human-maintained — DO NOT contradict)
+
+The following status entry is maintained by the human user and is authoritative for Phase, lifecycle state, and current work description. Your synthesis must be consistent with this. Supplement with log-derived insights, timeline, and decision context — but never override the Phase or lifecycle.
+
+${existingStatus}
+
+---
+
+`
+    : "";
+
   return `You are a memory consolidation agent for Munin, a persistent memory system for an AI assistant.
 Your job is to synthesize recent log entries into an enriched status summary for the namespace "${namespace}".
 
-## Current Status Entry
+${groundingSection}## Current Status Entry
 ${existingStatus ?? "No status entry exists yet for this namespace."}
 
 ## Previous Synthesis

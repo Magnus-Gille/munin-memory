@@ -174,6 +174,23 @@ describe("buildSynthesisPrompt", () => {
     const prompt = buildSynthesisPrompt("projects/test", null, null, logs);
     expect(prompt).toContain("Tags: none");
   });
+
+  it("includes Ground Truth grounding section when status entry exists", () => {
+    const logs: Entry[] = [makeEntry({ content: "A log entry" })];
+    const statusContent = "## Phase: Active\n\nWorking on feature Y.";
+    const prompt = buildSynthesisPrompt("projects/grounded", statusContent, null, logs);
+
+    expect(prompt).toContain("## Ground Truth (human-maintained — DO NOT contradict)");
+    expect(prompt).toContain("never override the Phase or lifecycle");
+    expect(prompt).toContain(statusContent);
+  });
+
+  it("omits Ground Truth grounding section when status entry is null", () => {
+    const logs: Entry[] = [makeEntry({ content: "A log entry" })];
+    const prompt = buildSynthesisPrompt("projects/no-status", null, null, logs);
+
+    expect(prompt).not.toContain("## Ground Truth (human-maintained — DO NOT contradict)");
+  });
 });
 
 // ─── parseSynthesisResponse ──────────────────────────────────────────────────
@@ -286,6 +303,32 @@ describe("consolidateNamespace", () => {
     expect(promptText).toContain("Active project");
     expect(promptText).toContain("## Previous Synthesis");
     expect(promptText).toContain("Old synthesis");
+  });
+
+  it("prompt includes Ground Truth grounding section when status entry exists", async () => {
+    writeState(db, "projects/grounded-ns", "status", "## Phase: Active\nBuilding the integration layer.", ["active"]);
+
+    for (let i = 0; i < 3; i++) {
+      appendLog(db, "projects/grounded-ns", `Log entry ${i}`, []);
+    }
+
+    await consolidateNamespace(db, "projects/grounded-ns", mockCallApi);
+
+    const promptText = mockCallApi.mock.calls[0][0];
+    expect(promptText).toContain("## Ground Truth (human-maintained — DO NOT contradict)");
+    expect(promptText).toContain("never override the Phase or lifecycle");
+    expect(promptText).toContain("Building the integration layer.");
+  });
+
+  it("prompt does NOT include Ground Truth grounding section when no status entry exists", async () => {
+    for (let i = 0; i < 3; i++) {
+      appendLog(db, "projects/no-status-ns", `Log entry ${i}`, []);
+    }
+
+    await consolidateNamespace(db, "projects/no-status-ns", mockCallApi);
+
+    const promptText = mockCallApi.mock.calls[0][0];
+    expect(promptText).not.toContain("## Ground Truth (human-maintained — DO NOT contradict)");
   });
 
   it("handles API error gracefully — returns error in result, no DB writes", async () => {

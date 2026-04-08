@@ -2592,6 +2592,105 @@ describe("synthesis freshness metadata", () => {
     expect(result.logs_incorporated).toBeUndefined();
     expect(result.origin).toBeUndefined();
   });
+
+  it("stale synthesis: synthesis older than status has stale:true and no summary", async () => {
+    const namespace = "projects/stale-synth-test";
+    // Write status entry first (will have a later timestamp)
+    await callTool("memory_write", {
+      namespace,
+      key: "status",
+      content: "## Phase: Active\n\nWorking on integration.",
+      tags: ["active"],
+    });
+    // Write synthesis entry
+    await callTool("memory_write", {
+      namespace,
+      key: "synthesis",
+      content: "## Phase: Active\n\nOld synthesis summary.",
+      tags: ["active"],
+    });
+    // Backdate synthesis to be older than the status entry
+    const oldSynthesisTime = "2025-01-01T00:00:00.000Z";
+    db.prepare("UPDATE entries SET updated_at = ? WHERE namespace = ? AND key = 'synthesis'").run(
+      oldSynthesisTime,
+      namespace,
+    );
+
+    const raw = await callTool("memory_orient", { detail: "standard" });
+    const result = parseToolResponse(raw) as {
+      dashboard: {
+        active: Array<{
+          namespace: string;
+          synthesis?: {
+            stale?: true;
+            summary?: string;
+            updated_at: string;
+            synthesis_age_days: number;
+            logs_incorporated: number | null;
+            origin: string;
+          };
+        }>;
+      };
+    };
+
+    const entry = result.dashboard.active.find((e) => e.namespace === namespace);
+    expect(entry).toBeDefined();
+    expect(entry!.synthesis).toBeDefined();
+    expect(entry!.synthesis!.stale).toBe(true);
+    expect(entry!.synthesis!.summary).toBeUndefined();
+    // Diagnostic fields should still be present
+    expect(entry!.synthesis!.updated_at).toBe(oldSynthesisTime);
+    expect(typeof entry!.synthesis!.synthesis_age_days).toBe("number");
+    expect(entry!.synthesis!.origin).toBeDefined();
+  });
+
+  it("fresh synthesis: synthesis newer than status has summary and no stale flag", async () => {
+    const namespace = "projects/fresh-synth-test";
+    // Write status entry with old timestamp
+    await callTool("memory_write", {
+      namespace,
+      key: "status",
+      content: "## Phase: Active\n\nWorking on integration.",
+      tags: ["active"],
+    });
+    // Backdate status to be older than synthesis
+    const oldStatusTime = "2025-01-01T00:00:00.000Z";
+    db.prepare("UPDATE entries SET updated_at = ? WHERE namespace = ? AND key = 'status'").run(
+      oldStatusTime,
+      namespace,
+    );
+    // Write synthesis entry (will have a current/newer timestamp)
+    await callTool("memory_write", {
+      namespace,
+      key: "synthesis",
+      content: "## Phase: Active\n\nFresh synthesis summary.",
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_orient", { detail: "standard" });
+    const result = parseToolResponse(raw) as {
+      dashboard: {
+        active: Array<{
+          namespace: string;
+          synthesis?: {
+            stale?: true;
+            summary?: string;
+            updated_at: string;
+            synthesis_age_days: number;
+            logs_incorporated: number | null;
+            origin: string;
+          };
+        }>;
+      };
+    };
+
+    const entry = result.dashboard.active.find((e) => e.namespace === namespace);
+    expect(entry).toBeDefined();
+    expect(entry!.synthesis).toBeDefined();
+    expect(entry!.synthesis!.stale).toBeUndefined();
+    expect(typeof entry!.synthesis!.summary).toBe("string");
+    expect(entry!.synthesis!.summary!.length).toBeGreaterThan(0);
+  });
 });
 
 describe("memory_resume", () => {
