@@ -4595,6 +4595,8 @@ export function registerTools(
                 summary: "No narrative context found.",
                 signals: [],
                 timeline: [],
+                data_requirements: "Narrative signals require a status entry or log entries in this namespace. Signals are derived from: phase duration (3+ days in a phase), blocker age (3+ days), decision churn (2+ similar decisions), long gaps between updates (14+ days), and reversal patterns (lifecycle toggling between active and blocked).",
+                suggestion: "Use memory_history for a chronological view of this namespace instead.",
               };
               if (narrativeArgs.include_sources) response.sources = [];
               const redactedSourcesSummary = summarizeRedactedSources(ctx, narrativeRedactedSources);
@@ -4621,6 +4623,8 @@ export function registerTools(
               const entryCount = (visibleStatusEntry ? 1 : 0) + logs.length;
               const logCount = logs.length;
               response.reason = `Scanned ${entryCount} entries (${logCount} logs). No signals exceeded detection thresholds. Narrative signals are derived from: phase duration (3+ days), blocker age (3+ days), decision churn (2+ similar decisions), long gaps between updates (14+ days), and reversal patterns.`;
+              response.data_requirements = "Signals need sustained conditions: a status entry with a blocker present for 3+ days, a phase lasting 3+ days, a gap of 14+ days between log entries, 2+ similar decisions logged with the decision tag, or at least 2 lifecycle transitions between active and blocked.";
+              response.suggestion = "Use memory_history for a chronological view of this namespace instead.";
             }
             if (sources) response.sources = sources;
             const redactedSourcesSummary = summarizeRedactedSources(ctx, narrativeRedactedSources);
@@ -4689,8 +4693,12 @@ export function registerTools(
                 const totalEntryCount = scopeEntries.length;
                 if (totalEntryCount === 0) {
                   response.reason = `Namespace has no status or log entries to scan`;
+                  response.data_requirements = "Commitments are extracted from two sources: (1) status entries with a non-empty next_steps list, and (2) log entries containing commitment-like phrases such as 'I will...', 'We agreed to...', 'We will...', or 'Agreed: ...'. At least one status or log entry matching these patterns is required.";
+                  response.suggestion = "Use memory_read to check the status entry's next steps directly.";
                 } else {
                   response.reason = `No commitment-like phrases detected in ${totalEntryCount} scanned entries. Commitments are extracted from status next-steps and log entries containing phrases like 'I will...', 'We agreed to...'`;
+                  response.data_requirements = "Commitments are extracted from two sources: (1) status entries with a non-empty next_steps list, and (2) log entries containing commitment-like phrases such as 'I will...', 'We agreed to...', 'We will...', or 'Agreed: ...'. At least one status or log entry matching these patterns is required.";
+                  response.suggestion = "Use memory_read to check the status entry's next steps directly.";
                 }
               } else {
                 const scopeEntries = listEntriesForDerivation(db, {
@@ -4700,6 +4708,8 @@ export function registerTools(
                 const totalEntryCount = scopeEntries.length;
                 response.reason =
                   `No commitment-like phrases detected in ${totalEntryCount} scanned entries. Commitments are extracted from status next-steps and log entries containing phrases like 'I will...', 'We agreed to...'`;
+                response.data_requirements = "Commitments are extracted from two sources: (1) status entries with a non-empty next_steps list, and (2) log entries containing commitment-like phrases such as 'I will...', 'We agreed to...', 'We will...', or 'Agreed: ...'. At least one status or log entry matching these patterns is required.";
+                response.suggestion = "Use memory_read to check the status entry's next steps directly.";
               }
             }
 
@@ -4878,8 +4888,12 @@ export function registerTools(
               const logCount = decisionLogs.length;
               if (entryCount === 0) {
                 response.reason = `Namespace has ${logCount} log entries — minimum 5 required for pattern detection`;
+                response.data_requirements = "Pattern detection requires decision-tagged log entries (tagged with 'decision'). A decision_theme pattern needs at least 3 entries sharing recurring terms, with 2+ terms appearing across 2+ entries. An undated_next_steps pattern needs 2+ open commitments without due dates. A commitment_slip or blocked_followthrough pattern needs 2+ overdue or blocked commitments.";
+                response.suggestion = "Use memory_query with tags: [\"decision\"] to browse decision logs directly.";
               } else {
                 response.reason = `${entryCount} entries scanned, no recurring terms above frequency threshold`;
+                response.data_requirements = "Pattern detection requires decision-tagged log entries (tagged with 'decision'). A decision_theme pattern needs at least 3 entries sharing recurring terms, with 2+ terms appearing across 2+ entries. An undated_next_steps pattern needs 2+ open commitments without due dates. A commitment_slip or blocked_followthrough pattern needs 2+ overdue or blocked commitments.";
+                response.suggestion = "Use memory_query with tags: [\"decision\"] to browse decision logs directly.";
               }
             }
 

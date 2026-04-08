@@ -3454,6 +3454,78 @@ describe("memory_narrative", () => {
       expect(typeof result.reason).toBe("string");
     }
   });
+
+  it("includes data_requirements and suggestion when no entries exist, omits them when signals are found", async () => {
+    // Empty namespace — no entries at all
+    const emptyRaw = await callTool("memory_narrative", {
+      namespace: "projects/narrative-data-req-empty",
+    });
+    const emptyResult = parseToolResponse(emptyRaw) as {
+      signals: Array<unknown>;
+      data_requirements?: string;
+      suggestion?: string;
+    };
+
+    expect(emptyResult.signals).toHaveLength(0);
+    expect(emptyResult.data_requirements).toBeDefined();
+    expect(typeof emptyResult.data_requirements).toBe("string");
+    expect(emptyResult.data_requirements!.length).toBeGreaterThan(0);
+    expect(emptyResult.suggestion).toBeDefined();
+    expect(emptyResult.suggestion).toBe("Use memory_history for a chronological view of this namespace instead.");
+
+    // Non-empty namespace — signals found
+    await callTool("memory_update_status", {
+      namespace: "projects/narrative-data-req-nonempty",
+      phase: "Blocked",
+      current_work: "Waiting on vendor",
+      blockers: "Vendor sign-off missing.",
+      next_steps: ["Follow up"],
+      lifecycle: "blocked",
+    });
+    db.prepare("UPDATE entries SET updated_at = '2026-03-20T00:00:00.000Z' WHERE namespace = 'projects/narrative-data-req-nonempty' AND key = 'status'").run();
+
+    const nonEmptyRaw = await callTool("memory_narrative", {
+      namespace: "projects/narrative-data-req-nonempty",
+    });
+    const nonEmptyResult = parseToolResponse(nonEmptyRaw) as {
+      signals: Array<unknown>;
+      data_requirements?: string;
+      suggestion?: string;
+    };
+
+    expect(nonEmptyResult.signals.length).toBeGreaterThan(0);
+    expect(nonEmptyResult.data_requirements).toBeUndefined();
+    expect(nonEmptyResult.suggestion).toBeUndefined();
+  });
+
+  it("includes data_requirements and suggestion when entries exist but no signals exceeded thresholds", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/narrative-data-req-no-signal",
+      phase: "Active",
+      current_work: "Just started",
+      blockers: "None.",
+      next_steps: ["Keep going"],
+      lifecycle: "active",
+    });
+
+    const raw = await callTool("memory_narrative", {
+      namespace: "projects/narrative-data-req-no-signal",
+    });
+    const result = parseToolResponse(raw) as {
+      signals: Array<unknown>;
+      reason?: string;
+      data_requirements?: string;
+      suggestion?: string;
+    };
+
+    if (result.signals.length === 0) {
+      expect(result.reason).toBeDefined();
+      expect(result.data_requirements).toBeDefined();
+      expect(typeof result.data_requirements).toBe("string");
+      expect(result.data_requirements!.length).toBeGreaterThan(0);
+      expect(result.suggestion).toBe("Use memory_history for a chronological view of this namespace instead.");
+    }
+  });
 });
 
 describe("memory_commitments", () => {
@@ -3780,6 +3852,51 @@ describe("memory_commitments", () => {
 
     expect(nonEmptyResult.open.length).toBeGreaterThan(0);
     expect(nonEmptyResult.reason).toBeUndefined();
+  });
+
+  it("includes data_requirements and suggestion in empty results, omits them in non-empty results", async () => {
+    // Empty namespace — no entries at all
+    const emptyRaw = await callTool("memory_commitments", {
+      namespace: "projects/commitments-data-req-empty",
+    });
+    const emptyResult = parseToolResponse(emptyRaw) as {
+      open: Array<unknown>;
+      at_risk: Array<unknown>;
+      overdue: Array<unknown>;
+      completed_recently: Array<unknown>;
+      reason?: string;
+      data_requirements?: string;
+      suggestion?: string;
+    };
+
+    expect(emptyResult.open).toHaveLength(0);
+    expect(emptyResult.data_requirements).toBeDefined();
+    expect(typeof emptyResult.data_requirements).toBe("string");
+    expect(emptyResult.data_requirements!.length).toBeGreaterThan(0);
+    expect(emptyResult.suggestion).toBeDefined();
+    expect(emptyResult.suggestion).toBe("Use memory_read to check the status entry's next steps directly.");
+
+    // Non-empty namespace — commitments found
+    await callTool("memory_update_status", {
+      namespace: "projects/commitments-data-req-nonempty",
+      phase: "Active",
+      current_work: "Working on feature",
+      blockers: "None.",
+      next_steps: ["Ship feature by 2027-10-01"],
+      lifecycle: "active",
+    });
+    const nonEmptyRaw = await callTool("memory_commitments", {
+      namespace: "projects/commitments-data-req-nonempty",
+    });
+    const nonEmptyResult = parseToolResponse(nonEmptyRaw) as {
+      open: Array<unknown>;
+      data_requirements?: string;
+      suggestion?: string;
+    };
+
+    expect(nonEmptyResult.open.length).toBeGreaterThan(0);
+    expect(nonEmptyResult.data_requirements).toBeUndefined();
+    expect(nonEmptyResult.suggestion).toBeUndefined();
   });
 });
 
@@ -4125,6 +4242,56 @@ describe("memory_patterns", () => {
 
     expect(nonEmptyResult.patterns.length).toBeGreaterThan(0);
     expect(nonEmptyResult.reason).toBeUndefined();
+  });
+
+  it("includes data_requirements and suggestion in empty results, omits them in non-empty results", async () => {
+    // Empty namespace — no entries at all
+    const emptyRaw = await callTool("memory_patterns", {
+      namespace: "projects/patterns-data-req-empty",
+    });
+    const emptyResult = parseToolResponse(emptyRaw) as {
+      patterns: Array<unknown>;
+      reason?: string;
+      data_requirements?: string;
+      suggestion?: string;
+    };
+
+    expect(emptyResult.patterns).toHaveLength(0);
+    expect(emptyResult.data_requirements).toBeDefined();
+    expect(typeof emptyResult.data_requirements).toBe("string");
+    expect(emptyResult.data_requirements!.length).toBeGreaterThan(0);
+    expect(emptyResult.suggestion).toBeDefined();
+    expect(emptyResult.suggestion).toBe("Use memory_query with tags: [\"decision\"] to browse decision logs directly.");
+
+    // Non-empty namespace — patterns found
+    await callTool("memory_log", {
+      namespace: "projects/patterns-data-req-nonempty",
+      content: "Decision: ARM64 support still looks fragile because maintainer risk remains high.",
+      tags: ["decision"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/patterns-data-req-nonempty",
+      content: "Decided to defer rollout again due to ARM64 uncertainty and single maintainer risk.",
+      tags: ["decision"],
+    });
+    await callTool("memory_log", {
+      namespace: "projects/patterns-data-req-nonempty",
+      content: "Decision review: maintainer risk and ARM64 support are still the blocking concerns.",
+      tags: ["decision"],
+    });
+
+    const nonEmptyRaw = await callTool("memory_patterns", {
+      namespace: "projects/patterns-data-req-nonempty",
+    });
+    const nonEmptyResult = parseToolResponse(nonEmptyRaw) as {
+      patterns: Array<unknown>;
+      data_requirements?: string;
+      suggestion?: string;
+    };
+
+    expect(nonEmptyResult.patterns.length).toBeGreaterThan(0);
+    expect(nonEmptyResult.data_requirements).toBeUndefined();
+    expect(nonEmptyResult.suggestion).toBeUndefined();
   });
 });
 
