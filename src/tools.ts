@@ -389,6 +389,13 @@ function getVisibleOtherKeysInNamespace(
   );
 }
 
+function uppercaseNamespaceWarning(namespace: string): string | undefined {
+  if (/[A-Z]/.test(namespace)) {
+    return `Namespace "${namespace}" contains uppercase characters. Convention is lowercase (e.g. "${namespace.toLowerCase()}").`;
+  }
+  return undefined;
+}
+
 function buildWriteHint(
   db: Database.Database,
   ctx: AccessContext,
@@ -3412,7 +3419,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_update_status",
     description:
-      "Create or patch a tracked `status` entry using a server-enforced structure. Use this for `projects/*` and `clients/*` status updates instead of `memory_write` when you want reliable partial updates instead of read-modify-write on markdown blobs. The server rewrites the content into canonical sections: Phase, Current Work, Blockers, Next Steps, and optional Notes. Status changes are not auto-logged; call `memory_log` separately when recording a decision or milestone.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Update a tracked status entry in `projects/*` or `clients/*` namespaces only. Uses a server-enforced structure with canonical sections: Phase, Current Work, Blockers, Next Steps, and optional Notes. Prefer this over `memory_write` for status updates — it supports reliable partial updates without read-modify-write on markdown blobs. Status changes are not auto-logged; call `memory_log` separately when recording a decision or milestone.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -5254,6 +5261,8 @@ export function registerTools(
               hint,
               provenance: buildProvenance(ctx.principalId, ctx.principalId),
             };
+            const nsWarning = uppercaseNamespaceWarning(namespace);
+            if (nsWarning) response.warning = nsWarning;
 
             // CAS hint for tracked status writes without expected_updated_at
             if (isTrackedStatus && !expected_updated_at && result.status === "updated") {
@@ -6017,7 +6026,7 @@ export function registerTools(
                 namespace,
               });
             }
-            return okResult("log", {
+            const logResponse: Record<string, unknown> = {
               status: "logged",
               id: result.id,
               namespace,
@@ -6025,7 +6034,10 @@ export function registerTools(
               timestamp_local: toLocalDisplay(result.timestamp),
               classification: result.classification,
               provenance: buildProvenance(ctx.principalId, ctx.principalId),
-            });
+            };
+            const logNsWarning = uppercaseNamespaceWarning(namespace);
+            if (logNsWarning) logResponse.warning = logNsWarning;
+            return okResult("log", logResponse);
           }
 
           case "memory_list": {
