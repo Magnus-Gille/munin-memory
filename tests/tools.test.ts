@@ -1580,6 +1580,37 @@ describe("memory_query", () => {
     expect(result.total).toBe(0);
   });
 
+  it("finds entry with single-word query (regression)", async () => {
+    const raw = await callTool("memory_query", { query: "SQLite", search_mode: "lexical" });
+    const result = parseToolResponse(raw) as { total: number };
+    expect(result.total).toBeGreaterThanOrEqual(1);
+  });
+
+  it("finds entry with 2-word query when both words appear (not necessarily adjacent)", async () => {
+    // Entry content has "SQLite" and "server" separated by other words
+    await callTool("memory_write", {
+      namespace: "projects/fts-test",
+      key: "twoword",
+      content: "The SQLite database is used as the memory server backend",
+      tags: ["test"],
+    });
+    const raw = await callTool("memory_query", { query: "SQLite server", search_mode: "lexical" });
+    const result = parseToolResponse(raw) as { results: Array<{ namespace: string }>; total: number };
+    expect(result.results.some((r) => r.namespace === "projects/fts-test")).toBe(true);
+  });
+
+  it("finds entry with 3-word query 'OAuth token expiry' when all three words appear", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/fts-test",
+      key: "oauth",
+      content: "The OAuth provider issues a token with a configurable expiry duration",
+      tags: ["test"],
+    });
+    const raw = await callTool("memory_query", { query: "OAuth token expiry", search_mode: "lexical" });
+    const result = parseToolResponse(raw) as { results: Array<{ namespace: string }>; total: number };
+    expect(result.results.some((r) => r.namespace === "projects/fts-test")).toBe(true);
+  });
+
   it("excludes expired state entries from query results by default", async () => {
     await callTool("memory_write", {
       namespace: "projects/expired",

@@ -522,12 +522,14 @@ function escapeFtsQuery(query: string): string {
   }
   // Wrap each whitespace-separated token in double quotes so that
   // special FTS5 characters (hyphens, colons, etc.) are treated as
-  // literals. Implicit AND between quoted tokens.
+  // literals. Join with explicit AND so that multi-word queries like
+  // "OAuth token expiry" find entries containing all tokens in any order
+  // (not as an adjacent phrase). Single-word queries are unaffected.
   return query
     .split(/\s+/)
     .filter((t) => t.length > 0)
     .map((t) => `"${t}"`)
-    .join(" ");
+    .join(" AND ");
 }
 
 function escapeForLike(s: string): string {
