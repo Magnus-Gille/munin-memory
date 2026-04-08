@@ -2522,7 +2522,7 @@ describe("synthesis freshness metadata", () => {
     const entry = result.dashboard.active.find((e) => e.namespace === "projects/no-meta");
     expect(entry!.synthesis).toBeDefined();
     expect(entry!.synthesis!.logs_incorporated).toBeNull();
-    expect(entry!.synthesis!.origin).toBe("auto");
+    expect(entry!.synthesis!.origin).toBe("manual");
     expect(typeof entry!.synthesis!.synthesis_age_days).toBe("number");
   });
 

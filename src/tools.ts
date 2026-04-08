@@ -3987,7 +3987,7 @@ export function registerTools(
                   updated_at_local: toLocalDisplay(synthesis.updated_at),
                   synthesis_age_days: synthesisAgeDays,
                   logs_incorporated: logsIncorporated,
-                  origin: synthesisMeta ? "auto" : "auto",
+                  origin: synthesisMeta ? "auto" : "manual",
                   cross_references: crossRefs.map((ref) => ({
                     target_namespace: ref.target_namespace === assessment.row.namespace ? ref.source_namespace : ref.target_namespace,
                     reference_type: ref.reference_type,
@@ -5339,7 +5339,7 @@ export function registerTools(
                 const synthesisAgeMs = Date.now() - new Date(parsed.updated_at).getTime();
                 response.synthesis_age_days = Math.floor(synthesisAgeMs / (1000 * 60 * 60 * 24));
                 response.logs_incorporated = countLogsIncorporated(db, namespace);
-                response.origin = synthesisMeta ? "auto" : "auto";
+                response.origin = synthesisMeta ? "auto" : "manual";
               }
               // Analytics: log opened_result outcome
               if (sessionId) {
