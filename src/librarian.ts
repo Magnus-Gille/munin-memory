@@ -546,6 +546,57 @@ export function buildLibrarianRuntimeSummary(
   return summary;
 }
 
+export type WriteVisibilityCheck =
+  | {
+      allowed: true;
+      effectiveClassification: ClassificationLevel;
+      transportType: TransportType;
+      maxClassification: ClassificationLevel;
+    }
+  | {
+      allowed: false;
+      effectiveClassification: ClassificationLevel;
+      transportType: TransportType;
+      maxClassification: ClassificationLevel;
+      error: string;
+    };
+
+/**
+ * Pre-flight check: will the caller be able to read back an entry with
+ * the given effective classification from their current transport type?
+ *
+ * Call this BEFORE writing to prevent orphaned entries that are written
+ * successfully but become invisible at read-time due to Librarian filtering.
+ */
+export function checkWriteVisibility(
+  ctx: AccessContext,
+  effectiveClassification: ClassificationLevel,
+  namespace: string,
+): WriteVisibilityCheck {
+  const transportType = getContextTransportType(ctx);
+  const maxClassification = getContextMaxClassification(ctx);
+
+  if (!isLibrarianEnabled() || classificationAllowed(effectiveClassification, maxClassification)) {
+    return {
+      allowed: true,
+      effectiveClassification,
+      transportType,
+      maxClassification,
+    };
+  }
+
+  return {
+    allowed: false,
+    effectiveClassification,
+    transportType,
+    maxClassification,
+    error:
+      `This entry would be classified as "${effectiveClassification}" (namespace floor for "${namespace}"), ` +
+      `which is not readable from your current ${formatTransportLabel(transportType)} connection ` +
+      `(max: ${maxClassification}). ${buildOwnerAccessGuidance(transportType)}`,
+  };
+}
+
 export function enforceClassification(
   ctx: AccessContext,
   entry: RedactableEntryMetadata,

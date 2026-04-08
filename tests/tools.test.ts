@@ -758,7 +758,7 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
     expect(result.results[0].match).toBeUndefined();
   });
 
-  it("filters classified key names out of memory_write hints on downgraded transports", async () => {
+  it("rejects consumer writes to classified namespaces (orphan prevention)", async () => {
     await callTool("memory_write", {
       namespace: "clients/lofalk",
       key: "secret-key",
@@ -776,12 +776,13 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
       namespace: "clients/lofalk",
       key: "public-note",
       content: "Visible internal note",
-      classification: "client-confidential",
     });
-    const result = parseToolResponse(raw) as { hint: string };
+    const result = parseToolResponse(raw) as { error: string; message: string };
 
-    expect(result.hint).not.toContain("secret-key");
-    expect(result.hint).toBe("No other visible entries in this namespace.");
+    // Consumer cannot write to clients/* because namespace floor is client-confidential
+    expect(result.error).toBe("classification_error");
+    expect(result.message).toContain("client-confidential");
+    expect(result.message).toContain("consumer");
   });
 
   it("filters classified key names out of memory_read miss hints on downgraded transports", async () => {

@@ -68,12 +68,16 @@ import {
 import {
   CLASSIFICATION_LEVELS,
   buildLibrarianRuntimeSummary,
+  checkWriteVisibility,
   enforceClassification,
   filterSourcesByClassification,
   getLibrarianConfigWarnings,
   isClassificationLevel,
   isLibrarianEnabled,
   isRedactionLogEnabled,
+  parseExplicitClassification,
+  resolveNamespaceClassificationFloor,
+  resolveStoredClassification,
   stripClassificationTags,
   summarizeRedactedSources,
   type LibrarianRuntimeConfig,
@@ -146,6 +150,7 @@ import type {
   ConsolidationRunResult,
   RetrievalFeedbackParams,
   RetrievalAggregates,
+  ClassificationLevel,
 } from "./types.js";
 
 // In-memory delete token store (debate resolution #9)
@@ -554,6 +559,49 @@ function validateClassificationInput(
   }
   if (classificationOverride !== undefined && typeof classificationOverride !== "boolean") {
     return "classification_override must be a boolean.";
+  }
+  return null;
+}
+
+/**
+ * Pre-flight check: resolve the effective classification for a write and
+ * verify that the caller's transport type can read the result back.
+ *
+ * Returns null if the write is safe, or an error string if it would create
+ * an orphaned entry invisible to the caller.
+ */
+function preflightWriteClassification(
+  db: Database.Database,
+  ctx: AccessContext,
+  namespace: string,
+  tags: string[],
+  classification?: ClassificationLevel,
+  classificationOverride?: boolean,
+  existingClassification?: string | null,
+): string | null {
+  let resolved;
+  try {
+    const explicitClassification = parseExplicitClassification({
+      classification,
+      tags,
+    });
+    const namespaceFloor = resolveNamespaceClassificationFloor(db, namespace);
+    resolved = resolveStoredClassification({
+      namespace,
+      namespaceFloor,
+      explicitClassification,
+      existingClassification,
+      allowBelowFloorOverride: classificationOverride === true,
+    });
+  } catch {
+    // Classification resolution errors (e.g. below namespace floor) will be
+    // caught and reported by the actual write path — skip the visibility check.
+    return null;
+  }
+
+  const check = checkWriteVisibility(ctx, resolved.classification, namespace);
+  if (!check.allowed) {
+    return check.error;
   }
   return null;
 }
@@ -5008,6 +5056,22 @@ export function registerTools(
                 }
               }
 
+              // Pre-flight: reject patches that would create Librarian-orphaned entries
+              {
+                const existing = readState(db, namespace, key);
+                const patchTags = existing
+                  ? [...parseTags(existing.tags), ...(patch.tags_add ?? [])].filter(t => !(patch.tags_remove ?? []).includes(t))
+                  : (patch.tags_add ?? []);
+                const orphanError = preflightWriteClassification(
+                  db, ctx, namespace, patchTags,
+                  classification, classification_override,
+                  existing?.classification,
+                );
+                if (orphanError) {
+                  return errResult("write", "classification_error", orphanError, { namespace, key });
+                }
+              }
+
               let patchResult;
               try {
                 patchResult = patchState(
@@ -5090,6 +5154,19 @@ export function registerTools(
                 warnings.push(`No lifecycle tag found. Consider adding one of: ${[...LIFECYCLE_TAGS].join(", ")}.`);
               } else if (lifecycleTags.length > 1) {
                 warnings.push(`Multiple lifecycle tags found: [${lifecycleTags.join(", ")}]. Use exactly one.`);
+              }
+            }
+
+            // Pre-flight: reject writes that would create Librarian-orphaned entries
+            {
+              const existing = readState(db, namespace, key);
+              const orphanError = preflightWriteClassification(
+                db, ctx, namespace, effectiveTags,
+                classification, classification_override,
+                existing?.classification,
+              );
+              if (orphanError) {
+                return errResult("write", "classification_error", orphanError, { namespace, key });
               }
             }
 
@@ -5250,6 +5327,18 @@ export function registerTools(
 
             if (!lifecycleTag) {
               warnings.push(`No lifecycle tag set. Consider one of: ${[...LIFECYCLE_TAGS].join(", ")}.`);
+            }
+
+            // Pre-flight: reject writes that would create Librarian-orphaned entries
+            {
+              const orphanError = preflightWriteClassification(
+                db, ctx, namespace, effectiveTags,
+                classification, classification_override,
+                existing?.classification,
+              );
+              if (orphanError) {
+                return errResult("update_status", "classification_error", orphanError, { namespace, key: "status" });
+              }
             }
 
             let result;
@@ -5853,6 +5942,16 @@ export function registerTools(
             }
             if (!canWrite(ctx, namespace)) {
               return accessDeniedResponse(ctx, "log");
+            }
+            // Pre-flight: reject logs that would create Librarian-orphaned entries
+            {
+              const orphanError = preflightWriteClassification(
+                db, ctx, namespace, tags ?? [],
+                classification, classification_override,
+              );
+              if (orphanError) {
+                return errResult("log", "classification_error", orphanError, { namespace });
+              }
             }
             let result;
             try {
