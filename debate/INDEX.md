@@ -28,3 +28,4 @@
 | 2026-04-01 | [munin-admin CLI](admin-cli-summary.md) | 2 | Add rotate-token; audit all mutations; refuse missing DB; strict expires-at; owner guard; --json everywhere | 15 | 3/15 (20%) |
 | 2026-04-02 | [Librarian architecture](librarian-summary.md) | 2 | Pre-synthesis filtering for derived tools; DB-driven namespace floors; transport attestation via dedicated credentials; mandatory audit before enforcement | 15 | 2/15 (13%) |
 | 2026-04-07 | [MemPalace research spike](mempalace-spike-summary.md) | 2 | Scenario C confirmed but import list not justified; benchmark before tuning; KG demoted; Munin-native eval harness is the real next step | 13 | 4/13 (31%) |
+| 2026-04-08 | [Telemetry & autonomous improvement](telemetry-summary.md) | 1* | Full proposal rejected; minimal Layer 1 only (tool_calls table + status aggregates); no automation; 30-day review gate | 11 | 5/11 (45%) |
