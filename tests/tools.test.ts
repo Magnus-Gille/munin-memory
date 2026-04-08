@@ -2403,9 +2403,69 @@ describe("memory_orient", () => {
 
     expect(result.conventions.compact).toBe(true);
     expect(result.namespaces).toBeUndefined();
-    expect(result.dashboard.active).toHaveLength(5);
+    // Compact mode shows all entries (no default limit) — size savings come from stripping synthesis
+    expect(result.dashboard.active).toHaveLength(6);
     expect(result.dashboard_meta.counts.active).toBe(6);
-    expect(result.dashboard_meta.truncated_groups).toContain("active");
+    expect(result.dashboard_meta.truncated_groups).not.toContain("active");
+    // Verify compact entries have no synthesis
+    for (const entry of result.dashboard.active as Array<{ synthesis?: unknown }>) {
+      expect(entry.synthesis).toBeUndefined();
+    }
+  });
+
+  it("compact mode extracts clean phase one-liner from markdown status", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/oneliner-test",
+      key: "status",
+      content: "## Phase\nRouter live-evaluated. Safety gate passes.\n\n## Current Work\nLots of details here.",
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_orient", { detail: "compact" });
+    const result = parseToolResponse(raw) as {
+      dashboard: { active: Array<{ namespace: string; summary: string }> };
+    };
+
+    const entry = result.dashboard.active.find((e) => e.namespace === "projects/oneliner-test");
+    expect(entry).toBeDefined();
+    // Should strip "## Phase" header and return the first meaningful line
+    expect(entry!.summary).toBe("Router live-evaluated. Safety gate passes.");
+    expect(entry!.summary).not.toContain("##");
+  });
+
+  it("standard mode includes synthesis with cross_reference_count but no full cross_references", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/std-xref",
+      key: "status",
+      content: "Active project",
+      tags: ["active"],
+    });
+    await callTool("memory_write", {
+      namespace: "projects/std-xref",
+      key: "synthesis",
+      content: "Synthesized content for testing.",
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_orient", { detail: "standard" });
+    const result = parseToolResponse(raw) as {
+      dashboard: {
+        active: Array<{
+          namespace: string;
+          synthesis?: {
+            summary: string;
+            cross_references: Array<unknown>;
+            cross_reference_count?: number;
+          };
+        }>;
+      };
+    };
+
+    const entry = result.dashboard.active.find((e) => e.namespace === "projects/std-xref");
+    expect(entry).toBeDefined();
+    expect(entry!.synthesis).toBeDefined();
+    expect(entry!.synthesis!.cross_references).toEqual([]);
+    expect(entry!.synthesis!.cross_reference_count).toBe(0);
   });
 
   it("honors namespace_limit when namespaces are included", async () => {
@@ -2473,7 +2533,7 @@ describe("synthesis freshness metadata", () => {
       run_duration_ms: 500,
     });
 
-    const raw = await callTool("memory_orient", {});
+    const raw = await callTool("memory_orient", { detail: "standard" });
     const result = parseToolResponse(raw) as {
       dashboard: {
         active: Array<{
@@ -2510,7 +2570,7 @@ describe("synthesis freshness metadata", () => {
       tags: ["active"],
     });
 
-    const raw = await callTool("memory_orient", {});
+    const raw = await callTool("memory_orient", { detail: "standard" });
     const result = parseToolResponse(raw) as {
       dashboard: {
         active: Array<{

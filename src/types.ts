@@ -224,6 +224,8 @@ export interface DashboardSynthesis {
     context: string | null;
     confidence: number;
   }>;
+  /** Count of cross-references (included in standard mode where the full array is omitted) */
+  cross_reference_count?: number;
 }
 
 export interface DashboardEntry {

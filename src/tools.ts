@@ -792,6 +792,29 @@ function contentPreview(content: string, maxLen = 500): string {
   return content.slice(0, maxLen) + "...";
 }
 
+/**
+ * Extract a clean one-liner from a status entry's content.
+ * Strips leading markdown headers (##, **Phase:**), blank lines,
+ * and returns the first meaningful line capped at maxLen.
+ */
+function phaseOneliner(content: string, maxLen = 100): string {
+  const lines = content.split("\n");
+  for (const raw of lines) {
+    const wasHeader = /^#{1,4}\s+/.test(raw);
+    // Strip markdown header prefixes and bold labels
+    const line = raw
+      .replace(/^#{1,4}\s+/, "")         // ## Phase → Phase
+      .replace(/^\*\*[^*]+\*\*:?\s*/, "") // **Phase:** Active → Active
+      .trim();
+    if (line.length === 0) continue;
+    // Skip bare section headings (e.g. "## Phase" → "Phase", "## Current Work" → "Current Work")
+    if (wasHeader && line.split(/\s+/).length <= 3) continue;
+    if (line.length <= maxLen) return line;
+    return line.slice(0, maxLen) + "...";
+  }
+  return content.slice(0, maxLen);
+}
+
 const STALENESS_THRESHOLD_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
 const EVENT_STALENESS_THRESHOLD_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
 const EVENT_LOOKAHEAD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -3101,7 +3124,7 @@ const TOOL_DEFINITIONS = [
           type: "string",
           enum: ["compact", "standard", "full"],
           description:
-            `Optional. Controls response size. \`${DEFAULT_ORIENT_DETAIL}\` is the default, \`compact\` trims dashboard/namespaces, \`standard\` includes the full dashboard and namespace overview, and \`full\` returns the full conventions document.`,
+            `Optional. Controls response size. \`${DEFAULT_ORIENT_DETAIL}\` is the default. \`compact\` returns a skeleton dashboard (phase one-liner per entry, no synthesis or cross-refs, no namespace list). \`standard\` adds synthesis summaries and cross-reference counts. \`full\` includes full cross-reference arrays and the full conventions document.`,
         },
         include_demo: {
           type: "boolean",
@@ -3945,7 +3968,7 @@ export function registerTools(
             const { include_demo, include_completed_tasks } = orientArgs;
             const detail = resolveOrientDetail(orientArgs);
             const includeNamespaces = orientArgs.include_namespaces ?? detail !== "compact";
-            const dashboardLimit = clampOptionalLimit(orientArgs.dashboard_limit_per_group, 50) ?? (detail === "compact" ? 5 : undefined);
+            const dashboardLimit = clampOptionalLimit(orientArgs.dashboard_limit_per_group, 50) ?? undefined;
             const namespaceLimit = clampOptionalLimit(orientArgs.namespace_limit, 200) ?? (detail === "compact" ? 20 : undefined);
             // Read conventions and namespace list
             const conventions = ctx.principalType === "owner" ? readState(db, "meta/conventions", "conventions") : null;
@@ -4010,7 +4033,9 @@ export function registerTools(
             for (const assessment of trackedStatusAssessments) {
               const entry: DashboardEntry = {
                 namespace: assessment.row.namespace,
-                summary: assessment.row.content_preview.slice(0, 150),
+                summary: detail === "compact"
+                  ? phaseOneliner(assessment.row.content_preview)
+                  : assessment.row.content_preview.slice(0, 150),
                 updated_at: assessment.row.updated_at,
                 updated_at_local: toLocalDisplay(assessment.row.updated_at),
                 lifecycle: assessment.lifecycle,
@@ -4021,30 +4046,49 @@ export function registerTools(
               }
               maintenanceNeeded.push(...assessment.maintenanceItems);
 
-              // Enrich with synthesis if available
-              const synthesis = readState(db, assessment.row.namespace, "synthesis");
-              if (synthesis) {
-                const crossRefs = getCrossReferences(db, assessment.row.namespace);
-                const synthesisMeta = getConsolidationMetadata(db, assessment.row.namespace);
-                const synthesisAgeMs = Date.now() - new Date(synthesis.updated_at).getTime();
-                const synthesisAgeDays = Math.floor(synthesisAgeMs / (1000 * 60 * 60 * 24));
-                const logsIncorporated = countLogsIncorporated(db, assessment.row.namespace);
-                const synthesisIsStale =
-                  new Date(synthesis.updated_at) < new Date(assessment.row.updated_at);
-                entry.synthesis = {
-                  ...(synthesisIsStale ? { stale: true as const } : { summary: contentPreview(synthesis.content) }),
-                  updated_at: synthesis.updated_at,
-                  updated_at_local: toLocalDisplay(synthesis.updated_at),
-                  synthesis_age_days: synthesisAgeDays,
-                  logs_incorporated: logsIncorporated,
-                  origin: synthesisMeta ? "auto" : "manual",
-                  cross_references: crossRefs.map((ref) => ({
-                    target_namespace: ref.target_namespace === assessment.row.namespace ? ref.source_namespace : ref.target_namespace,
-                    reference_type: ref.reference_type,
-                    context: ref.context,
-                    confidence: ref.confidence,
-                  })),
-                };
+              // Enrich with synthesis — skip entirely in compact mode
+              if (detail !== "compact") {
+                const synthesis = readState(db, assessment.row.namespace, "synthesis");
+                if (synthesis) {
+                  const synthesisMeta = getConsolidationMetadata(db, assessment.row.namespace);
+                  const synthesisAgeMs = Date.now() - new Date(synthesis.updated_at).getTime();
+                  const synthesisAgeDays = Math.floor(synthesisAgeMs / (1000 * 60 * 60 * 24));
+                  const logsIncorporated = countLogsIncorporated(db, assessment.row.namespace);
+                  const synthesisIsStale =
+                    new Date(synthesis.updated_at) < new Date(assessment.row.updated_at);
+
+                  if (detail === "standard") {
+                    // Standard: synthesis summary (or stale marker) + cross-ref count, no full cross-ref array
+                    const crossRefCount = getCrossReferences(db, assessment.row.namespace).length;
+                    entry.synthesis = {
+                      ...(synthesisIsStale ? { stale: true as const } : { summary: contentPreview(synthesis.content) }),
+                      updated_at: synthesis.updated_at,
+                      updated_at_local: toLocalDisplay(synthesis.updated_at),
+                      synthesis_age_days: synthesisAgeDays,
+                      logs_incorporated: logsIncorporated,
+                      origin: synthesisMeta ? "auto" : "manual",
+                      cross_references: [],
+                      cross_reference_count: crossRefCount,
+                    };
+                  } else {
+                    // Full: everything
+                    const crossRefs = getCrossReferences(db, assessment.row.namespace);
+                    entry.synthesis = {
+                      ...(synthesisIsStale ? { stale: true as const } : { summary: contentPreview(synthesis.content) }),
+                      updated_at: synthesis.updated_at,
+                      updated_at_local: toLocalDisplay(synthesis.updated_at),
+                      synthesis_age_days: synthesisAgeDays,
+                      logs_incorporated: logsIncorporated,
+                      origin: synthesisMeta ? "auto" : "manual",
+                      cross_references: crossRefs.map((ref) => ({
+                        target_namespace: ref.target_namespace === assessment.row.namespace ? ref.source_namespace : ref.target_namespace,
+                        reference_type: ref.reference_type,
+                        context: ref.context,
+                        confidence: ref.confidence,
+                      })),
+                    };
+                  }
+                }
               }
 
               const group = dashboard[assessment.lifecycle] ?? dashboard.uncategorized;
