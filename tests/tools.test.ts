@@ -4423,6 +4423,54 @@ describe("memory_handoff", () => {
 
     expect(result.open_loops.some((loop) => /overdue commitment/i.test(loop))).toBe(false);
   });
+
+  it("surfaces actual status content, not a generic lifecycle label", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/bragi",
+      phase: "Active",
+      current_work: "Implementing the new parser for structured logs.",
+      blockers: "None.",
+      next_steps: ["Write tests", "Open a PR"],
+      lifecycle: "active",
+    });
+
+    const raw = await callTool("memory_handoff", {
+      namespace: "projects/bragi",
+    });
+    const result = parseToolResponse(raw) as {
+      found: boolean;
+      current_state: { summary: string } | null;
+    };
+
+    expect(result.found).toBe(true);
+    expect(result.current_state).not.toBeNull();
+    // Should include actual entry content, not the old generic "Status in phase X." one-liner
+    expect(result.current_state?.summary).toContain("Implementing the new parser for structured logs.");
+    expect(result.current_state?.summary).not.toMatch(/^Status in phase/);
+    // Lifecycle tag should still be present
+    expect(result.current_state?.summary).toMatch(/\[active\]/i);
+  });
+
+  it("truncates long status content to approximately 300 characters", async () => {
+    const longWork = "A".repeat(400);
+    await callTool("memory_write", {
+      namespace: "projects/bragi-long",
+      key: "status",
+      content: longWork,
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_handoff", {
+      namespace: "projects/bragi-long",
+    });
+    const result = parseToolResponse(raw) as {
+      current_state: { summary: string } | null;
+    };
+
+    expect(result.current_state).not.toBeNull();
+    // Summary should be truncated — well under the 400-char raw content
+    expect((result.current_state?.summary ?? "").length).toBeLessThan(380);
+  });
 });
 
 describe("memory_attention", () => {

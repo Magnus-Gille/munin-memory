@@ -3011,9 +3011,12 @@ function buildPatternSources(entries: Entry[], sourceIds: Set<string>): PatternS
 
 function buildHandoffCurrentState(namespace: string, statusEntry: Entry | null, fallbackEntries: Entry[]): HandoffResponse["current_state"] {
   if (statusEntry) {
+    const lifecycle = getLifecycleFromEntry(statusEntry);
+    const phasePart = lifecycle ? `[${lifecycle}] ` : "";
+    const contentSummary = contentPreview(statusEntry.content, 300);
     return {
       namespace,
-      summary: buildNarrativeStatusSummary(statusEntry),
+      summary: `${phasePart}${contentSummary}`,
       updated_at: statusEntry.updated_at,
       source_entry_id: statusEntry.id,
     };
