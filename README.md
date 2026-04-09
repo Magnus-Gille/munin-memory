@@ -18,16 +18,35 @@ For the full argument, see [Resilient and Sovereign AI](https://gille.ai/en/blog
 
 ## What it does
 
-- **14 MCP tools** for reading, writing, searching, syncing, introspecting, and organizing memories
-- **Two memory types:** state entries (mutable, current truth) and log entries (append-only, chronological history)
-- **Structured tracked-status updates:** a first-class tool can patch `projects/*` and `clients/*` statuses without read-modify-write on markdown blobs
-- **Hierarchical namespaces** (e.g. `projects/website`, `people/alice`, `decisions/tech-stack`)
-- **Three search modes:** keyword (FTS5), semantic (vector embeddings), and hybrid (both combined via Reciprocal Rank Fusion). Semantic modes are optional and profile-dependent.
-- **Cursorable change feed + provenance:** audit history can be paged forward for multi-agent sync, and entry/audit responses carry actor provenance
-- **Content security:** writes are heuristically scanned for common secrets — obvious API keys, tokens, and inline passwords are rejected before storage
-- **OAuth secret hygiene:** confidential OAuth client secrets are encrypted at rest
-- **Dual auth:** Bearer token (simple) + OAuth 2.1 (for web/mobile clients)
-- **Two transports:** stdio (local) and Streamable HTTP (network)
+Munin is more than a key-value store for AI. The features are designed around how an assistant actually needs to think across time, across devices, and across people.
+
+- **Background consolidation (the "sleep" feature)** — an optional worker periodically synthesizes recent log entries into an enriched `synthesis` entry via an OpenRouter LLM call, extracting decisions, open threads, and cross-namespace references. The human-maintained `status` entry is treated as ground truth: the synthesizer supplements it, but can never override phase or lifecycle. Ground-truth anchoring is enforced in the prompt, not by trust.
+- **Computed lifecycle dashboard** — `memory_orient` returns a single "where is everything" view, computed dynamically from status entries in `projects/*` and `clients/*` and grouped by lifecycle (active, blocked, completed, stopped, maintenance, archived). No manual workbench to keep current.
+- **Retrospective synthesis tools** — `memory_narrative`, `memory_commitments`, `memory_patterns`, and `memory_handoff` derive reviewable, source-backed signals from logs and audit history: blocker age, decision churn, open commitments, anti-patterns, and handoff packs between environments or agents. Every surfaced signal is tied to an explicit source entry — no hidden policy, no hallucinated summaries.
+- **Two memory types** — state entries (mutable, current truth) and log entries (append-only, chronological history). A clean conceptual model that maps to how projects actually evolve.
+- **Structured status updates with CAS** — `memory_update_status` patches tracked status entries with compare-and-swap (`expected_updated_at`) so concurrent environments (laptop, desktop, web, mobile) don't blindly overwrite each other.
+- **Hierarchical namespaces** — `projects/website`, `people/alice`, `decisions/tech-stack`, `clients/acme`, and so on. Prefixed tags (`client:lofalk`, `person:sara`, `topic:ai-education`) cross-reference entries without rigid schemas.
+- **Three search modes** — keyword (FTS5), semantic (vector embeddings), and hybrid (fused via Reciprocal Rank Fusion). Semantic modes are optional and profile-dependent.
+- **Multi-principal access control** — server-enforced namespace isolation. The owner gets full access; family members, agents, and external principals get scoped permissions. OAuth clients auto-map to principals via a trusted proxy email header. A `munin-admin` CLI manages principals, devices, and service tokens.
+- **Outcome-aware retrieval** — Munin observes what the assistant does after each retrieval (opened a result? wrote in the namespace? reformulated the query?) and accumulates per-entry signals over time. Inspectable via `memory_insights`; explicit feedback via `memory_retrieval_feedback`.
+- **Cursorable change feed + provenance** — audit history can be paged forward for multi-agent sync, and entries and audits carry actor provenance.
+- **Content security** — writes are heuristically scanned for common secrets (API keys, tokens, inline passwords) and rejected before storage. Confidential OAuth client secrets are encrypted at rest.
+- **Dual auth** — Bearer token (simple) + OAuth 2.1 with dynamic client registration and PKCE (for web and mobile clients).
+- **Two transports** — stdio (local) and Streamable HTTP (network).
+
+Twenty-two MCP tools in total. The full list is in [CLAUDE.md](CLAUDE.md#mcp-tools-exposed).
+
+## What it looks like in practice
+
+These features exist to solve specific friction points that appear once you actually use persistent AI memory every day:
+
+- **"What's next?" gives a real answer.** Open any project and ask. `memory_orient` returns the computed dashboard grouped by lifecycle; for a specific project, the synthesis entry provides the consolidated arc — decisions, blockers, and open threads — without you having to paste a summary. The consolidation worker quietly rolls logs into a readable synthesis while you're away.
+- **Decisions survive the conversation that made them.** When you decide something, log it once. Six weeks later, `memory_narrative` or `memory_commitments` surfaces it with rationale and timestamp. No searching through chat history.
+- **Cross-environment continuity.** Claude Code on your laptop, Claude Desktop, Claude Web, and Claude Mobile all talk to the same Munin instance. A status update made on mobile shows up in your laptop session. The two-layer model (local detail files + Munin summary state) keeps each environment fast without losing coherence.
+- **Cross-namespace awareness.** The consolidator extracts references between namespaces — "this project depends on `people/sara` finishing X". Later, when you update Sara's status, you can see what's blocked on her.
+- **Honest retrospection.** `memory_patterns` only surfaces patterns that are backed by actual source entries. `memory_commitments` tracks open, overdue, at-risk, and completed follow-through. Nothing is invented — every signal points back to a source.
+- **Shared memory with scoped access.** A family member or a research agent can use the same Munin server without seeing your work namespaces. Principals have namespace rules and the server enforces them on every tool call, with denial semantics that make disallowed namespaces invisible rather than merely refused.
+- **Handoff between agents.** When one agent (or one environment) hands work to another, `memory_handoff` assembles a source-backed pack: current state, recent decisions, open loops, recent actors, and recommended next actions. Tuned for multi-agent setups where context transfer matters.
 
 ## Architecture
 
@@ -158,14 +177,17 @@ For the broader appliance direction, the project now distinguishes between `full
 
 ## Design process
 
-Every major feature was designed through structured adversarial debates between Claude (Opus) and Codex (GPT-5.3). One AI proposes, the other critiques, they iterate, and the resolution becomes the implementation spec.
+Every major feature was designed through structured adversarial debates between Claude (Opus) and Codex (GPT-5.4, earlier rounds used GPT-5.3). One AI proposes, the other critiques, they iterate, and the resolution becomes the implementation spec. Roughly two-thirds of Codex critiques change the plan in a non-trivial way, which is the entire reason the process exists.
 
-The summaries of these debates are in the `debate/` directory:
+The `debate/` directory holds the resolutions and round summaries. Highlights:
 
 - `debate/resolution.md` — v1 core design (schema, queries, tools)
 - `debate/expansion-resolution.md` — v2 features (tunnel, semantic search, OAuth)
 - `debate/tunnel-security-summary.md` — 5-layer security architecture
 - `debate/conventions-summary.md` — memory conventions and session protocol
+- `debate/multi-principal-p1-summary.md` — multi-principal access control
+- `debate/computed-dashboard-summary.md` — computed lifecycle dashboard
+- `debate/admin-cli-summary.md` — `munin-admin` CLI
 
 See `CLAUDE.md` for the full technical reference, including architecture details, spec amendments from the debates, and implementation notes.
 
@@ -186,11 +208,13 @@ npm run test:watch    # Watch mode
 
 ## Status
 
-This is an early-stage open-source project. It works well for my use case — Claude across 4 platforms (CLI, Desktop, Web, Mobile) sharing persistent memory through a Raspberry Pi on my desk.
+Early-stage open source, but in daily use. It runs my own setup — Claude across four platforms (CLI, Desktop, Web, Mobile) sharing persistent memory through a Raspberry Pi 5 on my desk, publicly reachable via a Cloudflare Tunnel.
 
-It is usable today, but it is still optimized for a technically comfortable self-hoster rather than a polished mass-market product. The deployment scripts assume Linux/systemd familiarity, the security model is primarily single-user, and you should expect to adapt parts of the setup to your own environment. The Pi Zero 2 W appliance direction is documented, but not yet validated on hardware.
+What's live today: the full MCP tool surface (22 tools), background consolidation via OpenRouter, the computed lifecycle dashboard, retrospective synthesis tools, multi-principal access control with OAuth auto-mapping and the `munin-admin` CLI, outcome-aware retrieval signals (Phase 1, observation only), and the five-layer security stack (Cloudflare Tunnel, Cloudflare Access, Bearer/OAuth, app hardening, Pi hardening).
 
-Built by Claude (Opus 4.6) and Magnus Gille, adversarially reviewed by Codex (GPT-5.3).
+What it is not: a polished mass-market product. It is optimized for a technically comfortable self-hoster. The deployment scripts assume Linux/systemd familiarity, you will need to adapt paths and network setup to your own environment, and the Pi Zero 2 W appliance direction is documented but not yet validated on hardware. Multi-principal access is implemented and tested, but in practice the server is still primarily used by a single human owner plus a handful of agent principals.
+
+Built by Claude (Opus 4.6) and Magnus Gille, adversarially reviewed by Codex (GPT-5.4).
 
 ## Project docs
 
