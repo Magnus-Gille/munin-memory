@@ -1,0 +1,19 @@
+{
+  "id": "locomo",
+  "kind": "public-benchmark-adapter",
+  "status": "scaffold",
+  "license": "see-upstream-license",
+  "sources": [
+    "https://github.com/snap-research/locomo",
+    "https://snap-research.github.io/locomo/"
+  ],
+  "downloads": [
+    {
+      "path": "benchmark/data/raw/locomo/locomo10.json",
+      "url": "https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json"
+    }
+  ],
+  "planned_outputs": [
+    "benchmark/generated/locomo-qa.jsonl"
+  ]
+}

@@ -44,3 +44,8 @@ benchmark/fixtures/
 benchmark/reports/
 benchmark/queries/*.jsonl
 !benchmark/queries/example.jsonl
+benchmark/data/raw/
+benchmark/data/cache/
+benchmark/generated/
+!benchmark/generated/
+!benchmark/generated/README.md

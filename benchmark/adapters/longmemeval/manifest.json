@@ -1,0 +1,28 @@
+{
+  "id": "longmemeval",
+  "kind": "public-benchmark-adapter",
+  "status": "scaffold",
+  "license": "MIT",
+  "sources": [
+    "https://github.com/xiaowu0162/LongMemEval",
+    "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned"
+  ],
+  "downloads": [
+    {
+      "path": "benchmark/data/raw/longmemeval/longmemeval_oracle.json",
+      "url": "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_oracle.json"
+    },
+    {
+      "path": "benchmark/data/raw/longmemeval/longmemeval_s_cleaned.json",
+      "url": "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json"
+    },
+    {
+      "path": "benchmark/data/raw/longmemeval/longmemeval_m_cleaned.json",
+      "url": "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_m_cleaned.json"
+    }
+  ],
+  "planned_outputs": [
+    "benchmark/generated/longmemeval-s.jsonl",
+    "benchmark/generated/longmemeval-m.jsonl"
+  ]
+}

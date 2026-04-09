@@ -1,0 +1,19 @@
+{
+  "id": "beir",
+  "kind": "public-benchmark-adapter",
+  "status": "scaffold",
+  "license": "Apache-2.0-framework-dataset-specific-data",
+  "sources": [
+    "https://github.com/beir-cellar/beir",
+    "https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/"
+  ],
+  "downloads": [
+    {
+      "path": "benchmark/data/raw/beir/scifact.zip",
+      "url": "https://public.ukp.informatik.tu-darmstadt.de/thakur/BEIR/datasets/scifact.zip"
+    }
+  ],
+  "planned_outputs": [
+    "benchmark/generated/beir-scifact.jsonl"
+  ]
+}
