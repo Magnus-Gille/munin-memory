@@ -41,7 +41,14 @@ echo "==> Building locally..."
 npm run build
 
 echo "==> Syncing to ${USER}@${HOST}:${REMOTE_DIR}..."
-rsync -avz --exclude node_modules --exclude .env --exclude .git \
+rsync -avz \
+  --exclude node_modules \
+  --exclude .env \
+  --exclude .git \
+  --exclude 'benchmark/data/raw/' \
+  --exclude 'benchmark/data/cache/' \
+  --exclude 'benchmark/generated/' \
+  --exclude 'benchmark/reports/' \
   ./ "${USER}@${HOST}:${REMOTE_DIR}/"
 
 echo "==> Installing dependencies on Pi (compiles native modules for ARM64)..."

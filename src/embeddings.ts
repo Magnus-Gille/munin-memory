@@ -23,6 +23,7 @@ type PoolingType = "none" | "mean" | "cls";
 let extractor: ((text: string, options: { pooling: PoolingType; normalize: boolean }) => Promise<{ data: Float32Array }>) | null = null;
 let circuitBreakerFailures = 0;
 let circuitBreakerDisabled = false;
+let extractorCacheDir: string | null = null;
 let workerTimer: ReturnType<typeof setTimeout> | null = null;
 let workerProcessing = false;
 let workerInflightPromise: Promise<void> | null = null;
@@ -73,10 +74,6 @@ export async function initEmbeddings(): Promise<boolean> {
     return false;
   }
 
-  if (extractor && !circuitBreakerDisabled) {
-    return true;
-  }
-
   try {
     if (_testExtractor) {
       extractor = _testExtractor;
@@ -92,6 +89,12 @@ export async function initEmbeddings(): Promise<boolean> {
     }
     transformers.env.cacheDir = cacheDir;
 
+    // Short-circuit only when the extractor is already loaded AND bound to the
+    // same cache_dir. If the DB path (and therefore cache_dir) changed, rebuild.
+    if (extractor && !circuitBreakerDisabled && extractorCacheDir === cacheDir) {
+      return true;
+    }
+
     const pipelineOptions: Record<string, unknown> = { cache_dir: cacheDir };
     if (config.localOnly) {
       pipelineOptions.local_files_only = true;
@@ -101,6 +104,7 @@ export async function initEmbeddings(): Promise<boolean> {
       const result = await pipe(text, { pooling: options.pooling, normalize: options.normalize });
       return { data: result.data as Float32Array };
     };
+    extractorCacheDir = cacheDir;
     return true;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
