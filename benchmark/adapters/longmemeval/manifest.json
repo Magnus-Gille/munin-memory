@@ -1,7 +1,7 @@
 {
   "id": "longmemeval",
   "kind": "public-benchmark-adapter",
-  "status": "scaffold",
+  "status": "implemented-lexical",
   "license": "MIT",
   "sources": [
     "https://github.com/xiaowu0162/LongMemEval",
@@ -22,7 +22,11 @@
     }
   ],
   "planned_outputs": [
+    "benchmark/generated/longmemeval-s.db",
     "benchmark/generated/longmemeval-s.jsonl",
-    "benchmark/generated/longmemeval-m.jsonl"
+    "benchmark/generated/longmemeval-s.provenance.json",
+    "benchmark/generated/longmemeval-m.db",
+    "benchmark/generated/longmemeval-m.jsonl",
+    "benchmark/generated/longmemeval-m.provenance.json"
   ]
 }

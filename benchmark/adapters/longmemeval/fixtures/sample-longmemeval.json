@@ -1,0 +1,84 @@
+[
+  {
+    "question_id": "q-001",
+    "question_type": "single-session-user",
+    "question": "Business Administration degree",
+    "answer": "Business Administration",
+    "question_date": "2023/05/30 (Tue) 23:40",
+    "answer_session_ids": ["answer_280352e9"],
+    "haystack_dates": [
+      "2023/05/20 (Sat) 02:21",
+      "2023/05/30 (Tue) 21:40"
+    ],
+    "haystack_session_ids": [
+      "sharegpt_yywfIrx_0",
+      "answer_280352e9"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "role": "user",
+          "content": "Help me solve a logic puzzle."
+        },
+        {
+          "role": "assistant",
+          "content": "Try moving the chicken first."
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "I graduated with a degree in Business Administration.",
+          "has_answer": true
+        },
+        {
+          "role": "assistant",
+          "content": "You said you graduated with Business Administration.",
+          "has_answer": true
+        }
+      ]
+    ]
+  },
+  {
+    "question_id": "q-002",
+    "question_type": "temporal-reasoning",
+    "question": "GPS system not functioning correctly",
+    "answer": "GPS system not functioning correctly",
+    "question_date": "2023/04/10 (Mon) 23:07",
+    "answer_session_ids": ["answer_4be1b6b4_1"],
+    "haystack_dates": [
+      "2023/04/10 (Mon) 14:47",
+      "2023/04/10 (Mon) 17:15"
+    ],
+    "haystack_session_ids": [
+      "answer_4be1b6b4_1",
+      "answer_4be1b6b4_2"
+    ],
+    "haystack_sessions": [
+      [
+        {
+          "role": "user",
+          "content": "After my first service, the GPS system was not functioning correctly.",
+          "has_answer": true
+        },
+        {
+          "role": "assistant",
+          "content": "The first issue after the service was the GPS malfunction.",
+          "has_answer": true
+        }
+      ],
+      [
+        {
+          "role": "user",
+          "content": "Later I also noticed a minor rattle in the door.",
+          "has_answer": false
+        },
+        {
+          "role": "assistant",
+          "content": "That sounds like a separate later issue.",
+          "has_answer": false
+        }
+      ]
+    ]
+  }
+]

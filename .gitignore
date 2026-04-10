@@ -48,4 +48,5 @@ benchmark/data/raw/
 benchmark/data/cache/
 benchmark/generated/
 !benchmark/generated/
+benchmark/generated/*
 !benchmark/generated/README.md

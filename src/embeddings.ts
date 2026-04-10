@@ -73,6 +73,10 @@ export async function initEmbeddings(): Promise<boolean> {
     return false;
   }
 
+  if (extractor && !circuitBreakerDisabled) {
+    return true;
+  }
+
   try {
     if (_testExtractor) {
       extractor = _testExtractor;

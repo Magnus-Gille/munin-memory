@@ -8,10 +8,14 @@ RAW_DIR="$ROOT_DIR/benchmark/data/raw"
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/fetch-benchmark-data.sh <dataset>
+  scripts/fetch-benchmark-data.sh [--force] <dataset>
 
 Supported datasets:
   longmemeval
+  longmemeval-s
+  longmemeval-m
+  longmemeval-oracle
+  longmemeval-all
   locomo
   beir-scifact
 
@@ -25,6 +29,11 @@ download() {
   local dest="$2"
 
   mkdir -p "$(dirname "$dest")"
+
+  if [[ "${FORCE_DOWNLOAD}" != "true" && -f "$dest" ]]; then
+    echo "Skipping existing file: $dest"
+    return
+  fi
 
   if command -v curl >/dev/null 2>&1; then
     curl -L --fail --output "$dest" "$url"
@@ -40,7 +49,39 @@ download() {
   exit 1
 }
 
-dataset="${1:-}"
+download_longmemeval_oracle() {
+  download \
+    "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_oracle.json" \
+    "$RAW_DIR/longmemeval/longmemeval_oracle.json"
+}
+
+download_longmemeval_s() {
+  download \
+    "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json" \
+    "$RAW_DIR/longmemeval/longmemeval_s_cleaned.json"
+}
+
+download_longmemeval_m() {
+  download \
+    "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_m_cleaned.json" \
+    "$RAW_DIR/longmemeval/longmemeval_m_cleaned.json"
+}
+
+FORCE_DOWNLOAD="false"
+dataset=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --force)
+      FORCE_DOWNLOAD="true"
+      shift
+      ;;
+    *)
+      dataset="$1"
+      shift
+      ;;
+  esac
+done
 
 if [[ -z "$dataset" ]]; then
   usage
@@ -49,15 +90,22 @@ fi
 
 case "$dataset" in
   longmemeval)
-    download \
-      "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_oracle.json" \
-      "$RAW_DIR/longmemeval/longmemeval_oracle.json"
-    download \
-      "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json" \
-      "$RAW_DIR/longmemeval/longmemeval_s_cleaned.json"
-    download \
-      "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_m_cleaned.json" \
-      "$RAW_DIR/longmemeval/longmemeval_m_cleaned.json"
+    download_longmemeval_oracle
+    download_longmemeval_s
+    ;;
+  longmemeval-s)
+    download_longmemeval_s
+    ;;
+  longmemeval-m)
+    download_longmemeval_m
+    ;;
+  longmemeval-oracle)
+    download_longmemeval_oracle
+    ;;
+  longmemeval-all)
+    download_longmemeval_oracle
+    download_longmemeval_s
+    download_longmemeval_m
     ;;
   locomo)
     download \

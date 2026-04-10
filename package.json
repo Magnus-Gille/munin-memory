@@ -31,7 +31,14 @@
     "dev": "tsx watch src/index.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "benchmark": "MUNIN_BENCHMARK=true vitest run tests/benchmark.test.ts"
+    "benchmark": "MUNIN_BENCHMARK=true vitest run tests/benchmark.test.ts",
+    "benchmark:build:longmemeval": "tsx benchmark/adapters/longmemeval/build.ts --split s",
+    "benchmark:fetch:longmemeval:s": "./scripts/fetch-benchmark-data.sh longmemeval-s",
+    "benchmark:run:longmemeval:s": "tsx benchmark/adapters/longmemeval/run.ts --split s",
+    "benchmark:longmemeval:s": "./scripts/fetch-benchmark-data.sh longmemeval-s && tsx benchmark/adapters/longmemeval/run.ts --split s",
+    "benchmark:run:longmemeval:s:round": "tsx benchmark/adapters/longmemeval/run.ts --split s --granularity round",
+    "benchmark:longmemeval:s:round": "./scripts/fetch-benchmark-data.sh longmemeval-s && tsx benchmark/adapters/longmemeval/run.ts --split s --granularity round",
+    "benchmark:run:longmemeval:s:round:hybrid": "tsx benchmark/adapters/longmemeval/run.ts --split s --granularity round --search-mode hybrid"
   },
   "dependencies": {
     "@huggingface/transformers": "^3.8.1",

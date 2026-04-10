@@ -190,10 +190,14 @@ export async function runBenchmark(
   const countRow = db.prepare("SELECT COUNT(*) as c FROM entries").get() as { c: number };
   const entryCount = countRow.c;
 
-  // Initialize embeddings for semantic/hybrid queries
-  const embeddingsAvailable = await initEmbeddings();
   const warnings: string[] = [];
-  if (!embeddingsAvailable) {
+  const requiresEmbeddings = queries.some(
+    (query) => query.search_mode === "semantic" || query.search_mode === "hybrid" || query.search_mode === "all",
+  );
+  const embeddingsAvailable = requiresEmbeddings
+    ? await initEmbeddings()
+    : false;
+  if (requiresEmbeddings && !embeddingsAvailable) {
     warnings.push("Embeddings unavailable — semantic and hybrid modes will return empty results or fall back to lexical.");
   }
 
