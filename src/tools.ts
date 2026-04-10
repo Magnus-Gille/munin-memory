@@ -5790,6 +5790,7 @@ export function registerTools(
                     includeExpired: true,
                     since,
                     until,
+                    rawFts5: true,
                   });
                   filteredExpired = filterExpiredEntries(lexicalResults, includeExpired);
                   lexicalResults = filteredExpired.items;

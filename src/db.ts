@@ -515,21 +515,30 @@ export function appendLog(
 // --- Query / search operations ---
 
 function escapeFtsQuery(query: string): string {
-  // If the query already contains double quotes, assume the caller
-  // is using FTS5 syntax intentionally and pass through as-is
-  if (query.includes('"')) {
-    return query;
+  // Tokenize the query into (a) balanced quoted phrases, preserved as FTS5
+  // phrase tokens, and (b) unquoted whitespace-separated words. Both forms
+  // are wrapped in double quotes in the output so special FTS5 characters
+  // (hyphens, colons, etc.) are treated as literals, and joined with
+  // explicit AND so multi-word queries find entries containing all tokens
+  // in any order. Stray or unbalanced quotes in unquoted tokens are
+  // removed -- this prevents natural-language questions (e.g. a question
+  // that embeds a book title in quotes, or has a dangling opening quote)
+  // from producing invalid FTS5 syntax.
+  const tokens: string[] = [];
+  const tokenizer = /"([^"]+)"|(\S+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = tokenizer.exec(query)) !== null) {
+    const raw = match[1] !== undefined ? match[1] : (match[2] ?? "");
+    const cleaned = raw.replace(/"/g, "").trim();
+    if (cleaned.length > 0) {
+      tokens.push(`"${cleaned}"`);
+    }
   }
-  // Wrap each whitespace-separated token in double quotes so that
-  // special FTS5 characters (hyphens, colons, etc.) are treated as
-  // literals. Join with explicit AND so that multi-word queries like
-  // "OAuth token expiry" find entries containing all tokens in any order
-  // (not as an adjacent phrase). Single-word queries are unaffected.
-  return query
-    .split(/\s+/)
-    .filter((t) => t.length > 0)
-    .map((t) => `"${t}"`)
-    .join(" AND ");
+  if (tokens.length === 0) {
+    // FTS5 rejects empty queries; return a phrase that matches nothing.
+    return '""';
+  }
+  return tokens.join(" AND ");
 }
 
 function escapeForLike(s: string): string {
@@ -546,6 +555,12 @@ export interface QueryOptions {
   includeExpired?: boolean;
   since?: string;
   until?: string;
+  /**
+   * When true, treat `query` as a pre-formed FTS5 expression and pass it
+   * through without tokenization or escaping. Callers that opt in are
+   * responsible for producing valid FTS5 syntax (e.g. `buildRelaxedLexicalQuery`).
+   */
+  rawFts5?: boolean;
 }
 
 export interface LexicalQueryResult {
@@ -580,7 +595,7 @@ export function queryEntriesLexicalScored(
   db: Database.Database,
   options: QueryOptions,
 ): LexicalQueryResult[] {
-  const { query, namespace, entryType, tags, limit = 10, includeExpired = false, since, until } = options;
+  const { query, namespace, entryType, tags, limit = 10, includeExpired = false, since, until, rawFts5 = false } = options;
   const clampedLimit = Math.min(Math.max(limit, 1), 50);
   const now = nowUTC();
 
@@ -589,7 +604,7 @@ export function queryEntriesLexicalScored(
     JOIN entries_fts fts ON e.rowid = fts.rowid
     WHERE entries_fts MATCH ?
   `;
-  const params: unknown[] = [escapeFtsQuery(query)];
+  const params: unknown[] = [rawFts5 ? query : escapeFtsQuery(query)];
 
   if (namespace) {
     if (namespace.endsWith("/")) {
