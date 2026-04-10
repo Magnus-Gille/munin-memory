@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { buildLongMemEvalArtifacts, type BuildMetadata, type BuildOptions } from "./build.js";
+import { buildLocomoArtifacts, type BuildMetadata, type BuildOptions } from "./build.js";
 import { loadQueries, runBenchmark, writeReport } from "../../runner.js";
 import { ensureSafeGeneratedPath, populateCorpusEmbeddings, type CorpusEmbeddingSummary } from "../shared.js";
 import type { SearchMode } from "../../../src/types.js";
@@ -12,35 +12,34 @@ interface RunOptions extends BuildOptions {
 
 function parseArgs(argv: string[]): RunOptions {
   const args = new Map<string, string>();
+  const flags = new Set<string>();
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (!arg.startsWith("--")) continue;
     const key = arg.slice(2);
-    const value = argv[i + 1];
-    if (!value || value.startsWith("--")) {
-      throw new Error(`Missing value for --${key}`);
+    const next = argv[i + 1];
+    if (!next || next.startsWith("--")) {
+      flags.add(key);
+      continue;
     }
-    args.set(key, value);
+    args.set(key, next);
     i += 1;
   }
 
-  const split = args.get("split") ?? "s";
   const granularity = (args.get("granularity") ?? "session") as BuildOptions["granularity"];
   const searchMode = (args.get("search-mode") ?? "lexical") as SearchMode;
-  const queryBase = granularity === "session"
-    ? `benchmark/generated/longmemeval-${split}`
-    : `benchmark/generated/longmemeval-${split}-${granularity}`;
-  const outputBase = searchMode === "lexical" ? queryBase : `${queryBase}-${searchMode}`;
-  const inputPath = args.get("input")
-    ?? (split === "m"
-      ? "benchmark/data/raw/longmemeval/longmemeval_m_cleaned.json"
-      : "benchmark/data/raw/longmemeval/longmemeval_s_cleaned.json");
+  const includeAdversarial = flags.has("include-adversarial");
+  const suffix = granularity === "session" ? "locomo" : `locomo-${granularity}`;
+  const outputBase = searchMode === "lexical"
+    ? `benchmark/generated/${suffix}`
+    : `benchmark/generated/${suffix}-${searchMode}`;
+  const inputPath = args.get("input") ?? "benchmark/data/raw/locomo/locomo10.json";
 
   return {
-    split,
     granularity,
     searchMode,
+    includeAdversarial,
     inputPath: resolve(inputPath),
     dbPath: resolve(args.get("db") ?? `${outputBase}.db`),
     queryPath: resolve(args.get("queries") ?? `${outputBase}.jsonl`),
@@ -63,10 +62,10 @@ function readBuildMetadata(path: string): BuildMetadata | null {
 function canReuseExistingArtifacts(options: RunOptions, metadata: BuildMetadata | null): boolean {
   if (!options.reuseExisting) return false;
   if (!metadata) return false;
-  return metadata.adapter === "longmemeval"
-    && metadata.split === options.split
+  return metadata.adapter === "locomo"
     && metadata.granularity === options.granularity
     && metadata.search_mode === options.searchMode
+    && metadata.include_adversarial === (options.includeAdversarial ?? false)
     && metadata.input_path === options.inputPath
     && metadata.db_path === options.dbPath
     && metadata.query_path === options.queryPath
@@ -95,7 +94,7 @@ async function main(): Promise<void> {
       queries: [],
       stats: existingMetadata!.stats,
     }
-    : buildLongMemEvalArtifacts(options);
+    : buildLocomoArtifacts(options);
   let embeddingSummary: CorpusEmbeddingSummary | null = null;
   if (options.searchMode === "hybrid" || options.searchMode === "semantic") {
     embeddingSummary = await populateCorpusEmbeddings(options.dbPath);
@@ -104,16 +103,17 @@ async function main(): Promise<void> {
   const report = await runBenchmark(options.dbPath, queries);
   const reportPath = writeReport(report, options.reportDir);
 
-  console.log("LongMemEval benchmark completed");
-  console.log(`  Split:      ${options.split}`);
+  console.log("LoCoMo benchmark completed");
   console.log(`  Gran:       ${options.granularity}`);
   console.log(`  Mode:       ${options.searchMode}`);
+  console.log(`  Adversarial:${options.includeAdversarial ? " included" : " skipped"}`);
   console.log(`  Input:      ${options.inputPath}`);
   if (reusedExisting) {
     console.log("  Build:      reused existing generated benchmark artifacts");
   } else {
     console.log("  Build:      rebuilt generated benchmark artifacts");
   }
+  console.log(`  Samples:    ${buildResult.stats.sample_count}`);
   console.log(`  Entries:    ${buildResult.stats.entry_count}`);
   console.log(`  Queries:    ${buildResult.stats.query_count}`);
   console.log(`  DB:         ${options.dbPath}`);
