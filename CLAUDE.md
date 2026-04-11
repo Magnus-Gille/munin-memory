@@ -146,6 +146,51 @@ Treat this as the current `full-node` deployment path. The project now distingui
 
 See `docs/appliance-profiles.md` for the recommendation and validation plan.
 
+## Release process
+
+Versioning follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) style. Pre-1.0, any release may contain breaking changes — `CHANGELOG.md` is the canonical record of what moved. The project is **not** published to npm; releases exist so downstream users (running their own instance) have a stable pin and a human-readable record of changes.
+
+### When to cut a release
+
+Cut a new tag when shipping a meaningfully different version (new features, breaking changes, security fixes). Routine internal commits can accumulate under `[Unreleased]` in `CHANGELOG.md` without a tag.
+
+### What belongs in CHANGELOG
+
+- User-visible behavior changes (new MCP tools, changed defaults, env var changes)
+- Security fixes and hardening
+- Deprecations and removals
+- Migration-relevant schema changes
+
+Skip: refactors with no behavior change, internal test additions, benchmark scaffolding, typo fixes in comments, debate docs.
+
+### How to cut a release
+
+1. Move entries from `[Unreleased]` in `CHANGELOG.md` into a new `[X.Y.Z] — YYYY-MM-DD` section. Keep the Added / Changed / Fixed / Security / Deprecated grouping.
+2. Bump `version` in `package.json` and `package-lock.json` (both the top-level `version` and the `""` package entry in the lockfile).
+3. Commit as `chore: release vX.Y.Z` and tag it: `git tag -a vX.Y.Z -m "vX.Y.Z"`.
+4. Push commit and tag: `git push origin main && git push origin vX.Y.Z`.
+5. Create the GitHub release with notes extracted from the `[X.Y.Z]` section of `CHANGELOG.md`:
+   ```bash
+   awk '/^## \[X\.Y\.Z\]/{flag=1} /^## \[/ && !/X\.Y\.Z/{flag=0} flag' CHANGELOG.md > /tmp/notes.md
+   gh release create vX.Y.Z --title "vX.Y.Z" --notes-file /tmp/notes.md
+   ```
+
+### Tagging mid-history
+
+If HEAD includes work that shouldn't be part of the next release (benchmark scaffolding, half-finished experiments, unrelated refactors), branch the release commit from the last "ready" commit rather than tagging HEAD directly:
+
+```bash
+git checkout -b release-X.Y.Z <ready-commit>
+# apply CHANGELOG + version bump on the branch
+git commit -m "chore: release vX.Y.Z"
+git tag -a vX.Y.Z -m "vX.Y.Z"
+git checkout main
+git cherry-pick release-X.Y.Z   # carry CHANGELOG + version bump forward onto main
+git branch -D release-X.Y.Z
+```
+
+The tagged commit's parent is the "ready" commit, so `git checkout vX.Y.Z` gives a clean tree. `main` carries both the in-progress work and the cherry-picked release commit. Two "chore: release vX.Y.Z" commits exist in `git log --all` — one on main, one reachable only via the tag — and that's intentional. See the v0.2.0 release for a worked example (tagged at `f8a9148` while main had unrelated benchmark work).
+
 ## MCP client configuration
 
 **Claude Code (HTTP — connecting to remote server):**
