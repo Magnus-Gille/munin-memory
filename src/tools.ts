@@ -50,6 +50,7 @@ import {
   getOtherKeysInNamespace,
   getTrackedStatuses,
   getCompletedTaskNamespaces,
+  getResolvedNamespaces,
   isEntryExpired,
   nowUTC,
   vecLoaded,
@@ -2707,9 +2708,36 @@ export function computeCommitmentConfidence(
   return Math.min(1.0, Math.max(0.0, raw));
 }
 
-function extractCommitmentsFromEntry(entry: Entry): DerivedCommitmentInput[] {
+const TERMINAL_LIFECYCLE_TAGS = new Set(["completed", "archived", "stopped", "failed"]);
+
+function entryHasTerminalLifecycle(entry: Entry): boolean {
+  const tags = parseTags(entry.tags);
+  const { canonical } = canonicalizeTags(tags);
+  return canonical.some((tag) => TERMINAL_LIFECYCLE_TAGS.has(tag));
+}
+
+function extractCommitmentsFromEntry(
+  entry: Entry,
+  resolvedNamespaces?: Set<string>,
+): DerivedCommitmentInput[] {
   const commitments: DerivedCommitmentInput[] = [];
   const seenNormalized = new Set<string>();
+
+  // Suppression rules: entries from resolved sources are historical records,
+  // not open commitments. Skip them entirely so existing commitments derived
+  // from the same entry get resolved on the next sync pass.
+  //
+  // 1. synthesis keys: already a distillation of the underlying logs/status.
+  //    Re-extracting from synthesis double-counts and surfaces milestone
+  //    labels like "Genesis (MVP Complete - 2026-03-21)" as commitments.
+  // 2. entries whose own tags carry a terminal lifecycle (completed, archived,
+  //    stopped, failed).
+  // 3. entries in a namespace whose status entry is terminal — catches task
+  //    result documents and post-mortems that don't carry lifecycle tags of
+  //    their own but live in a done namespace.
+  if (entry.key === "synthesis") return commitments;
+  if (entryHasTerminalLifecycle(entry)) return commitments;
+  if (resolvedNamespaces?.has(entry.namespace)) return commitments;
 
   const pushCommitment = (commitment: DerivedCommitmentInput, normalizedText: string) => {
     if (seenNormalized.has(normalizedText)) return;
@@ -2789,8 +2817,9 @@ function syncCommitmentsForScope(
     loggedEntryIds,
   );
 
+  const resolvedNamespaces = getResolvedNamespaces(db);
   for (const entry of filtered.allowed) {
-    syncCommitmentsForEntry(db, entry.id, extractCommitmentsFromEntry(entry));
+    syncCommitmentsForEntry(db, entry.id, extractCommitmentsFromEntry(entry, resolvedNamespaces));
   }
 
   return filtered.redacted;
@@ -2811,6 +2840,7 @@ function listFreshCommitmentRows(
   const { namespace, since, limit, includeResolved = true } = options;
   const loggedEntryIds = new Set<string>();
   const redactedSources = syncCommitmentsForScope(db, ctx, toolName, namespace, since, sessionId, loggedEntryIds);
+  const resolvedNamespaces = getResolvedNamespaces(db);
 
   const refreshCandidates = listCommitments(db, {
     namespace,
@@ -2853,7 +2883,7 @@ function listFreshCommitmentRows(
       redactedSources.push(...entryFilter.redacted);
       continue;
     }
-    syncCommitmentsForEntry(db, entry.id, extractCommitmentsFromEntry(entry));
+    syncCommitmentsForEntry(db, entry.id, extractCommitmentsFromEntry(entry, resolvedNamespaces));
   }
 
   const rows = listCommitments(db, {
@@ -5179,7 +5209,7 @@ export function registerTools(
 
               const patchedEntry = readState(db, namespace, key);
               if (patchedEntry) {
-                syncCommitmentsForEntry(db, patchedEntry.id, extractCommitmentsFromEntry(patchedEntry));
+                syncCommitmentsForEntry(db, patchedEntry.id, extractCommitmentsFromEntry(patchedEntry, getResolvedNamespaces(db)));
               }
 
               return okResult("write", { status: "patched", id: patchResult.id, namespace, key, hint: hintPatch });
@@ -5302,7 +5332,7 @@ export function registerTools(
             if (result.id) {
               const writtenEntry = getById(db, result.id);
               if (writtenEntry) {
-                syncCommitmentsForEntry(db, writtenEntry.id, extractCommitmentsFromEntry(writtenEntry));
+                syncCommitmentsForEntry(db, writtenEntry.id, extractCommitmentsFromEntry(writtenEntry, getResolvedNamespaces(db)));
               }
             }
 
@@ -5450,7 +5480,7 @@ export function registerTools(
             if (result.id) {
               const statusEntry = getById(db, result.id);
               if (statusEntry) {
-                syncCommitmentsForEntry(db, statusEntry.id, extractCommitmentsFromEntry(statusEntry));
+                syncCommitmentsForEntry(db, statusEntry.id, extractCommitmentsFromEntry(statusEntry, getResolvedNamespaces(db)));
               }
             }
 
@@ -6047,7 +6077,7 @@ export function registerTools(
             }
             const logEntry = getById(db, result.id);
             if (logEntry) {
-              syncCommitmentsForEntry(db, logEntry.id, extractCommitmentsFromEntry(logEntry));
+              syncCommitmentsForEntry(db, logEntry.id, extractCommitmentsFromEntry(logEntry, getResolvedNamespaces(db)));
             }
             // Analytics: log log outcome correlated to prior retrieval in this session
             if (sessionId) {

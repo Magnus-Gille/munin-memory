@@ -3846,6 +3846,88 @@ describe("memory_commitments", () => {
     }));
   });
 
+  it("does not extract commitments from synthesis entries (#26)", async () => {
+    // Synthesis entries are computed distillations of underlying logs/status.
+    // Milestone labels like "Genesis (MVP Complete - 2026-03-21)" contain an
+    // action verb and a date but are historical, not open commitments.
+    await callTool("memory_write", {
+      namespace: "projects/ragnarok",
+      key: "synthesis",
+      content: "## Milestones\n- Genesis (MVP Complete - 2026-03-21)\n- Beta ship target by 2027-09-01",
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/ragnarok",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ text: string }>;
+      at_risk: Array<{ text: string }>;
+      overdue: Array<{ text: string }>;
+      completed_recently: Array<{ text: string }>;
+    };
+
+    const all = [...result.open, ...result.at_risk, ...result.overdue, ...result.completed_recently];
+    expect(all.find((c) => c.text.includes("Genesis"))).toBeUndefined();
+    expect(all.find((c) => c.text.includes("Beta ship target"))).toBeUndefined();
+  });
+
+  it("does not extract commitments from entries with terminal lifecycle tags (#26)", async () => {
+    // Log entries that were written with an archived/completed/stopped tag
+    // are records of resolved work, even when the text contains forward-
+    // looking dated language.
+    await callTool("memory_log", {
+      namespace: "projects/skadi",
+      content: "We will ship the migration by 2027-01-15.",
+      tags: ["archived"],
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/skadi",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ text: string }>;
+      overdue: Array<{ text: string }>;
+      at_risk: Array<{ text: string }>;
+    };
+
+    expect(result.open).toHaveLength(0);
+    expect(result.overdue).toHaveLength(0);
+    expect(result.at_risk).toHaveLength(0);
+  });
+
+  it("does not extract commitments from entries in a resolved-status namespace (#26)", async () => {
+    // A task result document that lives in a namespace whose status is
+    // already `completed` should not contribute commitments, even when the
+    // document text uses "Due: <date>" language retrospectively.
+    // tasks/* is not a tracked namespace so memory_update_status refuses
+    // it — write the status directly with the lifecycle tag instead.
+    await callTool("memory_write", {
+      namespace: "tasks/old-task-run",
+      key: "status",
+      content: "Shipped and archived.",
+      tags: ["completed"],
+    });
+    await callTool("memory_write", {
+      namespace: "tasks/old-task-run",
+      key: "result",
+      content: "Due: 2026-03-31 (two weeks after setup on 2026-03-17). Delivered on time.",
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "tasks/old-task-run",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ text: string }>;
+      overdue: Array<{ text: string }>;
+      at_risk: Array<{ text: string }>;
+    };
+
+    expect(result.open).toHaveLength(0);
+    expect(result.overdue).toHaveLength(0);
+    expect(result.at_risk).toHaveLength(0);
+  });
+
   it("includes a reason string in empty results and omits it in non-empty results", async () => {
     // Empty namespace — no entries at all
     const emptyRaw = await callTool("memory_commitments", {

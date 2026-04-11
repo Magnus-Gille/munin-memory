@@ -1767,6 +1767,28 @@ export function getCompletedTaskNamespaces(db: Database.Database): Set<string> {
   return new Set(rows.map((r) => r.namespace));
 }
 
+/**
+ * Returns the set of namespaces whose `status` state entry carries a
+ * terminal lifecycle tag (`completed`, `archived`, `stopped`, or `failed`).
+ *
+ * Used by commitment extraction to suppress derivations from entries that
+ * live in an already-resolved namespace: task result documents,
+ * post-mortems, and archived projects typically contain forward-looking
+ * dated language that is historical, not an open commitment.
+ */
+export function getResolvedNamespaces(db: Database.Database): Set<string> {
+  const rows = db
+    .prepare(
+      `SELECT e.namespace FROM entries e, json_each(e.tags) t
+       WHERE e.entry_type = 'state'
+         AND e.key = 'status'
+         AND t.value IN ('completed', 'archived', 'stopped', 'failed')
+       GROUP BY e.namespace`,
+    )
+    .all() as Array<{ namespace: string }>;
+  return new Set(rows.map((r) => r.namespace));
+}
+
 // --- Retrieval analytics ---
 
 // Correlation window: 5 minutes

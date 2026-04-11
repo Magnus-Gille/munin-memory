@@ -16,6 +16,15 @@ changelog is the canonical record of what moved.
   to semantic-only. Previously, compound natural-language questions (e.g.
   "OAuth token expiry access control") surfaced only semantic signal even
   when lexical evidence was present in the corpus (#27).
+- `memory_commitments` no longer extracts derived commitments from resolved
+  sources. Three new suppression rules: (1) `synthesis` key entries are
+  skipped so milestone labels in consolidation output (e.g. "Genesis (MVP
+  Complete - 2026-03-21)") no longer masquerade as commitments; (2) entries
+  whose own tags carry a terminal lifecycle (`completed`, `archived`,
+  `stopped`, `failed`) are skipped; (3) entries living in a namespace whose
+  status is terminal are skipped — catches task result documents and
+  post-mortems that contain forward-looking dated language retrospectively
+  (#26).
 
 ## [0.2.0] — 2026-04-11
 
