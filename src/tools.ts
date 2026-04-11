@@ -1107,7 +1107,7 @@ function isTrackedNamespace(namespace: string): boolean {
   return namespace.startsWith("projects/") || namespace.startsWith("clients/");
 }
 
-function buildRelaxedLexicalQuery(query: string): string | null {
+export function buildRelaxedLexicalQuery(query: string): string | null {
   if (query.includes("\"")) return null;
   if (/\b(AND|OR|NOT|NEAR)\b|[:()*]/.test(query)) return null;
 

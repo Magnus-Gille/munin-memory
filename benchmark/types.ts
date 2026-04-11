@@ -77,4 +77,6 @@ export interface BenchmarkReport {
   queries: QueryBenchmarkResult[];
   /** Warnings about degraded conditions (e.g., embeddings unavailable). */
   warnings?: string[];
+  /** Count of lexical queries that fell back to the relaxed OR form because strict AND returned nothing. Mirrors memory_query's production fallback; see benchmark/runner.ts executeQuery. */
+  relaxed_lexical_fallback_count?: number;
 }

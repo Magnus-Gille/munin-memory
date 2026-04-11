@@ -20,6 +20,7 @@ import {
   type SemanticQueryOptions,
 } from "../src/db.js";
 import { generateEmbedding, embeddingToBuffer, initEmbeddings } from "../src/embeddings.js";
+import { buildRelaxedLexicalQuery } from "../src/tools.js";
 import { scoreQuery, aggregateScores, type ScoringResult } from "./scorer.js";
 import type {
   BenchmarkQuery,
@@ -117,23 +118,41 @@ async function executeQuery(
   query: string,
   mode: SearchMode,
   limit: number = 10,
-): Promise<{ ids: string[]; namespaces: string[] }> {
+): Promise<{ ids: string[]; namespaces: string[]; relaxed: boolean }> {
   if (mode === "lexical") {
-    const results = queryEntriesLexicalScored(db, {
+    let results = queryEntriesLexicalScored(db, {
       query,
       limit,
       includeExpired: true,
     });
+    let relaxed = false;
+    // Mirror memory_query's production fallback: if strict AND-of-all-words
+    // returns nothing, retry with the relaxed OR-of-content-terms form.
+    // Without this, benchmark lexical numbers are artificially depressed
+    // for any corpus where documents are shorter than the query.
+    if (results.length === 0) {
+      const relaxedQuery = buildRelaxedLexicalQuery(query);
+      if (relaxedQuery) {
+        results = queryEntriesLexicalScored(db, {
+          query: relaxedQuery,
+          limit,
+          includeExpired: true,
+          rawFts5: true,
+        });
+        relaxed = results.length > 0;
+      }
+    }
     return {
       ids: results.map((r) => r.entry.id),
       namespaces: results.map((r) => r.entry.namespace),
+      relaxed,
     };
   }
 
   if (mode === "semantic") {
     const emb = await generateEmbedding(query);
     if (!emb) {
-      return { ids: [], namespaces: [] };
+      return { ids: [], namespaces: [], relaxed: false };
     }
     const buf = embeddingToBuffer(emb);
     const results = queryEntriesSemanticScored(db, {
@@ -144,13 +163,15 @@ async function executeQuery(
     return {
       ids: results.map((r) => r.entry.id),
       namespaces: results.map((r) => r.entry.namespace),
+      relaxed: false,
     };
   }
 
   // hybrid
   const emb = await generateEmbedding(query);
   if (!emb) {
-    // Fall back to lexical
+    // Fall back to lexical (strict; no relaxed fallback here — matches
+    // production hybrid-when-embeddings-unavailable behavior)
     const results = queryEntriesLexicalScored(db, {
       query,
       limit,
@@ -159,6 +180,7 @@ async function executeQuery(
     return {
       ids: results.map((r) => r.entry.id),
       namespaces: results.map((r) => r.entry.namespace),
+      relaxed: false,
     };
   }
   const buf = embeddingToBuffer(emb);
@@ -169,6 +191,7 @@ async function executeQuery(
   return {
     ids: results.map((r) => r.entry.id),
     namespaces: results.map((r) => r.entry.namespace),
+    relaxed: false,
   };
 }
 
@@ -203,6 +226,7 @@ export async function runBenchmark(
 
   const allResults: QueryBenchmarkResult[] = [];
   let skippedUnresolved = 0;
+  let relaxedLexicalFallbackCount = 0;
 
   for (const query of queries) {
     const expectedIds = resolveExpectedIds(query);
@@ -229,12 +253,15 @@ export async function runBenchmark(
         actualMode = "lexical";
       }
 
-      const { ids: resultIds, namespaces: resultNamespaces } = await executeQuery(
+      const { ids: resultIds, namespaces: resultNamespaces, relaxed } = await executeQuery(
         db,
         query.query,
         mode,
         10,
       );
+      if (relaxed) {
+        relaxedLexicalFallbackCount += 1;
+      }
 
       let scores: ScoringResult;
       if (useNamespaceScoring) {
@@ -326,6 +353,7 @@ export async function runBenchmark(
     by_search_mode: bySearchMode,
     queries: allResults,
     warnings: warnings.length > 0 ? warnings : undefined,
+    relaxed_lexical_fallback_count: relaxedLexicalFallbackCount,
   };
 }
 
