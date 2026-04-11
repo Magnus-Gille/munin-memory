@@ -1616,26 +1616,48 @@ export function queryEntriesSemanticScored(
 export interface HybridQueryOptions {
   ftsOptions: QueryOptions;
   semanticOptions: SemanticQueryOptions;
+  /**
+   * Optional relaxed FTS query to retry with when the primary FTS query
+   * returns zero matches. Lets the hybrid path mirror the lexical-mode
+   * relaxed-token fallback: a natural-language question with more words
+   * than any single entry contains should still surface lexical signal
+   * via an OR-of-content-terms retry before the result collapses to
+   * semantic-only.
+   */
+  ftsFallbackOptions?: QueryOptions;
+}
+
+export interface HybridQueryScored {
+  results: HybridQueryResult[];
+  ftsRelaxed: boolean;
 }
 
 export function queryEntriesHybrid(
   db: Database.Database,
   options: HybridQueryOptions,
 ): Entry[] {
-  return queryEntriesHybridScored(db, options).map((result) => result.entry);
+  return queryEntriesHybridScored(db, options).results.map((result) => result.entry);
 }
 
 export function queryEntriesHybridScored(
   db: Database.Database,
   options: HybridQueryOptions,
-): HybridQueryResult[] {
-  const { ftsOptions, semanticOptions } = options;
+): HybridQueryScored {
+  const { ftsOptions, semanticOptions, ftsFallbackOptions } = options;
   const limit = Math.min(Math.max(ftsOptions.limit ?? 10, 1), 50);
 
   // Over-fetch from both sources (5x limit per Codex finding)
   const overFetchLimit = limit * 5;
 
-  const ftsResults = queryEntriesLexicalScored(db, { ...ftsOptions, limit: overFetchLimit });
+  let ftsResults = queryEntriesLexicalScored(db, { ...ftsOptions, limit: overFetchLimit });
+  let ftsRelaxed = false;
+  if (ftsResults.length === 0 && ftsFallbackOptions) {
+    const relaxed = queryEntriesLexicalScored(db, { ...ftsFallbackOptions, limit: overFetchLimit });
+    if (relaxed.length > 0) {
+      ftsResults = relaxed;
+      ftsRelaxed = true;
+    }
+  }
   const vecResults = queryEntriesSemanticScored(db, { ...semanticOptions, limit: overFetchLimit });
 
   // Build 1-indexed rank maps
@@ -1693,7 +1715,7 @@ export function queryEntriesHybridScored(
   // Sort by score descending
   scored.sort((a, b) => b.score - a.score);
 
-  return scored.slice(0, limit);
+  return { results: scored.slice(0, limit), ftsRelaxed };
 }
 
 // --- Vec helpers (used by embeddings.ts) ---

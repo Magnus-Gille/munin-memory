@@ -31,6 +31,7 @@ import {
   queryEntriesSemanticScored,
   queryEntriesHybrid,
   queryEntriesHybridScored,
+  type HybridQueryResult,
   queryEntriesByFilter,
   listEntriesForDerivation,
   listNamespaces,
@@ -441,7 +442,7 @@ function formatQueryResult(
   actualMode: SearchMode,
   lexicalById: Map<string, ReturnType<typeof queryEntriesLexicalScored>[number]>,
   semanticById: Map<string, ReturnType<typeof queryEntriesSemanticScored>[number]>,
-  hybridById: Map<string, ReturnType<typeof queryEntriesHybridScored>[number]>,
+  hybridById: Map<string, HybridQueryResult>,
 ): QueryResult {
   const parsed = parseEntry(entry);
   const redacted = maybeRedactEntryMetadata(db, ctx, buildRedactableEntryMetadata(parsed), toolName, sessionId);
@@ -5701,7 +5702,7 @@ export function registerTools(
             let results: Entry[] = [];
             let lexicalResults: ReturnType<typeof queryEntriesLexicalScored> = [];
             let semanticResults: ReturnType<typeof queryEntriesSemanticScored> = [];
-            let hybridResults: ReturnType<typeof queryEntriesHybridScored> = [];
+            let hybridResults: HybridQueryResult[] = [];
 
             if (requestedMode === "semantic") {
               if (!isSemanticEnabled() || !vecLoaded()) {
@@ -5750,10 +5751,21 @@ export function registerTools(
                 fallbackReason = "embedding_generation_failed";
               } else {
                 const buf = embeddingToBuffer(queryEmb);
-                hybridResults = queryEntriesHybridScored(db, {
+                const relaxedQuery = buildRelaxedLexicalQuery(query);
+                const hybridScored = queryEntriesHybridScored(db, {
                   ftsOptions: { query, namespace, entryType: entry_type, tags, limit: internalLimit, includeExpired: true, since, until },
                   semanticOptions: { queryEmbedding: buf, namespace, entryType: entry_type, tags, limit: internalLimit, includeExpired: true, since, until },
+                  ftsFallbackOptions: relaxedQuery
+                    ? { query: relaxedQuery, namespace, entryType: entry_type, tags, limit: internalLimit, includeExpired: true, since, until, rawFts5: true }
+                    : undefined,
                 });
+                hybridResults = hybridScored.results;
+                if (hybridScored.ftsRelaxed) {
+                  relaxedLexical = true;
+                  if (!warning) {
+                    warning = "No exact lexical matches found. Used relaxed token matching for natural-language query.";
+                  }
+                }
                 const filteredExpired = filterExpiredEntries(hybridResults, includeExpired);
                 hybridResults = filteredExpired.items;
                 expiredFilteredCount = filteredExpired.expiredFilteredCount;

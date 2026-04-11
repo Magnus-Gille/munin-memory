@@ -8,6 +8,15 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Fixed
+
+- `memory_query` hybrid mode now mirrors the lexical-mode relaxed-token
+  fallback: when the strict AND-of-all-words FTS5 query returns zero matches,
+  the hybrid path retries with an OR-of-content-terms query before collapsing
+  to semantic-only. Previously, compound natural-language questions (e.g.
+  "OAuth token expiry access control") surfaced only semantic signal even
+  when lexical evidence was present in the corpus (#27).
+
 ## [0.2.0] — 2026-04-11
 
 First tagged release since the initial public drop on 2026-03-03. Roughly six

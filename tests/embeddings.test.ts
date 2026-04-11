@@ -10,6 +10,7 @@ import {
   appendLog,
   queryEntriesSemantic,
   queryEntriesHybrid,
+  queryEntriesHybridScored,
   vecLoaded,
   storeEmbedding,
   removeEmbedding,
@@ -361,6 +362,51 @@ describe("hybrid RRF search", () => {
     const ids = results.map((r) => r.id);
     expect(ids).toContain(ftsId);
     expect(ids).toContain(vecId);
+  });
+
+  it.skipIf(!vecAvailable)("retries FTS with relaxed OR query when strict AND returns zero matches", () => {
+    // Entry contains "OAuth" and "access" but NOT "expiry" or "control".
+    // The strict AND-of-all-terms FTS query for "OAuth token expiry access control"
+    // would return zero matches; the relaxed OR fallback should still surface it.
+    const { id: oauthId } = writeState(
+      db,
+      "projects/munin-memory",
+      "oauth-status",
+      "OAuth 2.1 provider shipped with access token rotation",
+      [],
+    );
+    // Unrelated entry with far embedding so it doesn't crowd the result.
+    const { id: unrelatedId } = writeState(db, "test/ns", "unrelated", "completely different", []);
+
+    storeEmbedding(db, oauthId, embeddingToBuffer(makeEmbedding(99)), "test");
+    storeEmbedding(db, unrelatedId, embeddingToBuffer(makeEmbedding(50)), "test");
+    db.prepare("UPDATE entries SET embedding_status = 'generated' WHERE id IN (?, ?)").run(oauthId, unrelatedId);
+
+    const queryEmb = embeddingToBuffer(makeEmbedding(1));
+    const compound = "OAuth token expiry access control";
+
+    // Without ftsFallbackOptions: strict AND returns zero FTS matches.
+    const strict = queryEntriesHybridScored(db, {
+      ftsOptions: { query: compound },
+      semanticOptions: { queryEmbedding: queryEmb },
+    });
+    const strictOauth = strict.results.find((r) => r.entry.id === oauthId);
+    expect(strict.ftsRelaxed).toBe(false);
+    expect(strictOauth?.lexicalRank).toBeUndefined();
+
+    // With a relaxed OR fallback: FTS now contributes a lexical rank for the OAuth entry.
+    const relaxed = queryEntriesHybridScored(db, {
+      ftsOptions: { query: compound },
+      semanticOptions: { queryEmbedding: queryEmb },
+      ftsFallbackOptions: {
+        query: `"oauth" OR "token" OR "expiry" OR "access" OR "control"`,
+        rawFts5: true,
+      },
+    });
+    expect(relaxed.ftsRelaxed).toBe(true);
+    const relaxedOauth = relaxed.results.find((r) => r.entry.id === oauthId);
+    expect(relaxedOauth).toBeTruthy();
+    expect(relaxedOauth?.lexicalRank).toBeTypeOf("number");
   });
 });
 

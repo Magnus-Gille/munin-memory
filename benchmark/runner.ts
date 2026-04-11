@@ -184,14 +184,18 @@ async function executeQuery(
     };
   }
   const buf = embeddingToBuffer(emb);
-  const results = queryEntriesHybridScored(db, {
+  const relaxedQuery = buildRelaxedLexicalQuery(query);
+  const hybridScored = queryEntriesHybridScored(db, {
     ftsOptions: { query, limit, includeExpired: true },
     semanticOptions: { queryEmbedding: buf, limit, includeExpired: true },
+    ftsFallbackOptions: relaxedQuery
+      ? { query: relaxedQuery, limit, includeExpired: true, rawFts5: true }
+      : undefined,
   });
   return {
-    ids: results.map((r) => r.entry.id),
-    namespaces: results.map((r) => r.entry.namespace),
-    relaxed: false,
+    ids: hybridScored.results.map((r) => r.entry.id),
+    namespaces: hybridScored.results.map((r) => r.entry.namespace),
+    relaxed: hybridScored.ftsRelaxed,
   };
 }
 
