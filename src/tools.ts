@@ -6277,19 +6277,36 @@ export function registerTools(
 
             // Include aggregate retrieval health metrics
             const rawAgg = getRetrievalAggregates(db);
+            const rawRate = rawAgg.total_events > 0
+              ? rawAgg.reformulation_count / rawAgg.total_events
+              : 0;
+            const adjustedRate = rawAgg.multi_event_events > 0
+              ? rawAgg.reformulation_count / rawAgg.multi_event_events
+              : 0;
+            const singleEventSessions = rawAgg.total_sessions - rawAgg.multi_event_sessions;
+            const explanation = singleEventSessions > 0
+              ? `reformulation_rate uses all ${rawAgg.total_events} events as denominator. ` +
+                `${singleEventSessions} of ${rawAgg.total_sessions} sessions had only 1 event ` +
+                `(typically HTTP clients with per-request session IDs) — these inflate the ` +
+                `denominator without contributing signal. reformulation_rate_adjusted excludes ` +
+                `single-event sessions (${rawAgg.multi_event_events} events from ` +
+                `${rawAgg.multi_event_sessions} multi-event sessions).`
+              : "All sessions had multiple events; raw and adjusted rates are equivalent.";
             const aggregates: RetrievalAggregates = {
               period_start: rawAgg.period_start,
               period_end: rawAgg.period_end,
               total_events: rawAgg.total_events,
               total_outcomes: rawAgg.total_outcomes,
-              reformulation_rate: rawAgg.total_events > 0
-                ? rawAgg.reformulation_count / rawAgg.total_events
-                : 0,
+              reformulation_rate: rawRate,
+              reformulation_rate_adjusted: adjustedRate,
+              reformulation_explanation: explanation,
               positive_outcome_rate: rawAgg.total_events > 0
                 ? rawAgg.positive_outcome_count / rawAgg.total_events
                 : 0,
               feedback_counts: rawAgg.feedback_counts as Record<RetrievalFeedbackParams["feedback_type"], number>,
               total_feedback: rawAgg.total_feedback,
+              total_sessions: rawAgg.total_sessions,
+              multi_event_sessions: rawAgg.multi_event_sessions,
             };
 
             return okResult("insights", {

@@ -719,9 +719,13 @@ export interface RetrievalAggregates {
   total_events: number;
   total_outcomes: number;
   reformulation_rate: number;
+  reformulation_rate_adjusted: number;
+  reformulation_explanation: string;
   positive_outcome_rate: number;
   feedback_counts: Record<RetrievalFeedbackType, number>;
   total_feedback: number;
+  total_sessions: number;
+  multi_event_sessions: number;
 }
 
 // Security types

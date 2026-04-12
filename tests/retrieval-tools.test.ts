@@ -234,6 +234,27 @@ describe("memory_insights tool", () => {
     expect(result.min_impressions).toBe(3);
   });
 
+  it("includes session-segmented reformulation context in aggregates (#25)", async () => {
+    const raw = await callTool("memory_insights");
+    const result = parseToolResponse(raw) as {
+      aggregates: {
+        reformulation_rate: number;
+        reformulation_rate_adjusted: number;
+        reformulation_explanation: string;
+        total_sessions: number;
+        multi_event_sessions: number;
+      };
+    };
+
+    expect(result.aggregates).toBeDefined();
+    expect(result.aggregates.reformulation_rate).toBeTypeOf("number");
+    expect(result.aggregates.reformulation_rate_adjusted).toBeTypeOf("number");
+    expect(result.aggregates.reformulation_explanation).toBeTypeOf("string");
+    expect(result.aggregates.reformulation_explanation.length).toBeGreaterThan(0);
+    expect(result.aggregates.total_sessions).toBeTypeOf("number");
+    expect(result.aggregates.multi_event_sessions).toBeTypeOf("number");
+  });
+
   it("returns insights after retrieval events", async () => {
     writeState(db, "projects/insights-target", "status", "insights target project", ["active"]);
     const entry = db

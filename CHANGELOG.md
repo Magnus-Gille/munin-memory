@@ -8,6 +8,15 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Changed
+
+- `memory_insights` aggregates now include session-segmented reformulation
+  context: `reformulation_rate_adjusted` (excludes single-event sessions
+  from the denominator), `reformulation_explanation` (human-readable note
+  about known session-correlation limitations), `total_sessions`, and
+  `multi_event_sessions`. The raw `reformulation_rate` is retained for
+  backwards compatibility (#25).
+
 ### Fixed
 
 - `memory_query` hybrid mode now mirrors the lexical-mode relaxed-token

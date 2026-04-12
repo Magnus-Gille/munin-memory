@@ -2184,6 +2184,9 @@ export function getRetrievalAggregates(
   positive_outcome_count: number;
   feedback_counts: Record<string, number>;
   total_feedback: number;
+  total_sessions: number;
+  multi_event_sessions: number;
+  multi_event_events: number;
 } {
   const periodEnd = until ?? nowUTC();
   const periodStart = since ?? new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
@@ -2229,6 +2232,29 @@ export function getRetrievalAggregates(
       .get(periodStart, periodEnd) as { cnt: number }
   ).cnt;
 
+  // Session segmentation: multi-event sessions (≥2 retrieval events) are
+  // the only ones where reformulation can be detected. Single-event sessions
+  // (typically HTTP clients with per-request session IDs) inflate the
+  // denominator without contributing signal.
+  const sessionCounts = db
+    .prepare(
+      `SELECT
+         COUNT(DISTINCT session_id) AS total_sessions,
+         COUNT(DISTINCT CASE WHEN cnt >= 2 THEN session_id END) AS multi_event_sessions,
+         SUM(CASE WHEN cnt >= 2 THEN cnt ELSE 0 END) AS multi_event_events
+       FROM (
+         SELECT session_id, COUNT(*) AS cnt
+         FROM retrieval_events
+         WHERE timestamp >= ? AND timestamp <= ?
+         GROUP BY session_id
+       )`,
+    )
+    .get(periodStart, periodEnd) as {
+      total_sessions: number;
+      multi_event_sessions: number;
+      multi_event_events: number;
+    };
+
   // Feedback counts by type
   const feedbackRows = db
     .prepare(
@@ -2254,6 +2280,9 @@ export function getRetrievalAggregates(
     positive_outcome_count: positiveOutcomeCount,
     feedback_counts: feedbackCounts,
     total_feedback: totalFeedback,
+    total_sessions: sessionCounts.total_sessions,
+    multi_event_sessions: sessionCounts.multi_event_sessions,
+    multi_event_events: sessionCounts.multi_event_events,
   };
 }
 
