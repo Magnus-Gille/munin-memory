@@ -602,6 +602,30 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 14,
+    description: "Add tool_calls telemetry table (Layer 1)",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS tool_calls (
+          id TEXT PRIMARY KEY,
+          timestamp TEXT NOT NULL,
+          session_id TEXT,
+          principal_id TEXT,
+          tool_name TEXT NOT NULL,
+          success INTEGER NOT NULL DEFAULT 1,
+          error_type TEXT,
+          response_size_bytes INTEGER,
+          duration_ms REAL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_tool_calls_timestamp
+          ON tool_calls(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_tool_calls_tool_timestamp
+          ON tool_calls(tool_name, timestamp);
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

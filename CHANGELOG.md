@@ -8,6 +8,15 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Added
+
+- **Tool call telemetry (Layer 1)** — migration v14 adds a `tool_calls`
+  table. Every MCP tool call is instrumented with fire-and-forget timing:
+  `tool_name`, `success`, `error_type`, `response_size_bytes`, and
+  `duration_ms`. `memory_status` now includes a `telemetry` field (owner-
+  only) with per-tool aggregates over the last 7 days. Pruned alongside
+  retrieval analytics at the configured retention window (#28).
+
 ### Changed
 
 - `memory_insights` aggregates now include session-segmented reformulation

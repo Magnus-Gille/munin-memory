@@ -59,6 +59,8 @@ import {
   getInsightsByEntry,
   logRetrievalFeedback,
   getRetrievalAggregates,
+  logToolCall,
+  getToolCallAggregates,
   getAuditHistoryPage,
   insertRedactionLog,
   getOtherKeysInNamespaceByClassification,
@@ -4001,9 +4003,10 @@ export function registerTools(
   server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest) => {
       const { name, arguments: args } = request.params;
       const maxContentSize = getMaxContentSize();
+      const telemetryStart = performance.now();
 
       try {
-        switch (name) {
+        const result = await (async () => { switch (name) {
           case "memory_orient": {
             const orientArgs = (args ?? {}) as OrientParams;
             const { include_demo, include_completed_tasks } = orientArgs;
@@ -6478,7 +6481,7 @@ export function registerTools(
             if (configWarnings.length > 0) {
               librarian.config_warnings = configWarnings;
             }
-            return okResult("status", {
+            const statusResponse: Record<string, unknown> = {
               server: {
                 name: "munin-memory",
                 version: "0.1.0",
@@ -6499,21 +6502,60 @@ export function registerTools(
                 type: ctx.principalType,
               },
               librarian,
-            });
+            };
+            if (ctx.principalType === "owner") {
+              statusResponse.telemetry = getToolCallAggregates(db, 7);
+            }
+            return okResult("status", statusResponse);
           }
 
           default:
             return errResult("unknown", "unknown_tool", `Unknown tool: ${name}`);
-        }
+        } })();
+
+        const durationMs = performance.now() - telemetryStart;
+        const responseText = result.content?.[0]?.type === "text"
+          ? (result.content[0] as { text: string }).text
+          : "";
+        let isErr = false;
+        let errorType: string | undefined;
+        try {
+          const parsed = JSON.parse(responseText);
+          if (parsed.ok === false) {
+            isErr = true;
+            errorType = parsed.error ?? "unknown";
+          }
+        } catch { /* not JSON — treat as success */ }
+        logToolCall(db, {
+          sessionId,
+          principalId: ctx.principalId,
+          toolName: name ?? "unknown",
+          success: !isErr,
+          errorType,
+          responseSizeBytes: responseText.length,
+          durationMs,
+        });
+        return result;
       } catch (err) {
+        const durationMs = performance.now() - telemetryStart;
         const message = err instanceof Error ? err.message : String(err);
-        return {
+        const errorResponse = {
           content: [{
-            type: "text",
+            type: "text" as const,
             text: JSON.stringify({ ok: false, action: name ?? "unknown", error: "internal_error", message }),
           }],
           isError: true,
         };
+        logToolCall(db, {
+          sessionId,
+          principalId: ctx.principalId,
+          toolName: name ?? "unknown",
+          success: false,
+          errorType: "internal_error",
+          responseSizeBytes: errorResponse.content[0].text.length,
+          durationMs,
+        });
+        return errorResponse;
       }
     },
   );

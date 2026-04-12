@@ -5581,6 +5581,45 @@ describe("memory_status", () => {
     expect(result.principal.id).toBe("agent:test");
     expect(result.principal.type).toBe("agent");
   });
+
+  it("includes telemetry aggregates for owner (#28)", async () => {
+    // Make a couple of tool calls first to generate telemetry data
+    await callTool("memory_write", { namespace: "test/telemetry", key: "probe", content: "telemetry test" });
+    await callTool("memory_read", { namespace: "test/telemetry", key: "probe" });
+
+    const raw = await callTool("memory_status", {});
+    const result = parseToolResponse(raw) as {
+      telemetry: Array<{
+        tool_name: string;
+        total_calls: number;
+        error_count: number;
+        avg_duration_ms: number | null;
+        p95_response_size_bytes: number | null;
+      }>;
+    };
+
+    expect(Array.isArray(result.telemetry)).toBe(true);
+    // At minimum, the memory_write and memory_read we just did should show up
+    const writeRow = result.telemetry.find((r) => r.tool_name === "memory_write");
+    const readRow = result.telemetry.find((r) => r.tool_name === "memory_read");
+    expect(writeRow).toBeDefined();
+    expect(writeRow!.total_calls).toBeGreaterThanOrEqual(1);
+    expect(readRow).toBeDefined();
+    expect(readRow!.total_calls).toBeGreaterThanOrEqual(1);
+  });
+
+  it("records error telemetry for validation failures (#28)", async () => {
+    await callTool("memory_write", { namespace: "", key: "bad", content: "fail" });
+
+    const raw = await callTool("memory_status", {});
+    const result = parseToolResponse(raw) as {
+      telemetry: Array<{ tool_name: string; error_count: number }>;
+    };
+
+    const writeRow = result.telemetry.find((r) => r.tool_name === "memory_write");
+    expect(writeRow).toBeDefined();
+    expect(writeRow!.error_count).toBeGreaterThanOrEqual(1);
+  });
 });
 
 describe("unknown tool", () => {

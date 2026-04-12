@@ -2074,6 +2074,75 @@ export function getInsightsByEntry(
  * Sessions: delete where last_event_timestamp < now - 7 days.
  * Never throws.
  */
+// --- Tool call telemetry ---
+
+export interface ToolCallInput {
+  sessionId?: string;
+  principalId?: string;
+  toolName: string;
+  success: boolean;
+  errorType?: string;
+  responseSizeBytes?: number;
+  durationMs?: number;
+}
+
+export function logToolCall(
+  db: Database.Database,
+  input: ToolCallInput,
+): void {
+  try {
+    db.prepare(
+      `INSERT INTO tool_calls (id, timestamp, session_id, principal_id, tool_name, success, error_type, response_size_bytes, duration_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      randomUUID(),
+      nowUTC(),
+      input.sessionId ?? null,
+      input.principalId ?? null,
+      input.toolName,
+      input.success ? 1 : 0,
+      input.errorType ?? null,
+      input.responseSizeBytes ?? null,
+      input.durationMs ?? null,
+    );
+  } catch {
+    // Fire-and-forget: never fail the tool call
+  }
+}
+
+export interface ToolCallAggregateRow {
+  tool_name: string;
+  total_calls: number;
+  error_count: number;
+  avg_duration_ms: number | null;
+  p95_response_size_bytes: number | null;
+}
+
+export function getToolCallAggregates(
+  db: Database.Database,
+  days: number = 7,
+): ToolCallAggregateRow[] {
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  try {
+    return db
+      .prepare(
+        `SELECT
+           tool_name,
+           COUNT(*) AS total_calls,
+           SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS error_count,
+           AVG(duration_ms) AS avg_duration_ms,
+           MAX(response_size_bytes) AS p95_response_size_bytes
+         FROM tool_calls
+         WHERE timestamp >= ?
+         GROUP BY tool_name
+         ORDER BY total_calls DESC`,
+      )
+      .all(cutoff) as ToolCallAggregateRow[];
+  } catch {
+    return [];
+  }
+}
+
 export function pruneRetrievalAnalytics(
   db: Database.Database,
   retentionDays: number,
@@ -2093,6 +2162,11 @@ export function pruneRetrievalAnalytics(
       db.prepare(
         "DELETE FROM retrieval_sessions WHERE last_event_timestamp < ?",
       ).run(sessionCutoff);
+
+      // Tool call telemetry shares the same retention window
+      db.prepare(
+        "DELETE FROM tool_calls WHERE timestamp < ?",
+      ).run(cutoff);
     });
 
     txn();
