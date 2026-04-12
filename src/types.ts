@@ -838,6 +838,7 @@ export interface ConsolidationRunResult {
   token_count: number | null;
   duration_ms: number;
   cross_references_found: number;
+  orphans_discovered: number;
   error?: string;
 }
 

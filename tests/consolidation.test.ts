@@ -19,6 +19,11 @@ import {
   isConsolidationAvailable,
   resetConsolidationCircuitBreaker,
   processConsolidationBatch,
+  loadTargetVocabulary,
+  scanMentions,
+  isOrphaned,
+  mergeCrossReferences,
+  discoverOrphanedReferences,
   _consolidationConfig,
   _setApiKey,
   _setWorkerDb,
@@ -510,5 +515,220 @@ describe("circuit breaker", () => {
 describe("isConsolidationAvailable", () => {
   it("returns false when consolidation is disabled (default)", () => {
     expect(isConsolidationAvailable()).toBe(false);
+  });
+});
+
+// ─── Orphaned cross-reference scanner ────────────────────────────────────────
+
+describe("loadTargetVocabulary", () => {
+  it("returns tracked namespaces and excludes the source", () => {
+    writeState(db, "projects/alpha", "status", "alpha status", ["active"]);
+    writeState(db, "projects/beta", "status", "beta status", ["active"]);
+    writeState(db, "clients/acme", "status", "acme status", ["active"]);
+    writeState(db, "people/sara", "status", "sara profile", []);
+    writeState(db, "meta/workbench", "status", "irrelevant", []);
+
+    const targets = loadTargetVocabulary(db, "projects/alpha");
+    const namespaces = targets.map((t) => t.namespace).sort();
+
+    expect(namespaces).toEqual(["clients/acme", "people/sara", "projects/beta"]);
+    expect(namespaces).not.toContain("projects/alpha");
+    expect(namespaces).not.toContain("meta/workbench");
+  });
+
+  it("filters out bare names shorter than 4 chars", () => {
+    writeState(db, "projects/ab", "status", "short", []);
+    writeState(db, "projects/longenough", "status", "ok", []);
+
+    const targets = loadTargetVocabulary(db, "projects/other");
+    expect(targets.map((t) => t.namespace)).toEqual(["projects/longenough"]);
+  });
+
+  it("populates bareName as the last path segment", () => {
+    writeState(db, "projects/hugin", "status", "ok", []);
+    const targets = loadTargetVocabulary(db, "projects/alpha");
+    expect(targets[0]).toEqual({ namespace: "projects/hugin", bareName: "hugin" });
+  });
+});
+
+describe("scanMentions", () => {
+  const targets = [
+    { namespace: "projects/hugin", bareName: "hugin" },
+    { namespace: "projects/heimdall", bareName: "heimdall" },
+    { namespace: "people/sara", bareName: "sara" },
+  ];
+
+  it("counts full-path and bare-name mentions, case-insensitive", () => {
+    const logs: Entry[] = [
+      makeEntry({ content: "Worked with Hugin today on the projects/hugin task." }),
+      makeEntry({ content: "HUGIN crashed overnight." }),
+    ];
+    const hits = scanMentions(logs, targets);
+    const hugin = hits.find((h) => h.targetNamespace === "projects/hugin");
+    expect(hugin).toBeDefined();
+    // Full-path matches once; bare name matches "Hugin", "hugin" (inside
+    // projects/hugin), and "HUGIN" — total 4. The exact count is less
+    // important than crossing the threshold; we just need >= 2.
+    expect(hugin!.count).toBeGreaterThanOrEqual(2);
+  });
+
+  it("excludes targets below the 2-mention threshold", () => {
+    const logs: Entry[] = [makeEntry({ content: "single hugin mention" })];
+    const hits = scanMentions(logs, targets);
+    expect(hits).toEqual([]);
+  });
+
+  it("does not match substrings inside words", () => {
+    const logs: Entry[] = [
+      makeEntry({ content: "resara and saracen and saragossa — no standalone tokens." }),
+    ];
+    const hits = scanMentions(logs, targets);
+    const sara = hits.find((h) => h.targetNamespace === "people/sara");
+    expect(sara).toBeUndefined();
+  });
+
+  it("returns empty for empty inputs", () => {
+    expect(scanMentions([], targets)).toEqual([]);
+    expect(scanMentions([makeEntry({ content: "nothing here" })], [])).toEqual([]);
+  });
+});
+
+describe("isOrphaned", () => {
+  it("returns true when target namespace has no status or synthesis", () => {
+    writeState(db, "projects/target", "other-key", "unrelated", []);
+    expect(isOrphaned(db, "projects/source", "projects/target")).toBe(true);
+  });
+
+  it("returns false when target status mentions source's full path", () => {
+    writeState(db, "projects/target", "status", "depends on projects/source for data", []);
+    expect(isOrphaned(db, "projects/source", "projects/target")).toBe(false);
+  });
+
+  it("returns false when target status mentions source's bare name", () => {
+    writeState(db, "projects/target", "status", "Source powers the flow.", []);
+    expect(isOrphaned(db, "projects/source", "projects/target")).toBe(false);
+  });
+
+  it("returns false when target synthesis (not status) mentions source", () => {
+    writeState(db, "projects/target", "synthesis", "Uses source as its primary feed.", []);
+    expect(isOrphaned(db, "projects/source", "projects/target")).toBe(false);
+  });
+
+  it("returns true when target mentions something else, not the source", () => {
+    writeState(db, "projects/target", "status", "mentions alpha and beta only", []);
+    expect(isOrphaned(db, "projects/source", "projects/target")).toBe(true);
+  });
+});
+
+describe("mergeCrossReferences", () => {
+  const llmRef = {
+    target_namespace: "projects/hugin",
+    reference_type: "depends_on" as const,
+    context: "LLM-extracted dependency",
+    confidence: 0.9,
+  };
+  const scannerRefSameTarget = {
+    target_namespace: "projects/hugin",
+    reference_type: "related_to" as const,
+    context: "Scanner-detected: 5 mentions",
+    confidence: 0.5,
+  };
+  const scannerRefNewTarget = {
+    target_namespace: "people/sara",
+    reference_type: "related_to" as const,
+    context: "Scanner-detected: 3 mentions",
+    confidence: 0.5,
+  };
+
+  it("LLM wins on target collision (keeps LLM type and context)", () => {
+    const merged = mergeCrossReferences([llmRef], [scannerRefSameTarget]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toEqual(llmRef);
+  });
+
+  it("appends scanner refs for targets the LLM did not find", () => {
+    const merged = mergeCrossReferences([llmRef], [scannerRefNewTarget]);
+    expect(merged).toHaveLength(2);
+    expect(merged[0]).toEqual(llmRef);
+    expect(merged[1]).toEqual(scannerRefNewTarget);
+  });
+
+  it("returns LLM refs untouched when no scanner refs", () => {
+    expect(mergeCrossReferences([llmRef], [])).toEqual([llmRef]);
+  });
+
+  it("returns scanner refs when LLM produced none", () => {
+    expect(mergeCrossReferences([], [scannerRefNewTarget])).toEqual([scannerRefNewTarget]);
+  });
+});
+
+describe("discoverOrphanedReferences (integration)", () => {
+  it("emits a scanner-derived orphan ref for a target mentioned twice with no back-reference", () => {
+    writeState(db, "projects/beta", "status", "beta runs independently", ["active"]);
+    const logs: Entry[] = [
+      makeEntry({ content: "Beta needs rework." }),
+      makeEntry({ content: "Another call-site in projects/beta failed." }),
+    ];
+
+    const orphans = discoverOrphanedReferences(db, "projects/alpha", logs);
+
+    expect(orphans).toHaveLength(1);
+    expect(orphans[0].target_namespace).toBe("projects/beta");
+    expect(orphans[0].reference_type).toBe("related_to");
+    expect(orphans[0].confidence).toBe(0.5);
+    expect(orphans[0].context).toMatch(/^Scanner-detected: \d+ mentions/);
+  });
+
+  it("skips targets whose state already mentions the source (not orphaned)", () => {
+    writeState(db, "projects/beta", "status", "tightly coupled to alpha", ["active"]);
+    const logs: Entry[] = [
+      makeEntry({ content: "Beta is failing." }),
+      makeEntry({ content: "Fixed projects/beta config." }),
+    ];
+
+    const orphans = discoverOrphanedReferences(db, "projects/alpha", logs);
+    expect(orphans).toEqual([]);
+  });
+
+  it("consolidateNamespace persists scanner-discovered orphans via replaceCrossReferences", async () => {
+    // projects/alpha is the source. projects/gamma is the orphan target.
+    writeState(db, "projects/gamma", "status", "gamma is self-contained", ["active"]);
+
+    for (let i = 0; i < 3; i++) {
+      appendLog(db, "projects/alpha", `Update ${i}: coordinated with Gamma and projects/gamma this iteration.`, []);
+    }
+
+    // Use a canned LLM response that returns NO cross-references, so we can
+    // verify the scanner-derived orphan is the one that lands in the table.
+    const noRefResponse: ChatCompletionResponse = {
+      choices: [
+        {
+          message: {
+            content: JSON.stringify({
+              status_content: "## Phase: Active\n\nSynthesis body.",
+              tags: ["active"],
+              cross_references: [],
+            }),
+          },
+        },
+      ],
+      usage: { prompt_tokens: 100, completion_tokens: 50 },
+    };
+    const callApi = vi.fn<(p: string) => Promise<ChatCompletionResponse>>().mockResolvedValue(noRefResponse);
+
+    const result = await consolidateNamespace(db, "projects/alpha", callApi);
+
+    expect(result.error).toBeUndefined();
+    expect(result.orphans_discovered).toBe(1);
+    expect(result.cross_references_found).toBe(1);
+
+    const crossRefs = getCrossReferences(db, "projects/alpha").filter(
+      (r) => r.source_namespace === "projects/alpha",
+    );
+    expect(crossRefs).toHaveLength(1);
+    expect(crossRefs[0].target_namespace).toBe("projects/gamma");
+    expect(crossRefs[0].reference_type).toBe("related_to");
+    expect(crossRefs[0].confidence).toBe(0.5);
+    expect(crossRefs[0].context).toMatch(/^Scanner-detected:/);
   });
 });

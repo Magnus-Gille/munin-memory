@@ -10,6 +10,17 @@ changelog is the canonical record of what moved.
 
 ### Added
 
+- **Orphan cross-reference discovery** — the consolidation worker now scans
+  the unincorporated log window for mentions of other tracked namespaces
+  (`projects/*`, `clients/*`, `people/*`, `decisions/*`) and checks whether
+  the target namespace's `status`/`synthesis` state entries contain a
+  reciprocal reference. Orphaned connections (≥2 mentions, no back-reference)
+  are merged with LLM-extracted cross-references before the single
+  `cross_references` write — the LLM wins on `(source, target)` collision, and
+  scanner-derived refs are tagged `related_to` with `confidence = 0.5` and a
+  context string prefixed `Scanner-detected: …`. Closes the ~50% orphan gap
+  measured in the 2026-04-04 Phase 2 consolidation spike (#29).
+
 - **Tool call telemetry (Layer 1)** — migration v14 adds a `tool_calls`
   table. Every MCP tool call is instrumented with fire-and-forget timing:
   `tool_name`, `success`, `error_type`, `response_size_bytes`, and
