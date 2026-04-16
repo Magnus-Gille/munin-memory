@@ -10,6 +10,15 @@ changelog is the canonical record of what moved.
 
 ### Added
 
+- **Bridge credentials file** — the MCP stdio-to-HTTP bridge now accepts
+  `MUNIN_CREDENTIALS_FILE`, a path to a `chmod 600` JSON file holding
+  `auth_token` / `cf_client_id` / `cf_client_secret`. The bridge refuses to
+  read the file if it has any group or world bits set, and logs a warning if
+  inline env vars are set but overridden by the file. This keeps Bearer tokens
+  and Cloudflare Access secrets out of MCP client config files (Codex CLI,
+  Claude Desktop, etc.), which typically land on disk as plaintext `0644`.
+  README has a new "Credential storage" section (#30).
+
 - **Orphan cross-reference discovery** — the consolidation worker now scans
   the unincorporated log window for mentions of other tracked namespaces
   (`projects/*`, `clients/*`, `people/*`, `decisions/*`) and checks whether

@@ -5,6 +5,7 @@ import {
   isSessionExpiredError,
   isRequest,
   createBridge,
+  loadBridgeCredentials,
   type TransportLike,
 } from "../src/bridge.js";
 
@@ -449,5 +450,195 @@ describe("createBridge reconnection", () => {
 
     // No error response sent (notifications don't get error responses)
     expect(sentToStdio).toHaveLength(0);
+  });
+});
+
+// --- loadBridgeCredentials ---
+
+describe("loadBridgeCredentials", () => {
+  function fakeStat(mode: number): (p: string) => { mode: number } {
+    return () => ({ mode });
+  }
+
+  it("falls back to env vars when MUNIN_CREDENTIALS_FILE is unset", () => {
+    const creds = loadBridgeCredentials({
+      env: {
+        MUNIN_AUTH_TOKEN: "tok",
+        MUNIN_CF_CLIENT_ID: "cid",
+        MUNIN_CF_CLIENT_SECRET: "csec",
+      },
+      log: () => {},
+    });
+    expect(creds).toEqual({
+      authToken: "tok",
+      cfClientId: "cid",
+      cfClientSecret: "csec",
+    });
+  });
+
+  it("treats empty MUNIN_CREDENTIALS_FILE as unset", () => {
+    const creds = loadBridgeCredentials({
+      env: { MUNIN_CREDENTIALS_FILE: "", MUNIN_AUTH_TOKEN: "tok" },
+      log: () => {},
+    });
+    expect(creds.authToken).toBe("tok");
+  });
+
+  it("loads credentials from a 0600 JSON file", () => {
+    const logs: string[] = [];
+    const creds = loadBridgeCredentials({
+      env: { MUNIN_CREDENTIALS_FILE: "/tmp/fake-creds.json" },
+      stat: fakeStat(0o600),
+      readFile: () =>
+        JSON.stringify({
+          auth_token: "filetok",
+          cf_client_id: "filecid",
+          cf_client_secret: "filecsec",
+        }),
+      log: (m) => logs.push(m),
+      platform: "linux",
+    });
+    expect(creds).toEqual({
+      authToken: "filetok",
+      cfClientId: "filecid",
+      cfClientSecret: "filecsec",
+    });
+    expect(
+      logs.some((m) => m.startsWith("Credentials loaded from file:")),
+    ).toBe(true);
+  });
+
+  it("refuses a world-readable credentials file (0644)", () => {
+    expect(() =>
+      loadBridgeCredentials({
+        env: { MUNIN_CREDENTIALS_FILE: "/tmp/creds.json" },
+        stat: fakeStat(0o644),
+        readFile: () => "{}",
+        log: () => {},
+        platform: "linux",
+      }),
+    ).toThrow(/mode 0644.*chmod 600/);
+  });
+
+  it("refuses a group-readable credentials file (0640)", () => {
+    expect(() =>
+      loadBridgeCredentials({
+        env: { MUNIN_CREDENTIALS_FILE: "/tmp/creds.json" },
+        stat: fakeStat(0o640),
+        readFile: () => "{}",
+        log: () => {},
+        platform: "linux",
+      }),
+    ).toThrow(/mode 0640/);
+  });
+
+  it("accepts 0400 (read-only owner)", () => {
+    const creds = loadBridgeCredentials({
+      env: { MUNIN_CREDENTIALS_FILE: "/tmp/creds.json" },
+      stat: fakeStat(0o400),
+      readFile: () => JSON.stringify({ auth_token: "t" }),
+      log: () => {},
+      platform: "linux",
+    });
+    expect(creds.authToken).toBe("t");
+  });
+
+  it("skips mode check on win32", () => {
+    const creds = loadBridgeCredentials({
+      env: { MUNIN_CREDENTIALS_FILE: "C:\\creds.json" },
+      stat: fakeStat(0o777),
+      readFile: () => JSON.stringify({ auth_token: "wtok" }),
+      log: () => {},
+      platform: "win32",
+    });
+    expect(creds.authToken).toBe("wtok");
+  });
+
+  it("throws a clear error when stat fails", () => {
+    expect(() =>
+      loadBridgeCredentials({
+        env: { MUNIN_CREDENTIALS_FILE: "/nope" },
+        stat: () => {
+          throw new Error("ENOENT: no such file");
+        },
+        readFile: () => "",
+        log: () => {},
+        platform: "linux",
+      }),
+    ).toThrow(/not readable at \/nope.*ENOENT/);
+  });
+
+  it("throws when the file is not valid JSON", () => {
+    expect(() =>
+      loadBridgeCredentials({
+        env: { MUNIN_CREDENTIALS_FILE: "/tmp/bad.json" },
+        stat: fakeStat(0o600),
+        readFile: () => "not json",
+        log: () => {},
+        platform: "linux",
+      }),
+    ).toThrow(/not valid JSON/);
+  });
+
+  it("throws when the file is a JSON array", () => {
+    expect(() =>
+      loadBridgeCredentials({
+        env: { MUNIN_CREDENTIALS_FILE: "/tmp/arr.json" },
+        stat: fakeStat(0o600),
+        readFile: () => "[]",
+        log: () => {},
+        platform: "linux",
+      }),
+    ).toThrow(/JSON object at the top level/);
+  });
+
+  it("throws when a field has the wrong type", () => {
+    expect(() =>
+      loadBridgeCredentials({
+        env: { MUNIN_CREDENTIALS_FILE: "/tmp/wrong.json" },
+        stat: fakeStat(0o600),
+        readFile: () => JSON.stringify({ auth_token: 42 }),
+        log: () => {},
+        platform: "linux",
+      }),
+    ).toThrow(/field "auth_token" must be a string/);
+  });
+
+  it("logs a warning when env vars are overridden by the file", () => {
+    const logs: string[] = [];
+    loadBridgeCredentials({
+      env: {
+        MUNIN_CREDENTIALS_FILE: "/tmp/creds.json",
+        MUNIN_AUTH_TOKEN: "envtok",
+        MUNIN_CF_CLIENT_ID: "envcid",
+      },
+      stat: fakeStat(0o600),
+      readFile: () => JSON.stringify({ auth_token: "filetok" }),
+      log: (m) => logs.push(m),
+      platform: "linux",
+    });
+    expect(
+      logs.some(
+        (m) =>
+          m.includes("ignoring inline env vars") &&
+          m.includes("MUNIN_AUTH_TOKEN") &&
+          m.includes("MUNIN_CF_CLIENT_ID"),
+      ),
+    ).toBe(true);
+  });
+
+  it("accepts a partial file (only auth_token)", () => {
+    const creds = loadBridgeCredentials({
+      env: { MUNIN_CREDENTIALS_FILE: "/tmp/partial.json" },
+      stat: fakeStat(0o600),
+      readFile: () => JSON.stringify({ auth_token: "t" }),
+      log: () => {},
+      platform: "linux",
+    });
+    expect(creds).toEqual({
+      authToken: "t",
+      cfClientId: undefined,
+      cfClientSecret: undefined,
+    });
   });
 });
