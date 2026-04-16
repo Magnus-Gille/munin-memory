@@ -2275,6 +2275,7 @@ describe("memory_orient", () => {
     // Default is compact conventions
     expect(result.conventions.content).toContain("# Quick Reference");
     expect(result.conventions.content).toContain("memory_read");
+    expect(result.conventions.content).toContain("historical record, not current state");
     expect(result.conventions.updated_at).toBeTruthy();
     expect((result.conventions as any).compact).toBe(true);
     expect(result.dashboard).toBeDefined();
