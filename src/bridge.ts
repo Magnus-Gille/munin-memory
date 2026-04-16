@@ -13,8 +13,17 @@
  *   MUNIN_AUTH_TOKEN           — Bearer token for Authorization header.
  *   MUNIN_CF_CLIENT_ID         — Cloudflare Access client ID.
  *   MUNIN_CF_CLIENT_SECRET     — Cloudflare Access client secret.
+ *   MUNIN_CREDENTIALS_FILE     — Optional path to a 0600 JSON file holding
+ *                                 auth_token / cf_client_id / cf_client_secret.
+ *                                 When set, these values are read from the
+ *                                 file instead of env vars, keeping secrets
+ *                                 out of MCP client config files.
  *   MUNIN_REQUEST_TIMEOUT_MS   — Per-request timeout in ms (default: 60000).
  */
+
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -22,6 +31,142 @@ import {
   StreamableHTTPError,
 } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+
+// --- Credential loading ---
+
+export interface BridgeCredentials {
+  authToken?: string;
+  cfClientId?: string;
+  cfClientSecret?: string;
+}
+
+interface CredentialsFileShape {
+  auth_token?: unknown;
+  cf_client_id?: unknown;
+  cf_client_secret?: unknown;
+}
+
+export interface CredentialsLoaderOptions {
+  env?: NodeJS.ProcessEnv;
+  readFile?: (filePath: string) => string;
+  stat?: (filePath: string) => { mode: number };
+  log?: (msg: string) => void;
+  platform?: NodeJS.Platform;
+}
+
+function expandHome(p: string): string {
+  if (p === "~") return os.homedir();
+  if (p.startsWith("~/")) return path.join(os.homedir(), p.slice(2));
+  return p;
+}
+
+function readStringField(
+  source: CredentialsFileShape,
+  field: keyof CredentialsFileShape,
+  filePath: string,
+): string | undefined {
+  const value = source[field];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") {
+    throw new Error(
+      `MUNIN_CREDENTIALS_FILE at ${filePath}: field "${field}" must be a string.`,
+    );
+  }
+  return value;
+}
+
+export function loadBridgeCredentials(
+  options: CredentialsLoaderOptions = {},
+): BridgeCredentials {
+  const env = options.env ?? process.env;
+  const readFile =
+    options.readFile ?? ((p: string) => fs.readFileSync(p, "utf-8"));
+  const stat = options.stat ?? ((p: string) => fs.statSync(p));
+  const log =
+    options.log ??
+    ((msg: string) => process.stderr.write(`[munin-bridge] ${msg}\n`));
+  const platform = options.platform ?? process.platform;
+
+  const rawPath = env.MUNIN_CREDENTIALS_FILE;
+  if (!rawPath || rawPath.length === 0) {
+    return {
+      authToken: env.MUNIN_AUTH_TOKEN,
+      cfClientId: env.MUNIN_CF_CLIENT_ID,
+      cfClientSecret: env.MUNIN_CF_CLIENT_SECRET,
+    };
+  }
+
+  const filePath = expandHome(rawPath);
+
+  let stats: { mode: number };
+  try {
+    stats = stat(filePath);
+  } catch (err) {
+    throw new Error(
+      `MUNIN_CREDENTIALS_FILE set but file is not readable at ${filePath}: ${
+        (err as Error).message
+      }`,
+    );
+  }
+
+  if (platform !== "win32") {
+    const mode = stats.mode & 0o777;
+    if ((mode & 0o077) !== 0) {
+      throw new Error(
+        `MUNIN_CREDENTIALS_FILE at ${filePath} has mode 0${mode
+          .toString(8)
+          .padStart(3, "0")}; refusing to read a group/world-accessible credentials file (use \`chmod 600\`).`,
+      );
+    }
+  }
+
+  let raw: string;
+  try {
+    raw = readFile(filePath);
+  } catch (err) {
+    throw new Error(
+      `Failed to read MUNIN_CREDENTIALS_FILE at ${filePath}: ${
+        (err as Error).message
+      }`,
+    );
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `MUNIN_CREDENTIALS_FILE at ${filePath} is not valid JSON: ${
+        (err as Error).message
+      }`,
+    );
+  }
+
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(
+      `MUNIN_CREDENTIALS_FILE at ${filePath} must contain a JSON object at the top level.`,
+    );
+  }
+
+  const obj = parsed as CredentialsFileShape;
+  const authToken = readStringField(obj, "auth_token", filePath);
+  const cfClientId = readStringField(obj, "cf_client_id", filePath);
+  const cfClientSecret = readStringField(obj, "cf_client_secret", filePath);
+
+  const overriddenEnv: string[] = [];
+  if (env.MUNIN_AUTH_TOKEN) overriddenEnv.push("MUNIN_AUTH_TOKEN");
+  if (env.MUNIN_CF_CLIENT_ID) overriddenEnv.push("MUNIN_CF_CLIENT_ID");
+  if (env.MUNIN_CF_CLIENT_SECRET) overriddenEnv.push("MUNIN_CF_CLIENT_SECRET");
+  if (overriddenEnv.length > 0) {
+    log(
+      `MUNIN_CREDENTIALS_FILE is set; ignoring inline env vars: ${overriddenEnv.join(", ")}`,
+    );
+  }
+
+  log(`Credentials loaded from file: ${filePath}`);
+
+  return { authToken, cfClientId, cfClientSecret };
+}
 
 // --- Exported helpers (for testing) ---
 
@@ -349,16 +494,16 @@ async function main(): Promise<void> {
     10,
   );
 
+  const creds = loadBridgeCredentials({ log });
   const authHeaders: Record<string, string> = {};
-  if (process.env.MUNIN_AUTH_TOKEN) {
-    authHeaders["Authorization"] = `Bearer ${process.env.MUNIN_AUTH_TOKEN}`;
+  if (creds.authToken) {
+    authHeaders["Authorization"] = `Bearer ${creds.authToken}`;
   }
-  if (process.env.MUNIN_CF_CLIENT_ID) {
-    authHeaders["CF-Access-Client-Id"] = process.env.MUNIN_CF_CLIENT_ID;
+  if (creds.cfClientId) {
+    authHeaders["CF-Access-Client-Id"] = creds.cfClientId;
   }
-  if (process.env.MUNIN_CF_CLIENT_SECRET) {
-    authHeaders["CF-Access-Client-Secret"] =
-      process.env.MUNIN_CF_CLIENT_SECRET;
+  if (creds.cfClientSecret) {
+    authHeaders["CF-Access-Client-Secret"] = creds.cfClientSecret;
   }
 
   const fetchWithTimeout = createFetchWithTimeout(requestTimeoutMs);

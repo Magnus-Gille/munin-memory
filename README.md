@@ -162,6 +162,36 @@ All configuration is via environment variables. Copy `.env.example` for a starti
 
 See `.env.example` for the full list.
 
+## Credential storage (MCP bridge)
+
+The stdio-to-HTTP bridge (`dist/bridge.js`) needs a Bearer token and optionally Cloudflare Access client credentials to talk to a remote Munin server. MCP clients typically pass these via env vars in their config file, which means the secrets end up in plaintext on disk (often `0644`, syncable to dotfile repos, easy to screenshot).
+
+**Recommended: store secrets in a `chmod 600` JSON file, not in your MCP client config.**
+
+```bash
+mkdir -p ~/.config/munin
+cat > ~/.config/munin/credentials.json <<'JSON'
+{
+  "auth_token": "…",
+  "cf_client_id": "…",
+  "cf_client_secret": "…"
+}
+JSON
+chmod 600 ~/.config/munin/credentials.json
+```
+
+Then point the bridge at the file in your MCP client config (example: `~/.codex/config.toml`):
+
+```toml
+[mcp_servers.munin-memory.env]
+MUNIN_REMOTE_URL = "https://munin.example.com/mcp"
+MUNIN_CREDENTIALS_FILE = "/Users/you/.config/munin/credentials.json"
+```
+
+The bridge refuses to read a credentials file that is group- or world-accessible — fix perms with `chmod 600`. If both the file and inline env vars are set, the file wins and a stderr warning lists the env vars that were ignored.
+
+All three fields are optional; omit `cf_client_id` / `cf_client_secret` if you don't use Cloudflare Access. Rotate the Bearer token at a cadence that fits your threat model — once a quarter is a reasonable default for a personal deployment.
+
 ## Deploying to a Raspberry Pi
 
 This is how I run it today — a `full-node` deployment on a Pi 5 on my desk, accessible from anywhere via a Cloudflare Tunnel. The general pattern:
