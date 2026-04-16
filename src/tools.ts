@@ -3137,7 +3137,7 @@ function compactConventions(updatedAt: string): string {
     "- **State entries** = current truth (mutable). **Log entries** = chronological (append-only).",
     "- **Write vs update_status:** use `memory_update_status` for tracked `projects/*`/`clients/*` status entries; use `memory_write` for other state.",
     "- **Write protocol:** Log decisions first (memory_log), then update status with CAS (expected_updated_at).",
-    "- **Entries are historical record, not current state.** Verify feature-level claims (UI copy, flows, exact behavior) against the artifact — code, templates, running app — before asserting. Backend capability ≠ UI exposure.",
+    "- **Memory describes external artifacts at a point in time.** Before asserting feature-level claims (UI copy, flows, exact behavior), verify against the current artifact — code, templates, running app. Backend capability ≠ UI exposure. (State entries remain the current truth *within Munin*; this rule is about claims that depend on external reality.)",
     "- **Lifecycle tags** (required on status): active, blocked, completed, stopped, maintenance, archived.",
     "- **Tracked namespaces** (dashboard): projects/*, clients/*. Must have status key + lifecycle tag.",
     "- **Prefixed tags:** client:<name>, person:<name>, topic:<topic>, type:<artifact>, source:external/internal.",
