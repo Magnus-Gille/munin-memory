@@ -30,6 +30,15 @@ changelog is the canonical record of what moved.
 
 ### Changed
 
+- `memory_orient` compact conventions now include a rule clarifying that
+  memory describes external artifacts at a point in time, so models should
+  verify feature-level claims (UI copy, flows, exact behavior) against the
+  current artifact — code, templates, running app — before asserting to
+  the user. Backend capability ≠ UI exposure. State entries remain the
+  current truth within Munin; the new rule is scoped to claims that depend
+  on external reality. Prompted by an external tester report of an Opus 4.6
+  session hallucinating UI features despite accurate Munin retrieval (#33).
+
 - `memory_insights` aggregates now include session-segmented reformulation
   context: `reformulation_rate_adjusted` (excludes single-event sessions
   from the denominator), `reformulation_explanation` (human-readable note
