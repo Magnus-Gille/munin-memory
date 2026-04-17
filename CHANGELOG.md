@@ -30,6 +30,13 @@ changelog is the canonical record of what moved.
   context string prefixed `Scanner-detected: …`. Closes the ~50% orphan gap
   measured in the 2026-04-04 Phase 2 consolidation spike (#29).
 
+- **Scanner observability** — the consolidation worker now emits a
+  `Scanner[<namespace>]: targets=… candidates=… dropped_reciprocal=…
+  dropped_llm_merge=… kept=…` log line whenever any candidate passes the
+  mention threshold, including the case where everything is filtered out.
+  Lets us tell whether a silent scanner means "nothing to find" or "filters
+  too strict" without re-instrumenting.
+
 - **Tool call telemetry (Layer 1)** — migration v14 adds a `tool_calls`
   table. Every MCP tool call is instrumented with fire-and-forget timing:
   `tool_name`, `success`, `error_type`, `response_size_bytes`, and
