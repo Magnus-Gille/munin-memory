@@ -670,13 +670,16 @@ describe("discoverOrphanedReferences (integration)", () => {
       makeEntry({ content: "Another call-site in projects/beta failed." }),
     ];
 
-    const orphans = discoverOrphanedReferences(db, "projects/alpha", logs);
+    const { orphans, diagnostics } = discoverOrphanedReferences(db, "projects/alpha", logs);
 
     expect(orphans).toHaveLength(1);
     expect(orphans[0].target_namespace).toBe("projects/beta");
     expect(orphans[0].reference_type).toBe("related_to");
     expect(orphans[0].confidence).toBe(0.5);
     expect(orphans[0].context).toMatch(/^Scanner-detected: \d+ mentions/);
+    expect(diagnostics.candidates_above_threshold).toBe(1);
+    expect(diagnostics.dropped_by_reciprocal).toBe(0);
+    expect(diagnostics.orphans_found).toBe(1);
   });
 
   it("skips targets whose state already mentions the source (not orphaned)", () => {
@@ -686,8 +689,11 @@ describe("discoverOrphanedReferences (integration)", () => {
       makeEntry({ content: "Fixed projects/beta config." }),
     ];
 
-    const orphans = discoverOrphanedReferences(db, "projects/alpha", logs);
+    const { orphans, diagnostics } = discoverOrphanedReferences(db, "projects/alpha", logs);
     expect(orphans).toEqual([]);
+    expect(diagnostics.candidates_above_threshold).toBe(1);
+    expect(diagnostics.dropped_by_reciprocal).toBe(1);
+    expect(diagnostics.orphans_found).toBe(0);
   });
 
   it("consolidateNamespace persists scanner-discovered orphans via replaceCrossReferences", async () => {

@@ -227,8 +227,20 @@ export async function consolidateNamespace(
     const result = parseSynthesisResponse(text);
 
     // Step 5: Discover orphaned cross-references via scanner, merge with LLM refs
-    const scannerOrphans = discoverOrphanedReferences(db, namespace, logs);
+    const scanner = discoverOrphanedReferences(db, namespace, logs);
+    const scannerOrphans = scanner.orphans;
     const mergedRefs = mergeCrossReferences(result.cross_references, scannerOrphans);
+    const droppedByLlmMerge = scannerOrphans.length - (mergedRefs.length - result.cross_references.length);
+
+    if (scanner.diagnostics.candidates_above_threshold > 0) {
+      console.log(
+        `Scanner[${namespace}]: targets=${scanner.diagnostics.targets_considered} ` +
+          `candidates=${scanner.diagnostics.candidates_above_threshold} ` +
+          `dropped_reciprocal=${scanner.diagnostics.dropped_by_reciprocal} ` +
+          `dropped_llm_merge=${droppedByLlmMerge} ` +
+          `kept=${scannerOrphans.length - droppedByLlmMerge}`,
+      );
+    }
 
     // Step 6: Write results
     const lastLog = logs[logs.length - 1];
@@ -406,16 +418,32 @@ export function mergeCrossReferences(
   return merged;
 }
 
+export interface ScannerDiagnostics {
+  targets_considered: number;
+  candidates_above_threshold: number;
+  dropped_by_reciprocal: number;
+  orphans_found: number;
+}
+
+export interface ScannerResult {
+  orphans: SynthesisResult["cross_references"];
+  diagnostics: ScannerDiagnostics;
+}
+
 export function discoverOrphanedReferences(
   db: Database.Database,
   sourceNamespace: string,
   logs: Entry[],
-): SynthesisResult["cross_references"] {
+): ScannerResult {
   const targets = loadTargetVocabulary(db, sourceNamespace);
   const hits = scanMentions(logs, targets);
   const orphans: SynthesisResult["cross_references"] = [];
+  let droppedByReciprocal = 0;
   for (const hit of hits) {
-    if (!isOrphaned(db, sourceNamespace, hit.targetNamespace)) continue;
+    if (!isOrphaned(db, sourceNamespace, hit.targetNamespace)) {
+      droppedByReciprocal++;
+      continue;
+    }
     orphans.push({
       target_namespace: hit.targetNamespace,
       reference_type: "related_to",
@@ -423,7 +451,15 @@ export function discoverOrphanedReferences(
       confidence: ORPHAN_CONFIDENCE,
     });
   }
-  return orphans;
+  return {
+    orphans,
+    diagnostics: {
+      targets_considered: targets.length,
+      candidates_above_threshold: hits.length,
+      dropped_by_reciprocal: droppedByReciprocal,
+      orphans_found: orphans.length,
+    },
+  };
 }
 
 // --- Prompt building ---
