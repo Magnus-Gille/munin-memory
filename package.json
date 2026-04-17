@@ -38,7 +38,17 @@
     "benchmark:longmemeval:s": "./scripts/fetch-benchmark-data.sh longmemeval-s && tsx benchmark/adapters/longmemeval/run.ts --split s",
     "benchmark:run:longmemeval:s:round": "tsx benchmark/adapters/longmemeval/run.ts --split s --granularity round",
     "benchmark:longmemeval:s:round": "./scripts/fetch-benchmark-data.sh longmemeval-s && tsx benchmark/adapters/longmemeval/run.ts --split s --granularity round",
-    "benchmark:run:longmemeval:s:round:hybrid": "tsx benchmark/adapters/longmemeval/run.ts --split s --granularity round --search-mode hybrid"
+    "benchmark:run:longmemeval:s:round:hybrid": "tsx benchmark/adapters/longmemeval/run.ts --split s --granularity round --search-mode hybrid",
+    "benchmark:fetch:locomo": "./scripts/fetch-benchmark-data.sh locomo",
+    "benchmark:build:locomo": "tsx benchmark/adapters/locomo/build.ts",
+    "benchmark:run:locomo": "tsx benchmark/adapters/locomo/run.ts",
+    "benchmark:run:locomo:dialog": "tsx benchmark/adapters/locomo/run.ts --granularity dialog",
+    "benchmark:run:locomo:hybrid": "tsx benchmark/adapters/locomo/run.ts --search-mode hybrid",
+    "benchmark:run:locomo:dialog:hybrid": "tsx benchmark/adapters/locomo/run.ts --granularity dialog --search-mode hybrid",
+    "benchmark:locomo": "./scripts/fetch-benchmark-data.sh locomo && tsx benchmark/adapters/locomo/run.ts",
+    "benchmark:locomo:dialog": "./scripts/fetch-benchmark-data.sh locomo && tsx benchmark/adapters/locomo/run.ts --granularity dialog",
+    "benchmark:locomo:hybrid": "./scripts/fetch-benchmark-data.sh locomo && tsx benchmark/adapters/locomo/run.ts --search-mode hybrid",
+    "benchmark:locomo:dialog:hybrid": "./scripts/fetch-benchmark-data.sh locomo && tsx benchmark/adapters/locomo/run.ts --granularity dialog --search-mode hybrid"
   },
   "dependencies": {
     "@huggingface/transformers": "^3.8.1",

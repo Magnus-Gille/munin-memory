@@ -42,3 +42,32 @@ This is the current benchmark progression for public proxy evaluations. The goal
 - `R@10 = 0.2793`
 - `NDCG@5 = 0.1818`
 - `MRR = 0.2034`
+
+## LoCoMo
+
+Secondary public benchmark. Smaller and cheaper to run than LongMemEval, covers 5 question categories (single-hop, multi-hop, temporal, open-domain, adversarial).
+
+| Priority | Variant | Why | Status |
+|---|---|---|---|
+| 1 | `session` + lexical | Coarse baseline. Mirrors the LongMemEval progression. | Done |
+| 2 | `dialog` + lexical | Tests dialog-level granularity — expected to be too fine for pure BM25. | Done |
+| 3 | `session` + hybrid | First apples-to-apples comparison with production retrieval path, now that relaxed-FTS fallback is live. | Next |
+| 4 | `dialog` + hybrid | Re-tests dialog granularity under the stronger retriever. | Planned |
+
+### LoCoMo Baselines (pre relaxed-FTS fallback fix)
+
+- `session` + lexical: `R@1 = 0.066`, `MRR = 0.079` (1359/1536 queries hit fallback = 88%)
+- `dialog` + lexical: `R@1 = 0.001` (1508/1531 queries hit fallback = 98.5%, too granular for BM25 without semantic reranking)
+
+Fallback-usage baselines above are from the pre-fix benchmark runner that called `queryEntriesLexicalScored` directly and missed the production relaxed-lexical path. Reruns against the fixed runner are queued under #19.
+
+### Run
+
+```bash
+npm run benchmark:locomo                 # session + lexical
+npm run benchmark:locomo:dialog          # dialog + lexical
+npm run benchmark:locomo:hybrid          # session + hybrid
+npm run benchmark:locomo:dialog:hybrid   # dialog + hybrid
+```
+
+`benchmark:fetch:locomo` is a prerequisite the combined scripts already run.
