@@ -566,6 +566,27 @@ The consent endpoints only proceed when that header/value pair is present, or wh
 - `src/index.ts` — Express app setup, mounts `mcpAuthRouter()` + `requireBearerAuth()`
 - `src/migrations.ts` — Migration v3 creates OAuth tables
 
+## Observability
+
+### HTTP request logs
+
+Every `/mcp` request produces a single JSON line on stderr (captured by systemd / `journalctl -u munin-memory`). Fields:
+
+| Field | Notes |
+|---|---|
+| `timestamp`, `method`, `path`, `status`, `durationMs` | Standard request metadata |
+| `rpcMethod`, `toolName` | Extracted from JSON-RPC body (e.g. `tools/call`, `memory_list`) |
+| `authType`, `clientId`, `sessionId` | Auth context — `clientId: "legacy"` for legacy Bearer |
+| `diagnostics` | **Only present on 4xx `/mcp` responses.** Contains `headers` (sensitive keys redacted) + `bodySnippet` (first 500 chars of request body). Helps capture minimal reproductions for client-side MCP quirks (see #32). |
+
+Redacted header keys: `authorization`, `cookie`, `proxy-authorization`, `cf-access-client-secret`, `x-api-key`.
+
+To grep for 4xx captures:
+
+```bash
+ssh magnus@huginmunin.local "journalctl -u munin-memory -n 500 --no-pager | grep -E '\"status\":4[0-9]{2}' | grep '/mcp'"
+```
+
 ## Code style
 
 - TypeScript strict mode
