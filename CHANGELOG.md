@@ -10,6 +10,13 @@ changelog is the canonical record of what moved.
 
 ### Added
 
+- **4xx diagnostic logging on `/mcp`** — when an HTTP MCP request returns a
+  4xx status, the request log entry now carries a `diagnostics` field with
+  redacted request headers and a 500-char body snippet. Sensitive headers
+  (`authorization`, `cookie`, `proxy-authorization`, `cf-access-client-secret`,
+  `x-api-key`) are replaced with `[REDACTED]`. Zero overhead on 2xx responses.
+  Helps capture minimal reproductions for client-side MCP quirks (#32).
+
 - **Bridge credentials file** — the MCP stdio-to-HTTP bridge now accepts
   `MUNIN_CREDENTIALS_FILE`, a path to a `chmod 600` JSON file holding
   `auth_token` / `cf_client_id` / `cf_client_secret`. The bridge refuses to

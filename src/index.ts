@@ -76,6 +76,10 @@ export interface RequestLogEntry {
   sessionId?: string;
   status: number;
   durationMs: number;
+  diagnostics?: {
+    headers: Record<string, string | string[]>;
+    bodySnippet?: string;
+  };
 }
 
 export interface HttpAppOptions {
@@ -428,6 +432,38 @@ function deriveSessionId(clientId: string): string {
   return createHash("sha256").update(`${clientId}:${bucket}`).digest("hex").slice(0, 32);
 }
 
+const REDACTED_HEADER_KEYS = new Set([
+  "authorization",
+  "cookie",
+  "proxy-authorization",
+  "cf-access-client-secret",
+  "x-api-key",
+]);
+
+const DIAGNOSTIC_BODY_SNIPPET_LIMIT = 500;
+
+function redactHeaders(headers: Request["headers"]): Record<string, string | string[]> {
+  const out: Record<string, string | string[]> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    if (value === undefined) continue;
+    out[key] = REDACTED_HEADER_KEYS.has(key.toLowerCase()) ? "[REDACTED]" : value;
+  }
+  return out;
+}
+
+function buildBodySnippet(body: unknown): string | undefined {
+  if (body === undefined) return undefined;
+  try {
+    const serialized = typeof body === "string" ? body : JSON.stringify(body);
+    if (!serialized) return undefined;
+    return serialized.length > DIAGNOSTIC_BODY_SNIPPET_LIMIT
+      ? serialized.slice(0, DIAGNOSTIC_BODY_SNIPPET_LIMIT) + "...[truncated]"
+      : serialized;
+  } catch {
+    return undefined;
+  }
+}
+
 function attachRequestLogger(
   req: Request,
   res: Response,
@@ -438,9 +474,10 @@ function attachRequestLogger(
   const authContext = getRequestAuthLogContext(req.auth);
   let rpcMethod: string | undefined;
   let toolName: string | undefined;
+  let body: unknown;
 
   res.on("finish", () => {
-    requestLogger({
+    const entry: RequestLogEntry = {
       timestamp: new Date().toISOString(),
       method: req.method,
       path: req.path,
@@ -450,13 +487,21 @@ function attachRequestLogger(
       sessionId,
       status: res.statusCode,
       durationMs: Date.now() - startTime,
-    });
+    };
+    if (res.statusCode >= 400 && req.path === "/mcp") {
+      entry.diagnostics = {
+        headers: redactHeaders(req.headers),
+        bodySnippet: buildBodySnippet(body),
+      };
+    }
+    requestLogger(entry);
   });
 
   return {
-    setBody(body: unknown) {
-      rpcMethod = extractMethod(body);
-      toolName = extractToolName(body);
+    setBody(nextBody: unknown) {
+      body = nextBody;
+      rpcMethod = extractMethod(nextBody);
+      toolName = extractToolName(nextBody);
     },
   };
 }
