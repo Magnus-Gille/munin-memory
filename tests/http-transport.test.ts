@@ -212,6 +212,51 @@ describe("stateless HTTP transport", () => {
       }),
     ]);
   });
+
+  it("attaches diagnostics (redacted headers + body snippet) to 4xx /mcp logs", async () => {
+    const response = await supertest(app)
+      .post("/mcp")
+      .set({
+        Authorization: `Bearer ${LEGACY_API_KEY}`,
+        Host: "127.0.0.1:3030",
+        Accept: "application/json, text/event-stream",
+        "Content-Type": "application/json",
+        "mcp-protocol-version": "2099-01-01",
+        Cookie: "session=supersecret",
+      })
+      .send({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "memory_list", arguments: {} },
+      });
+
+    expect(response.status).toBe(400);
+
+    const entry = requestLogs.at(-1);
+    expect(entry?.status).toBe(400);
+    expect(entry?.path).toBe("/mcp");
+    expect(entry?.diagnostics).toBeDefined();
+    expect(entry?.diagnostics?.headers.authorization).toBe("[REDACTED]");
+    expect(entry?.diagnostics?.headers.cookie).toBe("[REDACTED]");
+    expect(entry?.diagnostics?.headers["mcp-protocol-version"]).toBe("2099-01-01");
+    expect(entry?.diagnostics?.bodySnippet).toContain("tools/call");
+  });
+
+  it("omits diagnostics on 2xx /mcp logs", async () => {
+    await supertest(app)
+      .post("/mcp")
+      .set(jsonRpcHeaders())
+      .send({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "memory_list", arguments: {} },
+      })
+      .expect(200);
+
+    expect(requestLogs.at(-1)?.diagnostics).toBeUndefined();
+  });
 });
 
 describe("request log attribution", () => {
