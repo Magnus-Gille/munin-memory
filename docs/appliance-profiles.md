@@ -19,8 +19,9 @@ That means the right first move is **not** a full rewrite of the codebase. The r
 
 | Profile | Target hardware | Default capabilities | Notes |
 |---------|-----------------|----------------------|-------|
-| `zero-appliance` | Raspberry Pi Zero 2 W class hardware | Core memory: state/log/orient/list/history/read/query with lexical search | Semantic search is not ruled out, but it is not assumed in the default Zero experience. |
-| `full-node` | Raspberry Pi 4/5, mini PC, VPS, or stronger x86/ARM hardware | Full public-remote deployment, OAuth, retrieval analytics, and local semantic/hybrid search | This matches the current "Pi 5 on my desk" style deployment most closely. |
+| `zero-appliance` | Raspberry Pi Zero 2 W class hardware | Core memory: state/log/orient/list/history/read/query with lexical search | Semantic is out by hardware constraint (see below), not by quality preference. |
+| `zero-plus-appliance` | Raspberry Pi 5 2GB class hardware | Core memory + local embeddings/hybrid search in an appliance form factor | New tier. Justified by v3 pilot data showing semantic materially lifts recall on prose-weighted corpora. Previously speculative; now a planned product tier. |
+| `full-node` | Raspberry Pi 4/5 4GB+, mini PC, VPS, or stronger x86/ARM hardware | Full public-remote deployment, OAuth, retrieval analytics, and local semantic/hybrid search | This matches the current "Pi 5 on my desk" style deployment most closely. |
 
 ## What stays stable
 
@@ -33,13 +34,14 @@ The product can evolve packaging and runtime topology without throwing away the 
 
 ## Semantic search stance
 
-Semantic search is **not** strictly out of the question on Raspberry Pi Zero 2 W. What is out of scope for the default Zero profile is assuming the current local embedding path will feel smooth there without proof.
+Semantic search stays a first-class feature for any profile that has the RAM headroom for it. The Munin Zero retrieval pilot (2026-04-19, `munin-zero/docs/experiments/retrieval-pilot-2026-04-19/pilot-report-v3.md`) confirmed that on prose-weighted content — long-form logs, meeting notes, narrative entries — hybrid search lifts R@20 by +14pp overall (+23pp on prose-log, +40pp on prose-state) versus lexical-only. An earlier v2 run on a state-heavy corpus showed no lift; the two experiments do not contradict, they sample different content shapes. Real-world Munin usage contains a lot of prose, so cutting semantic is not a free tradeoff.
 
 Current recommendation:
 
-- `full-node` can continue to offer local semantic and hybrid search.
-- `zero-appliance` should ship as a great lexical/core-memory box first.
-- Semantic search on `zero-appliance` is a second-phase validation item, not a default promise.
+- `full-node` continues to offer local semantic and hybrid search, enabled by default.
+- `zero-plus-appliance` (Pi 5 2GB) is the right home for an appliance-form-factor box that still runs embeddings. This tier exists because v3 showed the recall cost of dropping semantic is real for the persona-A prose-heavy user.
+- `zero-appliance` (Pi Zero 2 W) stays lexical-only. The 425MB total RAM / ~310MB available budget cannot host an embedding model plus index — this is a hardware ceiling, not a quality judgement. Acceptance on Zero relies on the appliance UX being tolerant of imperfect recall (model asks a clarifying question instead of failing).
+- Lexical is not uniformly worse. On structured-vocabulary content (research notes, short state entries) lexical ties or beats hybrid. A possible future direction is content-shape-aware routing, but N=50 single-model data is too thin to justify that complexity today.
 
 ## Sidecar stance
 
@@ -96,9 +98,11 @@ If those conditions are not met, the recommendation changes to raising the hardw
 
 After the Zero hardware spike, the project should make one of three explicit calls:
 
-1. `zero-appliance` is viable for core memory only
-2. `zero-appliance` is viable for core memory and experimental local semantic search
-3. Raspberry Pi Zero 2 W is not a good appliance target; raise the hardware floor
+1. `zero-appliance` is viable for core memory only — users who want semantic move up to `zero-plus-appliance`.
+2. `zero-appliance` is viable for core memory and some form of constrained semantic search (e.g. smaller model, offloaded embedding path).
+3. Raspberry Pi Zero 2 W is not a good appliance target; collapse into `zero-plus-appliance` as the entry tier and raise the hardware floor.
+
+Independent of which of these lands, retrieval-quality work on both Zero and full Munin should prioritize **query-formulation guidance** over retrieval-engine changes. The pilot identified tight namespace filters, bare-`OR` FTS5 syntax, and abstract paraphrase as the dominant failure modes — all addressable through `memory_query` tool-description guidance and applicable to every profile.
 
 ## Practical product direction
 
