@@ -3567,19 +3567,19 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_query",
     description:
-      "Search and filter memories. Supports lexical (FTS5 keyword), semantic (vector similarity), and hybrid (RRF fusion of both) search modes. Filters by namespace prefix, entry type, tags, time range (since/until), and optional expiry handling. Can be used without a query to browse by filters alone (e.g. all entries with a specific tag, or all entries updated today). Broad retrieval hides expired state entries by default; use `include_expired: true` to include them. Pass `explain: true` to include retrieval metadata and per-result match explanations.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Search and filter memories. Supports lexical (keyword), semantic (vector similarity), and hybrid (RRF fusion of both) search modes. Filters by namespace prefix, entry type, tags, time range (since/until), and optional expiry handling. Can be used without a query to browse by filters alone (e.g. all entries with a specific tag, or all entries updated today). Broad retrieval hides expired state entries by default; use `include_expired: true` to include them. Pass `explain: true` to include retrieval metadata and per-result match explanations.\n\nRetrieval tips (the most common formulation failures):\n- **If you get zero results, widen before giving up.** Drop the `namespace` filter first, then drop `tags`, then try different phrasing. Tight namespace filters pointed at the wrong tier (e.g. `meta/` when the entry is in `decisions/`) are the #1 cause of false-negative searches.\n- **Prefer natural-language phrasing.** Default `search_mode` is hybrid, so semantic recall bridges vocabulary gaps — you do not need to guess exact tokens.\n- **Lexical queries are tokenized, not raw FTS5.** The server splits your query into terms, preserves quoted phrases, and requires all terms to match (implicit AND). Boolean operators like `AND`, `OR`, `NOT`, and `NEAR` are not supported in user queries — write term lists or natural language, not FTS5 expressions.\n- **Use concrete tokens likely present in the entry**, not abstract paraphrase (\"explored\", \"examined\") — lexical still wins on structured-vocabulary content like research notes.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
     inputSchema: {
       type: "object" as const,
       properties: {
         query: {
           type: "string",
           description:
-            "Search terms. For lexical mode, FTS5 syntax supported. For semantic/hybrid, natural language works best. Optional — omit to browse by filters alone (tags, namespace, time range).",
+            "Search terms. Natural language works best (default mode is hybrid). Queries are tokenized server-side: quoted phrases are preserved, other terms are split on whitespace, and all terms must match (implicit AND). Boolean operators (`AND`/`OR`/`NOT`/`NEAR`) are not supported — write term lists or natural language instead of FTS5 expressions. Optional — omit to browse by filters alone (tags, namespace, time range).",
         },
         namespace: {
           type: "string",
           description:
-            "Optional. Filter to a namespace or namespace prefix (e.g. 'projects/' matches all project namespaces)",
+            "Optional. Filter to a namespace or namespace prefix (e.g. 'projects/' matches all project namespaces). Use sparingly — a wrong-tier filter (e.g. `meta/` when the entry is in `decisions/`) silently returns zero results. If a query with a namespace filter yields nothing, retry without it before reformulating.",
         },
         entry_type: {
           type: "string",

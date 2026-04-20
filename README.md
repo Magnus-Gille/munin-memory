@@ -88,10 +88,11 @@ Munin Memory now has an explicit tiered appliance direction instead of assuming 
 
 | Profile | Target | Default expectations |
 |---------|--------|----------------------|
-| `zero-appliance` | Raspberry Pi Zero 2 W class hardware | Core memory and lexical search first; semantic search is not ruled out, but it is not assumed in the default Zero experience. |
-| `full-node` | Raspberry Pi 4/5, mini PC, VPS, or stronger hardware | Full public-remote deployment, OAuth, and local semantic/hybrid search. |
+| `zero-appliance` | Raspberry Pi Zero 2 W class hardware | Core memory and lexical search only. Semantic is out by hardware constraint (~310MB available RAM cannot host an embedding model + index), not by quality preference. |
+| `zero-plus-appliance` | Raspberry Pi 5 2GB class hardware | Core memory plus local embeddings/hybrid search in an appliance form factor. Justified by retrieval pilot data showing semantic materially lifts recall on prose-weighted corpora. |
+| `full-node` | Raspberry Pi 4/5 4GB+, mini PC, VPS, or stronger hardware | Full public-remote deployment, OAuth, and local semantic/hybrid search. |
 
-No full rewrite is recommended as the first move. The current direction is to keep the MCP and SQLite contract stable, validate the constrained profile on real hardware, and only then decide whether local semantic search on Zero is worth supporting. See [docs/appliance-profiles.md](docs/appliance-profiles.md) for the full rationale and the real-hardware spike plan.
+No full rewrite is recommended as the first move. The current direction is to keep the MCP and SQLite contract stable, validate the constrained profile on real hardware, and decide whether the entry tier should stay at Zero or move up to `zero-plus-appliance`. See [docs/appliance-profiles.md](docs/appliance-profiles.md) for the full rationale and the real-hardware spike plan.
 
 ## Getting started
 
