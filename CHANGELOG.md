@@ -8,6 +8,16 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Changed
+
+- **Accent-insensitive lexical search** — migration v15 recreates the
+  `entries_fts` virtual table with `tokenize='unicode61 remove_diacritics 2'`
+  and rebuilds the index. Queries for `Mimir` now match content containing
+  `Mímir` (and vice versa), removing one of the two token-mismatch failure
+  modes observed in the 2026-04-20 retrieval pilot v3c T10 case. Porter
+  stemming stays deferred pending a separate evaluation against the Swedish
+  portion of the corpus (#40).
+
 ### Added
 
 - **4xx diagnostic logging on `/mcp`** — when an HTTP MCP request returns a
