@@ -773,6 +773,28 @@ describe("bearer token rotation", () => {
     expect(dpaTokens[0].status).toBe("active");
     expect(dpaTokens[0].id).toBe(dpaFirst.id);
   });
+
+  it("rotate after revoking the active token does not extend retiring tokens", () => {
+    // Codex regression: rotate -> rotate -> revoke(active) -> rotate
+    // must NOT pick up the still-retiring first token and re-extend its expiry.
+    const first = rotateBearerToken(db, "owner", 24);
+    const second = rotateBearerToken(db, "owner", 24);
+
+    // first is now retiring; second is active
+    revokeBearerToken(db, second.id);
+    // Now there is no active token. The next rotate should retire NOTHING
+    // (since `first` is already retiring) and just mint a new active token.
+    const third = rotateBearerToken(db, "owner", 24);
+
+    expect(third.retiringKeyId).toBeNull();
+    expect(third.retiringExpiresAt).toBeNull();
+
+    // Verify first token's expiry was NOT changed by the third rotation.
+    const tokens = listBearerTokens(db, "owner");
+    const firstAfter = tokens.find((t) => t.id === first.id)!;
+    // Its expires_at should still equal the value set by `second`'s rotation.
+    expect(firstAfter.expiresAt).toBe(second.retiringExpiresAt);
+  });
 });
 
 // ---------------------------------------------------------------------------

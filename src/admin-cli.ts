@@ -591,14 +591,17 @@ export function rotateBearerToken(
   const now = nowUTC();
   const expiresAt = new Date(Date.now() + graceHours * 3600 * 1000).toISOString();
 
-  // Find current active DB token for this scope
+  // Find truly active DB token for this scope (expires_at IS NULL).
+  // Tokens that are already retiring (expires_at set but in the future)
+  // must NOT be re-extended — that would resurrect a previously retired
+  // credential after rotate -> revoke(active) -> rotate.
   const existing = db
     .prepare(
       `SELECT id FROM bearer_tokens
-       WHERE scope = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)
+       WHERE scope = ? AND revoked_at IS NULL AND expires_at IS NULL
        ORDER BY created_at DESC LIMIT 1`,
     )
-    .get(scope, now) as { id: string } | undefined;
+    .get(scope) as { id: string } | undefined;
 
   const token = randomBytes(32).toString("hex");
   const newId = randomUUID();
@@ -896,8 +899,8 @@ Usage:
   munin-admin oauth-clients list [--principal <principal-id>]
   munin-admin oauth-clients remove <oauth-client-id>
   munin-admin oauth-clients clear <principal-id>
-  munin-admin bearer list [--scope=owner|dpa|consumer]
-  munin-admin bearer rotate [--scope=owner|dpa|consumer] [--grace-hours=<n>]
+  munin-admin bearer list [--scope <owner|dpa|consumer>]
+  munin-admin bearer rotate [--scope <owner|dpa|consumer>] [--grace-hours <n>]
   munin-admin bearer revoke <key-id>
 
 Global flags:

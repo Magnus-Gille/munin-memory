@@ -557,12 +557,17 @@ export class MuninOAuthProvider implements OAuthServerProvider {
         dbBearerRow.scope === "dpa" ? "dpa_covered"
         : dbBearerRow.scope === "consumer" ? "consumer"
         : undefined;
+      // Owner-scope DB tokens use authMethod="legacy_bearer" so
+      // normalizeTransportType() picks up the configured legacy bearer
+      // transport (e.g. dpa_covered), matching the env-var owner path.
+      const authMethodForScope: AuthMethod =
+        dbBearerRow.scope === "owner" ? "legacy_bearer" : "bearer";
       return {
         token,
         clientId: scopeClientId,
         scopes: [],
         expiresAt: farFuture,
-        authMethod: "bearer",
+        authMethod: authMethodForScope,
         ...(transportHint ? { transportTypeHint: transportHint } : {}),
       } as ExtendedAuthInfo;
     }
