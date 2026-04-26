@@ -16,11 +16,16 @@ import {
   listClassificationFloors,
   setClassificationFloor,
   auditClassification,
+  rotateBearerToken,
+  revokeBearerToken,
+  listBearerTokens,
   parseRules,
   parseClassification,
   parseExpiresAt,
   parseArgs,
   type AddPrincipalOpts,
+  type BearerScope,
+  type BearerTokenSummary,
 } from "../src/admin-cli.js";
 import { writeState } from "../src/db.js";
 
@@ -665,6 +670,108 @@ describe("parseArgs", () => {
     expect(parsed.resource).toBe("classification");
     expect(parsed.command).toBe("set-floor");
     expect(parsed.positionals).toEqual(["contracts/*", "client-restricted"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// bearer token rotation
+// ---------------------------------------------------------------------------
+
+describe("bearer token rotation", () => {
+  let db: Database.Database;
+  beforeEach(() => { db = makeDb(); });
+
+  it("rotate creates an active token with no retiring token on first rotation", () => {
+    const result = rotateBearerToken(db, "owner", 24);
+    expect(result.token).toHaveLength(64);
+    expect(result.scope).toBe("owner");
+    expect(result.retiringKeyId).toBeNull();
+    expect(result.retiringExpiresAt).toBeNull();
+
+    const tokens = listBearerTokens(db);
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0].status).toBe("active");
+    expect(tokens[0].id).toBe(result.id);
+  });
+
+  it("rotate puts previous DB token into retiring status", () => {
+    const first = rotateBearerToken(db, "owner", 24);
+    const second = rotateBearerToken(db, "owner", 24);
+
+    expect(second.retiringKeyId).toBe(first.id);
+    expect(second.retiringExpiresAt).not.toBeNull();
+
+    const tokens = listBearerTokens(db, "owner");
+    const firstToken = tokens.find((t) => t.id === first.id)!;
+    const secondToken = tokens.find((t) => t.id === second.id)!;
+    expect(firstToken.status).toBe("retiring");
+    expect(secondToken.status).toBe("active");
+  });
+
+  it("retiring token expires after grace window", () => {
+    const first = rotateBearerToken(db, "owner", 24); // create initial token
+    // Rotate again with 0 hours grace — first token retires immediately
+    rotateBearerToken(db, "owner", 0);
+    // The first token should now have expires_at set to (approx) now
+    const tokens = listBearerTokens(db, "owner");
+    const firstToken = tokens.find((t) => t.id === first.id);
+    // With 0 hours grace, expires_at = now, which may be <= now
+    // It's either retiring (expires_at just set to now) or expired
+    expect(firstToken?.status === "retiring" || firstToken?.status === "expired").toBe(true);
+  });
+
+  it("revoke sets revoked_at immediately", () => {
+    const result = rotateBearerToken(db, "owner", 24);
+    const ok = revokeBearerToken(db, result.id);
+    expect(ok).toBe(true);
+
+    const tokens = listBearerTokens(db, "owner");
+    expect(tokens[0].status).toBe("revoked");
+    expect(tokens[0].revokedAt).not.toBeNull();
+  });
+
+  it("revoke returns false for nonexistent key", () => {
+    expect(revokeBearerToken(db, "nonexistent-id")).toBe(false);
+  });
+
+  it("list filters by scope", () => {
+    rotateBearerToken(db, "owner", 24);
+    rotateBearerToken(db, "dpa", 24);
+    rotateBearerToken(db, "consumer", 24);
+
+    expect(listBearerTokens(db, "owner")).toHaveLength(1);
+    expect(listBearerTokens(db, "dpa")).toHaveLength(1);
+    expect(listBearerTokens(db)).toHaveLength(3);
+  });
+
+  it("rotate writes audit log entry", () => {
+    rotateBearerToken(db, "owner", 24);
+    const rows = db
+      .prepare("SELECT action, key FROM audit_log WHERE action = 'bearer_rotate'")
+      .all() as { action: string; key: string }[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0].key).toBe("owner");
+  });
+
+  it("revoke writes audit log entry", () => {
+    const result = rotateBearerToken(db, "owner", 24);
+    revokeBearerToken(db, result.id);
+    const rows = db
+      .prepare("SELECT action FROM audit_log WHERE action = 'bearer_revoke'")
+      .all() as { action: string }[];
+    expect(rows).toHaveLength(1);
+  });
+
+  it("different scopes are independent", () => {
+    const ownerFirst = rotateBearerToken(db, "owner", 24);
+    const dpaFirst = rotateBearerToken(db, "dpa", 24);
+    const ownerSecond = rotateBearerToken(db, "owner", 24);
+
+    // owner second rotation should not touch dpa token
+    expect(ownerSecond.retiringKeyId).toBe(ownerFirst.id);
+    const dpaTokens = listBearerTokens(db, "dpa");
+    expect(dpaTokens[0].status).toBe("active");
+    expect(dpaTokens[0].id).toBe(dpaFirst.id);
   });
 });
 

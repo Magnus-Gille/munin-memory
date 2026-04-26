@@ -20,6 +20,8 @@ changelog is the canonical record of what moved.
 
 ### Added
 
+- **`munin-admin bearer rotate/revoke/list`** — DB-managed bearer token rotation with configurable grace window. DB tokens are checked alongside env-var tokens in `verifyAccessToken`, allowing zero-downtime rotation. Migration v16 adds the `bearer_tokens` table. (#35)
+
 - **4xx diagnostic logging on `/mcp`** — when an HTTP MCP request returns a
   4xx status, the request log entry now carries a `diagnostics` field with
   redacted request headers and a 500-char body snippet. Sensitive headers

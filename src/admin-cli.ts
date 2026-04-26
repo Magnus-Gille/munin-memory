@@ -122,6 +122,25 @@ export interface RotateTokenResult {
   token: string;
 }
 
+export type BearerScope = "owner" | "dpa" | "consumer";
+
+export interface BearerTokenSummary {
+  id: string;
+  scope: BearerScope;
+  status: "active" | "retiring" | "expired" | "revoked";
+  createdAt: string;
+  expiresAt: string | null;
+  revokedAt: string | null;
+}
+
+export interface RotateBearerResult {
+  id: string;
+  token: string;
+  scope: BearerScope;
+  retiringKeyId: string | null;
+  retiringExpiresAt: string | null;
+}
+
 export interface ClassificationFloorSummary {
   namespacePattern: string;
   minClassification: ClassificationLevel;
@@ -564,6 +583,113 @@ export function auditClassification(
   }));
 }
 
+export function rotateBearerToken(
+  db: Database.Database,
+  scope: BearerScope,
+  graceHours: number,
+): RotateBearerResult {
+  const now = nowUTC();
+  const expiresAt = new Date(Date.now() + graceHours * 3600 * 1000).toISOString();
+
+  // Find current active DB token for this scope
+  const existing = db
+    .prepare(
+      `SELECT id FROM bearer_tokens
+       WHERE scope = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)
+       ORDER BY created_at DESC LIMIT 1`,
+    )
+    .get(scope, now) as { id: string } | undefined;
+
+  const token = randomBytes(32).toString("hex");
+  const newId = randomUUID();
+
+  const run = db.transaction(() => {
+    if (existing) {
+      db.prepare("UPDATE bearer_tokens SET expires_at = ? WHERE id = ?").run(
+        expiresAt,
+        existing.id,
+      );
+    }
+    db.prepare(
+      "INSERT INTO bearer_tokens (id, token_hash, scope, created_at) VALUES (?, ?, ?, ?)",
+    ).run(newId, hashToken(token), scope, now);
+    auditLog(
+      db,
+      "bearer_rotate",
+      scope,
+      JSON.stringify({ newKeyId: newId, retiringKeyId: existing?.id ?? null, graceHours }),
+    );
+  });
+  run();
+
+  return {
+    id: newId,
+    token,
+    scope,
+    retiringKeyId: existing?.id ?? null,
+    retiringExpiresAt: existing ? expiresAt : null,
+  };
+}
+
+export function revokeBearerToken(
+  db: Database.Database,
+  keyId: string,
+): boolean {
+  const row = db
+    .prepare("SELECT id, scope FROM bearer_tokens WHERE id = ? AND revoked_at IS NULL")
+    .get(keyId) as { id: string; scope: string } | undefined;
+  if (!row) return false;
+
+  const run = db.transaction(() => {
+    db.prepare("UPDATE bearer_tokens SET revoked_at = ? WHERE id = ?").run(nowUTC(), keyId);
+    auditLog(db, "bearer_revoke", row.scope, JSON.stringify({ keyId }));
+  });
+  run();
+  return true;
+}
+
+export function listBearerTokens(
+  db: Database.Database,
+  scope?: BearerScope,
+): BearerTokenSummary[] {
+  const now = nowUTC();
+  const rows = (
+    scope
+      ? db
+          .prepare(
+            "SELECT id, scope, created_at, expires_at, revoked_at FROM bearer_tokens WHERE scope = ? ORDER BY created_at DESC",
+          )
+          .all(scope)
+      : db
+          .prepare(
+            "SELECT id, scope, created_at, expires_at, revoked_at FROM bearer_tokens ORDER BY created_at DESC",
+          )
+          .all()
+  ) as Array<{
+    id: string;
+    scope: string;
+    created_at: string;
+    expires_at: string | null;
+    revoked_at: string | null;
+  }>;
+
+  return rows.map((r) => ({
+    id: r.id,
+    scope: r.scope as BearerScope,
+    status:
+      r.revoked_at !== null
+        ? "revoked"
+        : r.expires_at !== null && r.expires_at <= now
+          ? "expired"
+          : r.expires_at !== null
+            ? "retiring"
+            : "active",
+    createdAt: r.created_at,
+    expiresAt: r.expires_at,
+    revokedAt: r.revoked_at,
+  }));
+}
+
 // ---------------------------------------------------------------------------
 // CLI output formatting
 // ---------------------------------------------------------------------------
@@ -704,6 +830,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
     "--email",
     "--expires-at",
     "--principal",
+    "--scope",
+    "--grace-hours",
   ]);
 
   for (let i = 0; i < args.length; i++) {
@@ -768,6 +896,9 @@ Usage:
   munin-admin oauth-clients list [--principal <principal-id>]
   munin-admin oauth-clients remove <oauth-client-id>
   munin-admin oauth-clients clear <principal-id>
+  munin-admin bearer list [--scope=owner|dpa|consumer]
+  munin-admin bearer rotate [--scope=owner|dpa|consumer] [--grace-hours=<n>]
+  munin-admin bearer revoke <key-id>
 
 Global flags:
   --db <path>     Database path (default: ~/.munin-memory/memory.db)
@@ -1191,6 +1322,87 @@ function handleClassificationAudit(
   console.log(formatClassificationAudit(items));
 }
 
+function handleBearerList(
+  db: Database.Database,
+  flags: Map<string, string>,
+  json: boolean,
+): void {
+  const scope = flags.get("--scope") as BearerScope | undefined;
+  const tokens = listBearerTokens(db, scope);
+  if (json) {
+    console.log(JSON.stringify(tokens, null, 2));
+    return;
+  }
+  if (tokens.length === 0) {
+    console.log("No DB-managed bearer tokens found.");
+    return;
+  }
+  for (const t of tokens) {
+    const expiry = t.expiresAt ? ` expires=${t.expiresAt}` : "";
+    const revoked = t.revokedAt ? ` revoked=${t.revokedAt}` : "";
+    console.log(`${t.id}  scope=${t.scope}  status=${t.status}  created=${t.createdAt}${expiry}${revoked}`);
+  }
+}
+
+function handleBearerRotate(
+  db: Database.Database,
+  flags: Map<string, string>,
+  json: boolean,
+): void {
+  const scope = (flags.get("--scope") ?? "owner") as BearerScope;
+  if (!["owner", "dpa", "consumer"].includes(scope)) {
+    throw new Error(`Invalid scope "${scope}". Must be: owner, dpa, consumer`);
+  }
+  const graceHoursStr = flags.get("--grace-hours");
+  const graceHours = graceHoursStr !== undefined ? parseInt(graceHoursStr, 10) : 24;
+  if (isNaN(graceHours) || graceHours < 0) {
+    throw new Error("--grace-hours must be a non-negative integer");
+  }
+
+  const result = rotateBearerToken(db, scope, graceHours);
+
+  if (json) {
+    console.log(
+      JSON.stringify({
+        id: result.id,
+        token: result.token,
+        scope: result.scope,
+        retiringKeyId: result.retiringKeyId,
+        retiringExpiresAt: result.retiringExpiresAt,
+      }),
+    );
+    return;
+  }
+
+  console.log(`New bearer token (scope=${result.scope}):`);
+  console.log(`  ID:    ${result.id}`);
+  console.log(`  Token: ${result.token}`);
+  console.log("");
+  console.log("Store this token in your credentials file or MCP client config.");
+  console.log("It will NOT be shown again.");
+  if (result.retiringKeyId) {
+    console.log("");
+    console.log(`Previous token (${result.retiringKeyId}) is now retiring.`);
+    console.log(`It will stop working after: ${result.retiringExpiresAt}`);
+  }
+}
+
+function handleBearerRevoke(
+  db: Database.Database,
+  keyId: string,
+  json: boolean,
+): void {
+  const ok = revokeBearerToken(db, keyId);
+  if (json) {
+    console.log(JSON.stringify({ revoked: ok, keyId }));
+    return;
+  }
+  if (!ok) {
+    throw new Error(`Bearer token not found or already revoked: ${keyId}`);
+  }
+  console.log(`Revoked: ${keyId}`);
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -1214,11 +1426,12 @@ function main(): void {
     parsed.resource !== "principals"
     && parsed.resource !== "oauth-clients"
     && parsed.resource !== "classification"
+    && parsed.resource !== "bearer"
   ) {
     if (!parsed.resource) {
-      console.error("Missing resource. Expected: munin-admin principals|classification|oauth-clients <command>");
+      console.error("Missing resource. Expected: munin-admin principals|classification|oauth-clients|bearer <command>");
     } else {
-      console.error(`Unknown resource: ${parsed.resource}. Expected: principals, classification, or oauth-clients`);
+      console.error(`Unknown resource: ${parsed.resource}. Expected: principals, classification, oauth-clients, or bearer`);
     }
     console.error("\nRun 'munin-admin --help' for usage.");
     process.exit(1);
@@ -1229,7 +1442,9 @@ function main(): void {
       ? "list, remove, clear"
       : parsed.resource === "classification"
         ? "list-floors, set-floor, audit"
-        : "list, show, add, revoke, update, rotate-token, test";
+        : parsed.resource === "bearer"
+          ? "list, rotate, revoke"
+          : "list, show, add, revoke, update, rotate-token, test";
     console.error(`Missing command. Expected: ${cmds}`);
     console.error("\nRun 'munin-admin --help' for usage.");
     process.exit(1);
@@ -1262,6 +1477,28 @@ function main(): void {
           break;
         default:
           console.error(`Unknown oauth-clients command: ${parsed.command}`);
+          console.error("\nRun 'munin-admin --help' for usage.");
+          process.exit(1);
+      }
+      return;
+    }
+
+    if (parsed.resource === "bearer") {
+      switch (parsed.command) {
+        case "list":
+          handleBearerList(db, parsed.flags, parsed.json);
+          break;
+        case "rotate":
+          handleBearerRotate(db, parsed.flags, parsed.json);
+          break;
+        case "revoke": {
+          const keyId = parsed.positionals[0];
+          if (!keyId) throw new Error("Missing <key-id> argument.");
+          handleBearerRevoke(db, keyId, parsed.json);
+          break;
+        }
+        default:
+          console.error(`Unknown bearer command: ${parsed.command}`);
           console.error("\nRun 'munin-admin --help' for usage.");
           process.exit(1);
       }
