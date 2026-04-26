@@ -305,6 +305,21 @@ describe("queryEntries (FTS5)", () => {
     expect(results.length).toBeGreaterThanOrEqual(1);
     expect(results[0].content).toContain("full-text search");
   });
+
+  it("matches accented tokens against unaccented queries and vice versa (#40)", () => {
+    writeState(db, "decisions/jarvis-architecture", "overview", "Mímir is the wise councillor in Norse mythology.", ["decision"]);
+    writeState(db, "decisions/jarvis-architecture", "plain", "Mimir appears in many sagas.", ["decision"]);
+
+    const accentedHits = queryEntries(db, { query: "Mimir" });
+    const accentedContents = accentedHits.map((r) => r.content);
+    expect(accentedContents.some((c) => c.includes("Mímir"))).toBe(true);
+    expect(accentedContents.some((c) => c.includes("Mimir"))).toBe(true);
+
+    const plainHits = queryEntries(db, { query: "Mímir" });
+    const plainContents = plainHits.map((r) => r.content);
+    expect(plainContents.some((c) => c.includes("Mímir"))).toBe(true);
+    expect(plainContents.some((c) => c.includes("Mimir"))).toBe(true);
+  });
 });
 
 describe("listNamespaces", () => {

@@ -626,6 +626,47 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 15,
+    description: "Recreate entries_fts with unicode61 remove_diacritics=2 for accent-insensitive lexical search",
+    up: (db) => {
+      db.exec(`
+        DROP TRIGGER IF EXISTS entries_ai;
+        DROP TRIGGER IF EXISTS entries_ad;
+        DROP TRIGGER IF EXISTS entries_au;
+        DROP TABLE IF EXISTS entries_fts;
+
+        CREATE VIRTUAL TABLE entries_fts USING fts5(
+          content,
+          namespace,
+          key,
+          tags,
+          content='entries',
+          content_rowid='rowid',
+          tokenize='unicode61 remove_diacritics 2'
+        );
+
+        CREATE TRIGGER entries_ai AFTER INSERT ON entries BEGIN
+          INSERT INTO entries_fts(rowid, content, namespace, key, tags)
+          VALUES (new.rowid, new.content, new.namespace, new.key, new.tags);
+        END;
+
+        CREATE TRIGGER entries_ad AFTER DELETE ON entries BEGIN
+          INSERT INTO entries_fts(entries_fts, rowid, content, namespace, key, tags)
+          VALUES('delete', old.rowid, old.content, old.namespace, old.key, old.tags);
+        END;
+
+        CREATE TRIGGER entries_au AFTER UPDATE ON entries BEGIN
+          INSERT INTO entries_fts(entries_fts, rowid, content, namespace, key, tags)
+          VALUES('delete', old.rowid, old.content, old.namespace, old.key, old.tags);
+          INSERT INTO entries_fts(rowid, content, namespace, key, tags)
+          VALUES (new.rowid, new.content, new.namespace, new.key, new.tags);
+        END;
+
+        INSERT INTO entries_fts(entries_fts) VALUES('rebuild');
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {
