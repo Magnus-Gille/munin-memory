@@ -617,12 +617,21 @@ function preflightWriteClassification(
   return null;
 }
 
+interface StatusExtraSection {
+  title: string;
+  body: string;
+}
+
 interface StructuredStatus {
   phase?: string;
   current_work?: string;
   blockers?: string;
   next_steps?: string[];
   notes?: string;
+  // Non-canonical sections (e.g. "Vision", "Roadmap", "Milestones") preserved
+  // verbatim through parse → merge → format so memory_update_status doesn't
+  // drop them when callers patch only canonical fields.
+  extras?: StatusExtraSection[];
 }
 
 const STATUS_SECTION_ORDER = [
@@ -708,18 +717,23 @@ function assignStructuredStatusValue(
 function parseStructuredStatus(content: string): StructuredStatus {
   const structured: StructuredStatus = {};
   const lines = content.split("\n");
+  const extras: StatusExtraSection[] = [];
 
   const headingMatches = [...content.matchAll(/^##\s+(.+)$/gm)];
   if (headingMatches.length > 0) {
     for (let i = 0; i < headingMatches.length; i++) {
       const match = headingMatches[i];
-      const label = normalizeStatusLabel(match[1]);
-      if (!label) continue;
+      const rawTitle = match[1].trim();
+      const label = normalizeStatusLabel(rawTitle);
       const sectionStart = match.index! + match[0].length;
       const sectionEnd = i + 1 < headingMatches.length ? headingMatches[i + 1].index! : content.length;
       const raw = content.slice(sectionStart, sectionEnd).trim();
-      const extracted = extractStatusSectionValue(label, raw);
-      if (extracted !== undefined) assignStructuredStatusValue(structured, label, extracted);
+      if (label) {
+        const extracted = extractStatusSectionValue(label, raw);
+        if (extracted !== undefined) assignStructuredStatusValue(structured, label, extracted);
+      } else if (raw.length > 0) {
+        extras.push({ title: rawTitle, body: raw });
+      }
     }
   }
 
@@ -732,6 +746,7 @@ function parseStructuredStatus(content: string): StructuredStatus {
     if (extracted !== undefined) assignStructuredStatusValue(structured, label, extracted);
   }
 
+  if (extras.length > 0) structured.extras = extras;
   return structured;
 }
 
@@ -747,18 +762,23 @@ function normalizeStatusList(value?: string[]): string[] | undefined {
   return items;
 }
 
-function buildStructuredStatus(update: StructuredStatus, existing?: StructuredStatus): Required<StructuredStatus> {
-  const merged: Required<StructuredStatus> = {
+type BuiltStructuredStatus = Required<Omit<StructuredStatus, "extras">> & {
+  extras: StatusExtraSection[];
+};
+
+function buildStructuredStatus(update: StructuredStatus, existing?: StructuredStatus): BuiltStructuredStatus {
+  const merged: BuiltStructuredStatus = {
     phase: normalizeStatusText(update.phase) ?? normalizeStatusText(existing?.phase) ?? "Unspecified.",
     current_work: normalizeStatusText(update.current_work) ?? normalizeStatusText(existing?.current_work) ?? "Unspecified.",
     blockers: normalizeStatusText(update.blockers) ?? normalizeStatusText(existing?.blockers) ?? "None.",
     next_steps: normalizeStatusList(update.next_steps) ?? normalizeStatusList(existing?.next_steps) ?? ["None."],
     notes: normalizeStatusText(update.notes) ?? normalizeStatusText(existing?.notes) ?? "",
+    extras: update.extras ?? existing?.extras ?? [],
   };
   return merged;
 }
 
-function formatStructuredStatus(status: Required<StructuredStatus>): string {
+function formatStructuredStatus(status: BuiltStructuredStatus): string {
   const sections: string[] = [];
   for (const key of STATUS_SECTION_ORDER) {
     const title = STATUS_SECTION_TITLES[key];
@@ -770,6 +790,11 @@ function formatStructuredStatus(status: Required<StructuredStatus>): string {
     } else {
       sections.push(value as string);
     }
+    sections.push("");
+  }
+  for (const extra of status.extras) {
+    sections.push(`## ${extra.title}`);
+    sections.push(extra.body);
     sections.push("");
   }
   return sections.join("\n").trim();
