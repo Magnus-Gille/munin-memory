@@ -102,6 +102,8 @@ npm test         # Runs vitest (single run)
 npm run test:watch  # Runs vitest in watch mode
 ```
 
+For substantive code changes, default to red/green TDD: write the failing test first, confirm it fails, then implement until it passes. Skip for refactors with no behavior change, config tweaks, and trivial fixes.
+
 ## How to run locally
 
 **Stdio mode** (default — for Claude Code, Claude Desktop local):
