@@ -464,6 +464,67 @@ describe("memory_update_status", () => {
     expect(entry.classification).toBe("client-confidential");
     expect(entry.tags).toContain("classification:client-confidential");
   });
+
+  it("preserves non-canonical sections (Vision, Roadmap, Milestones) across patches (#44)", async () => {
+    // Seed a status with a mix of canonical and non-canonical sections, written
+    // via memory_write so update_status sees them in the existing content.
+    await callTool("memory_write", {
+      namespace: "projects/heimdall",
+      key: "status",
+      content: [
+        "## Phase",
+        "Active",
+        "",
+        "## Vision",
+        "Render a personal dashboard from Munin tracked statuses.",
+        "",
+        "## Current Work",
+        "Wiring up retrieval health card.",
+        "",
+        "## Roadmap",
+        "- v1: dashboard",
+        "- v2: alerts",
+        "",
+        "## Milestones",
+        "Q3 demo to Magnus.",
+      ].join("\n"),
+      tags: ["active"],
+    });
+
+    // Patch only lifecycle — every non-canonical section must survive.
+    await callTool("memory_update_status", {
+      namespace: "projects/heimdall",
+      lifecycle: "archived",
+    });
+
+    const readRaw = await callTool("memory_read", {
+      namespace: "projects/heimdall",
+      key: "status",
+    });
+    const entry = parseToolResponse(readRaw) as { content: string };
+
+    expect(entry.content).toContain("## Vision");
+    expect(entry.content).toContain("Render a personal dashboard from Munin tracked statuses.");
+    expect(entry.content).toContain("## Roadmap");
+    expect(entry.content).toContain("- v1: dashboard");
+    expect(entry.content).toContain("## Milestones");
+    expect(entry.content).toContain("Q3 demo to Magnus.");
+
+    // Patch a canonical section — extras must still survive a second time.
+    await callTool("memory_update_status", {
+      namespace: "projects/heimdall",
+      blockers: "Waiting on PR review.",
+    });
+    const readRaw2 = await callTool("memory_read", {
+      namespace: "projects/heimdall",
+      key: "status",
+    });
+    const entry2 = parseToolResponse(readRaw2) as { content: string };
+    expect(entry2.content).toContain("## Vision");
+    expect(entry2.content).toContain("## Roadmap");
+    expect(entry2.content).toContain("## Milestones");
+    expect(entry2.content).toContain("Waiting on PR review.");
+  });
 });
 
 describe("memory_read", () => {

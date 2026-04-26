@@ -8,6 +8,19 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`memory_update_status` no longer drops non-canonical sections.** Previously
+  the parse → merge → format cycle only recognized the five canonical sections
+  (`Phase`, `Current Work`, `Blockers`, `Next Steps`, `Notes`); anything else
+  (`Vision`, `Roadmap`, `Milestones`, custom sections) was silently discarded
+  on the next call — even a no-op `lifecycle` flip would wipe them. Now
+  `parseStructuredStatus` collects unknown `## Heading` sections into an
+  `extras` array, `buildStructuredStatus` carries them across patches, and
+  `formatStructuredStatus` re-emits them after the canonical block. Heimdall
+  and other downstream readers that depend on `## Vision` / `## Milestones`
+  no longer need the `memory_write patch` workaround. (#44)
+
 ### Changed
 
 - **Accent-insensitive lexical search** — migration v15 recreates the
