@@ -667,6 +667,23 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 16,
+    description: "bearer_tokens table for DB-managed bearer token rotation",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE bearer_tokens (
+          id TEXT PRIMARY KEY,
+          token_hash TEXT NOT NULL UNIQUE,
+          scope TEXT NOT NULL CHECK(scope IN ('owner', 'dpa', 'consumer')),
+          created_at TEXT NOT NULL,
+          expires_at TEXT,
+          revoked_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS bearer_tokens_scope ON bearer_tokens(scope);
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

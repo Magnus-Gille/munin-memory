@@ -539,6 +539,39 @@ export class MuninOAuthProvider implements OAuthServerProvider {
       } as ExtendedAuthInfo;
     }
 
+    // Check DB-managed bearer tokens
+    const bearerHash = createHash("sha256").update(token).digest("hex");
+    const dbBearerRow = this.db
+      .prepare(
+        `SELECT id, scope FROM bearer_tokens
+         WHERE token_hash = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)`,
+      )
+      .get(bearerHash, new Date().toISOString()) as { id: string; scope: string } | undefined;
+
+    if (dbBearerRow) {
+      const scopeClientId =
+        dbBearerRow.scope === "owner" ? "legacy-bearer"
+        : dbBearerRow.scope === "dpa" ? "bearer-dpa"
+        : "bearer-consumer";
+      const transportHint: TransportType | undefined =
+        dbBearerRow.scope === "dpa" ? "dpa_covered"
+        : dbBearerRow.scope === "consumer" ? "consumer"
+        : undefined;
+      // Owner-scope DB tokens use authMethod="legacy_bearer" so
+      // normalizeTransportType() picks up the configured legacy bearer
+      // transport (e.g. dpa_covered), matching the env-var owner path.
+      const authMethodForScope: AuthMethod =
+        dbBearerRow.scope === "owner" ? "legacy_bearer" : "bearer";
+      return {
+        token,
+        clientId: scopeClientId,
+        scopes: [],
+        expiresAt: farFuture,
+        authMethod: authMethodForScope,
+        ...(transportHint ? { transportTypeHint: transportHint } : {}),
+      } as ExtendedAuthInfo;
+    }
+
     // Check agent service tokens (principals.token_hash)
     const serviceTokenHash = createHash("sha256").update(token).digest("hex");
     const principalRow = this.db

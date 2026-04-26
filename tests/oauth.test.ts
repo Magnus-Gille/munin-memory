@@ -397,6 +397,48 @@ describe("Token verification", () => {
     await expect(provider.verifyAccessToken(wrongKey)).rejects.toThrow();
   });
 
+  it("DB-managed owner bearer uses authMethod=legacy_bearer", async () => {
+    // Codex regression: DB-managed owner-scope tokens must use authMethod="legacy_bearer"
+    // so normalizeTransportType() picks up the configured legacy bearer transport
+    // (e.g. dpa_covered). Otherwise rotated owner tokens silently degrade to consumer.
+    const { createHash, randomBytes, randomUUID } = await import("node:crypto");
+    const ownerToken = randomBytes(32).toString("hex");
+    const ownerHash = createHash("sha256").update(ownerToken).digest("hex");
+    db.prepare(
+      "INSERT INTO bearer_tokens (id, token_hash, scope, created_at) VALUES (?, ?, ?, ?)",
+    ).run(randomUUID(), ownerHash, "owner", new Date().toISOString());
+
+    const info = (await provider.verifyAccessToken(ownerToken)) as ExtendedAuthInfo;
+    expect(info.clientId).toBe("legacy-bearer");
+    expect(info.authMethod).toBe("legacy_bearer");
+  });
+
+  it("DB-managed dpa/consumer bearers use authMethod=bearer with transport hint", async () => {
+    const { createHash, randomBytes, randomUUID } = await import("node:crypto");
+    const dpaToken = randomBytes(32).toString("hex");
+    const dpaHash = createHash("sha256").update(dpaToken).digest("hex");
+    db.prepare(
+      "INSERT INTO bearer_tokens (id, token_hash, scope, created_at) VALUES (?, ?, ?, ?)",
+    ).run(randomUUID(), dpaHash, "dpa", new Date().toISOString());
+
+    const info = (await provider.verifyAccessToken(dpaToken)) as ExtendedAuthInfo;
+    expect(info.clientId).toBe("bearer-dpa");
+    expect(info.authMethod).toBe("bearer");
+    expect(info.transportTypeHint).toBe("dpa_covered");
+  });
+
+  it("DB-managed bearer with expires_at in the past is rejected", async () => {
+    const { createHash, randomBytes, randomUUID } = await import("node:crypto");
+    const expiredToken = randomBytes(32).toString("hex");
+    const expiredHash = createHash("sha256").update(expiredToken).digest("hex");
+    const past = new Date(Date.now() - 1000).toISOString();
+    db.prepare(
+      "INSERT INTO bearer_tokens (id, token_hash, scope, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
+    ).run(randomUUID(), expiredHash, "owner", new Date().toISOString(), past);
+
+    await expect(provider.verifyAccessToken(expiredToken)).rejects.toThrow();
+  });
+
   it("verifies OAuth access token", async () => {
     const res = createMockResponse();
     provider.completeAuthorization(
