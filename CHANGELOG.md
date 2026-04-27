@@ -8,6 +8,17 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Changed
+
+- **Backup schedule reduced from hourly to daily** with GFS retention (14 most
+  recent daily snapshots + 4 most recent Sunday snapshots, ~18 files total).
+  Previous policy kept 168 hourly snapshots which grew to ~50 GB and filled
+  the NAS Pi's SD card. New target is ~7 GB. Backup destination moved from
+  `/home/magnus/backups/munin-memory` (SD card) to
+  `/mnt/timemachine/backups/munin-memory` (1.8 TB external HDD).
+  `munin-backup.{service,timer}` are now version-controlled in the repo root
+  alongside `munin-memory.service`.
+
 ### Fixed
 
 - **`memory_update_status` no longer drops non-canonical sections.** Previously
