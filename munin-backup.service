@@ -1,0 +1,20 @@
+[Unit]
+Description=Munin Memory backup to NAS
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=magnus
+ExecStart=/home/magnus/repos/munin-memory/scripts/backup-to-nas.sh
+StandardOutput=journal
+StandardError=journal
+
+# Timeouts
+TimeoutStartSec=120
+
+# Hardening (lighter than the main service — just needs network + sqlite3)
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes

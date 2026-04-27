@@ -7,7 +7,7 @@ set -euo pipefail
 
 DB="/home/magnus/.munin-memory/memory.db"
 NAS_HOST="100.99.119.52"
-NAS_DIR="/home/magnus/backups/munin-memory"
+NAS_DIR="/mnt/timemachine/backups/munin-memory"
 TIMESTAMP=$(date -u +%Y-%m-%d-%H%M)
 FILENAME="memory-${TIMESTAMP}.db"
 LOCAL_TMP="/tmp/${FILENAME}"
@@ -25,13 +25,30 @@ if [ "$INTEGRITY" != "ok" ]; then
     exit 1
 fi
 
-# 3. rsync to NAS
+# 3. Ensure target dir exists, then rsync to NAS
+ssh "magnus@${NAS_HOST}" "mkdir -p '${NAS_DIR}'"
 rsync -az "$LOCAL_TMP" "magnus@${NAS_HOST}:${NAS_DIR}/${FILENAME}"
 
 # 4. Cleanup local temp
 rm -f "$LOCAL_TMP"
 
-# 5. Prune old backups on NAS (keep last 168 = 7 days of hourly backups)
-ssh "magnus@${NAS_HOST}" "cd ${NAS_DIR} && ls -1t memory-*.db 2>/dev/null | tail -n +169 | xargs -r rm --"
+# 5. Prune old backups on NAS — GFS retention:
+#    - keep the 14 most recent daily snapshots
+#    - plus the 4 most recent Sunday snapshots (rolling monthly coverage)
+ssh "magnus@${NAS_HOST}" "bash -s '${NAS_DIR}'" <<'REMOTE'
+set -euo pipefail
+cd "$1" || exit 0
+keep=$(mktemp)
+trap 'rm -f "$keep"' EXIT
+ls -1t memory-*.db 2>/dev/null | head -n 14 > "$keep"
+for f in $(ls -1t memory-*.db 2>/dev/null); do
+    d=$(echo "$f" | sed -nE 's/^memory-([0-9]{4}-[0-9]{2}-[0-9]{2}).*/\1/p')
+    [ -z "$d" ] && continue
+    if [ "$(date -d "$d" +%u 2>/dev/null)" = "7" ]; then
+        echo "$f"
+    fi
+done | head -n 4 >> "$keep"
+ls -1 memory-*.db 2>/dev/null | grep -vxFf "$keep" | xargs -r rm --
+REMOTE
 
 echo "$(date -Iseconds) Backup complete: ${FILENAME}"
