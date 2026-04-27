@@ -124,9 +124,26 @@ function ensureVecSchema(db: Database.Database): void {
   }
 }
 
-// Rebuild FTS index — for maintenance (debate resolution #7)
+// Rebuild FTS index — for maintenance (debate resolution #7).
+// NB: a plain FTS5 'rebuild' on this external-content table reads from
+// `entries` directly and bypasses the entries_ai/au triggers, which means
+// the v17 split-token augmentation (munin_split_tokens) would be silently
+// dropped. We instead wipe the index with delete-all and repopulate via
+// the same augmented form the live triggers use.
 export function rebuildFTS(db: Database.Database): void {
-  db.exec("INSERT INTO entries_fts(entries_fts) VALUES('rebuild')");
+  db.transaction(() => {
+    db.prepare("INSERT INTO entries_fts(entries_fts) VALUES('delete-all')").run();
+    db.prepare(
+      `INSERT INTO entries_fts(rowid, content, namespace, key, tags)
+         SELECT
+           rowid,
+           content || ' ' || munin_split_tokens(content),
+           namespace,
+           key,
+           tags
+         FROM entries`,
+    ).run();
+  })();
 }
 
 // --- Tracked status queries ---

@@ -320,6 +320,53 @@ describe("queryEntries (FTS5)", () => {
     expect(plainContents.some((c) => c.includes("Mímir"))).toBe(true);
     expect(plainContents.some((c) => c.includes("Mimir"))).toBe(true);
   });
+
+  it("matches camelCase tokens against separated-word queries (#42)", () => {
+    writeState(
+      db,
+      "projects/test",
+      "tools",
+      "Used the WebFetch tool to scrape the page",
+      ["tools"],
+    );
+
+    const camelHits = queryEntries(db, { query: "WebFetch" });
+    expect(camelHits.some((r) => r.content.includes("WebFetch"))).toBe(true);
+
+    const separatedHits = queryEntries(db, { query: "web fetch" });
+    expect(separatedHits.some((r) => r.content.includes("WebFetch"))).toBe(true);
+
+    const lowerHits = queryEntries(db, { query: "fetch" });
+    expect(lowerHits.some((r) => r.content.includes("WebFetch"))).toBe(true);
+  });
+
+  it("matches PascalCase identifiers and acronym boundaries (#42)", () => {
+    writeState(
+      db,
+      "projects/test",
+      "patterns",
+      "XMLParser handles parseXML and IOError events",
+      ["code"],
+    );
+
+    expect(
+      queryEntries(db, { query: "XML parser" }).some((r) =>
+        r.content.includes("XMLParser"),
+      ),
+    ).toBe(true);
+
+    expect(
+      queryEntries(db, { query: "parse XML" }).some((r) =>
+        r.content.includes("parseXML"),
+      ),
+    ).toBe(true);
+
+    expect(
+      queryEntries(db, { query: "io error" }).some((r) =>
+        r.content.includes("IOError"),
+      ),
+    ).toBe(true);
+  });
 });
 
 describe("listNamespaces", () => {
@@ -569,6 +616,29 @@ describe("rebuildFTS", () => {
     // Verify search still works after rebuild
     const results = queryEntries(db, { query: "searchable" });
     expect(results.length).toBe(1);
+  });
+
+  it("preserves split-token (camelCase) matches across rebuild (#42)", () => {
+    writeState(
+      db,
+      "projects/test",
+      "tools",
+      "Used the WebFetch tool to scrape",
+      ["tools"],
+    );
+    expect(
+      queryEntries(db, { query: "web fetch" }).some((r) =>
+        r.content.includes("WebFetch"),
+      ),
+    ).toBe(true);
+
+    rebuildFTS(db);
+
+    expect(
+      queryEntries(db, { query: "web fetch" }).some((r) =>
+        r.content.includes("WebFetch"),
+      ),
+    ).toBe(true);
   });
 });
 

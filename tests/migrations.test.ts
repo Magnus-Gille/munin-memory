@@ -1,7 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
-import { runMigrations, getSchemaVersion, migrations } from "../src/migrations.js";
+import {
+  runMigrations,
+  getSchemaVersion,
+  migrations,
+  splitCamelCaseTokens,
+} from "../src/migrations.js";
 import { initDatabase, writeState, readState, queryEntries } from "../src/db.js";
 
 const TEST_DB_PATH = "/tmp/munin-memory-migrations-test.db";
@@ -694,6 +699,104 @@ describe("migration v5 — principals table", () => {
       .prepare("SELECT namespace_rules FROM principals WHERE id = 'p1'")
       .get() as { namespace_rules: string };
     expect(row.namespace_rules).toBe("[]");
+    db.close();
+  });
+});
+
+describe("splitCamelCaseTokens (#42)", () => {
+  it("splits camelCase on lowercase→uppercase boundary", () => {
+    expect(splitCamelCaseTokens("webFetch")).toBe("web Fetch");
+    expect(splitCamelCaseTokens("userIdField")).toBe("user Id Field");
+  });
+
+  it("splits PascalCase identifiers", () => {
+    expect(splitCamelCaseTokens("WebFetch")).toBe("Web Fetch");
+    expect(splitCamelCaseTokens("HelloWorld")).toBe("Hello World");
+  });
+
+  it("splits acronym→Pascal boundary", () => {
+    expect(splitCamelCaseTokens("XMLParser")).toBe("XML Parser");
+    expect(splitCamelCaseTokens("IOError")).toBe("IO Error");
+    expect(splitCamelCaseTokens("parseXMLResponse")).toBe("parse XML Response");
+  });
+
+  it("preserves single-capital prefix on Pascal identifiers", () => {
+    // Acronym rule needs 2+ uppers in lookbehind, so a single leading capital
+    // followed by a Pascal-cased word is treated as one PascalCase token.
+    expect(splitCamelCaseTokens("OAuthToken")).toBe("OAuth Token");
+    expect(splitCamelCaseTokens("IPv6Address")).toBe("IPv6 Address");
+    expect(splitCamelCaseTokens("UFooBar")).toBe("UFoo Bar");
+  });
+
+  it("splits digit→uppercase boundary", () => {
+    expect(splitCamelCaseTokens("foo2Bar")).toBe("foo2 Bar");
+  });
+
+  it("leaves snake_case and kebab-case unchanged", () => {
+    expect(splitCamelCaseTokens("snake_case")).toBe("snake_case");
+    expect(splitCamelCaseTokens("kebab-case")).toBe("kebab-case");
+  });
+
+  it("leaves all-lower and all-upper runs unchanged", () => {
+    expect(splitCamelCaseTokens("hello")).toBe("hello");
+    expect(splitCamelCaseTokens("XML")).toBe("XML");
+  });
+
+  it("handles non-strings and empty values", () => {
+    expect(splitCamelCaseTokens(null)).toBe("");
+    expect(splitCamelCaseTokens(undefined)).toBe("");
+    expect(splitCamelCaseTokens(42)).toBe("");
+    expect(splitCamelCaseTokens("")).toBe("");
+  });
+
+  it("does not catastrophically backtrack on long single-case runs", () => {
+    const longUpper = "A".repeat(50000);
+    const start = Date.now();
+    const result = splitCamelCaseTokens(longUpper);
+    const elapsed = Date.now() - start;
+    expect(result).toBe(longUpper);
+    expect(elapsed).toBeLessThan(500);
+  });
+});
+
+describe("migration v17 — augmented FTS index", () => {
+  it("rebuilds FTS index so existing rows match split-token queries", () => {
+    // Simulate a pre-v17 DB: stop migrations at v16, insert a row, then upgrade.
+    const db = openRawDb();
+    const v16only = migrations.filter((m) => m.version <= 16);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS schema_version (
+        version INTEGER PRIMARY KEY,
+        applied_at TEXT NOT NULL
+      );
+    `);
+    // Manually run migrations up to v16 (mirror runMigrations logic)
+    for (const m of v16only) {
+      m.up(db);
+      db.prepare(
+        "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+      ).run(m.version, new Date().toISOString());
+    }
+
+    db.prepare(
+      `INSERT INTO entries (id, namespace, key, entry_type, content, tags, created_at, updated_at)
+       VALUES ('e1', 'projects/test', 'note', 'state', 'Used the WebFetch tool', '[]', ?, ?)`,
+    ).run(new Date().toISOString(), new Date().toISOString());
+
+    // Pre-v17: 'web fetch' should not match the camelCased content
+    const preHits = db
+      .prepare("SELECT rowid FROM entries_fts WHERE entries_fts MATCH ?")
+      .all("web fetch") as Array<{ rowid: number }>;
+    expect(preHits).toHaveLength(0);
+
+    // Now run the full migration set (v17 included). runMigrations registers the UDF.
+    runMigrations(db);
+
+    const postHits = db
+      .prepare("SELECT rowid FROM entries_fts WHERE entries_fts MATCH ?")
+      .all("web fetch") as Array<{ rowid: number }>;
+    expect(postHits.length).toBeGreaterThanOrEqual(1);
+
     db.close();
   });
 });

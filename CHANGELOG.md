@@ -21,6 +21,21 @@ changelog is the canonical record of what moved.
 
 ### Fixed
 
+- **FTS5 now matches camelCase / PascalCase identifiers against separated-word
+  queries.** Migration v17 recreates the FTS triggers to augment indexed
+  content with a case-split copy via the `munin_split_tokens` SQL UDF, and
+  rebuilds the existing index. `WebFetch` is now findable via `web fetch`,
+  `XMLParser` via `XML parser`, `parseXMLResponse` via `parse XML response`,
+  `OAuthToken` via `oauth token`, and `IPv6Address` via `IPv6 address`.
+  Original phrases still match unchanged (the augmented copy is appended,
+  not substituted). The maintenance helper `rebuildFTS()` was rewritten to
+  use `delete-all` + augmented re-population, since FTS5's built-in
+  `'rebuild'` command would silently strip the split-token augmentation by
+  reading from `entries` directly. Known limitation: quoted phrases that
+  span identifier-internal punctuation like `"90/10"` are still
+  tokenizer-split by `unicode61` — query as separate tokens or rely on
+  FTS5's near-match ranking. (#42)
+
 - **`memory_update_status` no longer drops non-canonical sections.** Previously
   the parse → merge → format cycle only recognized the five canonical sections
   (`Phase`, `Current Work`, `Blockers`, `Next Steps`, `Notes`); anything else

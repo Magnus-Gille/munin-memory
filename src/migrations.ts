@@ -684,9 +684,127 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 17,
+    description:
+      "Augment FTS index with camelCase/PascalCase splits via munin_split_tokens UDF",
+    up: (db) => {
+      db.exec(`
+        DROP TRIGGER IF EXISTS entries_ai;
+        DROP TRIGGER IF EXISTS entries_ad;
+        DROP TRIGGER IF EXISTS entries_au;
+
+        CREATE TRIGGER entries_ai AFTER INSERT ON entries BEGIN
+          INSERT INTO entries_fts(rowid, content, namespace, key, tags)
+          VALUES (
+            new.rowid,
+            new.content || ' ' || munin_split_tokens(new.content),
+            new.namespace,
+            new.key,
+            new.tags
+          );
+        END;
+
+        CREATE TRIGGER entries_ad AFTER DELETE ON entries BEGIN
+          INSERT INTO entries_fts(entries_fts, rowid, content, namespace, key, tags)
+          VALUES(
+            'delete',
+            old.rowid,
+            old.content || ' ' || munin_split_tokens(old.content),
+            old.namespace,
+            old.key,
+            old.tags
+          );
+        END;
+
+        CREATE TRIGGER entries_au AFTER UPDATE ON entries BEGIN
+          INSERT INTO entries_fts(entries_fts, rowid, content, namespace, key, tags)
+          VALUES(
+            'delete',
+            old.rowid,
+            old.content || ' ' || munin_split_tokens(old.content),
+            old.namespace,
+            old.key,
+            old.tags
+          );
+          INSERT INTO entries_fts(rowid, content, namespace, key, tags)
+          VALUES (
+            new.rowid,
+            new.content || ' ' || munin_split_tokens(new.content),
+            new.namespace,
+            new.key,
+            new.tags
+          );
+        END;
+      `);
+
+      // Manual rebuild — the 'rebuild' command on a contentless-ish
+      // external-content FTS5 table re-reads from the entries table directly
+      // and does NOT invoke our triggers, so the augmented form would not be
+      // picked up. Instead we wipe the index and re-emit each row through
+      // the new trigger logic by deleting + re-inserting via the FTS
+      // contentless interface.
+      db.exec("INSERT INTO entries_fts(entries_fts) VALUES('delete-all');");
+
+      const rows = db
+        .prepare(
+          "SELECT rowid, content, namespace, key, tags FROM entries",
+        )
+        .all() as Array<{
+          rowid: number;
+          content: string;
+          namespace: string;
+          key: string | null;
+          tags: string;
+        }>;
+
+      const insert = db.prepare(
+        `INSERT INTO entries_fts(rowid, content, namespace, key, tags)
+         VALUES (?, ? || ' ' || munin_split_tokens(?), ?, ?, ?)`,
+      );
+      for (const row of rows) {
+        insert.run(row.rowid, row.content, row.content, row.namespace, row.key, row.tags);
+      }
+    },
+  },
 ];
 
+/**
+ * Split identifiers like `webFetch`, `WebFetch`, `XMLParser` on case
+ * transitions so FTS5 (which treats them as single tokens via unicode61)
+ * can also match the underlying word forms.
+ *
+ * Used by migration v17's FTS triggers as a SQL UDF to augment indexed
+ * content. Idempotent and deterministic. Returns the empty string for
+ * non-string inputs so the SQL trigger never throws on NULL/numeric content.
+ */
+export function splitCamelCaseTokens(text: unknown): string {
+  if (typeof text !== "string" || text.length === 0) return "";
+  // Use zero-width lookbehind/lookahead to avoid catastrophic backtracking
+  // on long runs of a single case (e.g. "AAAA…"). The acronym-boundary rule
+  // requires 2+ uppercase letters in the lookbehind so identifiers like
+  // `OAuthToken` and `IPv6Address` keep their leading single-capital prefix
+  // attached (→ `OAuth Token`, `IPv6 Address`) instead of being split off
+  // (→ `O Auth Token`, `I Pv6 Address`) and missing FTS hits.
+  return text
+    .replace(/(?<=[\p{Ll}\p{Nd}])(?=\p{Lu})/gu, " ")
+    .replace(/(?<=\p{Lu}\p{Lu})(?=\p{Lu}\p{Ll})/gu, " ");
+}
+
+export function registerMuninUDFs(db: Database.Database): void {
+  db.function(
+    "munin_split_tokens",
+    { deterministic: true, varargs: false },
+    (text: unknown) => splitCamelCaseTokens(text),
+  );
+}
+
 export function runMigrations(db: Database.Database): void {
+  // Register UDFs needed by triggers BEFORE running any migrations.
+  // Migration v17 wires the FTS triggers to call munin_split_tokens(),
+  // and any future writes via the existing triggers also need it.
+  registerMuninUDFs(db);
+
   // Create the schema_version table (the migration framework's own table)
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_version (
