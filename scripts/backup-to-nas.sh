@@ -48,7 +48,7 @@ for f in $(ls -1t memory-*.db 2>/dev/null); do
         echo "$f"
     fi
 done | head -n 4 >> "$keep"
-ls -1 memory-*.db 2>/dev/null | grep -vxFf "$keep" | xargs -r rm --
+{ ls -1 memory-*.db 2>/dev/null | grep -vxFf "$keep" || true; } | xargs -r rm --
 REMOTE
 
 echo "$(date -Iseconds) Backup complete: ${FILENAME}"
