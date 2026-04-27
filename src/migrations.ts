@@ -781,10 +781,14 @@ export const migrations: Migration[] = [
 export function splitCamelCaseTokens(text: unknown): string {
   if (typeof text !== "string" || text.length === 0) return "";
   // Use zero-width lookbehind/lookahead to avoid catastrophic backtracking
-  // on long runs of a single case (e.g. "AAAA…").
+  // on long runs of a single case (e.g. "AAAA…"). The acronym-boundary rule
+  // requires 2+ uppercase letters in the lookbehind so identifiers like
+  // `OAuthToken` and `IPv6Address` keep their leading single-capital prefix
+  // attached (→ `OAuth Token`, `IPv6 Address`) instead of being split off
+  // (→ `O Auth Token`, `I Pv6 Address`) and missing FTS hits.
   return text
     .replace(/(?<=[\p{Ll}\p{Nd}])(?=\p{Lu})/gu, " ")
-    .replace(/(?<=\p{Lu})(?=\p{Lu}\p{Ll})/gu, " ");
+    .replace(/(?<=\p{Lu}\p{Lu})(?=\p{Lu}\p{Ll})/gu, " ");
 }
 
 export function registerMuninUDFs(db: Database.Database): void {

@@ -617,6 +617,29 @@ describe("rebuildFTS", () => {
     const results = queryEntries(db, { query: "searchable" });
     expect(results.length).toBe(1);
   });
+
+  it("preserves split-token (camelCase) matches across rebuild (#42)", () => {
+    writeState(
+      db,
+      "projects/test",
+      "tools",
+      "Used the WebFetch tool to scrape",
+      ["tools"],
+    );
+    expect(
+      queryEntries(db, { query: "web fetch" }).some((r) =>
+        r.content.includes("WebFetch"),
+      ),
+    ).toBe(true);
+
+    rebuildFTS(db);
+
+    expect(
+      queryEntries(db, { query: "web fetch" }).some((r) =>
+        r.content.includes("WebFetch"),
+      ),
+    ).toBe(true);
+  });
 });
 
 describe("embedding_status on entries", () => {

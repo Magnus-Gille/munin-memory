@@ -720,6 +720,14 @@ describe("splitCamelCaseTokens (#42)", () => {
     expect(splitCamelCaseTokens("parseXMLResponse")).toBe("parse XML Response");
   });
 
+  it("preserves single-capital prefix on Pascal identifiers", () => {
+    // Acronym rule needs 2+ uppers in lookbehind, so a single leading capital
+    // followed by a Pascal-cased word is treated as one PascalCase token.
+    expect(splitCamelCaseTokens("OAuthToken")).toBe("OAuth Token");
+    expect(splitCamelCaseTokens("IPv6Address")).toBe("IPv6 Address");
+    expect(splitCamelCaseTokens("UFooBar")).toBe("UFoo Bar");
+  });
+
   it("splits digit→uppercase boundary", () => {
     expect(splitCamelCaseTokens("foo2Bar")).toBe("foo2 Bar");
   });
