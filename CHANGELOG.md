@@ -8,6 +8,13 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Added
+
+- `MUNIN_CONSOLIDATION_MAX_LOGS_PER_RUN` (default `15`) — caps how many
+  unincorporated logs a single consolidation run incorporates, so a large
+  backlog drains incrementally over successive worker ticks instead of
+  producing one oversized synthesis request.
+
 ### Changed
 
 - **Backup schedule reduced from hourly to daily** with GFS retention (14 most
@@ -21,6 +28,14 @@ changelog is the canonical record of what moved.
 
 ### Fixed
 
+- **Consolidation worker no longer stalls indefinitely on a large backlog
+  (#51).** A namespace with many unincorporated logs produced a synthesis
+  that overflowed the OpenRouter `max_tokens` cap, returning truncated JSON
+  that failed to parse. Repeated parse failures tripped the circuit breaker,
+  which silently disabled *all* consolidation until the next process restart;
+  the growing backlog meant the namespace could never self-recover. Fixed by
+  raising `max_tokens` (2048 → 4096) and bounding the per-run log window
+  (`MUNIN_CONSOLIDATION_MAX_LOGS_PER_RUN`) so backlogs drain incrementally.
 - **FTS5 now matches camelCase / PascalCase identifiers against separated-word
   queries.** Migration v17 recreates the FTS triggers to augment indexed
   content with a case-split copy via the `munin_split_tokens` SQL UDF, and

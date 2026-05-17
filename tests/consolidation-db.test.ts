@@ -213,6 +213,36 @@ describe("getLogsForConsolidation", () => {
     expect(logs).toHaveLength(1);
     expect(logs[0].entry_type).toBe("log");
   });
+
+  it("caps the result to maxLogs, oldest-first, so a backlog drains incrementally (#51)", () => {
+    for (let i = 0; i < 10; i++) {
+      const ts = `2026-03-01T1${i}:00:00.000Z`;
+      appendLogAndSetTime(db, "projects/theta", `Entry ${i}`, ts);
+    }
+
+    // First run: bounded to the oldest 4 entries
+    const firstRun = getLogsForConsolidation(db, "projects/theta", null, 4);
+    expect(firstRun).toHaveLength(4);
+    expect(firstRun[0].content).toBe("Entry 0");
+    expect(firstRun[3].content).toBe("Entry 3");
+
+    // Next run starts after the last log of the previous (bounded) run —
+    // the cursor advances, draining the backlog over successive ticks.
+    const cursor = firstRun[firstRun.length - 1].created_at;
+    const secondRun = getLogsForConsolidation(db, "projects/theta", cursor, 4);
+    expect(secondRun).toHaveLength(4);
+    expect(secondRun[0].content).toBe("Entry 4");
+    expect(secondRun[3].content).toBe("Entry 7");
+  });
+
+  it("returns all logs when maxLogs is undefined, null, or non-positive", () => {
+    for (let i = 0; i < 6; i++) {
+      appendLogAndSetTime(db, "projects/iota", `E${i}`, `2026-04-01T1${i}:00:00.000Z`);
+    }
+    expect(getLogsForConsolidation(db, "projects/iota")).toHaveLength(6);
+    expect(getLogsForConsolidation(db, "projects/iota", null, null)).toHaveLength(6);
+    expect(getLogsForConsolidation(db, "projects/iota", null, 0)).toHaveLength(6);
+  });
 });
 
 describe("getConsolidationMetadata / upsertConsolidationMetadata", () => {
