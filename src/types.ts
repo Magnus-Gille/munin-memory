@@ -797,6 +797,8 @@ export interface ConsolidationMetadata {
   synthesis_model: string;
   synthesis_token_count: number | null;
   run_duration_ms: number | null;
+  /** 1 while a capped backlog is still draining over successive runs, else 0. */
+  drain_in_progress: number;
   created_at: string;
   updated_at: string;
 }

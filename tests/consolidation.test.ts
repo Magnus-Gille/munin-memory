@@ -737,4 +737,45 @@ describe("discoverOrphanedReferences (integration)", () => {
     expect(crossRefs[0].confidence).toBe(0.5);
     expect(crossRefs[0].context).toMatch(/^Scanner-detected:/);
   });
+
+  it("scanner orphan refs survive subsequent slices of the same drained backlog (#51 finding 3)", async () => {
+    const savedCap = _consolidationConfig.maxLogsPerRun;
+    _consolidationConfig.maxLogsPerRun = 2;
+    try {
+      const logAt = (content: string, ts: string) => {
+        const r = appendLog(db, "projects/drainsrc", content, []);
+        db.prepare("UPDATE entries SET created_at = ?, updated_at = ? WHERE id = ?").run(ts, ts, r.id);
+      };
+      writeState(db, "projects/gtarget", "status", "gtarget is self-contained", ["active"]);
+
+      // Window 1 (oldest 2) mentions the orphan target; window 2 does not.
+      logAt("Coordinated with projects/gtarget and gtarget again.", "2026-08-01T10:00:00.000Z");
+      logAt("More projects/gtarget gtarget follow-up.", "2026-08-01T10:01:00.000Z");
+      logAt("Unrelated internal refactor note.", "2026-08-01T10:02:00.000Z");
+      logAt("Another unrelated cleanup note.", "2026-08-01T10:03:00.000Z");
+
+      const noRef: ChatCompletionResponse = {
+        choices: [{ message: { content: JSON.stringify({ status_content: "## Phase\nbody", tags: ["active"], cross_references: [] }) } }],
+        usage: { prompt_tokens: 10, completion_tokens: 10 },
+      };
+      const callApi = vi.fn<(p: string) => Promise<ChatCompletionResponse>>().mockResolvedValue(noRef);
+
+      // Slice 1: discovers the gtarget orphan, flags drain in progress.
+      const r1 = await consolidateNamespace(db, "projects/drainsrc", callApi);
+      expect(r1.error).toBeUndefined();
+      expect(r1.orphans_discovered).toBe(1);
+      expect(
+        getCrossReferences(db, "projects/drainsrc").some((r) => r.target_namespace === "projects/gtarget"),
+      ).toBe(true);
+
+      // Slice 2: unrelated window. With the old destructive replace this wiped
+      // the gtarget ref; additive drain merge must preserve it.
+      const r2 = await consolidateNamespace(db, "projects/drainsrc", callApi);
+      expect(r2.error).toBeUndefined();
+      const refs = getCrossReferences(db, "projects/drainsrc");
+      expect(refs.some((r) => r.target_namespace === "projects/gtarget")).toBe(true);
+    } finally {
+      _consolidationConfig.maxLogsPerRun = savedCap;
+    }
+  });
 });

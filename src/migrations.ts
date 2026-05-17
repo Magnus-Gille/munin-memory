@@ -767,6 +767,16 @@ export const migrations: Migration[] = [
       }
     },
   },
+  {
+    version: 18,
+    description:
+      "Add consolidation_metadata.drain_in_progress so a capped backlog fully drains (#51)",
+    up: (db) => {
+      db.prepare(
+        "ALTER TABLE consolidation_metadata ADD COLUMN drain_in_progress INTEGER NOT NULL DEFAULT 0",
+      ).run();
+    },
+  },
 ];
 
 /**
