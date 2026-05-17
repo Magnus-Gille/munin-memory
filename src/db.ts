@@ -2612,6 +2612,12 @@ export function getNamespacesNeedingConsolidation(
   db: Database.Database,
   minLogs: number = 3,
 ): ConsolidationCandidate[] {
+  // A namespace is a candidate when it has >= minLogs unincorporated logs, OR
+  // it is mid-drain (drain_in_progress = 1) and has any unincorporated logs
+  // at all — so a backlog tail below minLogs still gets flushed (#51, finding 1).
+  // The unincorporated predicate uses a composite (created_at, id) cursor so a
+  // window that stops inside a same-timestamp bucket doesn't strand the rest
+  // (#51, finding 2).
   const sql = `
     SELECT
       e.namespace,
@@ -2621,12 +2627,41 @@ export function getNamespacesNeedingConsolidation(
     LEFT JOIN consolidation_metadata cm ON cm.namespace = e.namespace
     WHERE e.entry_type = 'log'
       AND (e.namespace LIKE 'projects/%' ESCAPE '\\' OR e.namespace LIKE 'clients/%' ESCAPE '\\')
-      AND e.created_at > COALESCE(cm.last_log_created_at, '1970-01-01T00:00:00.000Z')
+      AND (
+        cm.last_log_created_at IS NULL
+        OR e.created_at > cm.last_log_created_at
+        OR (e.created_at = cm.last_log_created_at
+            AND cm.last_log_id IS NOT NULL
+            AND e.id > cm.last_log_id)
+      )
     GROUP BY e.namespace
     HAVING COUNT(*) >= ?
+        OR (COALESCE(cm.drain_in_progress, 0) = 1 AND COUNT(*) >= 1)
     ORDER BY unincorporated_log_count DESC
   `;
   return db.prepare(sql).all(minLogs) as ConsolidationCandidate[];
+}
+
+/**
+ * True if any log entry exists for the namespace strictly after the composite
+ * (created_at, id) cursor. Used to decide whether a capped run left more
+ * backlog to drain.
+ */
+export function hasMoreLogsAfter(
+  db: Database.Database,
+  namespace: string,
+  cursorCreatedAt: string,
+  cursorId: string,
+): boolean {
+  const row = db
+    .prepare(
+      `SELECT 1 FROM entries
+         WHERE namespace = ? AND entry_type = 'log'
+           AND (created_at > ? OR (created_at = ? AND id > ?))
+         LIMIT 1`,
+    )
+    .get(namespace, cursorCreatedAt, cursorCreatedAt, cursorId);
+  return row !== undefined;
 }
 
 /**
@@ -2637,27 +2672,42 @@ export function getLogsForConsolidation(
   db: Database.Database,
   namespace: string,
   sinceTimestamp?: string | null,
+  sinceId?: string | null,
   maxLogs?: number | null,
 ): Entry[] {
-  // Oldest-first, optionally capped so a large backlog drains incrementally
-  // over successive worker ticks instead of producing one oversized synthesis
-  // request that truncates and fails to parse (issue #51).
+  // Total-order paging on (created_at, id), oldest-first, optionally capped so a
+  // large backlog drains incrementally over successive worker ticks instead of
+  // producing one oversized synthesis request that truncates and fails to parse
+  // (#51, finding driving original fix). The composite cursor means a window
+  // that stops inside a same-timestamp bucket resumes correctly instead of
+  // skipping the rest of that bucket forever (#51, finding 2).
   const hasLimit = typeof maxLogs === "number" && maxLogs > 0;
   const limitClause = hasLimit ? " LIMIT ?" : "";
+  const order = " ORDER BY created_at ASC, id ASC";
   if (sinceTimestamp) {
+    // With a known id cursor, page on the total order (created_at, id) so a
+    // same-timestamp bucket split across windows resumes correctly. Without an
+    // id (legacy/boundary callers), keep strict `created_at >` semantics.
+    const hasId = typeof sinceId === "string" && sinceId.length > 0;
+    const where = hasId
+      ? "AND (created_at > ? OR (created_at = ? AND id > ?))"
+      : "AND created_at > ?";
     const stmt = db.prepare(
       `SELECT * FROM entries
-         WHERE namespace = ? AND entry_type = 'log' AND created_at > ?
-         ORDER BY created_at ASC${limitClause}`,
+         WHERE namespace = ? AND entry_type = 'log'
+           ${where}
+         ${order}${limitClause}`,
     );
-    return (hasLimit
-      ? stmt.all(namespace, sinceTimestamp, maxLogs)
-      : stmt.all(namespace, sinceTimestamp)) as Entry[];
+    const args: unknown[] = hasId
+      ? [namespace, sinceTimestamp, sinceTimestamp, sinceId]
+      : [namespace, sinceTimestamp];
+    if (hasLimit) args.push(maxLogs);
+    return stmt.all(...args) as Entry[];
   }
   const stmt = db.prepare(
     `SELECT * FROM entries
        WHERE namespace = ? AND entry_type = 'log'
-       ORDER BY created_at ASC${limitClause}`,
+       ${order}${limitClause}`,
   );
   return (hasLimit ? stmt.all(namespace, maxLogs) : stmt.all(namespace)) as Entry[];
 }
@@ -2690,8 +2740,8 @@ export function upsertConsolidationMetadata(
       `INSERT INTO consolidation_metadata
          (namespace, last_consolidated_at, last_log_id, last_log_created_at,
           synthesis_model, synthesis_token_count, run_duration_ms,
-          created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          drain_in_progress, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(namespace) DO UPDATE SET
          last_consolidated_at = excluded.last_consolidated_at,
          last_log_id = excluded.last_log_id,
@@ -2699,6 +2749,7 @@ export function upsertConsolidationMetadata(
          synthesis_model = excluded.synthesis_model,
          synthesis_token_count = excluded.synthesis_token_count,
          run_duration_ms = excluded.run_duration_ms,
+         drain_in_progress = excluded.drain_in_progress,
          updated_at = excluded.updated_at`,
     )
     .run(
@@ -2709,6 +2760,7 @@ export function upsertConsolidationMetadata(
       metadata.synthesis_model,
       metadata.synthesis_token_count ?? null,
       metadata.run_duration_ms ?? null,
+      metadata.drain_in_progress ? 1 : 0,
       now,
       now,
     );
@@ -2739,6 +2791,49 @@ export function replaceCrossReferences(
       insert.run(
         randomUUID(),
         ref.source_namespace,
+        ref.target_namespace,
+        ref.reference_type,
+        ref.context ?? null,
+        ref.confidence,
+        extractedAt,
+        sourceSynthesisId ?? null,
+      );
+    }
+  });
+
+  txn();
+}
+
+/**
+ * Additively upsert cross-references for a source namespace WITHOUT deleting
+ * existing ones. Used while a backlog is draining across multiple runs: a
+ * partial window is not an authoritative full ref set, so refs discovered in
+ * earlier slices must survive later slices (#51, finding 3). Conflicts on
+ * (source, target, reference_type) refresh context/confidence.
+ */
+export function addCrossReferences(
+  db: Database.Database,
+  sourceNamespace: string,
+  refs: Array<Omit<CrossReference, "id" | "extracted_at" | "source_synthesis_id">>,
+  sourceSynthesisId?: string,
+): void {
+  const txn = db.transaction(() => {
+    const upsert = db.prepare(
+      `INSERT INTO cross_references
+         (id, source_namespace, target_namespace, reference_type, context,
+          confidence, extracted_at, source_synthesis_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(source_namespace, target_namespace, reference_type) DO UPDATE SET
+         context = excluded.context,
+         confidence = excluded.confidence,
+         extracted_at = excluded.extracted_at,
+         source_synthesis_id = excluded.source_synthesis_id`,
+    );
+    const extractedAt = nowUTC();
+    for (const ref of refs) {
+      upsert.run(
+        randomUUID(),
+        sourceNamespace,
         ref.target_namespace,
         ref.reference_type,
         ref.context ?? null,

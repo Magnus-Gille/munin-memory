@@ -5,6 +5,8 @@ import {
   getConsolidationMetadata,
   upsertConsolidationMetadata,
   replaceCrossReferences,
+  addCrossReferences,
+  hasMoreLogsAfter,
   writeState,
   nowUTC,
 } from "./db.js";
@@ -172,7 +174,14 @@ export async function consolidateNamespace(
   // Step 1: Read current state
   const metadata = getConsolidationMetadata(db, namespace);
   const sinceTimestamp = metadata?.last_log_created_at ?? null;
-  const logs = getLogsForConsolidation(db, namespace, sinceTimestamp, config.maxLogsPerRun);
+  const sinceId = metadata?.last_log_id ?? null;
+  const logs = getLogsForConsolidation(
+    db,
+    namespace,
+    sinceTimestamp,
+    sinceId,
+    config.maxLogsPerRun,
+  );
 
   if (logs.length === 0) {
     return {
@@ -249,19 +258,28 @@ export async function consolidateNamespace(
     // Step 6: Write results
     const lastLog = logs[logs.length - 1];
 
+    // Did the capped window leave more backlog? If so this run is one slice of
+    // a multi-run drain, and its refs are NOT an authoritative full set.
+    const moreRemain = hasMoreLogsAfter(db, namespace, lastLog.created_at, lastLog.id);
+    const draining = metadata?.drain_in_progress === 1 || moreRemain;
+
     writeState(db, namespace, "synthesis", result.status_content, result.tags, "consolidation-worker");
 
-    replaceCrossReferences(
-      db,
-      namespace,
-      mergedRefs.map((ref) => ({
-        source_namespace: namespace,
-        target_namespace: ref.target_namespace,
-        reference_type: ref.reference_type,
-        context: ref.context,
-        confidence: ref.confidence,
-      })),
-    );
+    const refRows = mergedRefs.map((ref) => ({
+      source_namespace: namespace,
+      target_namespace: ref.target_namespace,
+      reference_type: ref.reference_type,
+      context: ref.context,
+      confidence: ref.confidence,
+    }));
+    // While draining, accumulate refs (a partial window must not wipe refs found
+    // in earlier/later slices, #51 finding 3). Only a single complete run does
+    // an authoritative replace that can prune stale refs.
+    if (draining) {
+      addCrossReferences(db, namespace, refRows);
+    } else {
+      replaceCrossReferences(db, namespace, refRows);
+    }
 
     upsertConsolidationMetadata(db, {
       namespace,
@@ -271,6 +289,7 @@ export async function consolidateNamespace(
       synthesis_model: config.model,
       synthesis_token_count: response.usage?.completion_tokens ?? null,
       run_duration_ms: durationMs,
+      drain_in_progress: moreRemain ? 1 : 0,
     });
 
     return {

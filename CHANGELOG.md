@@ -36,6 +36,15 @@ changelog is the canonical record of what moved.
   the growing backlog meant the namespace could never self-recover. Fixed by
   raising `max_tokens` (2048 → 4096) and bounding the per-run log window
   (`MUNIN_CONSOLIDATION_MAX_LOGS_PER_RUN`) so backlogs drain incrementally.
+- **Consolidation backlog drain hardened (follow-up to #51).** The initial
+  per-run cap used a timestamp-only cursor that silently dropped logs sharing
+  the boundary second, never re-selected a sub-`MIN_LOGS` tail, and let each
+  drain slice overwrite the previous slice's cross-references. Fixed with a
+  composite `(created_at, id)` cursor (no same-timestamp data loss), a
+  `drain_in_progress` flag on `consolidation_metadata` (migration v18) that
+  forces the worker to keep draining until the backlog is empty regardless of
+  `MIN_LOGS`, and additive cross-reference upserts during a drain so orphan
+  references discovered in earlier slices survive later ones.
 - **FTS5 now matches camelCase / PascalCase identifiers against separated-word
   queries.** Migration v17 recreates the FTS triggers to augment indexed
   content with a case-split copy via the `munin_split_tokens` SQL UDF, and

@@ -214,22 +214,20 @@ describe("getLogsForConsolidation", () => {
     expect(logs[0].entry_type).toBe("log");
   });
 
-  it("caps the result to maxLogs, oldest-first, so a backlog drains incrementally (#51)", () => {
+  it("caps the result to maxLogs, oldest-first, draining via composite cursor (#51)", () => {
     for (let i = 0; i < 10; i++) {
       const ts = `2026-03-01T1${i}:00:00.000Z`;
       appendLogAndSetTime(db, "projects/theta", `Entry ${i}`, ts);
     }
 
-    // First run: bounded to the oldest 4 entries
-    const firstRun = getLogsForConsolidation(db, "projects/theta", null, 4);
+    const firstRun = getLogsForConsolidation(db, "projects/theta", null, null, 4);
     expect(firstRun).toHaveLength(4);
     expect(firstRun[0].content).toBe("Entry 0");
     expect(firstRun[3].content).toBe("Entry 3");
 
-    // Next run starts after the last log of the previous (bounded) run —
-    // the cursor advances, draining the backlog over successive ticks.
-    const cursor = firstRun[firstRun.length - 1].created_at;
-    const secondRun = getLogsForConsolidation(db, "projects/theta", cursor, 4);
+    // Resume on the composite (created_at, id) cursor of the last log.
+    const cur = firstRun[firstRun.length - 1];
+    const secondRun = getLogsForConsolidation(db, "projects/theta", cur.created_at, cur.id, 4);
     expect(secondRun).toHaveLength(4);
     expect(secondRun[0].content).toBe("Entry 4");
     expect(secondRun[3].content).toBe("Entry 7");
@@ -240,8 +238,80 @@ describe("getLogsForConsolidation", () => {
       appendLogAndSetTime(db, "projects/iota", `E${i}`, `2026-04-01T1${i}:00:00.000Z`);
     }
     expect(getLogsForConsolidation(db, "projects/iota")).toHaveLength(6);
-    expect(getLogsForConsolidation(db, "projects/iota", null, null)).toHaveLength(6);
-    expect(getLogsForConsolidation(db, "projects/iota", null, 0)).toHaveLength(6);
+    expect(getLogsForConsolidation(db, "projects/iota", null, null, null)).toHaveLength(6);
+    expect(getLogsForConsolidation(db, "projects/iota", null, null, 0)).toHaveLength(6);
+  });
+
+  it("does not strand logs sharing one timestamp when the cap splits the bucket (#51 finding 2)", () => {
+    // 4 logs, identical created_at; cap of 2 must split the bucket safely.
+    for (let i = 0; i < 4; i++) {
+      appendLogAndSetTime(db, "projects/kappa", `Same ${i}`, "2026-05-01T10:00:00.000Z");
+    }
+
+    const page1 = getLogsForConsolidation(db, "projects/kappa", null, null, 2);
+    expect(page1).toHaveLength(2);
+    const c1 = page1[page1.length - 1];
+
+    const page2 = getLogsForConsolidation(db, "projects/kappa", c1.created_at, c1.id, 2);
+    expect(page2).toHaveLength(2);
+
+    // No overlap, no loss: all 4 distinct ids seen across the two pages.
+    const ids = new Set([...page1, ...page2].map((l) => l.id));
+    expect(ids.size).toBe(4);
+
+    const c2 = page2[page2.length - 1];
+    const page3 = getLogsForConsolidation(db, "projects/kappa", c2.created_at, c2.id, 2);
+    expect(page3).toHaveLength(0);
+  });
+});
+
+describe("getNamespacesNeedingConsolidation — drain + composite cursor (#51)", () => {
+  it("flushes a sub-minLogs tail while a drain is in progress (finding 1)", () => {
+    for (let i = 0; i < 5; i++) {
+      appendLogAndSetTime(db, "projects/lambda", `L${i}`, `2026-06-01T0${i}:00:00.000Z`);
+    }
+    // Simulate a capped run that consumed 3 of 5 and flagged a drain.
+    const after3 = getLogsForConsolidation(db, "projects/lambda", null, null, 3);
+    const last = after3[after3.length - 1];
+    upsertConsolidationMetadata(db, {
+      namespace: "projects/lambda",
+      last_consolidated_at: "2026-06-01T09:00:00.000Z",
+      last_log_id: last.id,
+      last_log_created_at: last.created_at,
+      synthesis_model: "test",
+      synthesis_token_count: null,
+      run_duration_ms: null,
+      drain_in_progress: 1,
+    });
+
+    // Only 2 logs remain (< minLogs 3) but the drain flag keeps it eligible.
+    const candidates = getNamespacesNeedingConsolidation(db, 3);
+    const lambda = candidates.find((c) => c.namespace === "projects/lambda");
+    expect(lambda).toBeDefined();
+    expect(lambda!.unincorporated_log_count).toBe(2);
+  });
+
+  it("counts unincorporated logs with the composite cursor (no same-timestamp strand)", () => {
+    for (let i = 0; i < 4; i++) {
+      appendLogAndSetTime(db, "projects/mu", `M${i}`, "2026-07-01T10:00:00.000Z");
+    }
+    const page1 = getLogsForConsolidation(db, "projects/mu", null, null, 2);
+    const last = page1[page1.length - 1];
+    upsertConsolidationMetadata(db, {
+      namespace: "projects/mu",
+      last_consolidated_at: "2026-07-01T11:00:00.000Z",
+      last_log_id: last.id,
+      last_log_created_at: last.created_at,
+      synthesis_model: "test",
+      synthesis_token_count: null,
+      run_duration_ms: null,
+      drain_in_progress: 1,
+    });
+    // The 2 remaining same-timestamp logs must still be counted, not stranded.
+    const lambda = getNamespacesNeedingConsolidation(db, 3).find(
+      (c) => c.namespace === "projects/mu",
+    );
+    expect(lambda?.unincorporated_log_count).toBe(2);
   });
 });
 

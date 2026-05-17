@@ -651,6 +651,7 @@ See `technical-spec.md` § Security Module for the full pattern list.
 | `MUNIN_CONSOLIDATION_BATCH_SIZE` | `5` | Max namespaces per consolidation run |
 | `MUNIN_CONSOLIDATION_MIN_LOGS` | `3` | Minimum unincorporated logs to trigger consolidation |
 | `MUNIN_CONSOLIDATION_MAX_FAILURES` | `3` | Circuit breaker failure threshold |
+| `MUNIN_CONSOLIDATION_MAX_LOGS_PER_RUN` | `15` | Max unincorporated logs synthesized per namespace per run. Excess drains over subsequent runs (drain-until-empty). |
 | `OPENROUTER_API_KEY` | — | OpenRouter API key for consolidation worker (required when consolidation enabled) |
 
 ## Spec amendments from adversarial review
