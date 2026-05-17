@@ -2637,23 +2637,29 @@ export function getLogsForConsolidation(
   db: Database.Database,
   namespace: string,
   sinceTimestamp?: string | null,
+  maxLogs?: number | null,
 ): Entry[] {
+  // Oldest-first, optionally capped so a large backlog drains incrementally
+  // over successive worker ticks instead of producing one oversized synthesis
+  // request that truncates and fails to parse (issue #51).
+  const hasLimit = typeof maxLogs === "number" && maxLogs > 0;
+  const limitClause = hasLimit ? " LIMIT ?" : "";
   if (sinceTimestamp) {
-    return db
-      .prepare(
-        `SELECT * FROM entries
-         WHERE namespace = ? AND entry_type = 'log' AND created_at > ?
-         ORDER BY created_at ASC`,
-      )
-      .all(namespace, sinceTimestamp) as Entry[];
-  }
-  return db
-    .prepare(
+    const stmt = db.prepare(
       `SELECT * FROM entries
+         WHERE namespace = ? AND entry_type = 'log' AND created_at > ?
+         ORDER BY created_at ASC${limitClause}`,
+    );
+    return (hasLimit
+      ? stmt.all(namespace, sinceTimestamp, maxLogs)
+      : stmt.all(namespace, sinceTimestamp)) as Entry[];
+  }
+  const stmt = db.prepare(
+    `SELECT * FROM entries
        WHERE namespace = ? AND entry_type = 'log'
-       ORDER BY created_at ASC`,
-    )
-    .all(namespace) as Entry[];
+       ORDER BY created_at ASC${limitClause}`,
+  );
+  return (hasLimit ? stmt.all(namespace, maxLogs) : stmt.all(namespace)) as Entry[];
 }
 
 /**

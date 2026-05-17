@@ -21,6 +21,10 @@ const config = {
   batchSize: parseInt(process.env.MUNIN_CONSOLIDATION_BATCH_SIZE ?? "5", 10) || 5,
   minLogs: parseInt(process.env.MUNIN_CONSOLIDATION_MIN_LOGS ?? "3", 10) || 3,
   maxFailures: parseInt(process.env.MUNIN_CONSOLIDATION_MAX_FAILURES ?? "3", 10) || 3,
+  // Cap logs incorporated per run so a large backlog drains over multiple
+  // ticks instead of producing one synthesis that overflows max_tokens,
+  // truncates, fails to parse, and eventually trips the circuit breaker (#51).
+  maxLogsPerRun: parseInt(process.env.MUNIN_CONSOLIDATION_MAX_LOGS_PER_RUN ?? "15", 10) || 15,
 };
 
 // --- OpenRouter API types ---
@@ -53,7 +57,7 @@ async function callOpenRouter(prompt: string): Promise<ChatCompletionResponse> {
     },
     body: JSON.stringify({
       model: config.model,
-      max_tokens: 2048,
+      max_tokens: 4096,
       messages: [{ role: "user", content: prompt }],
       provider: { zdr: true },
     }),
@@ -168,7 +172,7 @@ export async function consolidateNamespace(
   // Step 1: Read current state
   const metadata = getConsolidationMetadata(db, namespace);
   const sinceTimestamp = metadata?.last_log_created_at ?? null;
-  const logs = getLogsForConsolidation(db, namespace, sinceTimestamp);
+  const logs = getLogsForConsolidation(db, namespace, sinceTimestamp, config.maxLogsPerRun);
 
   if (logs.length === 0) {
     return {
