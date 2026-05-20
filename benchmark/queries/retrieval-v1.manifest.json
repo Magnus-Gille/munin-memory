@@ -1,0 +1,527 @@
+{
+  "manifest_version": "1.0.0",
+  "manifest_id": "retrieval-v1",
+  "manifest_kind": "source_index",
+  "created_at": "2026-05-20T00:00:00Z",
+  "created_by": "Magnus Gille",
+  "purpose": "Curated source index that reconciles the munin-native retrieval query JSONLs in this repo with the munin-zero retrieval pilot artifacts (v2/v3/v3b/v3c). Records munin-zero#6 as closed by pilot v3c. This is a citation / provenance index, not a runnable benchmark label set.",
+  "citation_format": "<source_id>:<record_key>",
+  "record_key_fields": {
+    "munin-native-baseline": "id",
+    "munin-native-baseline-claude": "id",
+    "munin-native-example": "id",
+    "munin-zero-v2-intents": "target_num",
+    "munin-zero-v3-intents": "target_num",
+    "munin-zero-v3b-queries-sonnet": "target_id",
+    "munin-zero-v3c-intents": "target_num",
+    "munin-zero-v3c-queries-sonnet": "target_id"
+  },
+  "source_repos": [
+    {
+      "name": "munin-memory",
+      "role": "primary",
+      "commit_sha": "52b3f9936d887f8f32e33d367240e11488a84fbb",
+      "remote": "https://github.com/Magnus-Gille/munin-memory",
+      "notes": "Manifest creation commit reference. Native JSONLs live under benchmark/queries/."
+    },
+    {
+      "name": "munin-zero",
+      "role": "evidence",
+      "commit_sha": "ad4baff8b906065679144185af3e02ee632d9d28",
+      "commit_sha_short": "ad4baff",
+      "commit_date": "2026-04-20T22:17:54+02:00",
+      "remote": "local-only",
+      "notes": "Pilot artifact directory pinned at the v3c closure commit. CI does not check this repo out; integrity rests on sha256 pins below."
+    }
+  ],
+  "sources": [
+    {
+      "id": "munin-native-baseline",
+      "repo": "munin-memory",
+      "path": "benchmark/queries/baseline.jsonl",
+      "sha256": "bc3036f1b52a14968538c7c11193b7b9a65548fe5d2e292f6064984e871276f7",
+      "record_count": 15,
+      "source_class": "manual",
+      "tier": "primary",
+      "shape": "BenchmarkQuery",
+      "ground_truth_kind": "expected_ids",
+      "search_modes": ["hybrid"],
+      "strata_breakdown": {
+        "category": {
+          "project-status": 2,
+          "decision-lookup": 2,
+          "person-context": 2,
+          "temporal": 2,
+          "cross-project": 2,
+          "tag-search": 2,
+          "broad-orientation": 3
+        }
+      },
+      "notes": "Hand-curated munin-native baseline. All records use the BenchmarkQuery shape and source=\"manual\"."
+    },
+    {
+      "id": "munin-native-baseline-claude",
+      "repo": "munin-memory",
+      "path": "benchmark/queries/baseline-claude.jsonl",
+      "sha256": "85b09995a28e35132bef2ffafcc84533105aa71a0f4165d2ac1e687e8d54e4bc",
+      "record_count": 16,
+      "source_class": "manual",
+      "tier": "primary",
+      "shape": "BenchmarkQuery",
+      "ground_truth_kind": "both",
+      "ground_truth_breakdown": {
+        "expected_ids_only": 12,
+        "expected_namespaces_only": 4
+      },
+      "search_modes": ["hybrid"],
+      "strata_breakdown": {
+        "category": {
+          "project-status": 2,
+          "decision-lookup": 3,
+          "person-context": 2,
+          "temporal": 2,
+          "cross-project": 2,
+          "tag-search": 2,
+          "broad-orientation": 2,
+          "anecdote": 1
+        }
+      },
+      "anomalies": [
+        {
+          "record_id": "u-001",
+          "kind": "appended_user_anecdote",
+          "gap_ref": "gap-006"
+        }
+      ],
+      "notes": "Claude-authored extension to baseline. u-001 is an out-of-distribution user anecdote, flagged as gap-006 so consumers can filter it out."
+    },
+    {
+      "id": "munin-native-example",
+      "repo": "munin-memory",
+      "path": "benchmark/queries/example.jsonl",
+      "sha256": "bd99ad9843bb770264b1038f03f99c727f1bd0140a1cc0b85f74fee311940cf2",
+      "record_count": 3,
+      "source_class": "synthetic",
+      "tier": "evidence",
+      "shape": "BenchmarkQuery",
+      "ground_truth_kind": "expected_namespaces",
+      "search_modes": ["hybrid"],
+      "strata_breakdown": {
+        "category": {
+          "project-status": 1,
+          "decision-lookup": 1,
+          "person-context": 1
+        }
+      },
+      "notes": "Tiny synthetic example set kept for shape verification, not measurement."
+    },
+    {
+      "id": "munin-zero-v2-intents",
+      "repo": "munin-zero",
+      "path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-intents-v2.jsonl",
+      "sha256": "24123389efca7ec1b771089c376aaf71bfd36a3540c27bbfe5fba9b144443f71",
+      "record_count": 30,
+      "source_class": "derived",
+      "source_origin": "model:claude-sonnet-4-6 (intent-writer, blind chain — see pilot-report-v2.md)",
+      "tier": "evidence",
+      "shape": "munin-zero-intent",
+      "ground_truth_kind": "targets_external",
+      "target_set_id": "munin-zero-pilot-targets-v2",
+      "target_path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-targets-v2.jsonl",
+      "target_sha256": "75cd0520dc0aaa28b15cb0c5600e4cb9c1b72dee30979e0b043a193fd76926e2",
+      "target_id_field": "target_num",
+      "target_count": 30,
+      "result_paths": [
+        {
+          "path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-results-v2.jsonl",
+          "sha256": "f17aff0ef61d231c6bcd8dfd04164c778f8674374d79c5c8856a3cc5270d336b",
+          "search_mode": "lexical",
+          "limit": null,
+          "metric": "rank-scored",
+          "record_count": 90,
+          "notes": "90 = 30 intents × 3 models (haiku/opus/sonnet)."
+        },
+        {
+          "path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-results-v2-hybrid.jsonl",
+          "sha256": "4fd27b33118b67d45fb3a12c525b3093f85bba60e0ad4713f9fb94179a79924d",
+          "search_mode": "hybrid",
+          "limit": null,
+          "metric": "rank-scored",
+          "record_count": 90
+        }
+      ],
+      "evaluation_method": {
+        "method": "rank-scored",
+        "hit_definition": "target UUID appears in top-K (K varies by run)",
+        "notes": "v2 was pre-relaxed-FTS; baselines are stale (see gap-004)."
+      },
+      "strata_breakdown": {
+        "entry_type": {"state": 24, "log": 6},
+        "stratum": {"projects": 12, "people": 2, "decisions": 4, "logs": 6, "other": 6},
+        "language": {"en": 26, "sv": 4},
+        "cross_language": {"false": 26, "true": 4}
+      },
+      "search_modes": ["lexical", "hybrid"],
+      "notes": "v2 intent set. Ground truth lives in the target file by target_num."
+    },
+    {
+      "id": "munin-zero-v3-intents",
+      "repo": "munin-zero",
+      "path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-intents-v3.jsonl",
+      "sha256": "04c56a114b1cfd10a597efcac81c1feee24fc4affa09555eed91193a02ad5cc9",
+      "record_count": 50,
+      "source_class": "derived",
+      "source_origin": "model:claude-sonnet-4-6 (intent-writer, blind chain — see pilot-report-v3.md)",
+      "tier": "evidence",
+      "shape": "munin-zero-intent",
+      "ground_truth_kind": "targets_external",
+      "target_set_id": "munin-zero-pilot-targets-v3",
+      "target_path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-targets-v3.jsonl",
+      "target_sha256": "7c4942f0724de74fc4ff8483ccd79c7ec30c06a09089fb50c7c8aa28dceafcf8",
+      "target_id_field": "target_num",
+      "target_count": 50,
+      "result_paths": [
+        {
+          "path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-results-v3-lexical.jsonl",
+          "sha256": "4c6f562441fac01dab0925414c251dbc210d9a206830c709e103e0494bc3d9a3",
+          "search_mode": "lexical",
+          "limit": 20,
+          "metric": "hit@20",
+          "record_count": 50
+        },
+        {
+          "path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-results-v3-hybrid.jsonl",
+          "sha256": "9cd526f0eedf77da3a39a17330227b5366d9b8d522e934666f564d874df94d3c",
+          "search_mode": "hybrid",
+          "limit": 20,
+          "metric": "hit@20",
+          "record_count": 50
+        }
+      ],
+      "evaluation_method": {
+        "method": "binary-hit",
+        "hit_definition": "target UUID appears in top-20",
+        "limit": 20
+      },
+      "strata_breakdown": {
+        "entry_type": {"log": 32, "state": 18},
+        "stratum": {"prose-log": 27, "prose-state": 5, "mixed-lang": 3, "decision": 6, "research": 8, "other": 1},
+        "difficulty": {"hard": 32, "medium": 15, "easy": 3},
+        "language": {"en": 46, "en-mixed": 1, "sv": 3},
+        "cross_language": {"false": 46, "true": 4}
+      },
+      "search_modes": ["lexical", "hybrid"],
+      "notes": "v3 expanded intent set. Strata are populated directly from pilot-targets-v3.jsonl."
+    },
+    {
+      "id": "munin-zero-v3b-queries-sonnet",
+      "repo": "munin-zero",
+      "path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-queries-v3b-sonnet.jsonl",
+      "sha256": "350b50119eca0fe889ef84b4d5185824d1afe68f2be358823385fd260f9dc4c1",
+      "record_count": 50,
+      "source_class": "derived",
+      "tier": "evidence",
+      "shape": "munin-zero-formulated-query",
+      "ground_truth_kind": "targets_external",
+      "target_set_id": "munin-zero-pilot-targets-v3",
+      "target_path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-targets-v3.jsonl",
+      "target_sha256": "7c4942f0724de74fc4ff8483ccd79c7ec30c06a09089fb50c7c8aa28dceafcf8",
+      "target_id_field": "target_id",
+      "target_count": 50,
+      "result_paths": [
+        {
+          "path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-results-v3b-lexical.jsonl",
+          "sha256": "24415285776e72542800f9706610a84afa60d98eab081f849ac86ac7bb6d97b7",
+          "search_mode": "lexical",
+          "limit": 20,
+          "metric": "hit@20",
+          "record_count": 50
+        },
+        {
+          "path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-results-v3b-hybrid.jsonl",
+          "sha256": "ad8f9eff5d4e266b80159e7de76486daba7f73d3129f8d1b1c262209f5bd6905",
+          "search_mode": "hybrid",
+          "limit": 20,
+          "metric": "hit@20",
+          "record_count": 50
+        }
+      ],
+      "evaluation_method": {
+        "method": "binary-hit",
+        "hit_definition": "target UUID appears in top-20",
+        "limit": 20
+      },
+      "strata_breakdown": {
+        "inherits_from": "munin-zero-v3-intents",
+        "entry_type": {"log": 32, "state": 18},
+        "stratum": {"prose-log": 27, "prose-state": 5, "mixed-lang": 3, "decision": 6, "research": 8, "other": 1},
+        "difficulty": {"hard": 32, "medium": 15, "easy": 3},
+        "language": {"en": 46, "en-mixed": 1, "sv": 3}
+      },
+      "search_modes": ["lexical", "hybrid"],
+      "notes": "v3b is Sonnet-formulated queries built from the v3 intents; targets are the same as v3."
+    },
+    {
+      "id": "munin-zero-v3c-intents",
+      "repo": "munin-zero",
+      "path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-intents-v3c.jsonl",
+      "sha256": "a32e78fa057de7354a8903b2c3b9b7bfc672f43f3104b26715c5d1f010e56e8b",
+      "record_count": 6,
+      "source_class": "manual",
+      "source_origin": "human-rewrite (no model attribution in pilot-report-v3c.md; intents were explicitly rewritten as topical user questions rather than reusing the v3 Sonnet intent-writer output)",
+      "tier": "primary",
+      "shape": "munin-zero-intent",
+      "ground_truth_kind": "targets_external",
+      "target_set_id": "munin-zero-pilot-targets-v3",
+      "target_path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-targets-v3.jsonl",
+      "target_sha256": "7c4942f0724de74fc4ff8483ccd79c7ec30c06a09089fb50c7c8aa28dceafcf8",
+      "target_id_field": "target_num",
+      "target_count": 6,
+      "target_subset": [9, 10, 29, 35, 47, 49],
+      "target_uuid_subset": [
+        "fb352c89-bc21-4c44-88e9-204f546a6209",
+        "1b4c8471-f70d-4758-8453-1b0731ae4729",
+        "2ad0276d-21e3-4dc1-b342-e85aa896fd14",
+        "725e495a-4db3-4deb-8987-5cc341d53aac",
+        "30edced3-9552-42df-8ba4-334709ddd9a3",
+        "e6e24975-5942-4db1-b962-e2ef315eb059"
+      ],
+      "result_paths": [
+        {
+          "path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-results-v3c-lexical.jsonl",
+          "sha256": "0e8f50101e21eef00f7d843a4d379a0a81f225a6448335326199768a0061d891",
+          "search_mode": "lexical",
+          "limit": 20,
+          "metric": "hit@20",
+          "record_count": 6
+        }
+      ],
+      "evaluation_method": {
+        "method": "binary-hit",
+        "hit_definition": "target UUID appears in top-20",
+        "limit": 20,
+        "search_mode": "lexical",
+        "memory_query_mode": "lexical",
+        "snapshot_parity": "same snapshot as v3b"
+      },
+      "strata_breakdown": {
+        "inherits_from": "munin-zero-v3-intents",
+        "target_subset_uuids": [
+          "fb352c89-bc21-4c44-88e9-204f546a6209",
+          "1b4c8471-f70d-4758-8453-1b0731ae4729",
+          "2ad0276d-21e3-4dc1-b342-e85aa896fd14",
+          "725e495a-4db3-4deb-8987-5cc341d53aac",
+          "30edced3-9552-42df-8ba4-334709ddd9a3",
+          "e6e24975-5942-4db1-b962-e2ef315eb059"
+        ]
+      },
+      "search_modes": ["lexical"],
+      "notes": "Six closure intents that re-tested v3b lexical 0/6 failures after the FTS5 camelCase fix."
+    },
+    {
+      "id": "munin-zero-v3c-queries-sonnet",
+      "repo": "munin-zero",
+      "path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-queries-v3c-sonnet.jsonl",
+      "sha256": "88d667883459ff50787321ac8323c7dfb9e2dc96b339f457705fc5ad2f273684",
+      "record_count": 6,
+      "source_class": "derived",
+      "tier": "primary",
+      "shape": "munin-zero-formulated-query",
+      "ground_truth_kind": "targets_external",
+      "target_set_id": "munin-zero-pilot-targets-v3",
+      "target_path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-targets-v3.jsonl",
+      "target_sha256": "7c4942f0724de74fc4ff8483ccd79c7ec30c06a09089fb50c7c8aa28dceafcf8",
+      "target_id_field": "target_id",
+      "target_count": 6,
+      "target_subset": ["T9", "T10", "T29", "T35", "T47", "T49"],
+      "result_paths": [
+        {
+          "path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-results-v3c-lexical.jsonl",
+          "sha256": "0e8f50101e21eef00f7d843a4d379a0a81f225a6448335326199768a0061d891",
+          "search_mode": "lexical",
+          "limit": 20,
+          "metric": "hit@20",
+          "record_count": 6
+        }
+      ],
+      "evaluation_method": {
+        "method": "binary-hit",
+        "hit_definition": "target UUID appears in top-20",
+        "limit": 20,
+        "search_mode": "lexical"
+      },
+      "search_modes": ["lexical"],
+      "notes": "Sonnet-formulated queries for the six v3c closure intents."
+    }
+  ],
+  "strata_definitions": {
+    "source_class": {
+      "values": ["manual", "derived", "synthetic"],
+      "definition": "Matches benchmark/types.ts BenchmarkQuery.source. manual = hand-authored; derived = produced by a model or retrieval run; synthetic = generated for shape verification."
+    },
+    "tier": {
+      "values": ["primary", "evidence", "deprecated"],
+      "definition": "Editorial role inside the manifest. primary = load-bearing for the v1 freeze; evidence = cited support; deprecated = retained for lineage but superseded."
+    },
+    "entry_type": {
+      "values": ["state", "log"],
+      "definition": "Munin entry type of the underlying target."
+    },
+    "stratum": {
+      "definition": "Coarse content cluster. Values differ between v2 and v3 — see per-source strata_breakdown."
+    },
+    "difficulty": {
+      "values": ["easy", "medium", "hard"],
+      "definition": "Difficulty grade assigned during v3 target construction. Not populated for v2 (gap-001, gap-004)."
+    },
+    "language": {
+      "values": ["en", "sv", "en-mixed"],
+      "definition": "Primary language of the target content."
+    },
+    "category": {
+      "definition": "Munin-native query category. See benchmark/types.ts BenchmarkQuery.category."
+    },
+    "search_mode": {
+      "values": ["lexical", "semantic", "hybrid"],
+      "definition": "Retrieval mode under test. Mirrors src/types.ts SearchMode."
+    }
+  },
+  "dedupe_policy": {
+    "principle": "No record-level dedupe is performed inside the manifest. Each source's records remain addressable by (source_id, record_key). Cross-source duplicates are possible (e.g. v3c intents are a subset of v3 by target_num) and are documented via target_subset fields.",
+    "rules": [
+      "Treat (source_id, record_key) as the unique citation handle.",
+      "Where a source reuses a parent target set (v3b, v3c → v3 targets), the parent target_set_id is recorded so consumers can deduplicate by target UUID if needed.",
+      "u-001 in baseline-claude.jsonl is excluded from any future deduped retrieval-v1 label set; see gap-006."
+    ]
+  },
+  "known_gaps": [
+    {
+      "id": "gap-001",
+      "summary": "No difficulty stratum on munin-native or v2 sources.",
+      "status": "open",
+      "scope": "munin-native-baseline, munin-native-baseline-claude, munin-native-example, munin-zero-v2-intents"
+    },
+    {
+      "id": "gap-002",
+      "summary": "T10 tokenization issues on '90/10', 'Mímir', 'WebFetch'.",
+      "status": "documented",
+      "scope": "munin-zero-v3c-intents",
+      "evidence_path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-report-v3c.md"
+    },
+    {
+      "id": "gap-003",
+      "summary": "retrieval_events data is not yet trustworthy as source_class=derived input. Blocked on #31/#32.",
+      "status": "blocked",
+      "scope": "future-derived-sources"
+    },
+    {
+      "id": "gap-004",
+      "summary": "LoCoMo and v2 baselines pre-date the relaxed-FTS path and the camelCase tokenizer fix; numbers are stale.",
+      "status": "documented",
+      "scope": "munin-zero-v2-intents",
+      "evidence_path": "benchmark/experiment-matrix.md"
+    },
+    {
+      "id": "gap-005",
+      "summary": "entry_type stratum is unpopulated on munin-native sources.",
+      "status": "deferred",
+      "scope": "munin-native-baseline, munin-native-baseline-claude, munin-native-example",
+      "deferred_to": "Artifact 3"
+    },
+    {
+      "id": "gap-006",
+      "summary": "u-001 in baseline-claude.jsonl is an appended user anecdote, not a retrieval target.",
+      "status": "documented",
+      "scope": "munin-native-baseline-claude"
+    }
+  ],
+  "closed_issues": {
+    "munin-zero#6": {
+      "title": "Pilot v3c: lexical closure of v3b 0/6 failures",
+      "closing_commit": "ad4baff8b906065679144185af3e02ee632d9d28",
+      "closing_commit_short": "ad4baff",
+      "closed_at": "2026-04-20T22:17:54+02:00",
+      "summary": "v3c lexical re-test of the six v3b failures returned 5/6 hits at top-20 after the FTS5 camelCase tokenizer fix. T10 remained a miss (gap-002).",
+      "evidence_paths": [
+        "docs/experiments/retrieval-pilot-2026-04-19/pilot-report-v3c.md",
+        "docs/experiments/retrieval-pilot-2026-04-19/pilot-intents-v3c.jsonl",
+        "docs/experiments/retrieval-pilot-2026-04-19/pilot-queries-v3c-sonnet.jsonl",
+        "docs/experiments/retrieval-pilot-2026-04-19/pilot-results-v3c-lexical.jsonl",
+        "docs/experiments/retrieval-pilot-2026-04-19/pilot-targets-v3.jsonl",
+        "docs/experiments/retrieval-pilot-2026-04-19/pilot-report-v3b.md",
+        "docs/experiments/retrieval-pilot-2026-04-19/pilot-results-v3b-lexical.jsonl"
+      ],
+      "evidence_sha256": {
+        "docs/experiments/retrieval-pilot-2026-04-19/pilot-report-v3c.md": "c35c1440e900c1dd94b22c338af632d954b7d63a9526cc9c10ffa773805cd8c4",
+        "docs/experiments/retrieval-pilot-2026-04-19/pilot-intents-v3c.jsonl": "a32e78fa057de7354a8903b2c3b9b7bfc672f43f3104b26715c5d1f010e56e8b",
+        "docs/experiments/retrieval-pilot-2026-04-19/pilot-queries-v3c-sonnet.jsonl": "88d667883459ff50787321ac8323c7dfb9e2dc96b339f457705fc5ad2f273684",
+        "docs/experiments/retrieval-pilot-2026-04-19/pilot-results-v3c-lexical.jsonl": "0e8f50101e21eef00f7d843a4d379a0a81f225a6448335326199768a0061d891",
+        "docs/experiments/retrieval-pilot-2026-04-19/pilot-targets-v3.jsonl": "7c4942f0724de74fc4ff8483ccd79c7ec30c06a09089fb50c7c8aa28dceafcf8",
+        "docs/experiments/retrieval-pilot-2026-04-19/pilot-report-v3b.md": "50e1cdc56417cc8e42a3cf548ca6407a6270f820a1166d26bfe64ed5834f2cb6",
+        "docs/experiments/retrieval-pilot-2026-04-19/pilot-results-v3b-lexical.jsonl": "24415285776e72542800f9706610a84afa60d98eab081f849ac86ac7bb6d97b7"
+      },
+      "target_uuid_subset": [
+        "fb352c89-bc21-4c44-88e9-204f546a6209",
+        "1b4c8471-f70d-4758-8453-1b0731ae4729",
+        "2ad0276d-21e3-4dc1-b342-e85aa896fd14",
+        "725e495a-4db3-4deb-8987-5cc341d53aac",
+        "30edced3-9552-42df-8ba4-334709ddd9a3",
+        "e6e24975-5942-4db1-b962-e2ef315eb059"
+      ],
+      "outcome": "5/6 hit@20 (lexical) vs 0/6 v3b lexical"
+    }
+  },
+  "omitted_artifacts": [
+    {
+      "path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-queries-v2-haiku.jsonl",
+      "reason": "v2 per-model query files are cited but not first-class entries in the v1 freeze."
+    },
+    {
+      "path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-queries-v2-opus.jsonl",
+      "reason": "Same as haiku above."
+    },
+    {
+      "path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-queries-v2-sonnet.jsonl",
+      "reason": "Same as haiku above."
+    },
+    {
+      "path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-queries-v3-sonnet.jsonl",
+      "reason": "v3 formulated-query file. Only v3b and v3c sonnet queries are first-class in v1."
+    },
+    {
+      "path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-summaries-v2.jsonl",
+      "reason": "Run summaries, not retrieval queries or labels."
+    },
+    {
+      "path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-summaries-v3.jsonl",
+      "reason": "Run summaries, not retrieval queries or labels."
+    },
+    {
+      "path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-intents.jsonl",
+      "reason": "Legacy un-versioned intent file superseded by v2/v3."
+    },
+    {
+      "path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-queries.jsonl",
+      "reason": "Legacy un-versioned query file."
+    },
+    {
+      "path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-results.jsonl",
+      "reason": "Legacy un-versioned results file."
+    },
+    {
+      "path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-targets.jsonl",
+      "reason": "Legacy un-versioned targets file."
+    },
+    {
+      "path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-report.md",
+      "reason": "Legacy un-versioned report; superseded by v2/v3/v3b/v3c reports."
+    },
+    {
+      "path": "docs/experiments/retrieval-pilot-2026-04-19/mixed-corpus-weighted-scoring.md",
+      "reason": "Scoring methodology note, not a query or label artifact."
+    }
+  ],
+  "derived_total_record_count": 176,
+  "derived_munin_native_record_count": 34,
+  "derived_munin_zero_record_count": 142
+}

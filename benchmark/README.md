@@ -63,3 +63,14 @@ npx tsx benchmark/adapters/longmemeval/run.ts --split s
 - Commit manifests, docs, and adapter code.
 - Do not commit heavyweight raw datasets or generated caches.
 - Keep any CI fixture intentionally small and explicitly documented.
+
+## Retrieval Benchmark Lineage Manifest
+
+`queries/retrieval-v1.manifest.{json,md}` is a curated source index that
+reconciles the munin-native query JSONLs with the sibling munin-zero
+retrieval pilot artifacts (v2/v3/v3b/v3c, pinned at commit `ad4baff`).
+It is a **citation/provenance index, not a runner input** — the runner
+still consumes the native JSONLs directly. Start with the markdown
+companion (`retrieval-v1.manifest.md`) for orientation; the JSON file
+holds the machine-checkable schema. See `tests/retrieval-manifest.test.ts`
+for the invariants the manifest is expected to hold.
