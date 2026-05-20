@@ -8,8 +8,10 @@ import {
   loadQueries,
   computeQuerySetChecksum,
   crossCheckManifest,
+  runBenchmark,
 } from "../benchmark/runner.js";
-import type { QuerySetSource } from "../benchmark/types.js";
+import { initDatabase, writeState } from "../src/db.js";
+import type { QuerySetSource, BenchmarkQuery } from "../benchmark/types.js";
 
 const sha256Hex = (s: string | Buffer): string =>
   createHash("sha256").update(s).digest("hex");
@@ -284,4 +286,169 @@ describe("crossCheckManifest", () => {
     expect(updated[0].manifest_match).toBe("matched");
     expect(warnings).toEqual([]);
   });
+});
+
+describe("runBenchmark (end-to-end report shape)", () => {
+  let tmp: string;
+  let dbPath: string;
+  let queryPath: string;
+
+  // Build a tiny snapshot DB with a handful of state entries whose IDs are
+  // pinned so the queries below have meaningful ground truth.
+  const ENTRIES: Array<{ namespace: string; key: string; content: string; tags: string[] }> = [
+    { namespace: "projects/alpha", key: "status", content: "alpha project active phase", tags: ["status", "active"] },
+    { namespace: "projects/alpha", key: "decision", content: "alpha team chose sqlite over postgres", tags: ["decision"] },
+    { namespace: "projects/beta", key: "status", content: "beta project blocked waiting on infra", tags: ["status", "blocked"] },
+    { namespace: "people/sara", key: "context", content: "sara prefers terse status updates", tags: ["preference"] },
+    { namespace: "meta/notes", key: "x", content: "unrelated note about cabbages", tags: [] },
+  ];
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "runner-e2e-"));
+    dbPath = join(tmp, "snapshot.db");
+    queryPath = join(tmp, "queries.jsonl");
+
+    // Stand up a real schema so the runner can open it readonly.
+    const db = initDatabase(dbPath);
+    const idMap = new Map<string, string>();
+    for (const e of ENTRIES) {
+      const r = writeState(db, e.namespace, e.key, e.content, e.tags);
+      if (r.status === "success") {
+        idMap.set(`${e.namespace}::${e.key}`, r.entry.id);
+      }
+    }
+    db.close();
+
+    // One lexical query per entry → 5 total. Each pins the exact entry id
+    // so `expected_ids` is meaningful.
+    const queries: BenchmarkQuery[] = [
+      {
+        id: "alpha-status",
+        query: "alpha project active",
+        category: "project-status",
+        search_mode: "lexical",
+        source: "manual",
+        expected_ids: [idMap.get("projects/alpha::status")!],
+      },
+      {
+        id: "alpha-decision",
+        query: "sqlite postgres",
+        category: "decision-lookup",
+        search_mode: "lexical",
+        source: "manual",
+        expected_ids: [idMap.get("projects/alpha::decision")!],
+      },
+      {
+        id: "beta-status",
+        query: "beta blocked infra",
+        category: "project-status",
+        search_mode: "lexical",
+        source: "manual",
+        expected_ids: [idMap.get("projects/beta::status")!],
+      },
+      {
+        id: "sara-context",
+        query: "sara terse updates",
+        category: "person-context",
+        search_mode: "lexical",
+        source: "manual",
+        expected_ids: [idMap.get("people/sara::context")!],
+      },
+      {
+        id: "no-hit",
+        query: "rutabaga",
+        category: "broad-orientation",
+        search_mode: "lexical",
+        source: "manual",
+        expected_ids: ["nonexistent"],
+      },
+    ];
+    writeFileSync(queryPath, queries.map((q) => JSON.stringify(q)).join("\n") + "\n");
+  });
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("produces a v2 report whose timing invariants hold (per-query, overall, per-mode)", async () => {
+    const { queries, source } = loadQueriesWithSource(queryPath);
+    const report = await runBenchmark(dbPath, queries, {
+      querySetSources: [source],
+      manifestPath: null, // no manifest in this fixture
+    });
+
+    // Shape — v2 fields present and consistent.
+    expect(report.report_schema_version).toBe(2);
+    expect(report.runner_mode).toBe("raw");
+    expect(report.snapshot_schema_version).toBeGreaterThan(0);
+    expect(report.schema_version).toBe(report.snapshot_schema_version);
+    expect(report.query_count).toBe(5);
+    expect(report.evaluation_count).toBe(5);
+    expect(report.query_set_sources).toHaveLength(1);
+    expect(report.query_set_sources[0].sha256).toBe(source.sha256);
+    expect(report.query_set_checksum).toMatch(/^[0-9a-f]{64}$/);
+
+    // Per-query duration plumbing — every entry finite and non-negative.
+    expect(report.queries).toHaveLength(5);
+    for (const q of report.queries) {
+      expect(Number.isFinite(q.duration_ms)).toBe(true);
+      expect(q.duration_ms).toBeGreaterThanOrEqual(0);
+    }
+
+    // overall_duration consistency.
+    const sumPerQuery = report.queries.reduce((s, q) => s + q.duration_ms, 0);
+    // total_ms is rounded to 0.01 ms; allow a tiny tolerance for rounding.
+    expect(report.overall_duration.total_ms).toBeCloseTo(sumPerQuery, 1);
+    expect(report.overall_duration.p50_ms).not.toBeNull();
+    expect(report.overall_duration.p95_ms).not.toBeNull();
+    expect(report.overall_duration.p95_ms!).toBeGreaterThanOrEqual(report.overall_duration.p50_ms!);
+
+    // Bucket key alignment: every key in by_search_mode_duration is also
+    // a key in by_search_mode and vice versa. Both are bucketed on the
+    // *requested* mode, which keeps recall and latency comparable.
+    const recallKeys = Object.keys(report.by_search_mode).sort();
+    const durationKeys = Object.keys(report.by_search_mode_duration).sort();
+    expect(durationKeys).toEqual(recallKeys);
+    expect(recallKeys).toEqual(["lexical"]); // sanity for this fixture
+
+    // by_search_mode_duration totals must equal the sum of in-bucket per-query durations.
+    const lexicalSum = report.queries
+      .filter((q) => q.search_mode === "lexical")
+      .reduce((s, q) => s + q.duration_ms, 0);
+    expect(report.by_search_mode_duration.lexical.total_ms).toBeCloseTo(lexicalSum, 1);
+
+    // Per-category duration also present and consistent.
+    expect(report.by_category.length).toBeGreaterThan(0);
+    for (const cat of report.by_category) {
+      expect(cat.duration.p50_ms).not.toBeNull();
+      expect(cat.duration.p95_ms).not.toBeNull();
+      expect(cat.duration.p95_ms!).toBeGreaterThanOrEqual(cat.duration.p50_ms!);
+      const inCat = report.queries.filter((q) => {
+        const qDef = queries.find((qq) => qq.id === q.query_id)!;
+        return qDef.category === cat.category;
+      });
+      expect(cat.duration.total_ms).toBeCloseTo(
+        inCat.reduce((s, q) => s + q.duration_ms, 0),
+        1,
+      );
+    }
+
+    // Scoring fields present (regression guard against scorer/runner drift).
+    expect(report.overall.recallAt20).toBeGreaterThanOrEqual(report.overall.recallAt5);
+    expect(report.overall.recallAt10).toBeGreaterThanOrEqual(report.overall.recallAt5);
+  }, 30_000);
+
+  it("warns when querySetSources is omitted and emits an untracked checksum", async () => {
+    const { queries } = loadQueriesWithSource(queryPath);
+    const report = await runBenchmark(dbPath, queries, { manifestPath: null });
+    expect(report.warnings ?? []).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("query_set_sources not tracked"),
+      ]),
+    );
+    expect(report.query_set_sources).toEqual([]);
+    // Untracked runs collapse to a known constant — sha256("\n"). Documented
+    // in benchmark/README.md and pinned by computeQuerySetChecksum tests above.
+    expect(report.query_set_checksum).toBe(sha256Hex("\n"));
+  }, 30_000);
 });

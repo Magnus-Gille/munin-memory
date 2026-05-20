@@ -137,7 +137,7 @@ export interface BenchmarkReport {
   /**
    * @deprecated since `report_schema_version: 2`. Mirrors
    * `snapshot_schema_version` for one release so existing consumers keep
-   * working. Will be removed in a future PR — read `snapshot_schema_version`.
+   * working. Tracked for removal in #58 — read `snapshot_schema_version`.
    */
   schema_version: number;
   /**
