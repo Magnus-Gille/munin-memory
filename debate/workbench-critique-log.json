@@ -1,0 +1,119 @@
+[
+  {
+    "id": "workbench-C01",
+    "source": "codex-round-1",
+    "text": "Convention treated as hard invariant — no enforcement path for workbench MUST-update obligation across 4 platforms",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "workbench-C02",
+    "source": "codex-round-1",
+    "text": "§3.5 staleness detection not implementable — memory_list() returns no timestamps per namespace",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "workbench-C03",
+    "source": "codex-round-1",
+    "text": "MAX(updated_at) misses delete activity (rows gone) and read activity — proposes multi-field activity tracking",
+    "classification": "partially_valid",
+    "impact": "partially_changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "workbench-C04",
+    "source": "codex-round-1",
+    "text": "Read-time staleness implies write-on-read side effects — handshake reads become mutating operations",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "workbench-C05",
+    "source": "codex-round-1",
+    "text": "Workbench as single orientation read is a single point of misinformation if stale",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "workbench-C06",
+    "source": "codex-round-1",
+    "text": "Concurrent updates to meta/workbench will lose data — no compare-and-swap on memory_write",
+    "classification": "valid",
+    "impact": "deferred",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "workbench-C07",
+    "source": "codex-round-1",
+    "text": "Tiered handshake Tier 3 trigger requires cross-session persistent memory that Claude doesn't have",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "workbench-C08",
+    "source": "codex-round-1",
+    "text": "Convention-only replacement drops hard guarantees — no token budget, no session lifecycle, no disconnect-driven closure",
+    "classification": "partially_valid",
+    "impact": "reframed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "workbench-C09",
+    "source": "codex-round-1",
+    "text": "meta/last-session at <40% write reliability becomes low-trust noise that agents learn to ignore",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "workbench-C10",
+    "source": "codex-round-1",
+    "text": "Markdown is a fragile machine contract — formatting drift breaks cross-session parsing",
+    "classification": "partially_valid",
+    "impact": "partially_changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "workbench-C11",
+    "source": "codex-round-1",
+    "text": "14-day staleness threshold and 300-word workbench target are arbitrary and will conflict at scale",
+    "classification": "valid",
+    "impact": "deferred",
+    "severity": "moderate",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "workbench-C12",
+    "source": "codex-round-2",
+    "text": "Strict markdown template dropped Conventions version field, breaking Tier 3 trigger logic",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "moderate",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "workbench-C13",
+    "source": "codex-round-2",
+    "text": "Ad-hoc 7-day workbench staleness trigger introduced while threshold policy was deferred — internally inconsistent",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  }
+]

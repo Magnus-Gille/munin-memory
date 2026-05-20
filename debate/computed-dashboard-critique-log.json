@@ -1,0 +1,146 @@
+[
+  {
+    "id": "CD-C01",
+    "source": "codex-round-1",
+    "text": "'Never stale by construction' overclaims — dashboard eliminates cache drift but status entries can still be stale",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "CD-C02",
+    "source": "codex-round-1",
+    "text": "Auto-log content is low-signal (prefix truncation, no diff, no rationale) and pollutes memory_query and memory_list preview window",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "CD-C03",
+    "source": "codex-round-1",
+    "text": "Auto-log should be in same transaction as status write — partial success and race window on previous status read",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "CD-C04",
+    "source": "codex-round-1",
+    "text": "Lifecycle tag vocabulary drift — plan introduces new vocabulary conflicting with current tool descriptions (paused vs maintenance, done vs completed)",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "CD-C05",
+    "source": "codex-round-1",
+    "text": "Soft validation skips entirely when tags are omitted (tags is optional in API contract)",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "CD-C06",
+    "source": "codex-round-1",
+    "text": "decisions/* excluded from dashboard query despite draft claiming cross-cutting support",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "CD-C07",
+    "source": "codex-round-1",
+    "text": "SQL fetches full content for all status entries but only needs first N chars — use substr() server-side",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "CD-C08",
+    "source": "codex-round-1",
+    "text": "'No migration needed' is misleading — data cleanup and convention updates are real migration work even without schema changes",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "CD-C09",
+    "source": "codex-round-1",
+    "text": "Hybrid model (Alternative B): computed core + curated notes overlay is better than fully eliminating the curated layer",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "CD-C10",
+    "source": "codex-round-1",
+    "text": "Discoverability regression for partially-initialized projects (autoAddToWorkbench fired on any first entry, dashboard requires status key)",
+    "classification": "partially_valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "CD-C11",
+    "source": "codex-round-1",
+    "text": "Write-path enforcement (Alternative C) — lifecycle tags should be enforced, not just warned, if they're the primary dashboard signal",
+    "classification": "partially_valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "CD-C12",
+    "source": "codex-round-1",
+    "text": "Response size scales linearly with tracked namespaces — orient is mandatory START HERE call, payload size matters",
+    "classification": "partially_valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "CD-C13",
+    "source": "codex-round-2",
+    "text": "Plan removes 'read before write' safety without adding server-side overwrite protection — blind stale overwrites remain the central risk",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "CD-C14",
+    "source": "codex-round-2",
+    "text": "workbench-notes reintroduces manual state and staleness risk — must be explicitly non-authoritative and tightly scoped",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "CD-C15",
+    "source": "codex-round-2",
+    "text": "Canonicalization semantics: paused->maintenance is not obviously equivalent, need explicit mapping + warning on normalization",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "CD-C16",
+    "source": "codex-round-2",
+    "text": "'Session window' for missing-log detection is not a well-defined primitive in stateless HTTP transport",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  }
+]

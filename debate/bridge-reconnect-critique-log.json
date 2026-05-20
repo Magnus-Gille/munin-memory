@@ -1,0 +1,101 @@
+[
+  {
+    "id": "bridge-reconnect-C01",
+    "source": "codex-round-1",
+    "text": "onclose → cleanup → process.exit during reconnect is fatal. close() triggers onclose synchronously, killing the process before new transport is ready.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "bridge-reconnect-C02",
+    "source": "codex-round-1",
+    "text": "Error detection (400/not-initialized, 404/session-not-found) is partly correct but incomplete and brittle. Message substring matching is SDK-version-fragile. GET/DELETE 400 from server not covered.",
+    "classification": "partially_valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "bridge-reconnect-C03",
+    "source": "codex-round-1",
+    "text": "MCP handshake is lifecycle-complete but hardcoded/minimal init params may not produce session-equivalent behavior if server ever depends on client capabilities.",
+    "classification": "partially_valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "bridge-reconnect-C04",
+    "source": "codex-round-1",
+    "text": "2-hour idle TTL is not data-justified. Should be configurable via env var rather than hardcoded.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "bridge-reconnect-C05",
+    "source": "codex-round-1",
+    "text": "onmessage interception cleanup is one-way: timeout/failure paths can leave wrapper handler installed.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "bridge-reconnect-C06",
+    "source": "codex-round-1",
+    "text": "Missing liveness regression test proving reconnect doesn't trigger process.exit.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "bridge-reconnect-C07",
+    "source": "codex-round-1",
+    "text": "Network failure behavior (non-StreamableHTTPError) not explicitly defined.",
+    "classification": "partially_valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "bridge-reconnect-C08",
+    "source": "codex-round-2",
+    "text": "reconnecting guard is global, not transport-identity scoped. Replacement transport close during reconnect window would be suppressed.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "bridge-reconnect-C09",
+    "source": "codex-round-2",
+    "text": "Detaching oldClient.onmessage before close introduces potential inbound message loss during cutover.",
+    "classification": "partially_valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "bridge-reconnect-C10",
+    "source": "codex-round-2",
+    "text": "Handler restoration underspecified: per-promise restore on timeout conflicts with 'always restore in finally'. Need one canonical ownership rule.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "bridge-reconnect-C11",
+    "source": "codex-round-2",
+    "text": "Error classification position internally unresolved in Claude's response — proposed broad match then retracted it.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  }
+]

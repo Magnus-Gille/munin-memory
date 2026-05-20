@@ -1,0 +1,128 @@
+[
+  {
+    "id": "FW-C01",
+    "source": "codex-round-1",
+    "text": "Feature 1: `updated_at` index missing — adding `since` on updated_at would cause full table scans; no corresponding index in migrations.ts",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "FW-C02",
+    "source": "codex-round-1",
+    "text": "Feature 1: `memory_query` is a relevance search, not a change feed — `since` doesn't make 'what changed?' a first-class operation; wrong abstraction",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "FW-C03",
+    "source": "codex-round-1",
+    "text": "Feature 1: Post-KNN date filtering distorts semantic/hybrid results — highly relevant recent entries invisible if ranked below KNN cutoff globally",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "FW-C04",
+    "source": "codex-round-1",
+    "text": "Feature 2: `agent_id` hardcoded to 'default' in all tool handlers — caller-supplied agent_id is unverified and spoofable; identity model doesn't exist",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "FW-C05",
+    "source": "codex-round-1",
+    "text": "Feature 2: HTTP layer auth context not passed into tool execution — prerequisite architectural change required before session-aware orient is viable",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "FW-C06",
+    "source": "codex-round-1",
+    "text": "Feature 3: Attention partly already solved — maintenance suggestions already compute stale projects, missing lifecycle tags, blocked statuses; gap is narrower than claimed",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "FW-C07",
+    "source": "codex-round-1",
+    "text": "Feature 4: Compact token stored in in-memory Map — not durable across restarts, not safe for stateless HTTP",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "FW-C08",
+    "source": "codex-round-1",
+    "text": "Feature 4: Semantic drift between compact Phase 1 and Phase 2 — no binding of candidate set; new logs arriving between phases could be incorrectly pruned",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "FW-C09",
+    "source": "codex-round-1",
+    "text": "Missing feature: `memory_history` — audit_log table exists with no MCP tool exposing it; it is the correct abstraction for 'what changed?' queries",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "FW-C10",
+    "source": "codex-round-1",
+    "text": "Missing feature: caller context plumbing — tool handlers receive only db handle, not auth/session context; architectural prerequisite for multiple features",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "FW-C11",
+    "source": "codex-round-2",
+    "text": "Claude quoted fictional audit_log schema with entry_id and content fields — actual schema (migrations.ts:44) has only id, timestamp, agent_id, action, namespace, key, detail",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "FW-C12",
+    "source": "codex-round-2",
+    "text": "HMAC token fixes in-memory Map but doesn't solve candidate-set drift — 'latest_log_id still exists' check doesn't prove no newer logs arrived",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "FW-C13",
+    "source": "codex-round-2",
+    "text": "memory_history and narrow lexical since risk overlapping/muddled surfaces — distinction must be explicit: history=mutation timeline, query+date=content search",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "FW-C14",
+    "source": "codex-round-2",
+    "text": "Caller identity weakness is the same architectural problem for both memory_history attribution and orient diff — Claude treated it as blocking one but incidental to the other",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  }
+]

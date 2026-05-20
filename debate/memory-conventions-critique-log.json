@@ -1,0 +1,128 @@
+[
+  {
+    "id": "MC-C01",
+    "source": "codex-round-1",
+    "text": "Two-layer model is partially simpler conceptually but not simpler operationally — still three active surfaces, rule-heavy branchy handshake",
+    "classification": "partially_valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "MC-C02",
+    "source": "codex-round-1",
+    "text": "'Always update Munin' is behaviorally fragile — unclear threshold between substantive and trivial, policy drift between global CLAUDE.md and /close",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "MC-C03",
+    "source": "codex-round-1",
+    "text": "Tool descriptions as convention delivery: useful hinting channel but weak control channel, no evidence of reliable behavioral compliance",
+    "classification": "partially_valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "MC-C04",
+    "source": "codex-round-1",
+    "text": "New project from mobile workflow is incantation-heavy, no progressive discovery, no atomic helper",
+    "classification": "partially_valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "MC-C05",
+    "source": "codex-round-1",
+    "text": "Concurrent write scenario: phone writes decision, laptop /close overwrites with stale summary. No CAS/version precondition.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "MC-C06",
+    "source": "codex-round-1",
+    "text": "Convention staleness in stateless Web/Mobile sessions — model cannot know if conventions changed, mitigation is non-deterministic",
+    "classification": "partially_valid",
+    "impact": "rejected",
+    "severity": "minor",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "MC-C07",
+    "source": "codex-round-1",
+    "text": "Simpler design possible: one canonical layer in Munin with local file as derived cache, and/or remove manual workbench maintenance",
+    "classification": "invalid",
+    "impact": "rejected",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "MC-C08",
+    "source": "codex-round-1",
+    "text": "S5/S6 mitigations are rhetorical not mechanical — project status has no freshness SLA, tool descriptions have no compliance guarantee",
+    "classification": "partially_valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "MC-C09",
+    "source": "codex-round-1",
+    "text": "First 5 minutes reliable for local execution but not for cross-environment coherence when Munin is unavailable",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "MC-C10",
+    "source": "codex-round-1",
+    "text": "Security: no encryption at rest, legacy bearer non-expiring, regex-based secret scanning incomplete, conventions entry leaks operational internals",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "MC-C11",
+    "source": "codex-round-2",
+    "text": "Write threshold 'when code committed or decision made' misses substantial uncommitted work sessions needing cross-device continuity",
+    "classification": "partially_valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "MC-C12",
+    "source": "codex-round-2",
+    "text": "Conflict check spec underspecified — no session-start tracking, no defined merge/abort behavior on stale detection",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "MC-C13",
+    "source": "codex-round-2",
+    "text": "Over-reliance on logs as safety net — assumes decisions are always logged before status write, which is not guaranteed",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "MC-C14",
+    "source": "codex-round-2",
+    "text": "Mobile capture non-deterministic — 'Claude initiative' is not an operational control, no compensating deterministic interaction pattern specified",
+    "classification": "partially_valid",
+    "impact": "rejected",
+    "severity": "minor",
+    "caught_by_self_review": false
+  }
+]

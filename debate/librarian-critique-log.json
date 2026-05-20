@@ -1,0 +1,137 @@
+[
+  {
+    "id": "librarian-C01",
+    "source": "codex-round-1",
+    "text": "Transport boundary is not validated by a trustworthy signal — auth method as transport class is 'which credential was used' not 'what environment this is'",
+    "classification": "valid",
+    "impact": "partially_changed",
+    "severity": "critical",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "librarian-C02",
+    "source": "codex-round-1",
+    "text": "Derived tools (resume, commitments, patterns, handoff, narrative) are the real leak surface — post-synthesis redaction is insufficient, must filter before synthesis",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "librarian-C03",
+    "source": "codex-round-1",
+    "text": "Visible redaction leaks more than threat model admits — namespace+key+tags+timestamps for clients/* reveals active client relationships",
+    "classification": "valid",
+    "impact": "partially_changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "librarian-C04",
+    "source": "codex-round-1",
+    "text": "Namespace classification floors in code create a second policy system that will drift and fail open for new namespaces",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "librarian-C05",
+    "source": "codex-round-1",
+    "text": "Fail-closed is tool-by-tool manual enforcement — every tool must remember to do the right thing, which is not equivalent to actual fail-closed",
+    "classification": "partially_valid",
+    "impact": "partially_changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "librarian-C06",
+    "source": "codex-round-1",
+    "text": "Introduction of redacted entries is a breaking API contract change, not an additive change — existing consumers expect binary found/not-found",
+    "classification": "partially_valid",
+    "impact": "partially_changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "librarian-C07",
+    "source": "codex-round-1",
+    "text": "Audit/compliance evidence is overstated — session-ID fragmentation weakens per-session audit trails, and redaction log proves blocking not absence of leakage",
+    "classification": "partially_valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "librarian-C08",
+    "source": "codex-round-1",
+    "text": "Migration baseline too thin — no inventory of entries by proposed classification, especially projects/* which is heavily surfaced and likely contains client references",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "librarian-C09",
+    "source": "codex-round-1",
+    "text": "memory_query explain mode side-channels — ranking scores, distances, and reasons exposed for redacted entries",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "librarian-C10",
+    "source": "codex-round-1",
+    "text": "client-restricted depends on manual transport labeling for service tokens — admin misconfiguration can bypass the most sensitive classification level",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "librarian-C11",
+    "source": "codex-round-2",
+    "text": "redacted_sources in derived tools creates a new metadata leak surface — existence oracle for multiple protected entries at once",
+    "classification": "valid",
+    "impact": "deferred",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "librarian-C12",
+    "source": "codex-round-2",
+    "text": "Persisted derivative rows (commitments table copies text/excerpts) not addressed — reclassification of source doesn't propagate to copied data",
+    "classification": "valid",
+    "impact": "deferred",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "librarian-C13",
+    "source": "codex-round-2",
+    "text": "Mutable namespace_classification table is now a high-value target — single bad write lowers defaults for entire namespace family",
+    "classification": "valid",
+    "impact": "deferred",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "librarian-C14",
+    "source": "codex-round-2",
+    "text": "Separate bearer tokens materially increase operational burden — rotation, provisioning, audit around which clients hold which credential",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "librarian-C15",
+    "source": "codex-round-2",
+    "text": "Partial-failure semantics for derived tools unspecified — what happens when one source in a multi-source tool has unknown classification",
+    "classification": "valid",
+    "impact": "deferred",
+    "severity": "major",
+    "caught_by_self_review": false
+  }
+]

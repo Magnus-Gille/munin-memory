@@ -1,0 +1,128 @@
+[
+  {
+    "id": "conventions-C01",
+    "source": "claude-draft",
+    "text": "No conflict resolution strategy for concurrent writes to same key",
+    "classification": "partially_valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "conventions-C02",
+    "source": "claude-draft",
+    "text": "No canonical tag vocabulary — tags will drift across environments",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "conventions-C03",
+    "source": "claude-draft",
+    "text": "No content schema for common entries like project status",
+    "classification": "partially_valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "conventions-C04",
+    "source": "claude-draft",
+    "text": "No discoverability guidance for reading memory",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "conventions-C05",
+    "source": "claude-draft",
+    "text": "Stale 'future' references to sessions/ and workspace/",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "conventions-C06",
+    "source": "claude-draft",
+    "text": "No versioning of conventions document itself",
+    "classification": "partially_valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "conventions-C07",
+    "source": "claude-draft",
+    "text": "No entry size guidance — 100KB limit is too high for practical use",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "conventions-C08",
+    "source": "codex-round-1",
+    "text": "Split-brain risk: environments may point at different DB backends",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "conventions-C09",
+    "source": "codex-round-1",
+    "text": "Acting on truncated previews from memory_query/memory_list without fetching full content",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "conventions-C10",
+    "source": "codex-round-1",
+    "text": "Search-mode nondeterminism: hybrid gate settings differ across environments, producing different results",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "conventions-C11",
+    "source": "codex-round-1",
+    "text": "Delete governance gap: no retention/deletion policy beyond feedback items",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "moderate",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "conventions-C12",
+    "source": "codex-round-1",
+    "text": "Session Handshake proposal: verify backend, read conventions, fetch full entries, use explicit search_mode",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "conventions-C13",
+    "source": "codex-round-2",
+    "text": "Conventions must require explicit search_mode on every query and check search_mode_actual",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "conventions-C14",
+    "source": "codex-round-2",
+    "text": "Factual error: Claude claimed writeState uses ON CONFLICT DO UPDATE, but it uses SELECT-then-INSERT/UPDATE in transaction",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  }
+]

@@ -1,0 +1,119 @@
+[
+  {
+    "id": "ortelius-C01",
+    "source": "codex-round-1",
+    "text": "Triples CAN represent n-ary complexity via reification/event nodes — overclaim that they 'cannot'",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "ortelius-C02",
+    "source": "codex-round-1",
+    "text": "Curation workflow (non-ML domain experts maintaining ontologies) is undervalued as platform differentiation",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "ortelius-C03",
+    "source": "codex-round-1",
+    "text": "Competitor set mismatched: Cube/dbt are analytics semantic layers, not ontology platforms",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "ortelius-C04",
+    "source": "codex-round-1",
+    "text": "Magnus's security/productionization skills (OAuth, circuit breaker, dual auth) undervalued in fit analysis",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "ortelius-C05",
+    "source": "codex-round-1",
+    "text": "Munin capability transfer is non-trivial: MCP patterns, retrieval orchestration, provenance modeling, auth are portable",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "ortelius-C06",
+    "source": "codex-round-1",
+    "text": "Missing contract-structure risk analysis (IP, exclusivity, white-label, liability)",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "ortelius-C07",
+    "source": "codex-round-1",
+    "text": "No falsifiable diligence plan — what evidence to request to validate differentiation",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "ortelius-C08",
+    "source": "codex-round-1",
+    "text": "No explicit opportunity-cost analysis against Munin roadmap focus",
+    "classification": "partially_valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "ortelius-C09",
+    "source": "codex-round-1",
+    "text": "Enterprise ontology programs are organizational change, not just software — delivery fit != technical fit",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "ortelius-C10",
+    "source": "codex-round-1",
+    "text": "Recommendation needs hard gates (engagement model, IP terms, non-exclusivity, tech access, unit economics)",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "ortelius-C11",
+    "source": "codex-round-2",
+    "text": "Contract risk dismissal as 'standard consulting' misses point — still high-impact in channel model",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "ortelius-C12",
+    "source": "codex-round-2",
+    "text": "Need explicit pass/fail thresholds, not narrative 'due diligence'",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "ortelius-C13",
+    "source": "codex-round-2",
+    "text": "Must specify who needs to be in the meeting (engineering leadership) for valid technical signal",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  }
+]

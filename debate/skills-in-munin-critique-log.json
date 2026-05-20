@@ -1,0 +1,155 @@
+[
+  {
+    "id": "SIM-C01",
+    "source": "codex-round-1",
+    "text": "Model-agnostic prompt is a leaky abstraction — skills are prompt text + runtime assumptions + tool contracts + local references, not just portable instructions",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "SIM-C02",
+    "source": "codex-round-1",
+    "text": "Cost-benefit doesn't hold: 8 skills, 2-3 portable, building a general pipeline is over-engineered",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "SIM-C03",
+    "source": "codex-round-1",
+    "text": "Single source of truth claim is false — local is canonical, Munin is derived cache",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "SIM-C04",
+    "source": "codex-round-1",
+    "text": "documents/* is wrong namespace — passive artifacts vs mutable operational instructions have different trust and retrieval semantics",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "SIM-C05",
+    "source": "codex-round-1",
+    "text": "Security model incomplete: no namespace ACLs, no per-client write restrictions, write-only-from-laptop is operational assumption not enforced policy",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "SIM-C06",
+    "source": "codex-round-1",
+    "text": "Provenance and staleness have no detection mechanism — 'run /index-skills' is a reminder not a mitigation",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "SIM-C07",
+    "source": "codex-round-1",
+    "text": "Capability drift: agent/requires tags will rot without constant curation",
+    "classification": "partially_valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "SIM-C08",
+    "source": "codex-round-1",
+    "text": "Retrieval false positives: wrong operational prompt retrieval is worse than failed retrieval",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "SIM-C09",
+    "source": "codex-round-1",
+    "text": "Interaction-model mismatch: conversational confirmation loops don't transfer to autonomous agents",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "SIM-C10",
+    "source": "codex-round-1",
+    "text": "Sensitive workflow leakage: operational metadata (paths, account IDs, URL mappings) is sensitive beyond just credentials",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "SIM-C11",
+    "source": "codex-round-1",
+    "text": "Alternative A: store only curated portable playbooks, not sync all skills",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "SIM-C12",
+    "source": "codex-round-1",
+    "text": "Alternative C: extract reusable sub-artifacts (style profile) rather than whole skill containers",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "SIM-C13",
+    "source": "codex-round-2",
+    "text": "Security defense dodges operational consequences: still no trust model for who publishes, how consumers know entry is approved, what 'untrusted instruction' means in practice",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "SIM-C14",
+    "source": "codex-round-2",
+    "text": "Manual curation shifts canonical source ambiguity: if playbooks are independently edited in Munin, the relationship to local skills becomes editorial, not derivative",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "SIM-C15",
+    "source": "codex-round-2",
+    "text": "Revised proposal bundles dissimilar artifacts (playbooks, sub-artifacts, metadata) — these shouldn't be treated as one thing",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "SIM-C16",
+    "source": "codex-round-2",
+    "text": "A new namespace is not free — 2-3 artifacts don't justify the design overhead of conventions, retrieval rules, ownership rules",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "SIM-C17",
+    "source": "codex-round-2",
+    "text": "Demand is still assumed: no evidence other agents actually need or would benefit from these artifacts",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": true
+  }
+]

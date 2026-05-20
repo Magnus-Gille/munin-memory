@@ -1,0 +1,101 @@
+[
+  {
+    "id": "telemetry-C01",
+    "source": "codex-round-1",
+    "text": "Bundles four separate bets (data collection, session analysis, automated filing, deploy gates) as one architecture without proving they're interdependent",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "telemetry-C02",
+    "source": "codex-round-1",
+    "text": "Session model is a load-bearing assumption already known to be broken for HTTP/Hugin — invalidates Layer 2 methodology",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "telemetry-C03",
+    "source": "codex-round-1",
+    "text": "Does not prove incremental value over existing retrieval analytics — overstates 'no visibility' when 7 of 22 tools already have observability",
+    "classification": "partially_valid",
+    "impact": "partially_changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "telemetry-C04",
+    "source": "codex-round-1",
+    "text": "Scale and hot-path cost model lacks numbers — assertions without measurements for rows/day, bytes/row, latency impact, SD-card write amplification",
+    "classification": "partially_valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "telemetry-C05",
+    "source": "codex-round-1",
+    "text": "Coupling from universal handler wrapping is broader than admitted — assumes tools remain synchronous request/response forever",
+    "classification": "partially_valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "telemetry-C06",
+    "source": "codex-round-1",
+    "text": "Degradation behavior unspecified — what happens when INSERT fails, when cron fails, when gh is unauthenticated",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "telemetry-C07",
+    "source": "codex-round-1",
+    "text": "Anti-pattern heuristics are unsupported — every proposed pattern has legitimate counter-interpretations, no validation plan, no precision targets",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "telemetry-C08",
+    "source": "codex-round-1",
+    "text": "Operational burden materially understated — full proposal is a new subsystem plus recurring governance loop, not lightweight telemetry",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "telemetry-C09",
+    "source": "codex-round-1",
+    "text": "Opportunity cost cuts against the proposal — known bugs and benchmark work are more defensible than meta-tooling",
+    "classification": "partially_valid",
+    "impact": "partially_changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "telemetry-C10",
+    "source": "codex-round-1",
+    "text": "No success criteria or exit criteria defined — 'autonomous product improvement' is a vision not a measurable goal",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "telemetry-C11",
+    "source": "codex-round-1",
+    "text": "Reversibility is more expensive than 'drop the table' — automated issues, weekly reports, and deploy gates create workflow coupling that requires socio-technical rollback",
+    "classification": "partially_valid",
+    "impact": "partially_changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  }
+]

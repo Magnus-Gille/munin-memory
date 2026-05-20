@@ -1,0 +1,119 @@
+[
+  {
+    "id": "retrieval-decisions-zero-recall-C01",
+    "source": "codex-round-1",
+    "text": "'Across all three pilots' is false. v2 decisions stratum is 10/12 pooled and Sonnet 4/4 on actual decision targets; only v3/v3b prose-weighted subset fails 0/6. Draft over-generalized from the wrong experiments.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "retrieval-decisions-zero-recall-C02",
+    "source": "codex-round-1",
+    "text": "Proposed decisions/* expansion issue (issue B) does not cover its own benchmark: T29 is projects/drone-lab, not decisions/*. A decisions-only fix cannot satisfy the 6-target subset.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "retrieval-decisions-zero-recall-C03",
+    "source": "codex-round-1",
+    "text": "Token-overlap method used 'content + namespace + key + title' but FTS indexes content+namespace+key+tags — title is not indexed, tags was omitted. Method also didn't model strict-AND vs relaxed-OR fallback or live tokenizer behavior.",
+    "classification": "valid",
+    "impact": "partially_changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "retrieval-decisions-zero-recall-C04",
+    "source": "codex-round-1",
+    "text": "Three failure modes, not one: (a) meta-intent zero overlap (T9/T10/T35/T47 in v3b), (b) T49 entry_type formulator bug in v3 and v3b, (c) T47 namespace='meta/' formulator bug in v3 (fixed in v3b). Each implies a different intervention.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "retrieval-decisions-zero-recall-C05",
+    "source": "codex-round-1",
+    "text": "Consolidation worker architecture cost understated: it currently scopes to projects/* and clients/* log entries and writes synthesis per namespace. Extending to decisions/* is not a light split — it broadens worker namespace floor, adds LLM/cadence coupling, and creates uneven retrieval surfaces under partial failure.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "retrieval-decisions-zero-recall-C06",
+    "source": "codex-round-1",
+    "text": "'Close #38 + file two new issues' is weaker than 'edit #38 in place.' Closing loses the audit trail of why the original framing was wrong, duplicates a live munin-zero workstream, and spends coordination budget during an active cross-repo deliverable.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "retrieval-decisions-zero-recall-C07",
+    "source": "codex-round-1",
+    "text": "Acceptance-criterion rewrite is a goalpost move if presented as replacement. Version it as a new benchmark (topical-decisions) alongside v3/v3b, not instead of. Replacing the failing test with an easier test and declaring victory is not resolution.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "retrieval-decisions-zero-recall-C08",
+    "source": "codex-round-1",
+    "text": "'Do NOT implement bm25 weights + title boosts' is too categorical. T29/T49 have partial indexed overlap so ranking could matter on a subset. Relaxed-OR fallback means weighting can matter after fallback. Title boost belongs in a separate schema/indexing discussion because title isn't indexed.",
+    "classification": "partially_valid",
+    "impact": "partially_changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "retrieval-decisions-zero-recall-C09",
+    "source": "codex-round-1",
+    "text": "Draft missed that projects/munin-zero already has a cross-repo query-formulation experiment active in its next steps. Filing a new munin-zero issue duplicates live workstream.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "retrieval-decisions-zero-recall-R2-01",
+    "source": "codex-round-2",
+    "text": "Revised #38 title ('fails under v3/v3b meta-intents') still collapses the three-failure-mode taxonomy Claude just conceded. T49 is an entry_type formulator bug, not a meta-intent miss — collapsing them in the title routes the query-formulator bug back into obscurity.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "retrieval-decisions-zero-recall-R2-02",
+    "source": "codex-round-2",
+    "text": "'Tag v3/v3b as expected failure under lexical' is premature. The benchmark is still mixed (4 hard-lexical + 1 entry_type bug + 1 historical namespace bug). Tag only after strata are split by cause; otherwise the label is cosmetic dashboard hygiene.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "retrieval-decisions-zero-recall-R2-03",
+    "source": "codex-round-2",
+    "text": "Action plan step 3 ('comment on munin-zero status') is still file-and-forget. No artifact, no owner, no due date, no 'done' definition. In a week with an at-risk gate memo commitment, a comment-only handoff is exactly how benchmark versioning gets displaced. Must produce the artifact or an explicitly owned issue.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "retrieval-decisions-zero-recall-R2-04",
+    "source": "codex-round-2",
+    "text": "'Defer bm25/title/expansion' has no re-entry/stop condition. Is the trigger: new benchmark file exists, new benchmark rerun completes, or T29/T49-class cases still miss after rerun? Without that, defer stays open-ended and leaves 'done' underspecified.",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  }
+]

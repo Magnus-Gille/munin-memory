@@ -1,0 +1,137 @@
+[
+  {
+    "id": "admin-cli-C01",
+    "source": "codex-round-1",
+    "text": "Token lifecycle broken: revoke + re-add blocked by UNIQUE principal_id. No rotation command.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "admin-cli-C02",
+    "source": "codex-round-1",
+    "text": "No audit trail for principal CRUD despite existing audit_log table.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "admin-cli-C03",
+    "source": "codex-round-1",
+    "text": "initDatabase() silently creates DB on typo path. CLI should refuse missing DB.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "admin-cli-C04",
+    "source": "codex-round-1",
+    "text": "--expires-at needs format validation and UTC normalization, not permissive Date parsing.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "admin-cli-C05",
+    "source": "codex-round-1",
+    "text": "Owner creation via --type owner should be guarded (refuse without --force).",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "admin-cli-C06",
+    "source": "codex-round-1",
+    "text": "<id> terminology ambiguous against schema's id vs principal_id.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "admin-cli-C07",
+    "source": "codex-round-1",
+    "text": "update command only covers rules but dispatch mentions --oauth-client-id and --expires-at.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "admin-cli-C08",
+    "source": "codex-round-1",
+    "text": "No --json output despite Claude Code being a consumer.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "admin-cli-C09",
+    "source": "codex-round-1",
+    "text": "Manual argv parsing complexity underestimated; missing --help, exit codes, unknown flags.",
+    "classification": "partially_valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "admin-cli-C10",
+    "source": "codex-round-1",
+    "text": "ESM entrypoint guard needed to prevent main() running on import in tests.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "admin-cli-C11",
+    "source": "codex-round-1",
+    "text": "token_hash not UNIQUE in schema — collision risk.",
+    "classification": "invalid",
+    "impact": "rejected",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "admin-cli-C12",
+    "source": "codex-round-2",
+    "text": "--json should include mutation commands (add, rotate-token) since they emit one-time secrets.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "admin-cli-C13",
+    "source": "codex-round-2",
+    "text": "ESM main guard needs real file-URL comparison, not filename heuristics.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "admin-cli-C14",
+    "source": "codex-round-2",
+    "text": "Revoke semantics should be explicitly terminal or reversible, not ambiguous.",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "admin-cli-C15",
+    "source": "codex-round-2",
+    "text": "CLI parser/invocation layer needs automated tests, not just manual verification.",
+    "classification": "partially_valid",
+    "impact": "partially_changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  }
+]

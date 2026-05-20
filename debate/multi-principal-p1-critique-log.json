@@ -1,0 +1,164 @@
+[
+  {
+    "id": "mp1-C01",
+    "source": "codex-round-1",
+    "text": "memory_orient and memory_attention need input-level authorization, not output filtering — aggregate tools derive from multiple sources",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "mp1-C02",
+    "source": "codex-round-1",
+    "text": "memory_query canonical injection (meta/reference-index, people/magnus/profile, meta/conventions) must be filtered through access checks",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "mp1-C03",
+    "source": "codex-round-1",
+    "text": "Draft and spec disagree on denial payloads (agent denial shape, orient conventions for non-owners, memory_insights behavior)",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "mp1-C04",
+    "source": "codex-round-1",
+    "text": "memory_read not-found path leaks sibling keys via hint — denied access must use a separate clean path",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "mp1-C05",
+    "source": "codex-round-1",
+    "text": "Pattern validation must reject ambiguous patterns like users/sara* — require exact, /* suffix, or lone *",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "mp1-C06",
+    "source": "codex-round-1",
+    "text": "Per-tool namespace scope normalization needed — memory_history and memory_query interpret namespace parameters differently (subtree vs exact)",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "mp1-C07",
+    "source": "codex-round-1",
+    "text": "Shared-namespace delete incompatible with schema — entries have no principal ownership column, executeDelete wipes all entries",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "mp1-C08",
+    "source": "codex-round-1",
+    "text": "Non-owner namespace creation (writing to users/sara/inbox/msg1) needs explicit test in Phase 1",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "mp1-C09",
+    "source": "codex-round-1",
+    "text": "Delete token must be bound to principal — prevent cross-principal reuse",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "mp1-C10",
+    "source": "codex-round-1",
+    "text": "OAuth client_id to principal binding is unresolved — add oauth_client_id column to principals",
+    "classification": "partially_valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "mp1-C11",
+    "source": "codex-round-1",
+    "text": "Agent service tokens should be explicitly in or out of Phase 1 scope — current plan is ambiguous",
+    "classification": "partially_valid",
+    "impact": "partially_changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "mp1-C12",
+    "source": "codex-round-1",
+    "text": "Test matrix gaps — 13 specific missing scenarios identified including orient derived fields, history subtree, query explain mode, mixed batches",
+    "classification": "partially_valid",
+    "impact": "partially_changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "mp1-C13",
+    "source": "codex-round-1",
+    "text": "New tool default-allows without enforcement — tests only help if someone writes them. Need structural guard.",
+    "classification": "partially_valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "mp1-C14",
+    "source": "codex-round-1",
+    "text": "Compact conventions helper references meta/conventions which is owner-only — would disclose namespace to non-owners",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "mp1-C15",
+    "source": "codex-round-2",
+    "text": "Shared-namespace single-entry delete by any writer is still unsafe without entry ownership — must be all-deletes-owner-only OR add principal column",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "mp1-C16",
+    "source": "codex-round-2",
+    "text": "Agent service-token auth flow under-specified — need explicit AuthInfo.clientId semantics, revocation/expiry enforcement point, and whether verification is in verifyAccessToken or resolveAccessContext",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "mp1-C17",
+    "source": "codex-round-2",
+    "text": "Namespace canonicalization still missing — raw inputs not normalized before matching despite validator accepting slash-heavy variants",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "mp1-C18",
+    "source": "codex-round-2",
+    "text": "Spec must be updated to match revised design — source of truth is internally inconsistent",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  }
+]

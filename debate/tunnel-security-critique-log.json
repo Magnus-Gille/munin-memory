@@ -1,0 +1,119 @@
+[
+  {
+    "id": "tunnel-C01",
+    "source": "codex-round-1",
+    "text": "Unbounded session map with no TTL or cap — authenticated DoS via session exhaustion",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "tunnel-C02",
+    "source": "codex-round-1",
+    "text": "No timeout strategy (requestTimeout, headersTimeout, body read deadline) — slowloris exposure",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "tunnel-C03",
+    "source": "codex-round-1",
+    "text": "Plan not aligned with PRD v2 security controls (agent identity, RBAC, audit logging)",
+    "classification": "partially_valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "tunnel-C04",
+    "source": "codex-round-1",
+    "text": "DNS rebinding / host validation not addressed — SDK supports it but app doesn't use it",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "tunnel-C05",
+    "source": "codex-round-1",
+    "text": "Defense-in-depth credentials co-located in MCP client config — single compromise leaks both",
+    "classification": "partially_valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "tunnel-C06",
+    "source": "codex-round-1",
+    "text": "munin-memory.service lacks systemd hardening directives (runs as magnus with full access)",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "tunnel-C07",
+    "source": "claude-self-review",
+    "text": "Unverified: MCP clients may not propagate CF-Access headers on all request types (POST, GET/SSE, DELETE)",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "tunnel-C08",
+    "source": "claude-self-review",
+    "text": "Rate limiter design underspecified — SSE connections, MCP handshake counting unclear",
+    "classification": "partially_valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "tunnel-C09",
+    "source": "claude-self-review",
+    "text": "Cloudflare Access may be overkill for single-user with 256-bit Bearer token",
+    "classification": "partially_valid",
+    "impact": "rejected",
+    "severity": "minor",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "tunnel-C10",
+    "source": "codex-round-2",
+    "text": "Proposed keepAliveTimeout=60s is a hardening regression (increases connection pinning exposure)",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "tunnel-C11",
+    "source": "codex-round-2",
+    "text": "Fixed low session cap (10) can be exploited as authenticated lockout — needs eviction/absolute lifetime",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "tunnel-C12",
+    "source": "codex-round-2",
+    "text": "SSE reconnection creates new HTTP GET requests — headers must be re-sent, not assumed persistent",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "tunnel-C13",
+    "source": "codex-round-2",
+    "text": "Go-live gate: must run end-to-end auth enforcement test across all MCP request types before deploying",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  }
+]

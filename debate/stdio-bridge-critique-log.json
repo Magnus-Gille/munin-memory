@@ -1,0 +1,92 @@
+[
+  {
+    "id": "stdio-bridge-C01",
+    "source": "codex-round-1",
+    "text": "SSE handling buffers full response before emitting — can deadlock long-lived/incremental SSE streams",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "stdio-bridge-C02",
+    "source": "codex-round-1",
+    "text": "SSE parser is not spec-complete: no multi-line data assembly, requires space after 'data:', silently drops parse failures causing client hangs",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "stdio-bridge-C03",
+    "source": "codex-round-1",
+    "text": "No fetch timeout/AbortController means one hung HTTP request stalls entire serial queue indefinitely",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "stdio-bridge-C04",
+    "source": "codex-round-1",
+    "text": "SIGINT/SIGTERM handlers exit immediately, skipping session cleanup and in-flight drain",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "stdio-bridge-C05",
+    "source": "codex-round-1",
+    "text": "Protocol surface narrower than full MCP Streamable HTTP: no GET SSE stream, no resumability",
+    "classification": "partially_valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "stdio-bridge-C06",
+    "source": "codex-round-1",
+    "text": "Unbounded queue and stdout writes ignoring backpressure",
+    "classification": "partially_valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "stdio-bridge-C07",
+    "source": "codex-round-1",
+    "text": "SDK StreamableHTTPClientTransport already in project dependencies — should be used instead of hand-rolling SSE/session",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "stdio-bridge-C08",
+    "source": "codex-round-2",
+    "text": "Concession-to-fix mismatch: conceded multi-line SSE is broken but V1 fixes don't address it",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "stdio-bridge-C09",
+    "source": "codex-round-2",
+    "text": "Mandating MUNIN_AUTH_TOKEN at startup could break CF-only deployments",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "stdio-bridge-C10",
+    "source": "codex-round-2",
+    "text": "Hardcoded 30s timeout doesn't account for legitimate long-running tool calls — should be configurable",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  }
+]

@@ -1,0 +1,128 @@
+[
+  {
+    "id": "quality-metrics-C01",
+    "source": "codex-round-1",
+    "text": "D1 duplicates already-closed work: munin-zero#6 is closed by pilot v3c (commit ad4baff). The right D1 is a reconciliation manifest of existing benchmark/queries/*.jsonl + v3/v3b/v3c, not a from-scratch 50-case label project.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "quality-metrics-C02",
+    "source": "codex-round-1",
+    "text": "D2 duplicates the existing benchmark runner: benchmark/runner.ts, benchmark/scorer.ts, MUNIN_BENCHMARK test path already exist. The right move is to extend the runner (R@20/nDCG@20, p50/p95, production-ranker mode, version/checksum), not add a parallel scripts/eval-retrieval.ts.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "quality-metrics-C03",
+    "source": "codex-round-1",
+    "text": "retrieval_events is a candidate-source, not a label-source: no source-class column, filter-only pseudo-queries logged, reformulation rate inflated by single-event HTTP sessions. Sampled cases need source_class; reformulation_rate not eligible as a primary until #31/#32 fixed.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "quality-metrics-C04",
+    "source": "codex-round-1",
+    "text": "D3 needs three variants (tiebreaker / weighted blend / docs+API correction with weight removed), not two. Naive blend could regress authoritative tracked-status entries (tests/tools.test.ts:1782). Must inspect worst-10 changed top-20 deltas, not just aggregate nDCG.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "quality-metrics-C05",
+    "source": "codex-round-1",
+    "text": "Two-primaries-never-blended needs structural enforcement (schema with separate fields + lint test failing on aggregate scalars), not just prose discipline.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "quality-metrics-C06",
+    "source": "codex-round-1",
+    "text": "Faithfulness judge plan as drafted is not defensible: 'non-Haiku' is not a control, 'audit once' fails on prompt/model drift. Adopt claim-level rubric (supported/contradicted/not_in_sources/overgeneralized), pinned model+prompt checksum, re-audit on input change, deterministic coverage/compression/stability/recency separated from judge.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "quality-metrics-C07",
+    "source": "codex-round-1",
+    "text": "Historical consolidation replay is fragile: consolidation_metadata stores cursor/model/duration only, not full pre-run state. Use hand-built v0 fixtures + #51-style exported fixture; add replay metadata going forward only if scorer proves useful.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "quality-metrics-C08",
+    "source": "codex-round-1",
+    "text": "Guardrail plumbing has a labeling bug: db.ts:2151 computes MAX(response_size_bytes) but labels it p95_response_size_bytes. Must fix (compute real p95 or rename to max_response_size_bytes) before using in any scorecard.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "quality-metrics-C09",
+    "source": "codex-round-1",
+    "text": "Priority: D4-D7 should not auto-start after D1-D3. Phase 1 cut to retrieval baseline + recency decision only; explicit stop condition if no actionable change.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "quality-metrics-C10",
+    "source": "codex-round-2",
+    "text": "Stop condition needs an 'actionable' definition: merged ranking change, merged docs/schema/API correction, OR documented no-change decision. 'No useful signal' triggers pause, no inertia continuation.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "quality-metrics-C11",
+    "source": "codex-round-2",
+    "text": "PR 0 scope correction: not just 'fix the label' — either compute real p95 or rename field; update tests/docs/consumers. Prereq for live guardrail use, not for offline benchmark (which should measure per-query latency directly).",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "quality-metrics-C12",
+    "source": "codex-round-2",
+    "text": "#19 convergence claim is load-bearing: must make LongMemEval/LoCoMo adapters run through the same corrected runner path as an explicit done condition, while keeping proxy benchmarks out of the primary gate.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "quality-metrics-C13",
+    "source": "codex-round-2",
+    "text": "75-second memory_insights figure is real (avg_duration_ms ~65-76s over tiny N) but is a tool-call telemetry aggregate, not a p95 and not a retrieval-quality guardrail. Treat as a performance lead, not a benchmark metric.",
+    "classification": "valid",
+    "impact": "partially_changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "quality-metrics-C14",
+    "source": "codex-round-2",
+    "text": "Status/synthesis drift: status was already corrected (munin-zero#6 marked closed); synthesis is stale. Don't include 'update status to close #6' as work. Benchmark lineage should live in a source-controlled manifest, not loose memory entries.",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  }
+]

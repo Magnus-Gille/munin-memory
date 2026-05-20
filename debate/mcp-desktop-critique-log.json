@@ -1,0 +1,110 @@
+[
+  {
+    "id": "mcp-desktop-C01",
+    "source": "codex-round-1",
+    "text": "Root cause diagnosis is not proven — mcp-remote#113 is not a confirmed match. Three explanations remain live.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "mcp-desktop-C02",
+    "source": "codex-round-1",
+    "text": "Native connectors may inherit the same chat-mode session problem if Desktop itself is the layer losing state.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "mcp-desktop-C03",
+    "source": "codex-round-1",
+    "text": "Security implications understated — Bearer auth remains, OAuth adds 30-day refresh tokens, more credentials during Phase 1.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "mcp-desktop-C04",
+    "source": "codex-round-1",
+    "text": "Phase 1 dual registration unsafe — duplicate mutating tools, session cap pressure, global rate limiter, uninterpretable logs.",
+    "classification": "partially_valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "mcp-desktop-C05",
+    "source": "codex-round-1",
+    "text": "onsessionclosed only deletes map entry but doesn't call server.close(), unlike evictSession() — real leak.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "mcp-desktop-C06",
+    "source": "codex-round-1",
+    "text": "Stateless HTTP mode overlooked — SDK supports it, Munin fits the profile (tool-only, no per-session state), directly removes the failing requirement.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "mcp-desktop-C07",
+    "source": "codex-round-1",
+    "text": "Prior stdio-bridge debate already converged on SDK-based bridge as fix for session bugs — not referenced.",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "mcp-desktop-C08",
+    "source": "codex-round-1",
+    "text": "Should this even be fixed? Current state (cowork works, chat doesn't) is acceptable as temporary limitation.",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "mcp-desktop-C09",
+    "source": "codex-round-2",
+    "text": "C4 pushback dodges the point — dual registration makes the experiment uninterpretable regardless of duration, since logs don't record connector/auth source.",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "mcp-desktop-C10",
+    "source": "codex-round-2",
+    "text": "Stateless mode is not just flipping sessionIdGenerator — SDK requires fresh transport per request in stateless mode. Implementation delta understated.",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "mcp-desktop-C11",
+    "source": "codex-round-2",
+    "text": "Rate limiter is already global (not session-based) — Claude's concern about losing session-based rate limiting in stateless mode was wrong.",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "mcp-desktop-C12",
+    "source": "codex-round-2",
+    "text": "Observability is weak even before stateless — logs omit auth mechanism, client identity, connector source.",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  }
+]

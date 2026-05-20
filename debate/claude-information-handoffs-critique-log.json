@@ -1,0 +1,65 @@
+[
+  {
+    "id": "claude-information-handoffs-C01",
+    "source": "claude-round-1",
+    "text": "The initial routing model was a taxonomy without an explicit decision procedure for ambiguous cases.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "claude-information-handoffs-C02",
+    "source": "claude-round-1",
+    "text": "`inbox/` was treated as architecture without defined naming, lifecycle, cleanup, or discoverability rules.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "claude-information-handoffs-C03",
+    "source": "claude-round-1",
+    "text": "The draft dismissed a routing skill too quickly and failed to engage with the value of enforcement at execution time.",
+    "classification": "partially_valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "claude-information-handoffs-C04",
+    "source": "claude-round-1",
+    "text": "Munin's role in task handoff was underspecified, especially for Desktop/Web/Mobile environments without repo access.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "claude-information-handoffs-C05",
+    "source": "claude-round-1",
+    "text": "The draft did not clearly separate 'inform' from 'command' as distinct operations.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "claude-information-handoffs-C06",
+    "source": "claude-round-1",
+    "text": "The strongest practical recommendation was buried; the draft needed a sharper default rather than an abstract principle.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "claude-information-handoffs-C07",
+    "source": "claude-round-2",
+    "text": "Even after revision, the handoff-file discovery mechanism needed to be stated explicitly: the invoking prompt or task description must point Claude to the file.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  }
+]

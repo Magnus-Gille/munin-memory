@@ -1,0 +1,92 @@
+[
+  {
+    "id": "docs-location-C01",
+    "source": "codex-round-1",
+    "text": "In-repo docs don't solve the runtime cross-environment problem. memory_orient is already the right runtime surface; Desktop/Web/Mobile can't read repo files.",
+    "classification": "partially_valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "docs-location-C02",
+    "source": "codex-round-1",
+    "text": "The draft's handshake description already references meta/workbench, which was deleted. The extracted doc is stale before it exists.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "docs-location-C03",
+    "source": "codex-round-1",
+    "text": "Personal vs generic is not a clean two-way split. There are at least four categories: stable server semantics, Claude-specific guidance, Magnus-specific workflow, transferable deployment examples.",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "docs-location-C04",
+    "source": "codex-round-1",
+    "text": "Two-audience problem (cloner/self-hoster vs active Claude session) breaks the single-doc approach. Each needs fundamentally different content.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "docs-location-C05",
+    "source": "codex-round-1",
+    "text": "Public MIT repo does not imply universal product contract. README says it targets technically comfortable self-hosters, not mass-market users.",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "docs-location-C06",
+    "source": "codex-round-1",
+    "text": "Draft misses the strongest alternative: 3-layer structure (README concept section + repo concepts doc + memory_orient runtime). The blog/gist dismissal is too quick.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "docs-location-C07",
+    "source": "codex-round-1",
+    "text": "Proposed doc scope (handshake + two-layer model + state/log + writing principles + namespace conventions + environment table) is too much volatile material for one static page.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "docs-location-N01",
+    "source": "codex-round-2",
+    "text": "Precedence across the three layers is underspecified. Without explicit rules (Layer 3 wins for live ops, Layer 2 for concepts, Layer 1 for framing), drift returns through overlap.",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "docs-location-N02",
+    "source": "codex-round-2",
+    "text": "'Durable concepts' needs a hard exclusion rule, not just topic labels. Project history shows meta/workbench, two-layer model framing, write protocol, and CAS semantics all changed.",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "docs-location-N03",
+    "source": "codex-round-2",
+    "text": "Namespace taxonomy is the biggest smuggling risk. Current table mixes durable categories (projects/*, people/*) with workflow-local ones (documents/*, signals/*) and Mimir-specific conventions.",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  }
+]

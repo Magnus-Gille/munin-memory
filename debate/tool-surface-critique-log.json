@@ -1,0 +1,101 @@
+[
+  {
+    "id": "tool-surface-C01",
+    "source": "codex-round-1",
+    "text": "Context-cost premise is unmeasured and unfalsifiable as stated; existing per-tool telemetry (memory_status, db.ts call/error/size/duration) was overlooked and is the right first measurement, not a refactor.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "tool-surface-C02",
+    "source": "codex-round-1",
+    "text": "Session-continuity merge (orient/resume/handoff/narrative) directly contradicts a recorded design decision: docs/phase-2-engineering-plan.md explicitly says do not overload memory_orient with targeted resume behavior. Fails the draft's own 'different computations' test.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "tool-surface-C03",
+    "source": "codex-round-1",
+    "text": "The 22-tool surface was deliberately planned and shipped (CHANGELOG, README, phase plans 2-4, Munin logs), not accidental accretion. The 'sprawl' framing is wrong; the real defect is doc drift.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "tool-surface-C04",
+    "source": "codex-round-1",
+    "text": "CLAUDE.md actually has 11 tool rows not 12, plus a stale 'All 12 MCP tools enforce access rules' line. Documentation lacks an enforced single source of truth vs TOOL_DEFINITIONS.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "tool-surface-C05",
+    "source": "codex-round-1",
+    "text": "Param-mode consolidation is not capability-preserving: per-tool authorization/redaction paths and per-tool librarian/access coverage tests mean a mode enum collapses multiple safety contracts behind one schema.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "tool-surface-C06",
+    "source": "codex-round-1",
+    "text": "memory_update_status mislabeled as 'status sugar'; it is a server-enforced structured write path with canonical sections and compare-and-swap. Second factual error in the original analysis (first was memory_status).",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "tool-surface-C07",
+    "source": "codex-round-1",
+    "text": "Consolidation would silently degrade selection and blind per-tool telemetry (keyed by tool_name) exactly when evidence is needed; retaining aliases to preserve telemetry negates the context saving (catch-22).",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "tool-surface-C08",
+    "source": "codex-round-1",
+    "text": "Migration cost understated: dedicated per-tool test suites and per-tool access/librarian coverage make it more than a mechanical rename; reversibility is asymmetric.",
+    "classification": "valid",
+    "impact": "partially_changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "tool-surface-C09",
+    "source": "codex-round-2",
+    "text": "Over-concession: 'architecture migration is abandoned' if read as permanent is too strong. Correct conclusion is 'do not consolidate now'; keep surface-curation alive behind measurement.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "tool-surface-C10",
+    "source": "codex-round-2",
+    "text": "The doc-drift fix can itself become over-engineering. Generating prose from TOOL_DEFINITIONS (internal constant, template-literal descriptions) is a rabbit hole; correct fix is hand-fix the table + a CI name-consistency test, not a prose generator.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "tool-surface-C11",
+    "source": "codex-round-2",
+    "text": "read_batch->read is not behavior-identical today: memory_read adds synthesis freshness metadata and logs opened_result outcomes; memory_read_batch does neither per-result. A merge must decide preserve/fix/accept-change. Safer first step is an internal shared readOne helper, keeping public tools stable.",
+    "classification": "valid",
+    "impact": "deferred",
+    "severity": "minor",
+    "caught_by_self_review": false
+  }
+]

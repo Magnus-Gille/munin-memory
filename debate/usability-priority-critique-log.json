@@ -1,0 +1,56 @@
+[
+  {
+    "id": "usability-priority-C01",
+    "source": "codex-round-1",
+    "text": "Claude overstates memory_list frequency — memory_orient is the privileged path, not memory_list",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "usability-priority-C02",
+    "source": "codex-round-1",
+    "text": "Task namespaces don't corrupt the dashboard — they only pollute the auxiliary namespaces field",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "usability-priority-C03",
+    "source": "codex-round-1",
+    "text": "The always-on token tax is the conventions blob (~2800 words), not the task listing — conventions are returned unconditionally on every session",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "usability-priority-C04",
+    "source": "codex-round-1",
+    "text": "Cannot blanket-hide all tasks/* — tasks/admin and active tasks must remain visible",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "usability-priority-C05",
+    "source": "codex-round-2",
+    "text": "Bundling #4 with #3 is scope drift — they are different classes of work and should not be conflated",
+    "classification": "partially_valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "usability-priority-C06",
+    "source": "codex-round-2",
+    "text": "Two versions of conventions risk drift — compact summary must be a controlled derivative, not a separate source of truth",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  }
+]

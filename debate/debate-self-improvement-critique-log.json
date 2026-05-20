@@ -1,0 +1,119 @@
+[
+  {
+    "id": "dsi-C01",
+    "source": "codex-round-1",
+    "text": "Retrospective validation ('Step 12') is structurally broken: no trigger, no session continuity, no ownership, and debate artifacts may be gitignored. Will not happen reliably.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "dsi-C02",
+    "source": "codex-round-1",
+    "text": "Blind spot accumulation risks becoming taxonomy project rather than behavior change. Accumulation without mandatory consumption in Step 2 is a warehouse of hindsight.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "dsi-C03",
+    "source": "codex-round-1",
+    "text": "Catch rate denominator is not fixed: if Codex becomes more exhaustive, catch rate falls even if self-review improved. Unsafe for longitudinal comparison.",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "dsi-C04",
+    "source": "codex-round-1",
+    "text": "Specificity score (file:line reference ratio) is gameable and incentivizes over-anchoring on quoted code while underweighting systemic reasoning.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "dsi-C05",
+    "source": "codex-round-1",
+    "text": "'Validated in implementation' does not cleanly mean false positive. Avoided failures, design changes, and unobserved latent risks all look like non-manifestation.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "dsi-C06",
+    "source": "codex-round-1",
+    "text": "INDEX variance (0%–57%) suggests domain-sensitivity, not one stable Claude blind spot. A single global intervention is the wrong level.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "dsi-C07",
+    "source": "codex-round-1",
+    "text": "Stronger Step 2 with a fixed topic-specific adversarial checklist is simpler and more credible than the proposed machinery. Missed entirely in the draft.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "dsi-C08",
+    "source": "codex-round-1",
+    "text": "Mandatory draft sections (assumptions, failure modes, alternatives rejected, unknowns) improve the substrate before any review runs. Higher leverage than retrospective mechanisms. Missed entirely.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "dsi-C09",
+    "source": "codex-round-1",
+    "text": "The existing 'impact' field in the critique log (changed/acknowledged/rejected) is a better and more available signal than implementation retrospectives. Missed entirely in the draft.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "dsi-C10",
+    "source": "codex-round-1",
+    "text": "Periodic human synthesis every 5–10 debates is more sustainable than continuous per-debate blind-spot logging.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "dsi-C11",
+    "source": "codex-round-1",
+    "text": "Selection discipline (better triage on when to debate) may improve signal quality more than any retrospective mechanism.",
+    "classification": "partially_valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "dsi-C12",
+    "source": "codex-round-2",
+    "text": "Revised retrospective via Munin trigger creates new hard coupling (skill → memory_orient) that doesn't exist in the current skill. This is an architecture change, not a small repair.",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "dsi-C13",
+    "source": "codex-round-2",
+    "text": "The 'impact' field is not schema-clean across existing logs: values include 'deferred', 'partially_changed', 'reframed' beyond the three specified. Needs normalization before use as primary metric.",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "minor",
+    "caught_by_self_review": false
+  }
+]
