@@ -14,6 +14,21 @@ changelog is the canonical record of what moved.
   unincorporated logs a single consolidation run incorporates, so a large
   backlog drains incrementally over successive worker ticks instead of
   producing one oversized synthesis request.
+- Retrieval benchmark lineage manifest at
+  `benchmark/queries/retrieval-v1.manifest.{json,md}`. Curated source index
+  that reconciles munin-native query sets (`baseline.jsonl`,
+  `baseline-claude.jsonl`, `example.jsonl` — 34 records) with munin-zero
+  pilot evidence (v2/v3/v3b/v3c, pinned at commit `ad4baff`) into eight
+  first-class source entries (176 records total) plus an explicit
+  `omitted_artifacts[]` inventory. Records `munin-zero#6` as closed by
+  pilot v3c with sha256-pinned evidence (report + intents + queries +
+  results + targets) and the six target UUIDs. Strong validator test in
+  `tests/retrieval-manifest.test.ts` parses native JSONLs against the
+  `BenchmarkQuery` shape, asserts sha256 pins, verifies the v1 source
+  freeze, and includes negative tests for `source_class`, target metadata,
+  closure evidence, and derived totals. The manifest is a citation /
+  provenance index, not a runner input or label store. No existing JSONL
+  is modified.
 
 ### Changed
 
