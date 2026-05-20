@@ -31,6 +31,7 @@ docs/*
 debate/*
 !debate/INDEX.md
 !debate/*-summary.md
+!debate/*-critique-log.json
 !debate/*-resolution.md
 !debate/resolution.md
 # Off-topic debates (not about Munin Memory)

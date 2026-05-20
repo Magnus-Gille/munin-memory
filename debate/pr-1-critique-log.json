@@ -1,0 +1,137 @@
+[
+  {
+    "id": "pr-1-C01",
+    "source": "codex-round-1-plan",
+    "text": "source_class: evidence collides with the BenchmarkQuery.source enum (manual|derived|synthetic). Two concepts conflated with tier.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "pr-1-C02",
+    "source": "codex-round-1-plan",
+    "text": "Missing target/result metadata for v3c closure: target_set_id, target_path, target_id_field, target_count, result_paths[] (with search_mode/limit/metric/record_count), evaluation_method, and target UUID list.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "pr-1-C03",
+    "source": "codex-round-1-plan",
+    "text": "Plan defers difficulty/entry-type strata but the v3 targets file already carries them. PR 1 DoD requires preserving existing strata.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "pr-1-C04",
+    "source": "codex-round-1-plan",
+    "text": "'All lineage' framing overclaims for the eight-source set. Need omitted_artifacts[] inventory and curated-index framing.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "pr-1-C05",
+    "source": "codex-round-1-plan",
+    "text": "Validator only checks shape; can pass vacuously. Need exact v1 freeze enforcement, sha256 pins, native JSONL parsing against BenchmarkQuery, ground_truth_kind verification, negative tests.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "pr-1-C06",
+    "source": "codex-round-1-plan",
+    "text": "Manifest fields make it look like a deduped label store. Need explicit 'NOT a label store' section + record_key_fields/citation_format so consumers dereference instead of consuming inline.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "pr-1-C07",
+    "source": "codex-round-2-pr-review",
+    "text": "source_class on v2-intents and v3-intents marked as 'manual', but pilot reports name a Sonnet intent-writer in the blind chain. Should be 'derived'.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "pr-1-C08",
+    "source": "codex-round-2-pr-review",
+    "text": "closed_issues evidence does not include v3b lexical baseline. The '5/6 vs 0/6' claim is not verifiable from the closure record alone.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "pr-1-C09",
+    "source": "codex-round-2-pr-review",
+    "text": "Versioning policy says additive changes (including new sources) don't bump manifest_version, but validator enforces an exact 8-source freeze. Contradiction.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "pr-1-C10",
+    "source": "codex-round-2-pr-review",
+    "text": "Test comment calls EXPECTED_V1_SOURCE_IDS the 'single source of truth' while markdown says JSON is the source of truth.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "pr-1-C11",
+    "source": "codex-round-2-pr-review",
+    "text": "CHANGELOG calls the validator 'Strong' but external munin-zero artifacts aren't verified in CI. Overclaim.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "pr-1-C12",
+    "source": "codex-round-2-pr-review",
+    "text": "Maintenance ownership unclear; multiple places must stay in sync (JSON + markdown table + test expectations) with no named owner or trigger list.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "pr-1-C13",
+    "source": "codex-round-2-pr-review",
+    "text": "v3c stratum subset breakdown could be added (decisions: 6) for inspection convenience.",
+    "classification": "valid",
+    "impact": "rejected",
+    "severity": "minor",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "pr-1-C14",
+    "source": "codex-round-2-pr-review",
+    "text": "v3c-intents source_class flagged as possibly 'derived'. Defended as 'manual' because pilot-report-v3c.md describes them as 'rewritten' without naming a model, in contrast to v3 which names the Sonnet intent-writer.",
+    "classification": "partially_valid",
+    "impact": "partially_changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "pr-1-C15",
+    "source": "codex-round-3-pr-rebuttal",
+    "text": "Markdown §5 table still listed v2/v3 intents as 'manual' after JSON was corrected — doc-vs-JSON drift.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  }
+]
