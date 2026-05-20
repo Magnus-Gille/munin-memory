@@ -77,12 +77,24 @@ revisions; consumers should branch on it before reading new fields.
 - `snapshot_schema_version` — DB migration version of the snapshot used
   for the run. `schema_version` is kept for one release as a deprecated
   alias and mirrors this value.
-- `runner_mode` — which runner code path produced the numbers. `"raw"`
-  calls `src/db.ts` query functions directly (faster, no rerank, no
-  injectors). `"production_ranker"` (added in PR 2b) additionally runs
-  results through `rerankQueryResults` + canonical/attention injectors
-  + completed-task filter, matching `memory_query`. PR 2a always emits
-  `"raw"`.
+- `runner_mode` — which runner code path actually produced the numbers.
+  `"raw"` calls `src/db.ts` query functions directly (faster, no rerank,
+  no injectors). `"production_ranker"` (PR 2b) over-fetches per source
+  by `QUERY_RERANK_OVERFETCH_MULTIPLIER` and runs results through the
+  same canonical/attention injectors + `rerankQueryResults` +
+  completed-task filter that `memory_query` uses, then slices to the
+  requested limit. Select via `runnerMode` on `runBenchmark` or
+  `--runner-mode` on the adapter CLIs.
+- `runner_mode_requested` (PR 2b) — what the caller asked for. Equal to
+  `runner_mode` for non-degraded runs. When they differ, the runner
+  downgraded — `warnings[]` carries the reason.
+- `search_recency_weight` (PR 2b) — recency weight applied during
+  reranking. Number for `production_ranker` (default `0.2`); `null` for
+  `raw` because the reranker is skipped entirely.
+- `principal_id` (PR 2b) — always `"owner"` today. Benchmarks run with
+  full owner access and skip `filterByAccess`. Reserved so a future
+  multi-principal benchmarking mode can change this without a schema
+  bump.
 - `query_set_sources` — per-file lineage: path, filename, record_count,
   raw-bytes SHA-256, byte size, optional `manifest_source_id`, and
   `manifest_match` outcome (`matched` | `filename_match_sha_mismatch` |
@@ -119,6 +131,22 @@ SHA mismatch is recorded as a `warnings[]` entry and reflected in
 `manifest_match: "filename_match_sha_mismatch"`. It is not an error —
 local edits during ablations are expected. The load-bearing guardrail
 is the separate manifest CI test in `tests/retrieval-manifest.test.ts`.
+
+### `production_ranker` prereqs and fallback
+
+`production_ranker` mode reads columns added in schema v5
+(`entries.owner_principal_id`, `classification`, `valid_until`). Running
+against an older snapshot is **fail-loud** by default — `runBenchmark`
+throws with the missing-prereq reason. To opt into a silent downgrade
+that emits a `warnings[]` entry and falls back to `runner_mode: "raw"`,
+pass `fallbackRunnerMode: "raw"`. In both cases `runner_mode_requested`
+preserves the original ask, so post-hoc consumers can detect the
+degraded run by comparing the two fields.
+
+The benchmark-import-boundary test (`tests/benchmark-import-boundary.test.ts`)
+pins the small curated surface the benchmark is allowed to import from
+`src/tools.ts`. Issue #59 tracks the planned extraction of that surface
+into `src/internal/reranker.ts`.
 
 ### Line endings
 

@@ -1,0 +1,195 @@
+/**
+ * PR 2b — load-bearing import boundary test.
+ *
+ * The benchmark runner is allowed to import only a small, curated set of
+ * names from `src/tools.ts` (the reranker pipeline that PR 2b widened to
+ * `export`). If new names creep in here we risk benchmark/ depending on
+ * implementation detail that issue #59 is meant to extract into a
+ * dedicated module. Lock the surface down now so a refactor stays
+ * mechanical.
+ *
+ * Update the allow-list when issue #59 lands or when a new pipeline name
+ * needs benchmark visibility — and update issue #59's acceptance
+ * criteria at the same time.
+ */
+
+import { describe, it, expect } from "vitest";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join, resolve } from "node:path";
+
+const BENCHMARK_DIR = resolve(__dirname, "..", "benchmark");
+
+/**
+ * Names the benchmark surface is allowed to import from src/tools.js.
+ * Anything else is a lint failure — either remove the new dependency or
+ * propose a new public name on src/tools.ts and add it here in the
+ * same PR that introduces it.
+ */
+const ALLOWED_TOOLS_IMPORTS = new Set<string>([
+  "buildRelaxedLexicalQuery",
+  "QUERY_RERANK_OVERFETCH_MULTIPLIER",
+  "DEFAULT_SEARCH_RECENCY_WEIGHT",
+  "shouldApplyDefaultQuerySuppression",
+  "getTrackedStatusAssessments",
+  "injectCanonicalQueryEntries",
+  "injectAttentionQueryEntries",
+  "rerankQueryResults",
+]);
+
+function walkTypeScriptFiles(dir: string, out: string[] = []): string[] {
+  for (const entry of readdirSync(dir)) {
+    const path = join(dir, entry);
+    const st = statSync(path);
+    if (st.isDirectory()) {
+      // Skip generated and downloaded data — they don't host source.
+      if (entry === "node_modules" || entry === "data" || entry === "generated" || entry === "fixtures" || entry === "reports") {
+        continue;
+      }
+      walkTypeScriptFiles(path, out);
+    } else if (entry.endsWith(".ts")) {
+      out.push(path);
+    }
+  }
+  return out;
+}
+
+interface ImportRecord {
+  from: string;
+  /** Named imports — empty for star/default. */
+  names: string[];
+  /** Star (`import * as x`) and default (`import x from`) imports are
+   * sweeping aliases: they implicitly pull every export off the target
+   * module, so even one of them on `src/tools.js` blows the curated
+   * surface wide open. Flag separately so the assertion can reject
+   * them outright instead of relying on the named-import allow-list. */
+  wildcard: boolean;
+}
+
+/**
+ * Parse import statements out of a TypeScript source string.
+ *
+ * Handles named imports, namespace (`import * as ...`) imports, and
+ * default imports. Mixed forms like `import def, { a, b } from "..."`
+ * are reported as both — the named names are collected and `wildcard`
+ * is set (the default binding counts as a sweeping alias).
+ *
+ * Naive but sufficient for this allow-list: we only care about imports
+ * from a specific module, and `prettier` formats benchmark/ enough that
+ * we never have to worry about adversarial whitespace.
+ */
+function extractImports(source: string): ImportRecord[] {
+  const out: ImportRecord[] = [];
+
+  // Named or mixed default+named:  import [Foo,] { a, b as c } from "x";
+  // Captures optional default binding before the braced list.
+  const named = /import\s+(?:type\s+)?(?:([A-Za-z_$][\w$]*)\s*,\s*)?\{\s*([^}]+)\s*\}\s+from\s+["']([^"']+)["']/g;
+  let m: RegExpExecArray | null;
+  while ((m = named.exec(source)) !== null) {
+    const names = m[2]
+      .split(",")
+      .map((s) => s.trim())
+      .map((s) => s.split(/\s+as\s+/)[0].trim())
+      .map((s) => s.replace(/^type\s+/, "").trim())
+      .filter((s) => s.length > 0);
+    out.push({ from: m[3], names, wildcard: Boolean(m[1]) });
+  }
+
+  // Pure star alias:  import * as tools from "x";
+  const star = /import\s+(?:type\s+)?\*\s+as\s+[A-Za-z_$][\w$]*\s+from\s+["']([^"']+)["']/g;
+  while ((m = star.exec(source)) !== null) {
+    out.push({ from: m[1], names: [], wildcard: true });
+  }
+
+  // Pure default:  import tools from "x";
+  // Use a negative lookahead to avoid double-matching the `default + named`
+  // form already captured above (those start with `import Foo, {`).
+  const def = /import\s+(?:type\s+)?([A-Za-z_$][\w$]*)\s+from\s+["']([^"']+)["']/g;
+  while ((m = def.exec(source)) !== null) {
+    out.push({ from: m[2], names: [], wildcard: true });
+  }
+
+  return out;
+}
+
+describe("extractImports — lint primitive", () => {
+  it("captures named imports including aliases and type modifier", () => {
+    const src = `import { foo, bar as baz, type qux } from "x";`;
+    const records = extractImports(src);
+    expect(records).toHaveLength(1);
+    expect(records[0].from).toBe("x");
+    expect(records[0].names.sort()).toEqual(["bar", "foo", "qux"].sort());
+    expect(records[0].wildcard).toBe(false);
+  });
+
+  it("flags star imports as wildcards (M2 from PR 2b review)", () => {
+    const src = `import * as tools from "../src/tools.js";`;
+    const records = extractImports(src);
+    expect(records).toHaveLength(1);
+    expect(records[0].wildcard).toBe(true);
+    expect(records[0].names).toEqual([]);
+  });
+
+  it("flags default imports as wildcards", () => {
+    const src = `import tools from "../src/tools.js";`;
+    const records = extractImports(src);
+    // The default-import regex may match — but the assertion only cares
+    // that at least one record on `../src/tools.js` is flagged wildcard.
+    const toolsImports = records.filter((r) => r.from === "../src/tools.js");
+    expect(toolsImports.some((r) => r.wildcard)).toBe(true);
+  });
+
+  it("captures mixed default + named as both", () => {
+    const src = `import tools, { foo } from "../src/tools.js";`;
+    const records = extractImports(src);
+    expect(records).toHaveLength(1);
+    expect(records[0].wildcard).toBe(true);
+    expect(records[0].names).toEqual(["foo"]);
+  });
+});
+
+describe("benchmark/ → src/tools.ts import boundary", () => {
+  it("benchmark/ only imports the curated reranker surface from src/tools", () => {
+    const files = walkTypeScriptFiles(BENCHMARK_DIR);
+    const violations: Array<{ file: string; name: string }> = [];
+
+    for (const file of files) {
+      const src = readFileSync(file, "utf-8");
+      const imports = extractImports(src);
+      for (const imp of imports) {
+        // Match the various relative paths benchmark/ uses to reach
+        // src/tools(.js). Direct file imports only — package imports
+        // never resolve into the tools module.
+        const isToolsImport = /(?:^|\/)src\/tools(?:\.js)?$/.test(imp.from)
+          || imp.from === "../src/tools.js"
+          || imp.from === "../../src/tools.js"
+          || imp.from === "../../../src/tools.js";
+        if (!isToolsImport) continue;
+        // Star and default imports are categorically forbidden: they
+        // pull every export off `src/tools.js` and trivially bypass the
+        // allow-list. Surface as a violation with a synthetic name so
+        // the error message points at the right pattern.
+        if (imp.wildcard) {
+          violations.push({ file, name: "<star-or-default import>" });
+        }
+        for (const name of imp.names) {
+          if (!ALLOWED_TOOLS_IMPORTS.has(name)) {
+            violations.push({ file, name });
+          }
+        }
+      }
+    }
+
+    if (violations.length > 0) {
+      const summary = violations
+        .map((v) => `  ${v.file.replace(BENCHMARK_DIR, "benchmark")}: imports ${v.name}`)
+        .join("\n");
+      throw new Error(
+        `Benchmark surface imports unapproved names from src/tools.ts:\n${summary}\n\n` +
+          `If the new dependency is legitimate, add the name to ALLOWED_TOOLS_IMPORTS ` +
+          `in tests/benchmark-import-boundary.test.ts AND update issue #59's acceptance ` +
+          `criteria. If not, refactor the benchmark to not need it.`,
+      );
+    }
+    expect(violations).toEqual([]);
+  });
+});

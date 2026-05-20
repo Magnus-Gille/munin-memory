@@ -10,6 +10,37 @@ changelog is the canonical record of what moved.
 
 ### Added
 
+- **Benchmark `production_ranker` mode (PR 2b).** The benchmark runner
+  now offers a second code path that runs results through the same
+  pipeline `memory_query` uses in production: canonical reference
+  injection, attention/triage injection, completed-task filtering, and
+  `rerankQueryResults` with heuristic + freshness scoring — sliced to
+  the user-facing limit. Opt in with `runnerMode: "production_ranker"`
+  on `runBenchmark`, or `--runner-mode production_ranker` on the
+  LongMemEval / LoCoMo adapter CLIs. Fails loud when the snapshot
+  schema is too old for the rerank pipeline (need v5+); pass
+  `fallbackRunnerMode: "raw"` to opt into a silent downgrade with a
+  `warnings[]` entry. New report fields: `runner_mode_requested`
+  (always present, equal to `runner_mode` for non-degraded runs);
+  `search_recency_weight` (number for `production_ranker`, `null` for
+  `raw` — `0` would falsely imply "rerank ran with zero recency");
+  `principal_id: "owner"` reserved for a future multi-principal
+  benchmarking mode. New tests: `tests/runner-parity.test.ts` asserts
+  the runner's `production_ranker` top-k IDs match what
+  `memory_query` returns for the same DB and query (4 corpus shapes:
+  tracked-status, canonical-injection, decision-lookup, and the
+  relaxed-lexical fallback path) plus 4 prereq-handling cases;
+  `tests/benchmark-import-boundary.test.ts` pins the curated set of
+  names the benchmark surface is allowed to import from `src/tools.ts`
+  so the boundary survives until issue #59 extracts the rerank
+  pipeline into a dedicated module. The runner's per-query
+  `executeQuery` now returns full `Entry[]` (not just IDs) so the
+  caller picks the projection — IDs+namespaces for raw, full entries
+  for the production reranker. PR 2a's `runner_mode` field gains its
+  second value: previously always `"raw"`, now `"production_ranker"`
+  when the new path is selected. Issue #59 tracks the planned
+  follow-up that moves the exported reranker names into
+  `src/internal/reranker.ts`.
 - **Benchmark instrumentation (PR 2a — report schema v2).** Reports
   produced by `benchmark/runner.ts` now carry a `report_schema_version: 2`
   tag and additive fields on top of the existing v1 shape: top-20 scoring

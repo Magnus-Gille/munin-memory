@@ -4,10 +4,12 @@ import { buildLocomoArtifacts, type BuildMetadata, type BuildOptions } from "./b
 import { loadQueriesWithSource, runBenchmark, writeReport } from "../../runner.js";
 import { ensureSafeGeneratedPath, populateCorpusEmbeddings, type CorpusEmbeddingSummary } from "../shared.js";
 import type { SearchMode } from "../../../src/types.js";
+import type { RunnerMode } from "../../types.js";
 
 interface RunOptions extends BuildOptions {
   reportDir: string;
   reuseExisting: boolean;
+  runnerMode: RunnerMode;
 }
 
 function parseArgs(argv: string[]): RunOptions {
@@ -30,6 +32,13 @@ function parseArgs(argv: string[]): RunOptions {
   const granularity = (args.get("granularity") ?? "session") as BuildOptions["granularity"];
   const searchMode = (args.get("search-mode") ?? "lexical") as SearchMode;
   const includeAdversarial = flags.has("include-adversarial");
+  const runnerModeRaw = args.get("runner-mode") ?? "raw";
+  if (runnerModeRaw !== "raw" && runnerModeRaw !== "production_ranker") {
+    throw new Error(
+      `Invalid --runner-mode: ${runnerModeRaw}. Expected "raw" or "production_ranker".`,
+    );
+  }
+  const runnerMode: RunnerMode = runnerModeRaw;
   const suffix = granularity === "session" ? "locomo" : `locomo-${granularity}`;
   const outputBase = searchMode === "lexical"
     ? `benchmark/generated/${suffix}`
@@ -47,6 +56,7 @@ function parseArgs(argv: string[]): RunOptions {
     reportDir: resolve(args.get("report-dir") ?? "benchmark/reports"),
     limit: args.has("limit") ? Number(args.get("limit")) : undefined,
     reuseExisting: (args.get("reuse-existing") ?? "true") !== "false",
+    runnerMode,
   };
 }
 
@@ -102,6 +112,7 @@ async function main(): Promise<void> {
   const { queries, source } = loadQueriesWithSource(options.queryPath);
   const report = await runBenchmark(options.dbPath, queries, {
     querySetSources: [source],
+    runnerMode: options.runnerMode,
   });
   const reportPath = writeReport(report, options.reportDir);
 
