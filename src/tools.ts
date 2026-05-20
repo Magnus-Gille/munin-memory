@@ -854,9 +854,13 @@ function phaseOneliner(content: string, maxLen = 100): string {
 const STALENESS_THRESHOLD_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
 const EVENT_STALENESS_THRESHOLD_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
 const EVENT_LOOKAHEAD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-const QUERY_RERANK_OVERFETCH_MULTIPLIER = 5;
+// Exported (PR 2b) so the benchmark runner's production_ranker mode can
+// over-fetch by the same multiplier and apply the same default recency
+// weight as memory_query. Issue #59 tracks the eventual relocation into
+// src/internal/reranker.ts together with the rest of the rerank pipeline.
+export const QUERY_RERANK_OVERFETCH_MULTIPLIER = 5;
 const DEFAULT_ORIENT_DETAIL: OrientDetail = "compact";
-const DEFAULT_SEARCH_RECENCY_WEIGHT = 0.2;
+export const DEFAULT_SEARCH_RECENCY_WEIGHT = 0.2;
 const SEARCH_RECENCY_HALF_LIFE_DAYS = 30;
 const EXPIRES_SOON_DAYS = 7;
 const ISO_8601_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
@@ -1015,7 +1019,9 @@ const ATTENTION_TRIAGE_QUERY_PHRASES = [
   "what should i look at",
 ];
 
-interface TrackedStatusAssessment {
+// Exported (PR 2b) so the benchmark runner can pass the assessment map
+// through `rerankQueryResults`. Issue #59 tracks the planned relocation.
+export interface TrackedStatusAssessment {
   row: TrackedStatusRow;
   entry: Entry;
   lifecycle: string;
@@ -1152,7 +1158,17 @@ export function buildRelaxedLexicalQuery(query: string): string | null {
   return uniqueTerms.map((term) => `"${term}"`).join(" OR ");
 }
 
-function shouldApplyDefaultQuerySuppression(params: QueryParams): boolean {
+/**
+ * Whether the default attention/suppression heuristics apply.
+ *
+ * Exported (PR 2b) so the benchmark runner's production_ranker mode can
+ * apply the same predicate per-query as `memory_query`. Don't cache the
+ * result across queries — the gating depends on each query's params.
+ *
+ * Issue #59 tracks the planned relocation into src/internal/reranker.ts
+ * along with the rest of the rerank pipeline.
+ */
+export function shouldApplyDefaultQuerySuppression(params: QueryParams): boolean {
   return !params.namespace && !params.entry_type && (!params.tags || params.tags.length === 0);
 }
 
@@ -1315,7 +1331,13 @@ function assessTrackedStatus(row: TrackedStatusRow): TrackedStatusAssessment {
   };
 }
 
-function getTrackedStatusAssessments(db: Database.Database): Map<string, TrackedStatusAssessment> {
+/**
+ * Build the per-entry tracked-status assessment map.
+ *
+ * Exported (PR 2b) for the benchmark runner's production_ranker mode.
+ * Issue #59 tracks relocation into src/internal/reranker.ts.
+ */
+export function getTrackedStatusAssessments(db: Database.Database): Map<string, TrackedStatusAssessment> {
   const assessments = getTrackedStatuses(db).map(assessTrackedStatus);
   return new Map(assessments.map((assessment) => [assessment.entry.id, assessment]));
 }
@@ -1427,7 +1449,14 @@ function getQueryHeuristicScore(
   return score;
 }
 
-function injectCanonicalQueryEntries(
+/**
+ * Inject canonical reference entries (reference-index, magnus profile,
+ * conventions) when the query looks like a broad orientation request.
+ *
+ * Exported (PR 2b) for the benchmark runner. Issue #59 tracks the
+ * relocation into src/internal/reranker.ts.
+ */
+export function injectCanonicalQueryEntries(
   db: Database.Database,
   results: Entry[],
   params: QueryParams,
@@ -1454,7 +1483,14 @@ function injectCanonicalQueryEntries(
   return merged;
 }
 
-function injectAttentionQueryEntries(
+/**
+ * Inject blocked/needs-attention tracked statuses when the query looks
+ * like a triage request.
+ *
+ * Exported (PR 2b) for the benchmark runner. Issue #59 tracks the
+ * relocation into src/internal/reranker.ts.
+ */
+export function injectAttentionQueryEntries(
   results: Entry[],
   params: QueryParams,
   trackedStatuses: Map<string, TrackedStatusAssessment>,
@@ -1479,7 +1515,17 @@ function injectAttentionQueryEntries(
   return merged;
 }
 
-function rerankQueryResults(
+/**
+ * Rerank query results by heuristic score + freshness, applying the
+ * default suppression filter when appropriate.
+ *
+ * Exported (PR 2b) for the benchmark runner's production_ranker mode.
+ * Issue #59 tracks the relocation into src/internal/reranker.ts along
+ * with the supporting helpers (`getQueryHeuristicScore`,
+ * `isBroadOrientationQuery`, `isAttentionTriageQuery`,
+ * `looksLikeTombstone`, …).
+ */
+export function rerankQueryResults(
   results: Entry[],
   params: QueryParams,
   completedTasks: Set<string>,

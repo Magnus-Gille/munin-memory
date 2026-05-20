@@ -4,10 +4,12 @@ import { buildLongMemEvalArtifacts, type BuildMetadata, type BuildOptions } from
 import { loadQueriesWithSource, runBenchmark, writeReport } from "../../runner.js";
 import { ensureSafeGeneratedPath, populateCorpusEmbeddings, type CorpusEmbeddingSummary } from "../shared.js";
 import type { SearchMode } from "../../../src/types.js";
+import type { RunnerMode } from "../../types.js";
 
 interface RunOptions extends BuildOptions {
   reportDir: string;
   reuseExisting: boolean;
+  runnerMode: RunnerMode;
 }
 
 function parseArgs(argv: string[]): RunOptions {
@@ -28,6 +30,13 @@ function parseArgs(argv: string[]): RunOptions {
   const split = args.get("split") ?? "s";
   const granularity = (args.get("granularity") ?? "session") as BuildOptions["granularity"];
   const searchMode = (args.get("search-mode") ?? "lexical") as SearchMode;
+  const runnerModeRaw = args.get("runner-mode") ?? "raw";
+  if (runnerModeRaw !== "raw" && runnerModeRaw !== "production_ranker") {
+    throw new Error(
+      `Invalid --runner-mode: ${runnerModeRaw}. Expected "raw" or "production_ranker".`,
+    );
+  }
+  const runnerMode: RunnerMode = runnerModeRaw;
   const queryBase = granularity === "session"
     ? `benchmark/generated/longmemeval-${split}`
     : `benchmark/generated/longmemeval-${split}-${granularity}`;
@@ -48,6 +57,7 @@ function parseArgs(argv: string[]): RunOptions {
     reportDir: resolve(args.get("report-dir") ?? "benchmark/reports"),
     limit: args.has("limit") ? Number(args.get("limit")) : undefined,
     reuseExisting: (args.get("reuse-existing") ?? "true") !== "false",
+    runnerMode,
   };
 }
 
@@ -103,6 +113,7 @@ async function main(): Promise<void> {
   const { queries, source } = loadQueriesWithSource(options.queryPath);
   const report = await runBenchmark(options.dbPath, queries, {
     querySetSources: [source],
+    runnerMode: options.runnerMode,
   });
   const reportPath = writeReport(report, options.reportDir);
 

@@ -159,10 +159,34 @@ export interface BenchmarkReport {
   /** Total evaluations (queries × modes; differs from query_count when search_mode is "all"). */
   evaluation_count: number;
   /**
-   * Which runner code path produced these numbers. In PR 2a always `"raw"`;
-   * PR 2b adds `"production_ranker"`. Present on every report as of v2.
+   * Which runner code path actually produced these numbers. PR 2a emitted
+   * only `"raw"`; PR 2b adds `"production_ranker"`. Compare with
+   * `runner_mode_requested` to detect a degraded run (e.g. caller asked
+   * for `production_ranker` but the runner downgraded to `raw` because a
+   * prerequisite was missing and `fallbackRunnerMode: "raw"` was set).
    */
   runner_mode: RunnerMode;
+  /**
+   * Which runner mode the caller asked for. Always present as of PR 2b.
+   * Equal to `runner_mode` for non-degraded runs. When they differ, the
+   * runner downgraded — `warnings[]` carries the reason.
+   */
+  runner_mode_requested: RunnerMode;
+  /**
+   * Recency weight applied during reranking. Only meaningful for
+   * `production_ranker`; in `raw` mode the reranker is skipped entirely
+   * and this is reported as `null` for traceability.
+   */
+  search_recency_weight: number | null;
+  /**
+   * Principal identifier the runner ran as. Always `"owner"` in PR 2b —
+   * benchmarks run with full owner access and skip `filterByAccess`. The
+   * field is typed `string` so a future multi-principal benchmarking
+   * mode can populate it (e.g. `"family:sara"`, `"agent:skuld"`) without
+   * forcing every TypeScript consumer through a widening bump. Today's
+   * reports always carry the literal `"owner"`.
+   */
+  principal_id: string;
   /** Per-file lineage metadata for the query set(s) loaded into this run. */
   query_set_sources: QuerySetSource[];
   /**

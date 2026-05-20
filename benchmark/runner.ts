@@ -16,10 +16,21 @@ import {
   queryEntriesLexicalScored,
   queryEntriesHybridScored,
   queryEntriesSemanticScored,
+  getCompletedTaskNamespaces,
   setVecLoaded,
 } from "../src/db.js";
 import { generateEmbedding, embeddingToBuffer, initEmbeddings } from "../src/embeddings.js";
-import { buildRelaxedLexicalQuery } from "../src/tools.js";
+import {
+  buildRelaxedLexicalQuery,
+  QUERY_RERANK_OVERFETCH_MULTIPLIER,
+  DEFAULT_SEARCH_RECENCY_WEIGHT,
+  shouldApplyDefaultQuerySuppression,
+  getTrackedStatusAssessments,
+  injectCanonicalQueryEntries,
+  injectAttentionQueryEntries,
+  rerankQueryResults,
+} from "../src/tools.js";
+import type { Entry, QueryParams } from "../src/types.js";
 import {
   scoreQuery,
   aggregateScores,
@@ -284,6 +295,36 @@ export interface RunBenchmarkOptions {
    * populated. Pass `null` to explicitly skip even auto-detection.
    */
   manifestPath?: string | null;
+  /**
+   * Which runner code path to use. Defaults to `"raw"`.
+   *
+   * - `"raw"` — calls `src/db.ts` query functions directly with
+   *   `limit=10`. Faster, no rerank, no injectors. Useful for isolating
+   *   retrieval-recall changes from ranker behavior.
+   * - `"production_ranker"` — over-fetches by `QUERY_RERANK_OVERFETCH_MULTIPLIER`
+   *   and runs results through the same canonical/attention injectors +
+   *   `rerankQueryResults` + completed-task filter that `memory_query`
+   *   uses in production, then slices to the requested limit. End-to-end
+   *   parity with what production users see.
+   */
+  runnerMode?: RunnerMode;
+  /**
+   * Opt-in fallback when the prerequisites for `runnerMode` are not met
+   * (e.g. snapshot too old for `production_ranker`).
+   *
+   * Default behavior is fail-loud — the runner throws. Set
+   * `fallbackRunnerMode: "raw"` to instead downgrade with a
+   * `warnings[]` entry and emit `runner_mode: "raw"` /
+   * `runner_mode_requested: "production_ranker"` so post-hoc consumers
+   * can detect the degraded run.
+   */
+  fallbackRunnerMode?: "raw";
+  /**
+   * Recency weight passed into the production reranker. Defaults to
+   * `DEFAULT_SEARCH_RECENCY_WEIGHT` (0.2). Ignored in raw mode (no
+   * rerank). Range [0, 1].
+   */
+  searchRecencyWeight?: number;
 }
 
 /**
@@ -321,48 +362,43 @@ function scoreByNamespace(
 }
 
 /**
- * Run a single query through a specific search mode and return result IDs.
+ * Run a single query through a specific search mode and return the
+ * matching entries together with whether the relaxed-lexical fallback
+ * fired.
+ *
+ * Returns full `Entry` objects (not just IDs) so the caller can either
+ * project to IDs+namespaces (raw mode) or feed them through the
+ * production reranker pipeline (production_ranker mode). The previous
+ * IDs-only return shape was insufficient because the reranker needs the
+ * full entries.
+ *
+ * `limit` controls the per-source fetch size:
+ * - raw mode: pass the user-facing limit (typically 10)
+ * - production_ranker: pass `requestedLimit * QUERY_RERANK_OVERFETCH_MULTIPLIER`
+ *   (clamped to 50 by `queryEntriesLexicalScored` internally) so the
+ *   reranker has room to reorder.
  */
 async function executeQuery(
   db: Database.Database,
   query: string,
   mode: SearchMode,
   limit: number = 10,
-): Promise<{ ids: string[]; namespaces: string[]; relaxed: boolean }> {
+): Promise<{ entries: Entry[]; relaxed: boolean; effectiveMode: SearchMode }> {
   if (mode === "lexical") {
-    let results = queryEntriesLexicalScored(db, {
-      query,
-      limit,
-      includeExpired: true,
-    });
-    let relaxed = false;
-    // Mirror memory_query's production fallback: if strict AND-of-all-words
-    // returns nothing, retry with the relaxed OR-of-content-terms form.
-    // Without this, benchmark lexical numbers are artificially depressed
-    // for any corpus where documents are shorter than the query.
-    if (results.length === 0) {
-      const relaxedQuery = buildRelaxedLexicalQuery(query);
-      if (relaxedQuery) {
-        results = queryEntriesLexicalScored(db, {
-          query: relaxedQuery,
-          limit,
-          includeExpired: true,
-          rawFts5: true,
-        });
-        relaxed = results.length > 0;
-      }
-    }
-    return {
-      ids: results.map((r) => r.entry.id),
-      namespaces: results.map((r) => r.entry.namespace),
-      relaxed,
-    };
+    return runLexical(db, query, limit);
   }
 
   if (mode === "semantic") {
     const emb = await generateEmbedding(query);
     if (!emb) {
-      return { ids: [], namespaces: [], relaxed: false };
+      // Mirror memory_query's per-query semantic→lexical degradation
+      // (src/tools.ts:5828-5831): when embedding generation fails, fall
+      // back to lexical with the same strict-then-relaxed sequence so
+      // the report's actual_mode and the result IDs both stay parity
+      // with production. Previous behavior (return empty) was a silent
+      // divergence — M3 from the PR 2b internal review.
+      const fallback = await runLexical(db, query, limit);
+      return { ...fallback, effectiveMode: "lexical" };
     }
     const buf = embeddingToBuffer(emb);
     const results = queryEntriesSemanticScored(db, {
@@ -370,28 +406,17 @@ async function executeQuery(
       limit,
       includeExpired: true,
     });
-    return {
-      ids: results.map((r) => r.entry.id),
-      namespaces: results.map((r) => r.entry.namespace),
-      relaxed: false,
-    };
+    return { entries: results.map((r) => r.entry), relaxed: false, effectiveMode: "semantic" };
   }
 
   // hybrid
   const emb = await generateEmbedding(query);
   if (!emb) {
-    // Fall back to lexical (strict; no relaxed fallback here — matches
-    // production hybrid-when-embeddings-unavailable behavior)
-    const results = queryEntriesLexicalScored(db, {
-      query,
-      limit,
-      includeExpired: true,
-    });
-    return {
-      ids: results.map((r) => r.entry.id),
-      namespaces: results.map((r) => r.entry.namespace),
-      relaxed: false,
-    };
+    // memory_query degrades hybrid→lexical on embedding failure (strict
+    // first, then relaxed). Mirror it. Previously we ran strict-only
+    // without the relaxed fallback, which is a subtle parity gap.
+    const fallback = await runLexical(db, query, limit);
+    return { ...fallback, effectiveMode: "lexical" };
   }
   const buf = embeddingToBuffer(emb);
   const relaxedQuery = buildRelaxedLexicalQuery(query);
@@ -403,10 +428,130 @@ async function executeQuery(
       : undefined,
   });
   return {
-    ids: hybridScored.results.map((r) => r.entry.id),
-    namespaces: hybridScored.results.map((r) => r.entry.namespace),
+    entries: hybridScored.results.map((r) => r.entry),
     relaxed: hybridScored.ftsRelaxed,
+    effectiveMode: "hybrid",
   };
+}
+
+/**
+ * Run the lexical pipeline: strict FTS5 first, then the relaxed
+ * OR-of-content-terms fallback if strict returned nothing. Mirrors
+ * memory_query's lexical branch.
+ */
+function runLexical(
+  db: Database.Database,
+  query: string,
+  limit: number,
+): { entries: Entry[]; relaxed: boolean; effectiveMode: "lexical" } {
+  let results = queryEntriesLexicalScored(db, {
+    query,
+    limit,
+    includeExpired: true,
+  });
+  let relaxed = false;
+  if (results.length === 0) {
+    const relaxedQuery = buildRelaxedLexicalQuery(query);
+    if (relaxedQuery) {
+      results = queryEntriesLexicalScored(db, {
+        query: relaxedQuery,
+        limit,
+        includeExpired: true,
+        rawFts5: true,
+      });
+      relaxed = results.length > 0;
+    }
+  }
+  return { entries: results.map((r) => r.entry), relaxed, effectiveMode: "lexical" };
+}
+
+/**
+ * Replicate the production rerank pipeline from `src/tools.ts:5924-5936`,
+ * minus `filterByAccess` (the benchmark always runs as owner). Called
+ * per-query so `shouldApplyDefaultQuerySuppression` is evaluated against
+ * each query's params — caching the tracked-status / completed-task maps
+ * across queries would be incorrect because the predicate gate differs.
+ *
+ * The pipeline order is load-bearing:
+ *   1. Inject canonical entries (reference-index, magnus profile, …)
+ *   2. Inject blocked/attention statuses if the query is a triage query
+ *   3. Filter completed-task namespaces if default suppression applies
+ *   4. Rerank by heuristic + freshness, then slice to requestedLimit
+ *
+ * Any divergence from this order is a parity bug — the parity test in
+ * `tests/runner-parity.test.ts` is the safety net.
+ */
+function applyProductionReranker(
+  db: Database.Database,
+  rawResults: Entry[],
+  queryParams: QueryParams,
+  requestedLimit: number,
+): Entry[] {
+  // Memoize the gate predicate. Production memory_query gates on
+  // `shouldApplyDefaultQuerySuppression(...) || explain`; the benchmark
+  // always sets `explain: false`, so the `|| explain` branch is dead
+  // here. If that changes in the future, lift it back into the gate.
+  const applyDefaults = shouldApplyDefaultQuerySuppression(queryParams);
+
+  const trackedStatuses = applyDefaults ? getTrackedStatusAssessments(db) : undefined;
+
+  let results: Entry[] = injectCanonicalQueryEntries(db, rawResults, queryParams);
+  if (trackedStatuses) {
+    results = injectAttentionQueryEntries(results, queryParams, trackedStatuses);
+  }
+  const completedTasks = applyDefaults
+    ? getCompletedTaskNamespaces(db)
+    : new Set<string>();
+  return rerankQueryResults(results, queryParams, completedTasks, trackedStatuses).slice(
+    0,
+    requestedLimit,
+  );
+}
+
+/**
+ * Fail-loud prerequisite check for production_ranker mode.
+ *
+ * Production_ranker only runs against a snapshot whose schema is new
+ * enough to carry every column the rerank pipeline reads (canonical
+ * entries, tracked-status detection, completed-task namespaces). If
+ * something is missing we either throw (default) or downgrade to raw
+ * mode with a `warnings[]` entry (opt-in via `fallbackRunnerMode: "raw"`).
+ */
+function checkProductionRankerPrereqs(
+  db: Database.Database,
+  snapshotSchemaVersion: number,
+): { ok: true } | { ok: false; reason: string } {
+  // v5 introduces the principals table — the schema the multi-principal
+  // pipeline depends on. Older snapshots predate every column the rerank
+  // pipeline reads (notably `entries.owner_principal_id`), so we refuse
+  // to silently invent missing data.
+  if (snapshotSchemaVersion < 5) {
+    return {
+      ok: false,
+      reason: `Snapshot schema v${snapshotSchemaVersion} is too old for production_ranker (need v5+).`,
+    };
+  }
+  // Sanity: the entries table must exist and carry the v5 columns the
+  // tracked-status query reads.
+  const entriesRow = db
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='entries'")
+    .get() as { name: string } | undefined;
+  if (!entriesRow) {
+    return { ok: false, reason: "Snapshot is missing required table 'entries'." };
+  }
+  const columns = db
+    .prepare("PRAGMA table_info(entries)")
+    .all() as Array<{ name: string }>;
+  const colNames = new Set(columns.map((c) => c.name));
+  for (const required of ["owner_principal_id", "classification", "valid_until"]) {
+    if (!colNames.has(required)) {
+      return {
+        ok: false,
+        reason: `Snapshot entries table missing required column '${required}' for production_ranker.`,
+      };
+    }
+  }
+  return { ok: true };
 }
 
 /**
@@ -425,8 +570,23 @@ export async function runBenchmark(
   queries: BenchmarkQuery[],
   options: RunBenchmarkOptions = {},
 ): Promise<BenchmarkReport> {
-  // Open snapshot DB read-only
+  // Open snapshot DB read-only. The function wraps the body in try/finally
+  // so any early throw (e.g. failed production_ranker prereq check)
+  // still closes the connection — m5 from the PR 2b internal review.
   const db = new Database(snapshotPath, { readonly: true });
+  try {
+    return await runBenchmarkInner(db, snapshotPath, queries, options);
+  } finally {
+    db.close();
+  }
+}
+
+async function runBenchmarkInner(
+  db: Database.Database,
+  snapshotPath: string,
+  queries: BenchmarkQuery[],
+  options: RunBenchmarkOptions,
+): Promise<BenchmarkReport> {
   sqliteVec.load(db);
   setVecLoaded(true);
 
@@ -468,6 +628,36 @@ export async function runBenchmark(
 
   const querySetChecksum = computeQuerySetChecksum(querySetSources);
 
+  // Resolve runner mode. fail-loud is the default; opt-in fallback to raw
+  // is allowed when the caller explicitly sets `fallbackRunnerMode: "raw"`.
+  const requestedRunnerMode: RunnerMode = options.runnerMode ?? "raw";
+  let effectiveRunnerMode: RunnerMode = requestedRunnerMode;
+  if (requestedRunnerMode === "production_ranker") {
+    const check = checkProductionRankerPrereqs(db, snapshotSchemaVersion);
+    if (!check.ok) {
+      if (options.fallbackRunnerMode === "raw") {
+        warnings.push(
+          `production_ranker prereq failed — downgraded to raw mode. Reason: ${check.reason}`,
+        );
+        effectiveRunnerMode = "raw";
+      } else {
+        // The outer try/finally in `runBenchmark` owns db lifecycle.
+        throw new Error(
+          `production_ranker prerequisites not met: ${check.reason}. Pass fallbackRunnerMode: "raw" to opt into silent downgrade.`,
+        );
+      }
+    }
+  }
+
+  // Recency weight is only meaningful for production_ranker. Reporting it
+  // as `null` for raw mode keeps reports unambiguous: a 0 value would
+  // imply "rerank ran but recency was zeroed out", which is a different
+  // story.
+  const searchRecencyWeight =
+    effectiveRunnerMode === "production_ranker"
+      ? options.searchRecencyWeight ?? DEFAULT_SEARCH_RECENCY_WEIGHT
+      : null;
+
   const requiresEmbeddings = queries.some(
     (query) => query.search_mode === "semantic" || query.search_mode === "hybrid" || query.search_mode === "all",
   );
@@ -501,20 +691,58 @@ export async function runBenchmark(
         : [query.search_mode];
 
     for (const mode of modes) {
-      // Track when embeddings are unavailable and mode is affected
-      let actualMode = mode;
-      if ((mode === "semantic" || mode === "hybrid") && !embeddingsAvailable) {
-        actualMode = "lexical";
-      }
+      // Per-query limit and fetch size. Raw mode uses a tight limit=10
+      // (preserving PR 2a behavior). production_ranker over-fetches by
+      // QUERY_RERANK_OVERFETCH_MULTIPLIER so the rerank pipeline has the
+      // same candidate window as memory_query.
+      const requestedLimit = 10;
+      const internalLimit =
+        effectiveRunnerMode === "production_ranker"
+          ? Math.min(requestedLimit * QUERY_RERANK_OVERFETCH_MULTIPLIER, 50)
+          : requestedLimit;
 
+      // Pre-flight: if embeddings init returned unavailable, every
+      // semantic/hybrid query degrades to lexical. We still pass the
+      // requested mode into `executeQuery`, which performs the actual
+      // per-query embedding attempt and reports the resolved
+      // `effectiveMode` — that way a transient per-query embedding
+      // failure on a snapshot that DOES have a working model is still
+      // reported correctly (M3 from the PR 2b internal review).
       const queryStart = performance.now();
-      const { ids: resultIds, namespaces: resultNamespaces, relaxed } = await executeQuery(
+      const { entries: rawEntries, relaxed, effectiveMode } = await executeQuery(
         db,
         query.query,
         mode,
-        10,
+        internalLimit,
       );
+      const actualMode = effectiveMode;
+
+      let finalEntries: Entry[];
+      if (effectiveRunnerMode === "production_ranker") {
+        // Build the QueryParams memory_query would synthesize from the
+        // request. Mirror src/tools.ts:5788-5800. The benchmark doesn't
+        // carry namespace/entry_type/tags filters per-query today, so
+        // those stay undefined and the suppression heuristics fire as
+        // they would for a bare query string. The runner sets
+        // `explain: false`, which means the `|| explain` clause in
+        // memory_query at src/tools.ts:5924 is dead here — runner
+        // gating reduces to `shouldApplyDefaultQuerySuppression` alone.
+        const queryParams: QueryParams = {
+          query: query.query,
+          limit: requestedLimit,
+          search_mode: actualMode,
+          search_recency_weight: searchRecencyWeight ?? DEFAULT_SEARCH_RECENCY_WEIGHT,
+          include_expired: true,
+          explain: false,
+        };
+        finalEntries = applyProductionReranker(db, rawEntries, queryParams, requestedLimit);
+      } else {
+        finalEntries = rawEntries.slice(0, requestedLimit);
+      }
       const durationMs = performance.now() - queryStart;
+
+      const resultIds = finalEntries.map((e) => e.id);
+      const resultNamespaces = finalEntries.map((e) => e.namespace);
       if (relaxed) {
         relaxedLexicalFallbackCount += 1;
       }
@@ -613,7 +841,7 @@ export async function runBenchmark(
     bySearchModeDuration[mode] = summarizeDurations(modeDurations.get(mode)!);
   }
 
-  db.close();
+  // db lifecycle is owned by the outer try/finally in `runBenchmark`.
 
   return {
     run_at: new Date().toISOString(),
@@ -624,7 +852,10 @@ export async function runBenchmark(
     entry_count: entryCount,
     query_count: queries.length,
     evaluation_count: allResults.length,
-    runner_mode: "raw",
+    runner_mode: effectiveRunnerMode,
+    runner_mode_requested: requestedRunnerMode,
+    search_recency_weight: searchRecencyWeight,
+    principal_id: "owner",
     query_set_sources: querySetSources,
     query_set_checksum: querySetChecksum,
     overall,
