@@ -2135,26 +2135,64 @@ export interface ToolCallAggregateRow {
   p95_response_size_bytes: number | null;
 }
 
+/**
+ * Nearest-rank 95th percentile over an ascending-sorted array of finite
+ * numbers. Returns null for an empty array. Index is
+ * `ceil(0.95 * n) - 1`, clamped into `[0, n-1]`.
+ *
+ * Caller is responsible for excluding null/undefined and sorting ascending.
+ * Kept as a small total function so it's trivially unit-testable.
+ */
+function computeP95(sortedAsc: number[]): number | null {
+  const n = sortedAsc.length;
+  if (n === 0) return null;
+  const idx = Math.max(0, Math.min(n - 1, Math.ceil(0.95 * n) - 1));
+  return sortedAsc[idx];
+}
+
 export function getToolCallAggregates(
   db: Database.Database,
   days: number = 7,
 ): ToolCallAggregateRow[] {
   const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
   try {
-    return db
+    // Header aggregates (counts, errors, avg duration). p95 is computed
+    // separately below because SQLite has no PERCENTILE_CONT/_DISC.
+    const headers = db
       .prepare(
         `SELECT
            tool_name,
            COUNT(*) AS total_calls,
            SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS error_count,
-           AVG(duration_ms) AS avg_duration_ms,
-           MAX(response_size_bytes) AS p95_response_size_bytes
+           AVG(duration_ms) AS avg_duration_ms
          FROM tool_calls
          WHERE timestamp >= ?
          GROUP BY tool_name
          ORDER BY total_calls DESC`,
       )
-      .all(cutoff) as ToolCallAggregateRow[];
+      .all(cutoff) as Array<Omit<ToolCallAggregateRow, "p95_response_size_bytes">>;
+
+    // Per-tool ordered fetch of non-null response sizes. Same cutoff as the
+    // header query so counts and p95 see the same window. Bounded by analytics
+    // retention (MUNIN_ANALYTICS_RETENTION_DAYS, default 90).
+    const sizeStmt = db.prepare(
+      `SELECT response_size_bytes
+         FROM tool_calls
+         WHERE tool_name = ?
+           AND timestamp >= ?
+           AND response_size_bytes IS NOT NULL
+         ORDER BY response_size_bytes ASC`,
+    );
+
+    return headers.map((row) => {
+      const sizes = (sizeStmt.all(row.tool_name, cutoff) as Array<{
+        response_size_bytes: number;
+      }>).map((r) => r.response_size_bytes);
+      return {
+        ...row,
+        p95_response_size_bytes: computeP95(sizes),
+      };
+    });
   } catch {
     return [];
   }

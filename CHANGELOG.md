@@ -28,6 +28,14 @@ changelog is the canonical record of what moved.
 
 ### Fixed
 
+- **`memory_status` telemetry now reports a real 95th-percentile response
+  size.** The `p95_response_size_bytes` field returned by
+  `getToolCallAggregates` was previously computed as
+  `MAX(response_size_bytes)` despite the name. It is now computed in JS via
+  nearest-rank (`ceil(0.95 * n) - 1` on the ascending-sorted non-null sizes
+  per tool). Field name and shape are unchanged — operators reading this
+  telemetry will see lower, more representative values from this release
+  forward. Empty per-tool inputs continue to report `null`.
 - **Consolidation worker no longer stalls indefinitely on a large backlog
   (#51).** A namespace with many unincorporated logs produced a synthesis
   that overflowed the OpenRouter `max_tokens` cap, returning truncated JSON
