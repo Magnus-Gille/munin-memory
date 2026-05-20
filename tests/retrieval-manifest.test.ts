@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, statSync, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { resolve, join } from "node:path";
 
@@ -413,9 +413,26 @@ describe("retrieval-v1 manifest", () => {
   });
 
   describe("native JSONL on-disk verification", () => {
-    const nativeSources = (m: Manifest) => m.sources.filter((s) => s.repo === "munin-memory");
+    // Native sources are pinned in the manifest but most are gitignored
+    // (see `.gitignore`: `benchmark/queries/*.jsonl` excludes everything
+    // except `example.jsonl`). Skip per-source when the file is absent
+    // from this checkout — the manifest declaration is still validated by
+    // the structural rules above; this block only adds a "if the file IS
+    // present, its bytes match the manifest" guarantee. CI deliberately
+    // runs against the public surface.
+    const nativeSources = (m: Manifest) =>
+      m.sources.filter(
+        (s) => s.repo === "munin-memory" && existsSync(join(REPO_ROOT, s.path)),
+      );
 
-    it("line count matches record_count for every native source", () => {
+    it("at least one native source is present in the checkout", () => {
+      // Sanity guard: if every native source vanished we'd silently skip
+      // all three on-disk checks below. example.jsonl is committed, so
+      // this must always find at least one file.
+      expect(nativeSources(manifest).length).toBeGreaterThan(0);
+    });
+
+    it("line count matches record_count for every native source present on disk", () => {
       for (const s of nativeSources(manifest)) {
         const abs = join(REPO_ROOT, s.path);
         expect(statSync(abs).isFile(), `${s.path} not a file`).toBe(true);
@@ -424,14 +441,14 @@ describe("retrieval-v1 manifest", () => {
       }
     });
 
-    it("sha256 matches actual file contents for every native source", () => {
+    it("sha256 matches actual file contents for every native source present on disk", () => {
       for (const s of nativeSources(manifest)) {
         const abs = join(REPO_ROOT, s.path);
         expect(sha256OfFile(abs), `${s.id} sha256`).toBe(s.sha256);
       }
     });
 
-    it("every native record parses as BenchmarkQuery with matching source field", () => {
+    it("every native record present on disk parses as BenchmarkQuery with matching source field", () => {
       for (const s of nativeSources(manifest)) {
         const abs = join(REPO_ROOT, s.path);
         const text = readFileSync(abs, "utf8").trim();
