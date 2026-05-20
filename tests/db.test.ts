@@ -17,6 +17,8 @@ import {
   getOtherKeysInNamespace,
   getCompletedTaskNamespaces,
   rebuildFTS,
+  logToolCall,
+  getToolCallAggregates,
 } from "../src/db.js";
 
 const TEST_DB_PATH = "/tmp/munin-memory-test.db";
@@ -722,5 +724,112 @@ describe("edge cases", () => {
          VALUES ('test-id', 'ns', 'k', 'state', 'content', '{"a":1}', 'default', '2025-01-01T00:00:00.000Z', '2025-01-01T00:00:00.000Z')`,
       ).run();
     }).toThrow();
+  });
+});
+
+describe("getToolCallAggregates p95_response_size_bytes", () => {
+  function insertOldRow(toolName: string, sizeBytes: number | null, daysAgo: number) {
+    // logToolCall hardcodes nowUTC(); for cutoff tests we need backdated rows,
+    // so write directly through the same prepared statement shape.
+    const ts = new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000).toISOString();
+    db.prepare(
+      `INSERT INTO tool_calls (id, timestamp, session_id, principal_id, tool_name, success, error_type, response_size_bytes, duration_ms)
+       VALUES (?, ?, NULL, NULL, ?, 1, NULL, ?, NULL)`,
+    ).run(`old-${Math.random()}`, ts, toolName, sizeBytes);
+  }
+
+  it("returns no rows when no tool calls exist", () => {
+    expect(getToolCallAggregates(db, 7)).toEqual([]);
+  });
+
+  it("single row: p95 equals that row's size", () => {
+    logToolCall(db, { toolName: "memory_read", success: true, responseSizeBytes: 42 });
+    const row = getToolCallAggregates(db, 7).find((r) => r.tool_name === "memory_read")!;
+    expect(row).toBeDefined();
+    expect(row.total_calls).toBe(1);
+    expect(row.p95_response_size_bytes).toBe(42);
+  });
+
+  it("two rows: p95 is the larger (ceil(0.95*2)-1 = 1)", () => {
+    logToolCall(db, { toolName: "memory_read", success: true, responseSizeBytes: 10 });
+    logToolCall(db, { toolName: "memory_read", success: true, responseSizeBytes: 90 });
+    const row = getToolCallAggregates(db, 7).find((r) => r.tool_name === "memory_read")!;
+    expect(row.p95_response_size_bytes).toBe(90);
+  });
+
+  it("1..100 shuffled: p95 is exactly 95 (distinguishes p95 from max)", () => {
+    const values = Array.from({ length: 100 }, (_, i) => i + 1);
+    // Fisher–Yates with deterministic seed-ish shuffle isn't necessary; insert order
+    // doesn't matter because the function sorts. But shuffle anyway to be defensive.
+    for (let i = values.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [values[i], values[j]] = [values[j], values[i]];
+    }
+    for (const v of values) {
+      logToolCall(db, { toolName: "memory_query", success: true, responseSizeBytes: v });
+    }
+    const row = getToolCallAggregates(db, 7).find((r) => r.tool_name === "memory_query")!;
+    expect(row.total_calls).toBe(100);
+    expect(row.p95_response_size_bytes).toBe(95);
+  });
+
+  it("null sizes are excluded; p95 computed over non-null subset", () => {
+    logToolCall(db, { toolName: "memory_write", success: true, responseSizeBytes: 10 });
+    logToolCall(db, { toolName: "memory_write", success: true, responseSizeBytes: 20 });
+    logToolCall(db, { toolName: "memory_write", success: true }); // null size
+    logToolCall(db, { toolName: "memory_write", success: true }); // null size
+    logToolCall(db, { toolName: "memory_write", success: true, responseSizeBytes: 30 });
+    const row = getToolCallAggregates(db, 7).find((r) => r.tool_name === "memory_write")!;
+    expect(row.total_calls).toBe(5);
+    // sorted non-null: [10,20,30]; p95 idx = ceil(0.95*3)-1 = 2 → 30
+    expect(row.p95_response_size_bytes).toBe(30);
+  });
+
+  it("all-null group: row present, p95 is null", () => {
+    logToolCall(db, { toolName: "memory_list", success: true }); // no size
+    logToolCall(db, { toolName: "memory_list", success: true });
+    const row = getToolCallAggregates(db, 7).find((r) => r.tool_name === "memory_list")!;
+    expect(row).toBeDefined();
+    expect(row.total_calls).toBe(2);
+    expect(row.p95_response_size_bytes).toBeNull();
+  });
+
+  it("multi-tool: p95 isolated per tool", () => {
+    for (let i = 1; i <= 100; i++) {
+      logToolCall(db, { toolName: "tool_a", success: true, responseSizeBytes: i });
+    }
+    logToolCall(db, { toolName: "tool_b", success: true, responseSizeBytes: 500 });
+    logToolCall(db, { toolName: "tool_b", success: true, responseSizeBytes: 600 });
+    const rows = getToolCallAggregates(db, 7);
+    const a = rows.find((r) => r.tool_name === "tool_a")!;
+    const b = rows.find((r) => r.tool_name === "tool_b")!;
+    expect(a.p95_response_size_bytes).toBe(95);
+    expect(b.p95_response_size_bytes).toBe(600);
+  });
+
+  it("cutoff parity: old rows outside the window affect neither p95 nor total_calls", () => {
+    // Recent: small distribution
+    logToolCall(db, { toolName: "memory_read", success: true, responseSizeBytes: 10 });
+    logToolCall(db, { toolName: "memory_read", success: true, responseSizeBytes: 20 });
+    logToolCall(db, { toolName: "memory_read", success: true, responseSizeBytes: 30 });
+    // Old (40 days ago): one huge value that would dominate p95 if not filtered
+    insertOldRow("memory_read", 999_999_999, 40);
+
+    const row = getToolCallAggregates(db, 7).find((r) => r.tool_name === "memory_read")!;
+    expect(row.total_calls).toBe(3);
+    // sorted recent: [10,20,30]; p95 idx = 2 → 30
+    expect(row.p95_response_size_bytes).toBe(30);
+  });
+
+  it("shape regression: row has exact expected keys", () => {
+    logToolCall(db, { toolName: "memory_read", success: true, responseSizeBytes: 1 });
+    const row = getToolCallAggregates(db, 7)[0];
+    expect(Object.keys(row).sort()).toEqual([
+      "avg_duration_ms",
+      "error_count",
+      "p95_response_size_bytes",
+      "tool_name",
+      "total_calls",
+    ]);
   });
 });

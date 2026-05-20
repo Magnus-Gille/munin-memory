@@ -5668,6 +5668,13 @@ describe("memory_status", () => {
     expect(writeRow!.total_calls).toBeGreaterThanOrEqual(1);
     expect(readRow).toBeDefined();
     expect(readRow!.total_calls).toBeGreaterThanOrEqual(1);
+    // Plumbing assertion: p95_response_size_bytes must be forwarded as either
+    // null or a positive integer. Pins handler plumbing; full correctness lives
+    // in tests/db.test.ts.
+    for (const row of [writeRow!, readRow!]) {
+      const p95 = row.p95_response_size_bytes;
+      expect(p95 === null || (typeof p95 === "number" && Number.isInteger(p95) && p95 > 0)).toBe(true);
+    }
   });
 
   it("records error telemetry for validation failures (#28)", async () => {
