@@ -9,8 +9,11 @@ const MANIFEST_PATH = join(
   "benchmark/queries/retrieval-v1.manifest.json",
 );
 
-// Single source of truth for the v1 freeze. If you intentionally add or
-// remove a source, update this list AND bump the relevant counts below.
+// Test-side mirror of the v1 freeze. The JSON manifest is the source of
+// truth (see retrieval-v1.manifest.md §11); this list is a duplicated
+// guard so a silent edit to the JSON can't pass review without also
+// touching the test. If you intentionally add or remove a source, update
+// this list AND bump the relevant counts below.
 const EXPECTED_V1_SOURCE_IDS = [
   "munin-native-baseline",
   "munin-native-baseline-claude",

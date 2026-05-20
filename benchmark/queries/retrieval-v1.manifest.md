@@ -160,13 +160,15 @@ v3b lexical 0/6 baseline, on the same snapshot as v3b, after the FTS5
 camelCase tokenizer fix landed. T10 remained a miss and is tracked as
 gap-002.
 
-The closure record pins all five evidence artifacts by sha256:
+The closure record pins all evidence artifacts by sha256:
 
-- `pilot-report-v3c.md` (report)
+- `pilot-report-v3c.md` (closure report)
 - `pilot-intents-v3c.jsonl` (six closure intents)
 - `pilot-queries-v3c-sonnet.jsonl` (six Sonnet-formulated queries)
 - `pilot-results-v3c-lexical.jsonl` (six retrieval-run results, top-20)
 - `pilot-targets-v3.jsonl` (target file holding the six target UUIDs)
+- `pilot-report-v3b.md` (baseline report — context for the 0/6 claim)
+- `pilot-results-v3b-lexical.jsonl` (baseline lexical results — substantiates the "vs 0/6" comparison)
 
 The six target UUIDs are recorded as
 `closed_issues["munin-zero#6"].target_uuid_subset` so a reader can verify
@@ -188,16 +190,48 @@ ranks without re-running the experiment.
 
 ## 11. Versioning policy
 
-- Additive changes (new sources, new strata in existing breakdowns, new
-  gaps, new closed issues) do **not** bump `manifest_version`.
-- Breaking changes (removing a source, changing `source_class` /
-  `ground_truth_kind` semantics, changing `record_key_fields` for an
-  existing source) bump the major version.
-- Bumping the major version requires a migration note in
-  `CHANGELOG.md` and a parallel `retrieval-vN.manifest.json` while
-  consumers move over.
+The eight `sources[]` entries are the **v1 freeze**. The validator test
+enforces the exact set, so this is mechanically tested, not just
+documented.
 
-## 12. Relationship to future work
+- Patch (`1.0.x`): metadata-only changes that keep the same set of
+  sources, the same record counts, and the same target/result paths
+  (e.g. clarifying notes, gap status updates, evidence_paths
+  corrections that do not add a new source).
+- Minor (`1.x.0`): additive changes that affect the v1 freeze — adding
+  a new source, recording new result_paths for an existing source, or
+  introducing a new known_gap. The validator's `EXPECTED_V1_SOURCE_IDS`
+  list must be updated in the same change.
+- Major (`x.0.0`): breaking changes (removing a source, changing
+  `source_class` / `ground_truth_kind` semantics, changing
+  `record_key_fields` for an existing source, or restructuring the JSON
+  schema). Major bumps require a migration note in `CHANGELOG.md` and a
+  parallel `retrieval-vN.manifest.json` while consumers move over.
+
+In all cases, update `CHANGELOG.md` and the §5 source table in this
+file in the same commit as the JSON change.
+
+## 12. Maintenance
+
+**Owner:** the same person maintaining `benchmark/queries/*.jsonl` and
+the munin-zero retrieval pilots (currently Magnus). Three triggers
+require touching this manifest:
+
+1. A native JSONL changes (records added, removed, or reordered).
+   Re-run `npm test -- retrieval-manifest`; failing sha256 / line-count
+   assertions will name the file. Update `sha256`, `record_count`, and
+   any affected `strata_breakdown` in the JSON, and the §5 table here.
+2. A new munin-zero pilot artifact is produced. Add it to `sources[]`
+   if it joins the v1 freeze (and bump the minor version per §11);
+   otherwise list it under `omitted_artifacts[]` with a reason.
+3. An issue tracked under `closed_issues[]` reopens or its evidence
+   path changes. Update the entry and its `evidence_sha256` map.
+
+The JSON file is the single machine source of truth. The markdown
+mirrors what the JSON says — when they conflict, the JSON wins and the
+markdown gets a follow-up fix.
+
+## 13. Relationship to future work
 
 - **Artifact 3** (≥50 human-audited relevance-graded cases) will sit on
   top of this manifest but will live in its own file. It is **not**

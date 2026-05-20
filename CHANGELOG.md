@@ -22,11 +22,14 @@ changelog is the canonical record of what moved.
   first-class source entries (176 records total) plus an explicit
   `omitted_artifacts[]` inventory. Records `munin-zero#6` as closed by
   pilot v3c with sha256-pinned evidence (report + intents + queries +
-  results + targets) and the six target UUIDs. Strong validator test in
-  `tests/retrieval-manifest.test.ts` parses native JSONLs against the
-  `BenchmarkQuery` shape, asserts sha256 pins, verifies the v1 source
-  freeze, and includes negative tests for `source_class`, target metadata,
-  closure evidence, and derived totals. The manifest is a citation /
+  results + targets, plus the v3b lexical baseline that substantiates
+  the "vs 0/6" comparison) and the six target UUIDs. Validator test in
+  `tests/retrieval-manifest.test.ts` parses every native JSONL against
+  the `BenchmarkQuery` shape, verifies sha256 pins for in-repo native
+  sources, asserts the exact v1 source freeze, and includes negative
+  tests for `source_class`, target metadata, closure evidence, and
+  derived totals. (External munin-zero artifacts are pinned by path +
+  sha256 in the manifest but are not checked out by CI.) The manifest is a citation /
   provenance index, not a runner input or label store. No existing JSONL
   is modified.
 

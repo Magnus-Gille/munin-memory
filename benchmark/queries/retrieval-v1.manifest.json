@@ -121,7 +121,8 @@
       "path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-intents-v2.jsonl",
       "sha256": "24123389efca7ec1b771089c376aaf71bfd36a3540c27bbfe5fba9b144443f71",
       "record_count": 30,
-      "source_class": "manual",
+      "source_class": "derived",
+      "source_origin": "model:claude-sonnet-4-6 (intent-writer, blind chain — see pilot-report-v2.md)",
       "tier": "evidence",
       "shape": "munin-zero-intent",
       "ground_truth_kind": "targets_external",
@@ -169,7 +170,8 @@
       "path": "docs/experiments/retrieval-pilot-2026-04-19/pilot-intents-v3.jsonl",
       "sha256": "04c56a114b1cfd10a597efcac81c1feee24fc4affa09555eed91193a02ad5cc9",
       "record_count": 50,
-      "source_class": "manual",
+      "source_class": "derived",
+      "source_origin": "model:claude-sonnet-4-6 (intent-writer, blind chain — see pilot-report-v3.md)",
       "tier": "evidence",
       "shape": "munin-zero-intent",
       "ground_truth_kind": "targets_external",
@@ -266,6 +268,7 @@
       "sha256": "a32e78fa057de7354a8903b2c3b9b7bfc672f43f3104b26715c5d1f010e56e8b",
       "record_count": 6,
       "source_class": "manual",
+      "source_origin": "human-rewrite (no model attribution in pilot-report-v3c.md; intents were explicitly rewritten as topical user questions rather than reusing the v3 Sonnet intent-writer output)",
       "tier": "primary",
       "shape": "munin-zero-intent",
       "ground_truth_kind": "targets_external",
@@ -444,14 +447,18 @@
         "docs/experiments/retrieval-pilot-2026-04-19/pilot-intents-v3c.jsonl",
         "docs/experiments/retrieval-pilot-2026-04-19/pilot-queries-v3c-sonnet.jsonl",
         "docs/experiments/retrieval-pilot-2026-04-19/pilot-results-v3c-lexical.jsonl",
-        "docs/experiments/retrieval-pilot-2026-04-19/pilot-targets-v3.jsonl"
+        "docs/experiments/retrieval-pilot-2026-04-19/pilot-targets-v3.jsonl",
+        "docs/experiments/retrieval-pilot-2026-04-19/pilot-report-v3b.md",
+        "docs/experiments/retrieval-pilot-2026-04-19/pilot-results-v3b-lexical.jsonl"
       ],
       "evidence_sha256": {
         "docs/experiments/retrieval-pilot-2026-04-19/pilot-report-v3c.md": "c35c1440e900c1dd94b22c338af632d954b7d63a9526cc9c10ffa773805cd8c4",
         "docs/experiments/retrieval-pilot-2026-04-19/pilot-intents-v3c.jsonl": "a32e78fa057de7354a8903b2c3b9b7bfc672f43f3104b26715c5d1f010e56e8b",
         "docs/experiments/retrieval-pilot-2026-04-19/pilot-queries-v3c-sonnet.jsonl": "88d667883459ff50787321ac8323c7dfb9e2dc96b339f457705fc5ad2f273684",
         "docs/experiments/retrieval-pilot-2026-04-19/pilot-results-v3c-lexical.jsonl": "0e8f50101e21eef00f7d843a4d379a0a81f225a6448335326199768a0061d891",
-        "docs/experiments/retrieval-pilot-2026-04-19/pilot-targets-v3.jsonl": "7c4942f0724de74fc4ff8483ccd79c7ec30c06a09089fb50c7c8aa28dceafcf8"
+        "docs/experiments/retrieval-pilot-2026-04-19/pilot-targets-v3.jsonl": "7c4942f0724de74fc4ff8483ccd79c7ec30c06a09089fb50c7c8aa28dceafcf8",
+        "docs/experiments/retrieval-pilot-2026-04-19/pilot-report-v3b.md": "50e1cdc56417cc8e42a3cf548ca6407a6270f820a1166d26bfe64ed5834f2cb6",
+        "docs/experiments/retrieval-pilot-2026-04-19/pilot-results-v3b-lexical.jsonl": "24415285776e72542800f9706610a84afa60d98eab081f849ac86ac7bb6d97b7"
       },
       "target_uuid_subset": [
         "fb352c89-bc21-4c44-88e9-204f546a6209",
