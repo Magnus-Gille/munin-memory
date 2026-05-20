@@ -1,0 +1,9 @@
+# Enforce LF line endings on text files Windows checkouts otherwise
+# silently produce divergent SHA-256 checksums for benchmark JSONLs
+# (see benchmark/queries/retrieval-v1.manifest.json).
+* text=auto eol=lf
+*.jsonl text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.ts text eol=lf
+*.sh text eol=lf
