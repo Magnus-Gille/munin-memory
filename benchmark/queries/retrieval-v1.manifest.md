@@ -103,8 +103,8 @@ references) live in `sources[]` in the JSON. Quick map:
 | `munin-native-baseline` | munin-memory | primary | manual | 15 | expected_ids | Hand-curated. |
 | `munin-native-baseline-claude` | munin-memory | primary | manual | 16 | both | 12 expected_ids + 4 expected_namespaces. `u-001` is an out-of-distribution anecdote (gap-006). |
 | `munin-native-example` | munin-memory | evidence | synthetic | 3 | expected_namespaces | Shape verification only. |
-| `munin-zero-v2-intents` | munin-zero | evidence | manual | 30 | targets_external | v2 pre-relaxed-FTS; stale (gap-004). |
-| `munin-zero-v3-intents` | munin-zero | evidence | manual | 50 | targets_external | v3 expanded set; full strata populated. |
+| `munin-zero-v2-intents` | munin-zero | evidence | derived | 30 | targets_external | Sonnet intent-writer; v2 pre-relaxed-FTS, stale (gap-004). |
+| `munin-zero-v3-intents` | munin-zero | evidence | derived | 50 | targets_external | Sonnet intent-writer; v3 expanded set, full strata populated. |
 | `munin-zero-v3b-queries-sonnet` | munin-zero | evidence | derived | 50 | targets_external | Sonnet-formulated queries over v3 targets. |
 | `munin-zero-v3c-intents` | munin-zero | primary | manual | 6 | targets_external | Closure intents for `munin-zero#6`. |
 | `munin-zero-v3c-queries-sonnet` | munin-zero | primary | derived | 6 | targets_external | Closure queries for `munin-zero#6`. |
