@@ -64,6 +64,70 @@ npx tsx benchmark/adapters/longmemeval/run.ts --split s
 - Do not commit heavyweight raw datasets or generated caches.
 - Keep any CI fixture intentionally small and explicitly documented.
 
+## Report Schema
+
+Reports under `reports/` follow the shape defined in `types.ts` as
+`BenchmarkReport`. The `report_schema_version` field tags additive
+revisions; consumers should branch on it before reading new fields.
+
+### v2 additions (PR 2a)
+
+- `report_schema_version: 2` — pin for this revision. Implicit `1` for
+  any pre-PR-2a report.
+- `snapshot_schema_version` — DB migration version of the snapshot used
+  for the run. `schema_version` is kept for one release as a deprecated
+  alias and mirrors this value.
+- `runner_mode` — which runner code path produced the numbers. `"raw"`
+  calls `src/db.ts` query functions directly (faster, no rerank, no
+  injectors). `"production_ranker"` (added in PR 2b) additionally runs
+  results through `rerankQueryResults` + canonical/attention injectors
+  + completed-task filter, matching `memory_query`. PR 2a always emits
+  `"raw"`.
+- `query_set_sources` — per-file lineage: path, filename, record_count,
+  raw-bytes SHA-256, byte size, optional `manifest_source_id`, and
+  `manifest_match` outcome (`matched` | `filename_match_sha_mismatch` |
+  `unmatched` | `manifest_not_provided`). Populate by loading queries
+  with `loadQueriesWithSource`/`loadQueriesFromDirWithSources` and
+  passing the source(s) through `RunBenchmarkOptions.querySetSources`.
+- `query_set_checksum` — SHA-256 over the sorted `(filename, sha256)`
+  pairs of all sources. Same checksum ⇒ same query bytes, independent
+  of load order.
+- `overall_duration`, `by_search_mode_duration`, and
+  `CategoryResult.duration` — `{ p50_ms, p95_ms, total_ms }` summaries.
+  Percentiles use the same nearest-rank algorithm as
+  `src/db.ts:computeP95` (`idx = clamp(0, n-1, ceil(p * n) - 1)`).
+  `by_search_mode_duration` buckets are keyed on the **requested** mode
+  (mirroring `by_search_mode`), not `actual_mode`, so a downgraded
+  semantic→lexical query still lands in the `semantic` bucket.
+- `QueryBenchmarkResult.duration_ms` — per-query wall-time captured
+  with `performance.now()` and rounded to 0.01 ms.
+- `ScoringResult.recallAt20` and `ndcgAt20` — top-20 cutoffs added to
+  the existing scoring fields. Aggregations and per-category breakdowns
+  include them automatically.
+
+### Manifest cross-check
+
+`runBenchmark` accepts `RunBenchmarkOptions.manifestPath`:
+
+- `string` — explicit path to a `retrieval-v1.manifest.json` to compare
+  against.
+- omitted — auto-detects `retrieval-v1.manifest.json` sitting next to
+  the first loaded query file.
+- `null` — disables cross-check entirely (even auto-detect).
+
+SHA mismatch is recorded as a `warnings[]` entry and reflected in
+`manifest_match: "filename_match_sha_mismatch"`. It is not an error —
+local edits during ablations are expected. The load-bearing guardrail
+is the separate manifest CI test in `tests/retrieval-manifest.test.ts`.
+
+### Line endings
+
+`.gitattributes` enforces `eol=lf` for `.jsonl`/`.json`/`.md`/`.ts`/`.sh`
+so the on-disk SHA of query files is stable across macOS, Linux, and
+Windows checkouts. The benchmark checksum machinery relies on this —
+without LF normalization the same file would produce different SHAs on
+different OSes.
+
 ## Retrieval Benchmark Lineage Manifest
 
 `queries/retrieval-v1.manifest.{json,md}` is a curated source index that

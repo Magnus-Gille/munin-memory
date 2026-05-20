@@ -33,6 +33,73 @@ export interface BenchmarkQuery {
   notes?: string;
 }
 
+/**
+ * Runner mode toggle.
+ *
+ * - `raw` — runner calls `src/db.ts` query functions directly. Default.
+ *   Faster, no MCP scaffolding, no rerank, no canonical/attention
+ *   injectors. Useful for isolating retrieval-recall changes without
+ *   ranker interference.
+ * - `production_ranker` — runner additionally runs results through
+ *   `rerankQueryResults` + canonical / attention injectors + completed-task
+ *   filter, matching what `memory_query` does in production. The benchmark
+ *   numbers reflect end-to-end production behavior.
+ *
+ * Wired in PR 2b. PR 2a emits only `"raw"`; the type lives here so the
+ * report shape is stable across both PRs.
+ */
+export type RunnerMode = "raw" | "production_ranker";
+
+/**
+ * One loaded JSONL query-set file with byte-level integrity metadata.
+ *
+ * Records the path, line count, raw-bytes SHA-256, byte size, and
+ * optional pin to a `retrieval-v1.manifest.json` source entry. The
+ * `manifest_match` field tells consumers whether a manifest cross-check
+ * was performed and what it found.
+ */
+export interface QuerySetSource {
+  /** Path the runner was given (absolute or repo-relative). */
+  path: string;
+  /** Basename of the file (filename portion of the path). */
+  filename: string;
+  /** Number of non-blank non-comment lines parsed into queries. */
+  record_count: number;
+  /** SHA-256 hash over the raw bytes of the file (lowercase hex). */
+  sha256: string;
+  /** File size in bytes. */
+  bytes: number;
+  /**
+   * When a manifest was loaded and a sources[] entry's filename matched
+   * this file: that source's id (e.g. `"munin-native-baseline"`). Absent
+   * otherwise.
+   */
+  manifest_source_id?: string;
+  /**
+   * Cross-check outcome:
+   * - `matched` — basename and on-disk SHA both match a manifest entry.
+   * - `filename_match_sha_mismatch` — basename matches but contents differ.
+   * - `unmatched` — manifest was loaded but no matching entry.
+   * - `manifest_not_provided` — no manifest was given to the runner.
+   */
+  manifest_match: "matched" | "filename_match_sha_mismatch" | "unmatched" | "manifest_not_provided";
+}
+
+/**
+ * Duration aggregate for a bucket (overall, per search mode, per category).
+ *
+ * Percentiles computed with the same nearest-rank algorithm as
+ * `src/db.ts:computeP95`. See `benchmark/scorer.ts:percentilesFromDurations`.
+ */
+export interface DurationSummary {
+  /** 50th percentile wall-time in milliseconds (null for n=0). */
+  p50_ms: number | null;
+  /** 95th percentile wall-time in milliseconds (null for n=0). */
+  p95_ms: number | null;
+  /** Sum of all sample durations in milliseconds. Useful for sanity. */
+  total_ms: number;
+}
+
 /** Result of running a single query through a specific search mode. */
 export interface QueryBenchmarkResult {
   query_id: string;
@@ -44,6 +111,8 @@ export interface QueryBenchmarkResult {
   expected_ids: string[];
   scores: ScoringResult;
   negative_violations: string[];
+  /** Wall-time for this evaluation, captured with performance.now(). */
+  duration_ms: number;
 }
 
 /** Per-category aggregate. */
@@ -51,6 +120,7 @@ export interface CategoryResult {
   category: string;
   query_count: number;
   scores: ScoringResult;
+  duration: DurationSummary;
 }
 
 /** Full benchmark report. */
@@ -59,20 +129,63 @@ export interface BenchmarkReport {
   run_at: string;
   /** DB snapshot file used. */
   snapshot_path: string;
-  /** Schema version of the snapshot DB. */
+  /**
+   * Schema version of the snapshot DB used for the run.
+   * Renamed from `schema_version` to disambiguate from `report_schema_version`.
+   */
+  snapshot_schema_version: number;
+  /**
+   * @deprecated since `report_schema_version: 2`. Mirrors
+   * `snapshot_schema_version` for one release so existing consumers keep
+   * working. Will be removed in a future PR — read `snapshot_schema_version`.
+   */
   schema_version: number;
+  /**
+   * Version of the BenchmarkReport JSON shape itself. Bumped additively
+   * when new fields are introduced. Old consumers should treat unknown
+   * fields as optional and branch on this when consuming new ones.
+   *
+   * - `1` — implicit version of all pre-PR-2a reports.
+   * - `2` — PR 2a additions (query_set_sources, query_set_checksum,
+   *   overall_duration, by_search_mode_duration, snapshot_schema_version,
+   *   runner_mode, CategoryResult.duration, QueryBenchmarkResult.duration_ms,
+   *   ScoringResult.recallAt20/ndcgAt20).
+   */
+  report_schema_version: 2;
   /** Number of entries in the snapshot DB. */
   entry_count: number;
   /** Total queries in the query set. */
   query_count: number;
   /** Total evaluations (queries × modes; differs from query_count when search_mode is "all"). */
   evaluation_count: number;
+  /**
+   * Which runner code path produced these numbers. In PR 2a always `"raw"`;
+   * PR 2b adds `"production_ranker"`. Present on every report as of v2.
+   */
+  runner_mode: RunnerMode;
+  /** Per-file lineage metadata for the query set(s) loaded into this run. */
+  query_set_sources: QuerySetSource[];
+  /**
+   * Deterministic SHA-256 over the sorted (filename, sha256) pairs of all
+   * query_set_sources. Useful for one-shot comparison across reports:
+   * same checksum ⟹ same query set bytes.
+   */
+  query_set_checksum: string;
   /** Overall aggregated scores. */
   overall: ScoringResult;
+  /** Wall-time percentiles + total across every evaluation. */
+  overall_duration: DurationSummary;
   /** Per-category breakdown. */
   by_category: CategoryResult[];
   /** Per-search-mode breakdown. */
   by_search_mode: Record<string, ScoringResult>;
+  /**
+   * Per-search-mode wall-time summary. Bucket key is the requested mode
+   * (mirroring `by_search_mode`), not `actual_mode`, so a query that
+   * requested semantic but ran lexical contributes to the `semantic` bucket
+   * to keep latency comparable to recall.
+   */
+  by_search_mode_duration: Record<string, DurationSummary>;
   /** Individual query results (for debugging). */
   queries: QueryBenchmarkResult[];
   /** Warnings about degraded conditions (e.g., embeddings unavailable). */

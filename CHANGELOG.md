@@ -10,6 +10,26 @@ changelog is the canonical record of what moved.
 
 ### Added
 
+- **Benchmark instrumentation (PR 2a — report schema v2).** Reports
+  produced by `benchmark/runner.ts` now carry a `report_schema_version: 2`
+  tag and additive fields on top of the existing v1 shape: top-20 scoring
+  (`recallAt20`, `ndcgAt20`); per-query `duration_ms` captured with
+  `performance.now()` and rounded to 0.01 ms; `overall_duration`,
+  `by_search_mode_duration`, and per-category `duration` summaries with
+  `{p50_ms, p95_ms, total_ms}` (nearest-rank percentiles, parity with
+  `src/db.ts:computeP95`); `query_set_sources[]` per-file lineage
+  (filename, raw-bytes SHA-256, byte size, record count) with optional
+  manifest cross-check (`manifest_source_id`, `manifest_match`); a
+  deterministic `query_set_checksum` over sorted `(filename, sha256)`
+  pairs; `snapshot_schema_version` renamed from `schema_version` (the
+  old field is kept as a deprecated alias for one release); and a
+  `runner_mode` discriminator (PR 2a always emits `"raw"`; PR 2b will
+  add `"production_ranker"`). New `loadQueriesWithSource` /
+  `loadQueriesFromDirWithSources` helpers and `RunBenchmarkOptions`
+  (`querySetSources`, `manifestPath`) thread the lineage end-to-end.
+  `.gitattributes` pins `eol=lf` for `.jsonl`/`.json`/`.md`/`.ts`/`.sh`
+  so query-file SHAs are stable across macOS/Linux/Windows. No changes
+  to `src/tools.ts`; production paths are untouched.
 - `MUNIN_CONSOLIDATION_MAX_LOGS_PER_RUN` (default `15`) — caps how many
   unincorporated logs a single consolidation run incorporates, so a large
   backlog drains incrementally over successive worker ticks instead of

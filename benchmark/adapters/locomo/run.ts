@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { buildLocomoArtifacts, type BuildMetadata, type BuildOptions } from "./build.js";
-import { loadQueries, runBenchmark, writeReport } from "../../runner.js";
+import { loadQueriesWithSource, runBenchmark, writeReport } from "../../runner.js";
 import { ensureSafeGeneratedPath, populateCorpusEmbeddings, type CorpusEmbeddingSummary } from "../shared.js";
 import type { SearchMode } from "../../../src/types.js";
 
@@ -99,8 +99,10 @@ async function main(): Promise<void> {
   if (options.searchMode === "hybrid" || options.searchMode === "semantic") {
     embeddingSummary = await populateCorpusEmbeddings(options.dbPath);
   }
-  const queries = loadQueries(options.queryPath);
-  const report = await runBenchmark(options.dbPath, queries);
+  const { queries, source } = loadQueriesWithSource(options.queryPath);
+  const report = await runBenchmark(options.dbPath, queries, {
+    querySetSources: [source],
+  });
   const reportPath = writeReport(report, options.reportDir);
 
   console.log("LoCoMo benchmark completed");
@@ -128,8 +130,15 @@ async function main(): Promise<void> {
   console.log(`  R@1:        ${report.overall.recallAt1.toFixed(4)}`);
   console.log(`  R@5:        ${report.overall.recallAt5.toFixed(4)}`);
   console.log(`  R@10:       ${report.overall.recallAt10.toFixed(4)}`);
+  console.log(`  R@20:       ${report.overall.recallAt20.toFixed(4)}`);
   console.log(`  NDCG@5:     ${report.overall.ndcgAt5.toFixed(4)}`);
+  console.log(`  NDCG@20:    ${report.overall.ndcgAt20.toFixed(4)}`);
   console.log(`  MRR:        ${report.overall.mrr.toFixed(4)}`);
+  const dur = report.overall_duration;
+  console.log(`  p50 (ms):   ${dur.p50_ms === null ? "n/a" : dur.p50_ms.toFixed(2)}`);
+  console.log(`  p95 (ms):   ${dur.p95_ms === null ? "n/a" : dur.p95_ms.toFixed(2)}`);
+  console.log(`  Runner:     ${report.runner_mode}`);
+  console.log(`  QS checksum:${report.query_set_checksum.slice(0, 12)}`);
   if (report.warnings && report.warnings.length > 0) {
     for (const warning of report.warnings) {
       console.log(`  Warning:    ${warning}`);
