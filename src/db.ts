@@ -2157,7 +2157,8 @@ export function getToolCallAggregates(
   const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
   try {
     // Header aggregates (counts, errors, avg duration). p95 is computed
-    // separately below because SQLite has no PERCENTILE_CONT/_DISC.
+    // in JS below: easier to unit-test than a SQL window function, and
+    // independent of whichever SQLite build ships with the host driver.
     const headers = db
       .prepare(
         `SELECT
