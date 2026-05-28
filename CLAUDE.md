@@ -25,19 +25,32 @@ Part of the Hugin & Munin personal AI system. See `prd.md` for full product cont
 
 ### MCP tools exposed
 
+All 22 tools registered in `TOOL_DEFINITIONS` (`src/tools.ts`) are listed below, in registration order. This table is the single human-readable inventory; `tests/claude-md-tool-inventory.test.ts` asserts every registered tool name appears here exactly once.
+
 | Tool | Purpose |
 |------|---------|
-| `memory_orient` | **Start here.** Returns compact conventions, computed project dashboard (grouped by lifecycle), curated notes, maintenance suggestions, and namespace overview in one call. Hides completed task namespaces by default. Pass `include_full_conventions: true` for the full guide. |
-| `memory_write` | Store/update a state entry (namespace + key + content). Supports compare-and-swap via `expected_updated_at` for tracked statuses. Auto-canonicalizes lifecycle tags. |
-| `memory_read` | Retrieve a specific state entry by namespace + key |
-| `memory_get` | Retrieve any entry (state or log) by UUID |
-| `memory_query` | Search and filter memories (lexical/semantic/hybrid). Supports `since`/`until` temporal filters. Query string optional — can browse by filters alone (tags, namespace, time range). |
-| `memory_log` | Append a chronological log entry to a namespace |
-| `memory_list` | Browse namespaces and their contents (with recent log previews; demo and completed task namespaces hidden by default) |
-| `memory_delete` | Delete entries (with token-based confirmation) |
-| `memory_insights` | Inspect retrieval usage signals per entry: impressions, open rate, follow-through rate, staleness pressure, learned signals. Now also returns aggregate retrieval health metrics (reformulation rate, positive outcome rate, feedback counts). |
-| `memory_retrieval_feedback` | Submit explicit feedback on retrieval quality. Supports: bad_results, missing_result, wrong_order, stale_results, good_results. Auto-links to most recent retrieval event. Owner-only. Feeds benchmark ground truth pipeline. |
-| `memory_consolidate` | Manually trigger consolidation for a specific namespace or all eligible tracked namespaces. Synthesizes unincorporated logs into an enriched 'synthesis' key via OpenRouter LLM call. Owner-only. |
+| `memory_orient` | **Start here.** Call at the start of every conversation before any other memory tool. Returns conventions, a computed project dashboard (grouped by lifecycle), curated notes, maintenance suggestions, and a namespace overview in one call. Hides completed task namespaces by default; pass `include_full_conventions: true` for the full guide. |
+| `memory_resume` | Build a compact, targeted continuation pack after `memory_orient` from a project hint, namespace, or opener — the most relevant state, logs, and next steps to pick work back up. |
+| `memory_extract` | Suggest reviewable memory operations from explicit conversation signals (messy notes, transcript text). Proposes writes/logs for you to confirm; does not write directly. |
+| `memory_narrative` | Derive a narrative view for one namespace from current status, recent logs, and audit history — project-arc signals like momentum and direction. |
+| `memory_commitments` | Surface explicit commitments derived from tracked next steps and dated, attributable source text. Review open, at-risk, and overdue obligations. |
+| `memory_patterns` | Derive conservative, reviewable patterns from repeated decision logs, tracked-status follow-through, and commitment outcomes. |
+| `memory_handoff` | Assemble a source-backed handoff pack for one namespace: current state, recent decisions, open loops, recent actors, and recommended next actions. |
+| `memory_write` | Store/update a state entry (namespace + key + content); upserts on conflict. Supports compare-and-swap via `expected_updated_at` for tracked statuses. Auto-canonicalizes lifecycle tags. |
+| `memory_update_status` | Update a tracked status entry in `projects/*` or `clients/*` only, using server-enforced canonical sections (Phase, Current Work, Blockers, Next Steps, Notes). Supports lifecycle tag + CAS. |
+| `memory_read` | Retrieve a specific state entry by namespace + key. Returns full content, tags, and timestamps. |
+| `memory_read_batch` | Retrieve multiple state entries in a single call; returns results (found or not found) in input order. Orient across several known keys at once. |
+| `memory_get` | Retrieve the full content of any entry (state or log) by UUID. Use after `memory_query` returns truncated previews. |
+| `memory_query` | Search and filter memories: lexical (keyword), semantic (vector), or hybrid (RRF fusion). Filters by namespace, tags, type, and `since`/`until`. Query string optional — browse by filters alone. |
+| `memory_attention` | Return deterministic triage items for tracked work: blocked statuses, stale active work, expiring/expired statuses, near-term event staleness, and missing status/lifecycle tags. |
+| `memory_log` | Append an immutable, timestamped log entry to a namespace. For decisions, events, and milestones with rationale. |
+| `memory_list` | Browse namespaces and their contents with recent log previews. Demo and completed task-run namespaces hidden by default. |
+| `memory_history` | View the chronological audit trail of changes (writes, updates, deletes, namespace deletes, log appends). Supports an ascending cursor for sync/polling workflows. |
+| `memory_delete` | Delete a state entry by namespace+key, or all entries in a namespace. Call without `delete_token` to preview, then with the returned token to confirm. |
+| `memory_insights` | Per-entry retrieval analytics: impressions, opens, follow-through rate, staleness pressure, learned signals. Also returns aggregate retrieval-health metrics (reformulation rate, positive outcome rate, feedback counts). |
+| `memory_retrieval_feedback` | Submit explicit feedback on retrieval quality: bad_results, missing_result, wrong_order, stale_results, good_results. Owner-only. Auto-links to the most recent retrieval event; feeds the benchmark ground-truth pipeline. |
+| `memory_consolidate` | Manually trigger consolidation for a namespace or all eligible tracked namespaces. Synthesizes unincorporated logs into an enriched `synthesis` key via OpenRouter LLM call. Owner-only. |
+| `memory_status` | Return server capabilities, version, and feature availability — discover which search modes, tools, and features this instance supports. |
 
 ## Project structure
 
@@ -361,7 +374,7 @@ After `MUNIN_EMBEDDINGS_MAX_FAILURES` (default 5) consecutive embedding failures
 
 ### Overview
 
-Server-enforced namespace isolation. Each authenticated principal has scoped namespace rules; owner retains full access with zero overhead. All 12 MCP tools enforce access rules via `AccessContext`.
+Server-enforced namespace isolation. Each authenticated principal has scoped namespace rules; owner retains full access with zero overhead. All registered MCP tools enforce access rules via `AccessContext`.
 
 ### Schema
 

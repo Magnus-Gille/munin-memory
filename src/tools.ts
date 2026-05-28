@@ -3971,6 +3971,15 @@ const TOOL_DEFINITIONS = [
   },
 ];
 
+/**
+ * Names of every MCP tool registered in {@link TOOL_DEFINITIONS}.
+ * Exported as the single source of truth for the CLAUDE.md tool-table
+ * inventory contract (see tests/claude-md-tool-inventory.test.ts, issue #54).
+ */
+export const REGISTERED_TOOL_NAMES: readonly string[] = TOOL_DEFINITIONS.map(
+  (t) => t.name,
+);
+
 function textResult(obj: Record<string, unknown>) {
   return { content: [{ type: "text" as const, text: JSON.stringify(obj) }] };
 }
