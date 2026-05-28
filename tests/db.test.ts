@@ -342,6 +342,39 @@ describe("queryEntries (FTS5)", () => {
     expect(lowerHits.some((r) => r.content.includes("WebFetch"))).toBe(true);
   });
 
+  it("matches slash- and digit-separated tokens like 90/10 (#42)", () => {
+    // Regression guard: unicode61 tokenizes both the indexed content and the
+    // query phrase identically (`90/10` -> adjacent tokens `90`, `10`), so the
+    // ratio survives as a searchable phrase. No query-side expansion needed —
+    // this locks in that the slash case keeps working. The camelCase half is
+    // covered by the tests above (migration v17 / munin_split_tokens).
+    writeState(
+      db,
+      "projects/test",
+      "ratios",
+      "The split was 90/10 in favor of recall; a separate 80/20 rule applies",
+      ["notes"],
+    );
+
+    // Bare, quoted-phrase, and space-separated forms all find the 90/10 entry.
+    for (const q of ["90/10", '"90/10"', "90 10"]) {
+      expect(
+        queryEntries(db, { query: q }).some((r) => r.content.includes("90/10")),
+        `query ${JSON.stringify(q)} should match content containing 90/10`,
+      ).toBe(true);
+    }
+
+    // A different ratio in the same entry is independently findable.
+    expect(
+      queryEntries(db, { query: "80/20" }).some((r) => r.content.includes("80/20")),
+    ).toBe(true);
+
+    // And an absent ratio does not match (no over-eager false positive).
+    expect(
+      queryEntries(db, { query: "90/11" }).some((r) => r.content.includes("90/10")),
+    ).toBe(false);
+  });
+
   it("matches PascalCase identifiers and acronym boundaries (#42)", () => {
     writeState(
       db,
