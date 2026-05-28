@@ -135,12 +135,6 @@ export interface BenchmarkReport {
    */
   snapshot_schema_version: number;
   /**
-   * @deprecated since `report_schema_version: 2`. Mirrors
-   * `snapshot_schema_version` for one release so existing consumers keep
-   * working. Tracked for removal in #58 — read `snapshot_schema_version`.
-   */
-  schema_version: number;
-  /**
    * Version of the BenchmarkReport JSON shape itself. Bumped additively
    * when new fields are introduced. Old consumers should treat unknown
    * fields as optional and branch on this when consuming new ones.
@@ -150,8 +144,10 @@ export interface BenchmarkReport {
    *   overall_duration, by_search_mode_duration, snapshot_schema_version,
    *   runner_mode, CategoryResult.duration, QueryBenchmarkResult.duration_ms,
    *   ScoringResult.recallAt20/ndcgAt20).
+   * - `3` — removed the deprecated `schema_version` alias (#58). Read
+   *   `snapshot_schema_version` for the snapshot DB migration version.
    */
-  report_schema_version: 2;
+  report_schema_version: 3;
   /** Number of entries in the snapshot DB. */
   entry_count: number;
   /** Total queries in the query set. */

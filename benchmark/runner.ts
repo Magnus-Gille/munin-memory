@@ -847,8 +847,7 @@ async function runBenchmarkInner(
     run_at: new Date().toISOString(),
     snapshot_path: snapshotPath,
     snapshot_schema_version: snapshotSchemaVersion,
-    schema_version: snapshotSchemaVersion, // deprecated alias for one release
-    report_schema_version: 2,
+    report_schema_version: 3,
     entry_count: entryCount,
     query_count: queries.length,
     evaluation_count: allResults.length,

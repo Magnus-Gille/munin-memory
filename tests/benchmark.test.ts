@@ -54,7 +54,7 @@ describe.skipIf(!shouldRun)("Retrieval Benchmark", () => {
     if (!report) return;
     console.log("\n=== Benchmark Summary ===");
     console.log(`  Snapshot: ${report.snapshot_path}`);
-    console.log(`  Schema: v${report.schema_version}, Entries: ${report.entry_count}`);
+    console.log(`  Schema: v${report.snapshot_schema_version}, Entries: ${report.entry_count}`);
     console.log(`  Queries: ${report.query_count}`);
     console.log(`  Evaluations: ${report.evaluation_count}`);
     if (report.warnings) {

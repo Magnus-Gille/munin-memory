@@ -70,13 +70,19 @@ Reports under `reports/` follow the shape defined in `types.ts` as
 `BenchmarkReport`. The `report_schema_version` field tags additive
 revisions; consumers should branch on it before reading new fields.
 
+### v3 changes (#58)
+
+- `report_schema_version: 3` — pin for the current revision. The
+  deprecated `schema_version` alias (a one-release mirror of
+  `snapshot_schema_version`) has been removed. Read
+  `snapshot_schema_version` for the snapshot DB migration version.
+
 ### v2 additions (PR 2a)
 
 - `report_schema_version: 2` — pin for this revision. Implicit `1` for
   any pre-PR-2a report.
 - `snapshot_schema_version` — DB migration version of the snapshot used
-  for the run. `schema_version` is kept for one release as a deprecated
-  alias and mirrors this value.
+  for the run.
 - `runner_mode` — which runner code path actually produced the numbers.
   `"raw"` calls `src/db.ts` query functions directly (faster, no rerank,
   no injectors). `"production_ranker"` (PR 2b) over-fetches per source
