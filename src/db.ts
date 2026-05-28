@@ -40,7 +40,13 @@ export function nowUTC(): string {
 }
 
 export function resolveDbPath(configuredPath?: string): string {
-  const raw = configuredPath || "~/.munin-memory/memory.db";
+  // Precedence: explicit path (e.g. `--db`, or the server's explicit env read)
+  // > MUNIN_MEMORY_DB_PATH > hardcoded default. Honoring the env var here means
+  // every entry point — server, munin-admin, tests, any bare initDatabase() —
+  // resolves to the same DB, matching the documented contract. Without this the
+  // CLI silently ignored MUNIN_MEMORY_DB_PATH and always hit the default,
+  // a footgun that could redirect writes to the production DB unexpectedly.
+  const raw = configuredPath || process.env.MUNIN_MEMORY_DB_PATH || "~/.munin-memory/memory.db";
   return raw.replace(/^~/, homedir());
 }
 

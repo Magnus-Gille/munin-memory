@@ -196,6 +196,36 @@ describe("path resolution", () => {
     );
   });
 
+  describe("MUNIN_MEMORY_DB_PATH precedence", () => {
+    const original = process.env.MUNIN_MEMORY_DB_PATH;
+    afterEach(() => {
+      if (original === undefined) delete process.env.MUNIN_MEMORY_DB_PATH;
+      else process.env.MUNIN_MEMORY_DB_PATH = original;
+    });
+
+    it("falls back to MUNIN_MEMORY_DB_PATH when no explicit path is given", () => {
+      process.env.MUNIN_MEMORY_DB_PATH = "/tmp/from-env.db";
+      expect(resolveDbPath()).toBe("/tmp/from-env.db");
+      // getDataDir/embedding cache derive from the same resolution.
+      expect(getDataDir()).toBe("/tmp");
+    });
+
+    it("lets an explicit path override the env var", () => {
+      process.env.MUNIN_MEMORY_DB_PATH = "/tmp/from-env.db";
+      expect(resolveDbPath("/tmp/explicit.db")).toBe("/tmp/explicit.db");
+    });
+
+    it("uses the hardcoded default when neither is set", () => {
+      delete process.env.MUNIN_MEMORY_DB_PATH;
+      expect(resolveDbPath()).toBe(`${homedir()}/.munin-memory/memory.db`);
+    });
+
+    it("expands a tilde coming from the env var", () => {
+      process.env.MUNIN_MEMORY_DB_PATH = "~/custom/memory.db";
+      expect(resolveDbPath()).toBe(`${homedir()}/custom/memory.db`);
+    });
+  });
+
   it("derives data dir from resolved DB path", () => {
     expect(getDataDir("~/.munin-memory/memory.db")).toBe(
       `${homedir()}/.munin-memory`,

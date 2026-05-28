@@ -97,6 +97,17 @@ changelog is the canonical record of what moved.
 
 ### Fixed
 
+- **`MUNIN_MEMORY_DB_PATH` is now honored by every entry point, not just the
+  server.** `resolveDbPath()` previously read the env var nowhere — only
+  `src/index.ts` consulted it explicitly and passed it into `initDatabase()`.
+  `munin-admin`, tests, and any bare `initDatabase()` call silently ignored it
+  and always resolved to the hardcoded `~/.munin-memory/memory.db` default,
+  contradicting the documented "configurable via `MUNIN_MEMORY_DB_PATH`"
+  contract. This was a footgun: an operator who set the env var expecting to
+  target a non-default DB could unknowingly read/write the production DB
+  instead. `resolveDbPath()` now applies the precedence **explicit path
+  (e.g. `munin-admin --db`) > `MUNIN_MEMORY_DB_PATH` > default**, so all entry
+  points resolve consistently. Existing explicit-path callers are unaffected.
 - **`memory_status` telemetry now reports a real 95th-percentile response
   size.** The `p95_response_size_bytes` field returned by
   `getToolCallAggregates` was previously computed as
