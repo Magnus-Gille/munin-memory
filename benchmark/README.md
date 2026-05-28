@@ -145,8 +145,8 @@ degraded run by comparing the two fields.
 
 The benchmark-import-boundary test (`tests/benchmark-import-boundary.test.ts`)
 pins the small curated surface the benchmark is allowed to import from
-`src/tools.ts`. Issue #59 tracks the planned extraction of that surface
-into `src/internal/reranker.ts`.
+`src/internal/reranker.ts`. Issue #59 extracted the reranker pipeline out
+of `src/tools.ts` into that dedicated module.
 
 ### Line endings
 
