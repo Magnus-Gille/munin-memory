@@ -11,6 +11,7 @@ This directory holds Munin's retrieval benchmark harness plus the scaffold for p
 ## Layout
 
 - `runner.ts`, `scorer.ts`, `types.ts` — existing benchmark harness.
+- `ci-gate.ts`, `ci-gate-policy.ts`, `ci-gate/` — the deterministic CI regression gate (see below).
 - `experiment-matrix.md` — current benchmark progression and what each next variant is meant to test.
 - `queries/` — query sets in Munin's JSONL format.
 - `adapters/` — public benchmark manifests and adapter notes.
@@ -27,6 +28,49 @@ This directory holds Munin's retrieval benchmark harness plus the scaffold for p
 4. Add a small `BEIR` subset for generic retrieval regression.
 
 See [experiment-matrix.md](./experiment-matrix.md) for the current ordered experiment plan.
+
+## CI Regression Gate
+
+The CI gate turns the harness from "runnable" into "automatically catches a bad
+ranking change". Unlike the snapshot-based benchmark (which needs a private,
+gitignored DB), the gate is fully self-contained and deterministic, so it runs
+on every CI build with no secrets and no network.
+
+```bash
+npm run benchmark:ci-gate                        # run the gate; exit 1 on regression
+npm run benchmark:ci-gate -- --update-baseline   # re-bless the baseline after an intentional change
+npm run benchmark:ci-gate -- --tolerance 0.01    # override the FP tolerance (default 1e-6)
+```
+
+How it works:
+
+1. Builds the committed synthetic corpus (`ci-gate/corpus.json`, 26 entries with
+   deliberately overlapping vocabulary) into an ephemeral SQLite DB. Nothing
+   binary is committed.
+2. Runs the benchmark in **`raw` + `lexical`** mode against the committed query
+   set (`ci-gate/queries.jsonl`, 15 queries with single-entry ground truth).
+   bm25 over a fixed corpus is deterministic across machines.
+3. Compares the aggregate scores (R@1, R@5, R@10, nDCG@5, MRR) against
+   `ci-gate/baseline.json`. Any metric dropping below baseline beyond a tiny
+   floating-point tolerance fails the gate. Improvements always pass.
+
+Files:
+
+- `ci-gate/corpus.json` — synthetic entries (the only "source of truth" data).
+- `ci-gate/queries.jsonl` — queries + `expected_ids` ground truth.
+- `ci-gate/baseline.json` — blessed scores + corpus/query-set hashes for lineage.
+- `ci-gate-policy.ts` — pure, unit-tested pass/fail comparison.
+- `ci-gate.ts` — fixture builder + runner + CLI.
+
+The gate is also enforced inside the normal `npm test` run via
+`tests/ci-gate.test.ts`, which fails if the committed corpus or query set drifts
+from the baseline without a re-bless.
+
+**Scope.** The gate covers the retrieval-recall + lexical-ranking (`raw`) layer.
+The production reranker is intentionally *not* gated here: its freshness and
+attention inputs are time-relative and would rot a committed baseline.
+Raw-vs-production parity is guarded separately by `tests/runner-parity.test.ts`.
+Extending the gate to a time-frozen `production_ranker` run is future work.
 
 ## Adapter Contract
 
