@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { existsSync, unlinkSync, mkdirSync } from "node:fs";
+import { rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import express from "express";
 import request from "supertest";
@@ -10,13 +10,15 @@ import { MockApAdapter } from "../../src/onboarding/ap.js";
 import { createWizardRoutes } from "../../src/onboarding/wizard-routes.js";
 
 const TEST_DIR = "/tmp/munin-wizard-routes-test";
-const STATE_FILE = join(TEST_DIR, "device-state.json");
 
-function cleanup() {
-  for (const f of [STATE_FILE, STATE_FILE + ".tmp"]) {
-    if (existsSync(f)) unlinkSync(f);
-  }
-}
+// POST /setup/connect kicks off an untracked background setTimeout that
+// transitions the state file (e.g. to RUNNING_UNCLAIMED) ~100ms after the
+// response is sent. With a shared state-file path, that leaked timer from one
+// test could clobber a later test's state mid-run. Give every test its own
+// directory so a stray background write can never reach another test's state.
+let testCounter = 0;
+let testDir: string;
+let STATE_FILE: string;
 
 function makeState(overrides?: Partial<DeviceStateData>): DeviceStateData {
   return {
@@ -35,8 +37,10 @@ let transitionCalled: boolean;
 let app: ReturnType<typeof express>;
 
 beforeEach(() => {
-  mkdirSync(TEST_DIR, { recursive: true });
-  cleanup();
+  testDir = join(TEST_DIR, String(testCounter++));
+  STATE_FILE = join(testDir, "device-state.json");
+  rmSync(testDir, { recursive: true, force: true });
+  mkdirSync(testDir, { recursive: true });
   ds = new DeviceState(STATE_FILE);
   wifi = new MockWifiAdapter();
   ap = new MockApAdapter();
@@ -53,7 +57,9 @@ beforeEach(() => {
   }));
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  rmSync(testDir, { recursive: true, force: true });
+});
 
 describe("GET /setup", () => {
   it("returns the WiFi wizard page", async () => {
