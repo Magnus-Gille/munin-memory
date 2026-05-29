@@ -1,16 +1,17 @@
 /**
- * PR 2b — load-bearing import boundary test.
+ * Load-bearing import boundary test (updated for issue #59).
  *
- * The benchmark runner is allowed to import only a small, curated set of
- * names from `src/tools.ts` (the reranker pipeline that PR 2b widened to
- * `export`). If new names creep in here we risk benchmark/ depending on
- * implementation detail that issue #59 is meant to extract into a
- * dedicated module. Lock the surface down now so a refactor stays
- * mechanical.
+ * The benchmark runner imports the reranker pipeline from the dedicated
+ * module `src/internal/reranker.ts` (extracted in issue #59). This test
+ * enforces two constraints:
  *
- * Update the allow-list when issue #59 lands or when a new pipeline name
- * needs benchmark visibility — and update issue #59's acceptance
- * criteria at the same time.
+ * 1. benchmark/ must NOT import any of the curated reranker names from
+ *    `src/tools.ts` — they now live in `src/internal/reranker.ts`.
+ * 2. benchmark/ may import from `src/internal/reranker.ts`, but only the
+ *    curated surface defined below.
+ *
+ * Update the allow-lists if the reranker surface changes, and keep the
+ * wildcard-import rejection in place.
  */
 
 import { describe, it, expect } from "vitest";
@@ -20,12 +21,12 @@ import { join, resolve } from "node:path";
 const BENCHMARK_DIR = resolve(__dirname, "..", "benchmark");
 
 /**
- * Names the benchmark surface is allowed to import from src/tools.js.
+ * Names the benchmark surface is allowed to import from
+ * src/internal/reranker.js (the dedicated module extracted in issue #59).
  * Anything else is a lint failure — either remove the new dependency or
- * propose a new public name on src/tools.ts and add it here in the
- * same PR that introduces it.
+ * add the name to the reranker's public surface and update this list.
  */
-const ALLOWED_TOOLS_IMPORTS = new Set<string>([
+const ALLOWED_RERANKER_IMPORTS = new Set<string>([
   "buildRelaxedLexicalQuery",
   "QUERY_RERANK_OVERFETCH_MULTIPLIER",
   "DEFAULT_SEARCH_RECENCY_WEIGHT",
@@ -148,7 +149,7 @@ describe("extractImports — lint primitive", () => {
 });
 
 describe("benchmark/ → src/tools.ts import boundary", () => {
-  it("benchmark/ only imports the curated reranker surface from src/tools", () => {
+  it("benchmark/ does not import any reranker names from src/tools", () => {
     const files = walkTypeScriptFiles(BENCHMARK_DIR);
     const violations: Array<{ file: string; name: string }> = [];
 
@@ -164,15 +165,14 @@ describe("benchmark/ → src/tools.ts import boundary", () => {
           || imp.from === "../../src/tools.js"
           || imp.from === "../../../src/tools.js";
         if (!isToolsImport) continue;
-        // Star and default imports are categorically forbidden: they
-        // pull every export off `src/tools.js` and trivially bypass the
-        // allow-list. Surface as a violation with a synthetic name so
-        // the error message points at the right pattern.
+        // Star and default imports are categorically forbidden.
         if (imp.wildcard) {
           violations.push({ file, name: "<star-or-default import>" });
         }
+        // The reranker names must now be imported from src/internal/reranker.js,
+        // not from src/tools.js. Any such import here is a boundary violation.
         for (const name of imp.names) {
-          if (!ALLOWED_TOOLS_IMPORTS.has(name)) {
+          if (ALLOWED_RERANKER_IMPORTS.has(name)) {
             violations.push({ file, name });
           }
         }
@@ -184,10 +184,49 @@ describe("benchmark/ → src/tools.ts import boundary", () => {
         .map((v) => `  ${v.file.replace(BENCHMARK_DIR, "benchmark")}: imports ${v.name}`)
         .join("\n");
       throw new Error(
-        `Benchmark surface imports unapproved names from src/tools.ts:\n${summary}\n\n` +
-          `If the new dependency is legitimate, add the name to ALLOWED_TOOLS_IMPORTS ` +
-          `in tests/benchmark-import-boundary.test.ts AND update issue #59's acceptance ` +
-          `criteria. If not, refactor the benchmark to not need it.`,
+        `Benchmark imports reranker names from src/tools.ts (should use src/internal/reranker.ts):\n${summary}\n\n` +
+          `The reranker pipeline now lives in src/internal/reranker.ts (issue #59). ` +
+          `Update the benchmark import to use "../src/internal/reranker.js".`,
+      );
+    }
+    expect(violations).toEqual([]);
+  });
+
+  it("benchmark/ only imports the curated reranker surface from src/internal/reranker", () => {
+    const files = walkTypeScriptFiles(BENCHMARK_DIR);
+    const violations: Array<{ file: string; name: string }> = [];
+
+    for (const file of files) {
+      const src = readFileSync(file, "utf-8");
+      const imports = extractImports(src);
+      for (const imp of imports) {
+        // Match paths that resolve to src/internal/reranker(.js).
+        const isRerankerImport = /(?:^|\/)src\/internal\/reranker(?:\.js)?$/.test(imp.from)
+          || imp.from === "../src/internal/reranker.js"
+          || imp.from === "../../src/internal/reranker.js"
+          || imp.from === "../../../src/internal/reranker.js";
+        if (!isRerankerImport) continue;
+        // Star and default imports are categorically forbidden: they
+        // pull every export off the module and trivially bypass the allow-list.
+        if (imp.wildcard) {
+          violations.push({ file, name: "<star-or-default import>" });
+        }
+        for (const name of imp.names) {
+          if (!ALLOWED_RERANKER_IMPORTS.has(name)) {
+            violations.push({ file, name });
+          }
+        }
+      }
+    }
+
+    if (violations.length > 0) {
+      const summary = violations
+        .map((v) => `  ${v.file.replace(BENCHMARK_DIR, "benchmark")}: imports ${v.name}`)
+        .join("\n");
+      throw new Error(
+        `Benchmark surface imports unapproved names from src/internal/reranker.ts:\n${summary}\n\n` +
+          `If the new dependency is legitimate, add the name to ALLOWED_RERANKER_IMPORTS ` +
+          `in tests/benchmark-import-boundary.test.ts. If not, refactor the benchmark to not need it.`,
       );
     }
     expect(violations).toEqual([]);

@@ -29,7 +29,7 @@ import {
   injectCanonicalQueryEntries,
   injectAttentionQueryEntries,
   rerankQueryResults,
-} from "../src/tools.js";
+} from "../src/internal/reranker.js";
 import type { Entry, QueryParams } from "../src/types.js";
 import {
   scoreQuery,
