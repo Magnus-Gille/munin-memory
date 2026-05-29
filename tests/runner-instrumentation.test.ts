@@ -377,11 +377,10 @@ describe("runBenchmark (end-to-end report shape)", () => {
       manifestPath: null, // no manifest in this fixture
     });
 
-    // Shape — v2 fields present and consistent.
-    expect(report.report_schema_version).toBe(2);
+    // Shape — v3 fields present and consistent.
+    expect(report.report_schema_version).toBe(3);
     expect(report.runner_mode).toBe("raw");
     expect(report.snapshot_schema_version).toBeGreaterThan(0);
-    expect(report.schema_version).toBe(report.snapshot_schema_version);
     expect(report.query_count).toBe(5);
     expect(report.evaluation_count).toBe(5);
     expect(report.query_set_sources).toHaveLength(1);

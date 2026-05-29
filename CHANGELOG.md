@@ -86,6 +86,13 @@ changelog is the canonical record of what moved.
 
 ### Changed
 
+- **Benchmark report schema v3 — removed the deprecated `schema_version`
+  alias (#58).** `BenchmarkReport.schema_version` (a one-release mirror of
+  `snapshot_schema_version` introduced in report schema v2 / PR 2a) is gone.
+  `report_schema_version` is now `3`. Consumers must read
+  `snapshot_schema_version` for the snapshot DB migration version. This is a
+  breaking change to the report shape; historical report JSON under
+  `benchmark/reports/` is unaffected (frozen records).
 - **Backup schedule reduced from hourly to daily** with GFS retention (14 most
   recent daily snapshots + 4 most recent Sunday snapshots, ~18 files total).
   Previous policy kept 168 hourly snapshots which grew to ~50 GB and filled
