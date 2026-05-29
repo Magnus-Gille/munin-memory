@@ -16,7 +16,8 @@
  *   munin-admin classification audit [namespace-prefix]
  *
  * Global flags:
- *   --db <path>     Database path (default: ~/.munin-memory/memory.db)
+ *   --db <path>     Database path. Precedence: --db > MUNIN_MEMORY_DB_PATH
+ *                   env var > ~/.munin-memory/memory.db (default).
  *   --json          Machine-readable JSON output
  *   --init          Allow creating a new DB if it doesn't exist
  *   --help          Show usage
@@ -904,7 +905,8 @@ Usage:
   munin-admin bearer revoke <key-id>
 
 Global flags:
-  --db <path>     Database path (default: ~/.munin-memory/memory.db)
+  --db <path>     Database path. Precedence: --db > MUNIN_MEMORY_DB_PATH
+                  env var > ~/.munin-memory/memory.db (default).
   --json          Machine-readable JSON output
   --init          Allow creating a new DB if it doesn't exist
   --force         Required for --type owner

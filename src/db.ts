@@ -40,7 +40,14 @@ export function nowUTC(): string {
 }
 
 export function resolveDbPath(configuredPath?: string): string {
-  const raw = configuredPath || "~/.munin-memory/memory.db";
+  // Precedence: explicit path (e.g. admin CLI --db) > MUNIN_MEMORY_DB_PATH
+  // env var > default. The env fallback keeps the admin CLI and the server
+  // pointed at the same database; without it, `munin-admin` silently ignored
+  // MUNIN_MEMORY_DB_PATH and wrote to the production DB during dry-runs.
+  const raw =
+    configuredPath ||
+    process.env.MUNIN_MEMORY_DB_PATH ||
+    "~/.munin-memory/memory.db";
   return raw.replace(/^~/, homedir());
 }
 

@@ -97,6 +97,16 @@ changelog is the canonical record of what moved.
 
 ### Fixed
 
+- **`munin-admin` now honors `MUNIN_MEMORY_DB_PATH`.** The admin CLI
+  previously only accepted a `--db` flag and ignored the
+  `MUNIN_MEMORY_DB_PATH` env var that the server respects — so a dry-run
+  that exported the env var to a throwaway path silently wrote to the
+  production database instead. `resolveDbPath()` now falls back to
+  `MUNIN_MEMORY_DB_PATH` when no explicit path is given, with precedence
+  `--db` flag > env var > `~/.munin-memory/memory.db` default. The server
+  and embedding-cache paths are unaffected (they already passed the env
+  value explicitly). Help text and the `--db` docstring updated to
+  document the precedence.
 - **`memory_status` telemetry now reports a real 95th-percentile response
   size.** The `p95_response_size_bytes` field returned by
   `getToolCallAggregates` was previously computed as

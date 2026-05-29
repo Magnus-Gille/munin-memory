@@ -219,6 +219,34 @@ describe("path resolution", () => {
       "/var/lib/munin-memory/hf-cache",
     );
   });
+
+  describe("MUNIN_MEMORY_DB_PATH fallback", () => {
+    const original = process.env.MUNIN_MEMORY_DB_PATH;
+    afterEach(() => {
+      if (original === undefined) {
+        delete process.env.MUNIN_MEMORY_DB_PATH;
+      } else {
+        process.env.MUNIN_MEMORY_DB_PATH = original;
+      }
+    });
+
+    it("falls back to MUNIN_MEMORY_DB_PATH when no path is given", () => {
+      process.env.MUNIN_MEMORY_DB_PATH = "/tmp/munin-throwaway.db";
+      expect(resolveDbPath(undefined)).toBe("/tmp/munin-throwaway.db");
+    });
+
+    it("prefers an explicit path over the env var", () => {
+      process.env.MUNIN_MEMORY_DB_PATH = "/tmp/munin-throwaway.db";
+      expect(resolveDbPath("/explicit/path.db")).toBe("/explicit/path.db");
+    });
+
+    it("falls back to the default when neither is set", () => {
+      delete process.env.MUNIN_MEMORY_DB_PATH;
+      expect(resolveDbPath(undefined)).toBe(
+        `${homedir()}/.munin-memory/memory.db`,
+      );
+    });
+  });
 });
 
 describe("vec store/remove operations", () => {
