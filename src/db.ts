@@ -670,7 +670,13 @@ export function queryEntriesLexicalScored(
     params.push(until);
   }
 
-  sql += " ORDER BY lexical_score LIMIT ?";
+  // Total order: bm25 ties are legal and SQL does not guarantee stable
+  // ordering for equal sort keys, which would make rank-sensitive consumers
+  // (e.g. the retrieval CI gate) non-deterministic across SQLite versions.
+  // `rowid` is insertion order — this codifies SQLite's existing de-facto
+  // tie-break (so prior ordering is unchanged) while making it explicit and
+  // total, instead of using the random UUID `e.id` which would reorder ties.
+  sql += " ORDER BY lexical_score, e.rowid LIMIT ?";
   params.push(clampedLimit);
 
   const rows = db.prepare(sql).all(...params) as Array<Entry & { lexical_score: number }>;

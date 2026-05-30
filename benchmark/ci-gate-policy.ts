@@ -54,6 +54,49 @@ export const GATED_METRICS: (keyof GatedScores)[] = [
 /** Default tolerance — absorbs FP noise only. See module doc. */
 export const DEFAULT_GATE_TOLERANCE = 1e-6;
 
+/**
+ * Validate a parsed baseline object before it is trusted by the gate.
+ *
+ * A malformed baseline is dangerous: a missing or non-finite metric flows
+ * through `current - baseline` as `NaN`, and `NaN < -tolerance` is `false`, so
+ * a corrupt baseline would silently mask a real regression. We fail loud
+ * instead. Throws with an actionable message; callers should treat a throw as
+ * a hard gate failure, not a "no baseline" condition.
+ */
+export function validateBaseline(parsed: unknown): GateBaseline {
+  const errs: string[] = [];
+  const b = parsed as Record<string, unknown>;
+  if (typeof b !== "object" || b === null) {
+    throw new Error("baseline is not an object");
+  }
+  if (b.baseline_schema_version !== 1) {
+    errs.push(`baseline_schema_version must be 1 (got ${JSON.stringify(b.baseline_schema_version)})`);
+  }
+  for (const k of ["generated_at", "corpus_sha256", "query_set_checksum"] as const) {
+    if (typeof b[k] !== "string" || (b[k] as string).length === 0) {
+      errs.push(`${k} must be a non-empty string`);
+    }
+  }
+  if (typeof b.query_count !== "number" || !Number.isInteger(b.query_count) || b.query_count <= 0) {
+    errs.push(`query_count must be a positive integer (got ${JSON.stringify(b.query_count)})`);
+  }
+  const overall = b.overall as Record<string, unknown> | undefined;
+  if (typeof overall !== "object" || overall === null) {
+    errs.push("overall must be an object");
+  } else {
+    for (const metric of GATED_METRICS) {
+      const v = overall[metric];
+      if (typeof v !== "number" || !Number.isFinite(v)) {
+        errs.push(`overall.${metric} must be a finite number (got ${JSON.stringify(v)})`);
+      }
+    }
+  }
+  if (errs.length > 0) {
+    throw new Error(`Invalid baseline.json: ${errs.join("; ")}`);
+  }
+  return parsed as GateBaseline;
+}
+
 /** Per-metric comparison outcome. */
 export interface MetricDelta {
   metric: keyof GatedScores;

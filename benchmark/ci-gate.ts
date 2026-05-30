@@ -36,6 +36,7 @@ import type { BenchmarkReport } from "./types.js";
 import {
   compareToBaseline,
   formatVerdict,
+  validateBaseline,
   DEFAULT_GATE_TOLERANCE,
   type GatedScores,
   type GateBaseline,
@@ -163,11 +164,29 @@ export async function runCiGate(
     query_count: report.query_count,
   };
 
+  // Distinguish "no baseline yet" (file missing → null, pre-bless) from a
+  // malformed/outdated baseline (hard failure). A corrupt baseline must never
+  // be silently treated as absent, and never trusted — a missing/non-finite
+  // metric would make `current - baseline` NaN and mask a real regression.
   let baseline: GateBaseline | null = null;
+  let raw: string | null = null;
   try {
-    baseline = JSON.parse(readFileSync(paths.baselinePath, "utf-8")) as GateBaseline;
-  } catch {
-    baseline = null;
+    raw = readFileSync(paths.baselinePath, "utf-8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      raw = null;
+    } else {
+      throw new Error(`Could not read baseline at ${paths.baselinePath}: ${(err as Error).message}`);
+    }
+  }
+  if (raw !== null) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      throw new Error(`baseline.json is not valid JSON (${paths.baselinePath}): ${(err as Error).message}`);
+    }
+    baseline = validateBaseline(parsed);
   }
 
   const verdict = baseline

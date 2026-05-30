@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   compareToBaseline,
   formatVerdict,
+  validateBaseline,
   GATED_METRICS,
   DEFAULT_GATE_TOLERANCE,
   type GateBaseline,
@@ -110,6 +111,55 @@ describe("compareToBaseline policy", () => {
     );
     expect(failText).toContain("RESULT: FAIL");
     expect(failText).toContain("mrr");
+  });
+});
+
+describe("validateBaseline", () => {
+  function validBaseline(): GateBaseline {
+    return {
+      baseline_schema_version: 1,
+      generated_at: "2026-01-01T00:00:00.000Z",
+      corpus_sha256: "abc",
+      query_set_checksum: "def",
+      query_count: 15,
+      overall: { ...PERFECT },
+    };
+  }
+
+  it("accepts a well-formed baseline", () => {
+    expect(() => validateBaseline(validBaseline())).not.toThrow();
+  });
+
+  it("rejects a non-object", () => {
+    expect(() => validateBaseline(null)).toThrow();
+    expect(() => validateBaseline(42)).toThrow();
+  });
+
+  it("rejects an unknown schema version", () => {
+    expect(() => validateBaseline({ ...validBaseline(), baseline_schema_version: 2 })).toThrow(
+      /baseline_schema_version/,
+    );
+  });
+
+  it("rejects a missing metric (the NaN-masking hole Codex flagged)", () => {
+    const b = validBaseline();
+    // @ts-expect-error — intentionally drop a metric to simulate a corrupt file
+    delete b.overall.mrr;
+    expect(() => validateBaseline(b)).toThrow(/overall\.mrr/);
+  });
+
+  it("rejects a non-finite metric", () => {
+    const b = validBaseline();
+    (b.overall as Record<string, unknown>).recallAt5 = Number.NaN;
+    expect(() => validateBaseline(b)).toThrow(/recallAt5/);
+  });
+
+  it("rejects a non-positive query_count", () => {
+    expect(() => validateBaseline({ ...validBaseline(), query_count: 0 })).toThrow(/query_count/);
+  });
+
+  it("rejects empty lineage hashes", () => {
+    expect(() => validateBaseline({ ...validBaseline(), corpus_sha256: "" })).toThrow(/corpus_sha256/);
   });
 });
 
