@@ -16,3 +16,8 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test
+      # Retrieval regression gate: deterministic raw/lexical benchmark over a
+      # committed synthetic corpus, compared to benchmark/ci-gate/baseline.json.
+      # Fails the build if recall/ranking regresses. Re-bless an intentional
+      # change with: npm run benchmark:ci-gate -- --update-baseline
+      - run: npm run benchmark:ci-gate

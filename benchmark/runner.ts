@@ -587,8 +587,30 @@ async function runBenchmarkInner(
   queries: BenchmarkQuery[],
   options: RunBenchmarkOptions,
 ): Promise<BenchmarkReport> {
-  sqliteVec.load(db);
-  setVecLoaded(true);
+  // sqlite-vec is only needed for vector (semantic/hybrid) search. The lexical
+  // path uses FTS only, so a lexical-only run (e.g. the CI regression gate)
+  // must not fail on a machine where the native extension is unavailable or
+  // ABI-mismatched — matching initDatabase's treatment of vec as a soft
+  // dependency. Fail loud only when the query set actually requires vectors.
+  const requiresEmbeddings = queries.some(
+    (query) =>
+      query.search_mode === "semantic" ||
+      query.search_mode === "hybrid" ||
+      query.search_mode === "all",
+  );
+  let vecLoadError: Error | null = null;
+  try {
+    sqliteVec.load(db);
+    setVecLoaded(true);
+  } catch (err) {
+    setVecLoaded(false);
+    vecLoadError = err instanceof Error ? err : new Error(String(err));
+    if (requiresEmbeddings) {
+      throw new Error(
+        `sqlite-vec failed to load but the query set requires semantic/hybrid search: ${vecLoadError.message}`,
+      );
+    }
+  }
 
   // Get DB metadata
   const schemaRow = db.prepare("SELECT MAX(version) as v FROM schema_version").get() as { v: number } | undefined;
@@ -597,6 +619,9 @@ async function runBenchmarkInner(
   const entryCount = countRow.c;
 
   const warnings: string[] = [];
+  if (vecLoadError) {
+    warnings.push(`sqlite-vec unavailable — ran lexical-only. (${vecLoadError.message})`);
+  }
 
   // Resolve query-set lineage.
   let querySetSources: QuerySetSource[] = (options.querySetSources ?? []).map((s) => ({ ...s }));
@@ -658,9 +683,7 @@ async function runBenchmarkInner(
       ? options.searchRecencyWeight ?? DEFAULT_SEARCH_RECENCY_WEIGHT
       : null;
 
-  const requiresEmbeddings = queries.some(
-    (query) => query.search_mode === "semantic" || query.search_mode === "hybrid" || query.search_mode === "all",
-  );
+  // requiresEmbeddings was computed above (it also gates the sqlite-vec load).
   const embeddingsAvailable = requiresEmbeddings
     ? await initEmbeddings()
     : false;

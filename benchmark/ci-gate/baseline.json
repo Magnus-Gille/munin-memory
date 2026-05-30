@@ -1,0 +1,14 @@
+{
+  "baseline_schema_version": 1,
+  "generated_at": "2026-05-29T21:50:32.893Z",
+  "corpus_sha256": "fe3a7242a2d9f3fd559ea6b8d0d79e3a5dfc67cf489020a7aee63182510d0919",
+  "query_set_checksum": "bb54e0e96067c05c0144bec0e8e972288edf707a8644c8187336c4e9d4e6f7e6",
+  "query_count": 15,
+  "overall": {
+    "recallAt1": 1,
+    "recallAt5": 1,
+    "recallAt10": 1,
+    "ndcgAt5": 1,
+    "mrr": 1
+  }
+}

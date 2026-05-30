@@ -10,6 +10,25 @@ changelog is the canonical record of what moved.
 
 ### Added
 
+- **Retrieval CI regression gate (#70, Phase 4).** A deterministic gate
+  that fails the build when a code change degrades retrieval quality.
+  It builds a small, fully synthetic corpus (`benchmark/ci-gate/corpus.json`)
+  into an ephemeral SQLite DB, runs the benchmark in `raw` + `lexical`
+  mode (bm25 over a fixed corpus — no embeddings, no network, no
+  recency/time dependence, so the numbers are stable across machines),
+  and compares the aggregate scores (R@1, R@5, R@10, nDCG@5, MRR) against
+  a committed baseline (`benchmark/ci-gate/baseline.json`). Any metric
+  regressing beyond a tiny floating-point tolerance fails. Run it with
+  `npm run benchmark:ci-gate`; re-bless an intentional change with
+  `npm run benchmark:ci-gate -- --update-baseline`. Wired into
+  `.github/workflows/ci.yml` and also exercised on every `npm test` run
+  via `tests/ci-gate.test.ts` (policy unit tests + an end-to-end pass
+  check that keeps the committed corpus, query set, and baseline in
+  sync). Scope note: the gate covers the retrieval-recall + lexical-ranking
+  (`raw`) layer; the production reranker is intentionally not gated here
+  because its freshness/attention inputs are time-relative and would rot
+  a committed baseline — raw-vs-production parity stays guarded by
+  `tests/runner-parity.test.ts`.
 - **Benchmark `production_ranker` mode (PR 2b).** The benchmark runner
   now offers a second code path that runs results through the same
   pipeline `memory_query` uses in production: canonical reference

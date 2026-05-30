@@ -1,0 +1,210 @@
+[
+  {
+    "id": "ci-atlas-status",
+    "namespace": "projects/atlas",
+    "key": "status",
+    "content": "Project Atlas status: active. Phase 2 migration in progress. The ingestion pipeline is rewritten; remaining work is the dashboard and the export job. No blockers.",
+    "tags": ["active", "project"],
+    "created_at": "2026-01-05T09:00:00.000Z"
+  },
+  {
+    "id": "ci-atlas-ingestion",
+    "namespace": "projects/atlas",
+    "key": "ingestion-notes",
+    "content": "Atlas ingestion pipeline notes. Batches are pulled every five minutes and deduplicated by source id before the transform stage. Backpressure is handled with a bounded queue.",
+    "tags": ["pipeline", "notes"],
+    "created_at": "2026-01-06T09:00:00.000Z"
+  },
+  {
+    "id": "ci-borealis-status",
+    "namespace": "projects/borealis",
+    "key": "status",
+    "content": "Project Borealis status: blocked. Waiting on the storage engine decision before the schema can be frozen. Dashboard work is paused until then.",
+    "tags": ["blocked", "project"],
+    "created_at": "2026-01-07T09:00:00.000Z"
+  },
+  {
+    "id": "ci-borealis-roadmap",
+    "namespace": "projects/borealis",
+    "key": "roadmap",
+    "content": "Borealis roadmap: ship the read-only API first, then the write path, then real-time subscriptions. The subscription work depends on the chosen storage engine.",
+    "tags": ["roadmap", "notes"],
+    "created_at": "2026-01-08T09:00:00.000Z"
+  },
+  {
+    "id": "ci-decision-auth",
+    "namespace": "decisions/auth-strategy",
+    "key": "decision",
+    "content": "Decision: use OAuth 2.1 with PKCE for user authentication, and short-lived bearer tokens for service-to-service authentication. Rejected session cookies because the mobile client needs token refresh.",
+    "tags": ["decision", "auth"],
+    "created_at": "2026-01-09T09:00:00.000Z"
+  },
+  {
+    "id": "ci-decision-storage",
+    "namespace": "decisions/storage-engine",
+    "key": "decision",
+    "content": "Decision: adopt SQLite with WAL mode for the storage engine. Rejected Postgres for the appliance tier because of the single-binary deployment constraint and ARM64 support.",
+    "tags": ["decision", "storage"],
+    "created_at": "2026-01-10T09:00:00.000Z"
+  },
+  {
+    "id": "ci-decision-deploy",
+    "namespace": "decisions/deploy-pipeline",
+    "key": "decision",
+    "content": "Decision: deploy via a single GitHub Actions workflow that builds, tests, and ships an artifact to the appliance over SSH. Rejected a container registry to keep the footprint small.",
+    "tags": ["decision", "deploy"],
+    "created_at": "2026-01-11T09:00:00.000Z"
+  },
+  {
+    "id": "ci-decision-cache",
+    "namespace": "decisions/cache-policy",
+    "key": "decision",
+    "content": "Decision: cache query results in memory with a five-minute TTL and a least-recently-used eviction policy. Rejected an external cache to avoid another moving part on the appliance.",
+    "tags": ["decision", "cache"],
+    "created_at": "2026-01-12T09:00:00.000Z"
+  },
+  {
+    "id": "ci-person-dana",
+    "namespace": "people/dana",
+    "key": "profile",
+    "content": "Dana is the backend lead. Prefers small reviewable pull requests and writes the database migrations. Owns the storage engine decision and the deployment pipeline.",
+    "tags": ["person"],
+    "created_at": "2026-01-13T09:00:00.000Z"
+  },
+  {
+    "id": "ci-person-ravi",
+    "namespace": "people/ravi",
+    "key": "profile",
+    "content": "Ravi is the mobile lead. Drove the authentication strategy and the token refresh flow. Prefers asynchronous updates over meetings.",
+    "tags": ["person"],
+    "created_at": "2026-01-14T09:00:00.000Z"
+  },
+  {
+    "id": "ci-conventions",
+    "namespace": "meta/conventions",
+    "key": "conventions",
+    "content": "Team conventions: write a failing test first, keep pull requests small, and record every architectural decision with its rejected alternatives. Commit messages use the conventional commits format.",
+    "tags": ["conventions", "meta"],
+    "created_at": "2026-01-15T09:00:00.000Z"
+  },
+  {
+    "id": "ci-reading-rrf",
+    "namespace": "reading/reciprocal-rank-fusion",
+    "key": "summary",
+    "content": "Summary of reciprocal rank fusion: combine multiple ranked result lists by summing one over k plus rank. Robust to score-scale differences between lexical and vector retrieval.",
+    "tags": ["reading", "retrieval"],
+    "created_at": "2026-01-16T09:00:00.000Z"
+  },
+  {
+    "id": "ci-reading-bm25",
+    "namespace": "reading/bm25",
+    "key": "summary",
+    "content": "Summary of BM25: a bag-of-words ranking function that scores documents by term frequency saturation and inverse document frequency, with a length-normalization term.",
+    "tags": ["reading", "retrieval"],
+    "created_at": "2026-01-17T09:00:00.000Z"
+  },
+  {
+    "id": "ci-client-northwind",
+    "namespace": "clients/northwind",
+    "key": "status",
+    "content": "Northwind engagement status: active. Delivered the onboarding workshop; next is the data migration review. Invoice for the workshop has been sent.",
+    "tags": ["active", "client"],
+    "created_at": "2026-01-18T09:00:00.000Z"
+  },
+  {
+    "id": "ci-client-contoso",
+    "namespace": "clients/contoso",
+    "key": "status",
+    "content": "Contoso engagement status: stopped. The pilot ended without a renewal. Keeping the relationship warm with a quarterly check-in email.",
+    "tags": ["stopped", "client"],
+    "created_at": "2026-01-19T09:00:00.000Z"
+  },
+  {
+    "id": "ci-atlas-export",
+    "namespace": "projects/atlas",
+    "key": "export-job",
+    "content": "Atlas export job: nightly cron writes a CSV snapshot to object storage and emails a download link. Failures retry three times with exponential backoff.",
+    "tags": ["notes"],
+    "created_at": "2026-01-20T09:00:00.000Z"
+  },
+  {
+    "id": "ci-borealis-schema",
+    "namespace": "projects/borealis",
+    "key": "schema-draft",
+    "content": "Borealis schema draft: entities are events with a monotonic sequence number, an actor, and a JSON payload. The schema cannot be frozen until the storage engine is chosen.",
+    "tags": ["schema", "notes"],
+    "created_at": "2026-01-21T09:00:00.000Z"
+  },
+  {
+    "id": "ci-decision-recency",
+    "namespace": "decisions/ranking-recency",
+    "key": "decision",
+    "content": "Decision: apply a small recency weight when reranking retrieval results so fresher entries surface first on ties. Rejected a hard time decay because old decisions must stay findable.",
+    "tags": ["decision", "retrieval"],
+    "created_at": "2026-01-22T09:00:00.000Z"
+  },
+  {
+    "id": "ci-meta-backups",
+    "namespace": "meta/backups",
+    "key": "policy",
+    "content": "Backup policy: nightly snapshot to the NAS with grandfather-father-son retention. Restores are tested monthly. The database file is copied while the writer holds a checkpoint.",
+    "tags": ["meta", "ops"],
+    "created_at": "2026-01-23T09:00:00.000Z"
+  },
+  {
+    "id": "ci-person-sam",
+    "namespace": "people/sam",
+    "key": "profile",
+    "content": "Sam handles infrastructure and the deployment pipeline runbook. Set up the GitHub Actions workflow and the SSH artifact delivery to the appliance.",
+    "tags": ["person"],
+    "created_at": "2026-01-24T09:00:00.000Z"
+  },
+  {
+    "id": "ci-reading-pkce",
+    "namespace": "reading/pkce",
+    "key": "summary",
+    "content": "Summary of PKCE: proof key for code exchange protects the OAuth authorization code flow on public clients by binding the code to a verifier the client generated.",
+    "tags": ["reading", "auth"],
+    "created_at": "2026-01-25T09:00:00.000Z"
+  },
+  {
+    "id": "ci-atlas-dashboard",
+    "namespace": "projects/atlas",
+    "key": "dashboard-spec",
+    "content": "Atlas dashboard spec: a single page showing ingestion throughput, queue depth, and the last successful export time. Refreshes every thirty seconds.",
+    "tags": ["spec", "notes"],
+    "created_at": "2026-01-26T09:00:00.000Z"
+  },
+  {
+    "id": "ci-decision-observability",
+    "namespace": "decisions/observability",
+    "key": "decision",
+    "content": "Decision: emit one structured JSON log line per request to stderr and let the host journal collect it. Rejected a metrics agent because the appliance has no spare memory.",
+    "tags": ["decision", "ops"],
+    "created_at": "2026-01-27T09:00:00.000Z"
+  },
+  {
+    "id": "ci-northwind-migration",
+    "namespace": "clients/northwind",
+    "key": "migration-plan",
+    "content": "Northwind data migration plan: export legacy records to JSON, validate against the new schema, then bulk import during a maintenance window. Dana reviews the migration scripts.",
+    "tags": ["client", "notes"],
+    "created_at": "2026-01-28T09:00:00.000Z"
+  },
+  {
+    "id": "ci-meta-roadmap",
+    "namespace": "meta/roadmap",
+    "key": "overview",
+    "content": "Roadmap overview: finish Atlas phase two, unblock Borealis with the storage engine decision, then start the shared authentication service. Reading queue covers retrieval ranking.",
+    "tags": ["meta", "roadmap"],
+    "created_at": "2026-01-29T09:00:00.000Z"
+  },
+  {
+    "id": "ci-borealis-api",
+    "namespace": "projects/borealis",
+    "key": "api-notes",
+    "content": "Borealis API notes: the read-only endpoints page through events by sequence number. The write path is gated behind the storage engine decision and is not yet implemented.",
+    "tags": ["api", "notes"],
+    "created_at": "2026-01-30T09:00:00.000Z"
+  }
+]
