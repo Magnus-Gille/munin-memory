@@ -8,8 +8,58 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-05-30
+
+Roughly six weeks past v0.2.0. Headline items: DB-managed bearer-token rotation,
+accent-insensitive and camelCase-aware lexical search, tool-call telemetry, a
+self-feeding consolidation cross-reference scanner, a full benchmark/eval
+harness with a deterministic CI regression gate, and two transitive-dependency
+security fixes (including a protobufjs RCE). Schema advanced through migrations
+v14–v18.
+
 ### Added
 
+- **`munin-admin bearer rotate/revoke/list`** — DB-managed bearer token rotation with configurable grace window. DB tokens are checked alongside env-var tokens in `verifyAccessToken`, allowing zero-downtime rotation. Migration v16 adds the `bearer_tokens` table. (#35)
+- **Tool call telemetry (Layer 1)** — migration v14 adds a `tool_calls`
+  table. Every MCP tool call is instrumented with fire-and-forget timing:
+  `tool_name`, `success`, `error_type`, `response_size_bytes`, and
+  `duration_ms`. `memory_status` now includes a `telemetry` field (owner-
+  only) with per-tool aggregates over the last 7 days. Pruned alongside
+  retrieval analytics at the configured retention window (#28).
+- **Orphan cross-reference discovery** — the consolidation worker now scans
+  the unincorporated log window for mentions of other tracked namespaces
+  (`projects/*`, `clients/*`, `people/*`, `decisions/*`) and checks whether
+  the target namespace's `status`/`synthesis` state entries contain a
+  reciprocal reference. Orphaned connections (≥2 mentions, no back-reference)
+  are merged with LLM-extracted cross-references before the single
+  `cross_references` write — the LLM wins on `(source, target)` collision, and
+  scanner-derived refs are tagged `related_to` with `confidence = 0.5` and a
+  context string prefixed `Scanner-detected: …`. Closes the ~50% orphan gap
+  measured in the 2026-04-04 Phase 2 consolidation spike (#29).
+- **Scanner observability** — the consolidation worker now emits a
+  `Scanner[<namespace>]: targets=… candidates=… dropped_reciprocal=…
+  dropped_llm_merge=… kept=…` log line whenever any candidate passes the
+  mention threshold, including the case where everything is filtered out.
+  Lets us tell whether a silent scanner means "nothing to find" or "filters
+  too strict" without re-instrumenting.
+- **4xx diagnostic logging on `/mcp`** — when an HTTP MCP request returns a
+  4xx status, the request log entry now carries a `diagnostics` field with
+  redacted request headers and a 500-char body snippet. Sensitive headers
+  (`authorization`, `cookie`, `proxy-authorization`, `cf-access-client-secret`,
+  `x-api-key`) are replaced with `[REDACTED]`. Zero overhead on 2xx responses.
+  Helps capture minimal reproductions for client-side MCP quirks (#32).
+- **Bridge credentials file** — the MCP stdio-to-HTTP bridge now accepts
+  `MUNIN_CREDENTIALS_FILE`, a path to a `chmod 600` JSON file holding
+  `auth_token` / `cf_client_id` / `cf_client_secret`. The bridge refuses to
+  read the file if it has any group or world bits set, and logs a warning if
+  inline env vars are set but overridden by the file. This keeps Bearer tokens
+  and Cloudflare Access secrets out of MCP client config files (Codex CLI,
+  Claude Desktop, etc.), which typically land on disk as plaintext `0644`.
+  README has a new "Credential storage" section (#30).
+- `MUNIN_CONSOLIDATION_MAX_LOGS_PER_RUN` (default `15`) — caps how many
+  unincorporated logs a single consolidation run incorporates, so a large
+  backlog drains incrementally over successive worker ticks instead of
+  producing one oversized synthesis request.
 - **Retrieval CI regression gate (#70, Phase 4).** A deterministic gate
   that fails the build when a code change degrades retrieval quality.
   It builds a small, fully synthetic corpus (`benchmark/ci-gate/corpus.json`)
@@ -80,10 +130,6 @@ changelog is the canonical record of what moved.
   `.gitattributes` pins `eol=lf` for `.jsonl`/`.json`/`.md`/`.ts`/`.sh`
   so query-file SHAs are stable across macOS/Linux/Windows. No changes
   to `src/tools.ts`; production paths are untouched.
-- `MUNIN_CONSOLIDATION_MAX_LOGS_PER_RUN` (default `15`) — caps how many
-  unincorporated logs a single consolidation run incorporates, so a large
-  backlog drains incrementally over successive worker ticks instead of
-  producing one oversized synthesis request.
 - Retrieval benchmark lineage manifest at
   `benchmark/queries/retrieval-v1.manifest.{json,md}`. Curated source index
   that reconciles munin-native query sets (`baseline.jsonl`,
@@ -105,13 +151,27 @@ changelog is the canonical record of what moved.
 
 ### Changed
 
-- **Benchmark report schema v3 — removed the deprecated `schema_version`
-  alias (#58).** `BenchmarkReport.schema_version` (a one-release mirror of
-  `snapshot_schema_version` introduced in report schema v2 / PR 2a) is gone.
-  `report_schema_version` is now `3`. Consumers must read
-  `snapshot_schema_version` for the snapshot DB migration version. This is a
-  breaking change to the report shape; historical report JSON under
-  `benchmark/reports/` is unaffected (frozen records).
+- **Accent-insensitive lexical search** — migration v15 recreates the
+  `entries_fts` virtual table with `tokenize='unicode61 remove_diacritics 2'`
+  and rebuilds the index. Queries for `Mimir` now match content containing
+  `Mímir` (and vice versa), removing one of the two token-mismatch failure
+  modes observed in the 2026-04-20 retrieval pilot v3c T10 case. Porter
+  stemming stays deferred pending a separate evaluation against the Swedish
+  portion of the corpus (#40).
+- `memory_orient` compact conventions now include a rule clarifying that
+  memory describes external artifacts at a point in time, so models should
+  verify feature-level claims (UI copy, flows, exact behavior) against the
+  current artifact — code, templates, running app — before asserting to
+  the user. Backend capability ≠ UI exposure. State entries remain the
+  current truth within Munin; the new rule is scoped to claims that depend
+  on external reality. Prompted by an external tester report of an Opus 4.6
+  session hallucinating UI features despite accurate Munin retrieval (#33).
+- `memory_insights` aggregates now include session-segmented reformulation
+  context: `reformulation_rate_adjusted` (excludes single-event sessions
+  from the denominator), `reformulation_explanation` (human-readable note
+  about known session-correlation limitations), `total_sessions`, and
+  `multi_event_sessions`. The raw `reformulation_rate` is retained for
+  backwards compatibility (#25).
 - **Backup schedule reduced from hourly to daily** with GFS retention (14 most
   recent daily snapshots + 4 most recent Sunday snapshots, ~18 files total).
   Previous policy kept 168 hourly snapshots which grew to ~50 GB and filled
@@ -120,9 +180,57 @@ changelog is the canonical record of what moved.
   `/mnt/timemachine/backups/munin-memory` (1.8 TB external HDD).
   `munin-backup.{service,timer}` are now version-controlled in the repo root
   alongside `munin-memory.service`.
+- **Benchmark report schema v3 — removed the deprecated `schema_version`
+  alias (#58).** `BenchmarkReport.schema_version` (a one-release mirror of
+  `snapshot_schema_version` introduced in report schema v2 / PR 2a) is gone.
+  `report_schema_version` is now `3`. Consumers must read
+  `snapshot_schema_version` for the snapshot DB migration version. This is a
+  breaking change to the report shape; historical report JSON under
+  `benchmark/reports/` is unaffected (frozen records).
 
 ### Fixed
 
+- **`memory_update_status` no longer drops non-canonical sections.** Previously
+  the parse → merge → format cycle only recognized the five canonical sections
+  (`Phase`, `Current Work`, `Blockers`, `Next Steps`, `Notes`); anything else
+  (`Vision`, `Roadmap`, `Milestones`, custom sections) was silently discarded
+  on the next call — even a no-op `lifecycle` flip would wipe them. Now
+  `parseStructuredStatus` collects unknown `## Heading` sections into an
+  `extras` array, `buildStructuredStatus` carries them across patches, and
+  `formatStructuredStatus` re-emits them after the canonical block. Heimdall
+  and other downstream readers that depend on `## Vision` / `## Milestones`
+  no longer need the `memory_write patch` workaround. (#44)
+- **FTS5 now matches camelCase / PascalCase identifiers against separated-word
+  queries.** Migration v17 recreates the FTS triggers to augment indexed
+  content with a case-split copy via the `munin_split_tokens` SQL UDF, and
+  rebuilds the existing index. `WebFetch` is now findable via `web fetch`,
+  `XMLParser` via `XML parser`, `parseXMLResponse` via `parse XML response`,
+  `OAuthToken` via `oauth token`, and `IPv6Address` via `IPv6 address`.
+  Original phrases still match unchanged (the augmented copy is appended,
+  not substituted). The maintenance helper `rebuildFTS()` was rewritten to
+  use `delete-all` + augmented re-population, since FTS5's built-in
+  `'rebuild'` command would silently strip the split-token augmentation by
+  reading from `entries` directly. Known limitation: quoted phrases that
+  span identifier-internal punctuation like `"90/10"` are still
+  tokenizer-split by `unicode61` — query as separate tokens or rely on
+  FTS5's near-match ranking. (#42)
+- **Consolidation worker no longer stalls indefinitely on a large backlog
+  (#51).** A namespace with many unincorporated logs produced a synthesis
+  that overflowed the OpenRouter `max_tokens` cap, returning truncated JSON
+  that failed to parse. Repeated parse failures tripped the circuit breaker,
+  which silently disabled *all* consolidation until the next process restart;
+  the growing backlog meant the namespace could never self-recover. Fixed by
+  raising `max_tokens` (2048 → 4096) and bounding the per-run log window
+  (`MUNIN_CONSOLIDATION_MAX_LOGS_PER_RUN`) so backlogs drain incrementally.
+- **Consolidation backlog drain hardened (follow-up to #51).** The initial
+  per-run cap used a timestamp-only cursor that silently dropped logs sharing
+  the boundary second, never re-selected a sub-`MIN_LOGS` tail, and let each
+  drain slice overwrite the previous slice's cross-references. Fixed with a
+  composite `(created_at, id)` cursor (no same-timestamp data loss), a
+  `drain_in_progress` flag on `consolidation_metadata` (migration v18) that
+  forces the worker to keep draining until the backlog is empty regardless of
+  `MIN_LOGS`, and additive cross-reference upserts during a drain so orphan
+  references discovered in earlier slices survive later ones.
 - **`munin-admin` now honors `MUNIN_MEMORY_DB_PATH`.** The admin CLI
   previously only accepted a `--db` flag and ignored the
   `MUNIN_MEMORY_DB_PATH` env var that the server respects — so a dry-run
@@ -141,124 +249,6 @@ changelog is the canonical record of what moved.
   per tool). Field name and shape are unchanged — operators reading this
   telemetry will see lower, more representative values from this release
   forward. Empty per-tool inputs continue to report `null`.
-- **Consolidation worker no longer stalls indefinitely on a large backlog
-  (#51).** A namespace with many unincorporated logs produced a synthesis
-  that overflowed the OpenRouter `max_tokens` cap, returning truncated JSON
-  that failed to parse. Repeated parse failures tripped the circuit breaker,
-  which silently disabled *all* consolidation until the next process restart;
-  the growing backlog meant the namespace could never self-recover. Fixed by
-  raising `max_tokens` (2048 → 4096) and bounding the per-run log window
-  (`MUNIN_CONSOLIDATION_MAX_LOGS_PER_RUN`) so backlogs drain incrementally.
-- **Consolidation backlog drain hardened (follow-up to #51).** The initial
-  per-run cap used a timestamp-only cursor that silently dropped logs sharing
-  the boundary second, never re-selected a sub-`MIN_LOGS` tail, and let each
-  drain slice overwrite the previous slice's cross-references. Fixed with a
-  composite `(created_at, id)` cursor (no same-timestamp data loss), a
-  `drain_in_progress` flag on `consolidation_metadata` (migration v18) that
-  forces the worker to keep draining until the backlog is empty regardless of
-  `MIN_LOGS`, and additive cross-reference upserts during a drain so orphan
-  references discovered in earlier slices survive later ones.
-- **FTS5 now matches camelCase / PascalCase identifiers against separated-word
-  queries.** Migration v17 recreates the FTS triggers to augment indexed
-  content with a case-split copy via the `munin_split_tokens` SQL UDF, and
-  rebuilds the existing index. `WebFetch` is now findable via `web fetch`,
-  `XMLParser` via `XML parser`, `parseXMLResponse` via `parse XML response`,
-  `OAuthToken` via `oauth token`, and `IPv6Address` via `IPv6 address`.
-  Original phrases still match unchanged (the augmented copy is appended,
-  not substituted). The maintenance helper `rebuildFTS()` was rewritten to
-  use `delete-all` + augmented re-population, since FTS5's built-in
-  `'rebuild'` command would silently strip the split-token augmentation by
-  reading from `entries` directly. Known limitation: quoted phrases that
-  span identifier-internal punctuation like `"90/10"` are still
-  tokenizer-split by `unicode61` — query as separate tokens or rely on
-  FTS5's near-match ranking. (#42)
-
-- **`memory_update_status` no longer drops non-canonical sections.** Previously
-  the parse → merge → format cycle only recognized the five canonical sections
-  (`Phase`, `Current Work`, `Blockers`, `Next Steps`, `Notes`); anything else
-  (`Vision`, `Roadmap`, `Milestones`, custom sections) was silently discarded
-  on the next call — even a no-op `lifecycle` flip would wipe them. Now
-  `parseStructuredStatus` collects unknown `## Heading` sections into an
-  `extras` array, `buildStructuredStatus` carries them across patches, and
-  `formatStructuredStatus` re-emits them after the canonical block. Heimdall
-  and other downstream readers that depend on `## Vision` / `## Milestones`
-  no longer need the `memory_write patch` workaround. (#44)
-
-### Changed
-
-- **Accent-insensitive lexical search** — migration v15 recreates the
-  `entries_fts` virtual table with `tokenize='unicode61 remove_diacritics 2'`
-  and rebuilds the index. Queries for `Mimir` now match content containing
-  `Mímir` (and vice versa), removing one of the two token-mismatch failure
-  modes observed in the 2026-04-20 retrieval pilot v3c T10 case. Porter
-  stemming stays deferred pending a separate evaluation against the Swedish
-  portion of the corpus (#40).
-
-### Added
-
-- **`munin-admin bearer rotate/revoke/list`** — DB-managed bearer token rotation with configurable grace window. DB tokens are checked alongside env-var tokens in `verifyAccessToken`, allowing zero-downtime rotation. Migration v16 adds the `bearer_tokens` table. (#35)
-
-- **4xx diagnostic logging on `/mcp`** — when an HTTP MCP request returns a
-  4xx status, the request log entry now carries a `diagnostics` field with
-  redacted request headers and a 500-char body snippet. Sensitive headers
-  (`authorization`, `cookie`, `proxy-authorization`, `cf-access-client-secret`,
-  `x-api-key`) are replaced with `[REDACTED]`. Zero overhead on 2xx responses.
-  Helps capture minimal reproductions for client-side MCP quirks (#32).
-
-- **Bridge credentials file** — the MCP stdio-to-HTTP bridge now accepts
-  `MUNIN_CREDENTIALS_FILE`, a path to a `chmod 600` JSON file holding
-  `auth_token` / `cf_client_id` / `cf_client_secret`. The bridge refuses to
-  read the file if it has any group or world bits set, and logs a warning if
-  inline env vars are set but overridden by the file. This keeps Bearer tokens
-  and Cloudflare Access secrets out of MCP client config files (Codex CLI,
-  Claude Desktop, etc.), which typically land on disk as plaintext `0644`.
-  README has a new "Credential storage" section (#30).
-
-- **Orphan cross-reference discovery** — the consolidation worker now scans
-  the unincorporated log window for mentions of other tracked namespaces
-  (`projects/*`, `clients/*`, `people/*`, `decisions/*`) and checks whether
-  the target namespace's `status`/`synthesis` state entries contain a
-  reciprocal reference. Orphaned connections (≥2 mentions, no back-reference)
-  are merged with LLM-extracted cross-references before the single
-  `cross_references` write — the LLM wins on `(source, target)` collision, and
-  scanner-derived refs are tagged `related_to` with `confidence = 0.5` and a
-  context string prefixed `Scanner-detected: …`. Closes the ~50% orphan gap
-  measured in the 2026-04-04 Phase 2 consolidation spike (#29).
-
-- **Scanner observability** — the consolidation worker now emits a
-  `Scanner[<namespace>]: targets=… candidates=… dropped_reciprocal=…
-  dropped_llm_merge=… kept=…` log line whenever any candidate passes the
-  mention threshold, including the case where everything is filtered out.
-  Lets us tell whether a silent scanner means "nothing to find" or "filters
-  too strict" without re-instrumenting.
-
-- **Tool call telemetry (Layer 1)** — migration v14 adds a `tool_calls`
-  table. Every MCP tool call is instrumented with fire-and-forget timing:
-  `tool_name`, `success`, `error_type`, `response_size_bytes`, and
-  `duration_ms`. `memory_status` now includes a `telemetry` field (owner-
-  only) with per-tool aggregates over the last 7 days. Pruned alongside
-  retrieval analytics at the configured retention window (#28).
-
-### Changed
-
-- `memory_orient` compact conventions now include a rule clarifying that
-  memory describes external artifacts at a point in time, so models should
-  verify feature-level claims (UI copy, flows, exact behavior) against the
-  current artifact — code, templates, running app — before asserting to
-  the user. Backend capability ≠ UI exposure. State entries remain the
-  current truth within Munin; the new rule is scoped to claims that depend
-  on external reality. Prompted by an external tester report of an Opus 4.6
-  session hallucinating UI features despite accurate Munin retrieval (#33).
-
-- `memory_insights` aggregates now include session-segmented reformulation
-  context: `reformulation_rate_adjusted` (excludes single-event sessions
-  from the denominator), `reformulation_explanation` (human-readable note
-  about known session-correlation limitations), `total_sessions`, and
-  `multi_event_sessions`. The raw `reformulation_rate` is retained for
-  backwards compatibility (#25).
-
-### Fixed
-
 - `memory_query` hybrid mode now mirrors the lexical-mode relaxed-token
   fallback: when the strict AND-of-all-words FTS5 query returns zero matches,
   the hybrid path retries with an OR-of-content-terms query before collapsing
@@ -274,6 +264,15 @@ changelog is the canonical record of what moved.
   status is terminal are skipped — catches task result documents and
   post-mortems that contain forward-looking dated language retrospectively
   (#26).
+
+### Security
+
+- **Transitive `protobufjs` bumped to 7.6.1 via an npm override to clear a
+  prototype-pollution / remote-code-execution vulnerability.** `protobufjs`
+  is pulled in transitively (not called directly by Munin); the `overrides`
+  block pins the patched version. (#50)
+- **`hono` bumped to 4.12.23 and `@hono/node-server` to 1.19.14 via
+  `overrides`** to pick up upstream security fixes. (#49)
 
 ## [0.2.0] — 2026-04-11
 
@@ -409,6 +408,7 @@ Initial public release (commit `c40c127`). Core MCP tool surface
 `memory_list`, `memory_delete`), SQLite + FTS5 storage, Bearer token auth,
 stdio transport, and the first HTTP transport for Raspberry Pi deployment.
 
-[Unreleased]: https://github.com/Magnus-Gille/munin-memory/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Magnus-Gille/munin-memory/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Magnus-Gille/munin-memory/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Magnus-Gille/munin-memory/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Magnus-Gille/munin-memory/releases/tag/v0.1.0
