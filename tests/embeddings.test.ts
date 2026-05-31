@@ -144,6 +144,19 @@ describe("generateEmbedding", () => {
 });
 
 describe("circuit breaker", () => {
+  // The failing extractor in these tests deliberately rejects with
+  // "model crashed"; generateEmbedding logs each failure via console.error.
+  // Capture it so the *expected* failures don't leak to full-suite stderr —
+  // that noise was misread as a real model crash in #74 — while still
+  // asserting the failure path logs as intended.
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    errorSpy.mockRestore();
+  });
+
   it("disables after maxFailures consecutive failures", async () => {
     const failingExtractor = () => Promise.reject(new Error("model crashed"));
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -155,6 +168,10 @@ describe("circuit breaker", () => {
     }
 
     expect(isEmbeddingAvailable()).toBe(false);
+    // The failure path logs each attempt — confirm it did (and was captured).
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("model crashed"),
+    );
 
     // generateEmbedding returns null when circuit breaker is tripped
     const result = await generateEmbedding("test");
