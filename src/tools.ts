@@ -3152,7 +3152,7 @@ const TOOL_DEFINITIONS = [
         },
         explain: {
           type: "boolean",
-          description: "Optional. If true, include retrieval metadata and per-result match explanations.",
+          description: "Optional. If true, include retrieval metadata and a per-result `match{}` block. The block carries `heuristic_score`, `freshness_score`, and `reasons` in every mode, plus the mode-specific signals: `lexical_rank`/`lexical_score` for lexical, `semantic_rank`/`semantic_distance` for semantic, and all of those plus `hybrid_score` (the RRF fusion score) for hybrid. Use it to debug ranking in any search mode.",
         },
         since: {
           type: "string",
