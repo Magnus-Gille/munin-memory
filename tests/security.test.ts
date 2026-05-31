@@ -135,6 +135,17 @@ describe("validateNamespace", () => {
     expect(validateNamespace("projects@home").valid).toBe(false);
     expect(validateNamespace("projects.v1").valid).toBe(false);
   });
+
+  it("names the offending character in the error message", () => {
+    const dot = validateNamespace("testing/foo.bar");
+    expect(dot.valid).toBe(false);
+    expect(dot.error).toContain(".");
+    expect(dot.error).toContain("'.'");
+
+    const space = validateNamespace("bad ns");
+    expect(space.valid).toBe(false);
+    expect(space.error).toContain("' '");
+  });
 });
 
 describe("validateKey", () => {
