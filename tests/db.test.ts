@@ -16,6 +16,7 @@ import {
   executeDelete,
   getOtherKeysInNamespace,
   getCompletedTaskNamespaces,
+  getTrackedStatuses,
   rebuildFTS,
   logToolCall,
   getToolCallAggregates,
@@ -56,6 +57,36 @@ describe("initDatabase", () => {
   it("sets WAL journal mode", () => {
     const mode = db.pragma("journal_mode", { simple: true });
     expect(mode).toBe("wal");
+  });
+});
+
+describe("getTrackedStatuses ordering (#74)", () => {
+  it("returns a total, connection-independent order when updated_at ties", () => {
+    // Seed several tracked statuses, then force identical updated_at to
+    // simulate same-millisecond bulk writes (test fixtures, seeds). Without a
+    // total-order tie-break, two connections can return tied rows in different
+    // order — the root cause of the runner-parity flake (#74).
+    writeState(db, "projects/alpha", "status", "Active alpha.", ["active"]);
+    writeState(db, "projects/bravo", "status", "Blocked bravo.", ["blocked"]);
+    writeState(db, "clients/delta", "status", "Active delta.", ["active"]);
+    writeState(db, "projects/charlie", "status", "Active charlie.", ["active"]);
+    db.prepare(
+      "UPDATE entries SET updated_at = '2026-01-01T00:00:00.000Z' WHERE key = 'status'",
+    ).run();
+
+    // Insertion order (rowid) is the documented tie-break.
+    const expected = ["projects/alpha", "projects/bravo", "clients/delta", "projects/charlie"];
+
+    // Stable across repeated calls AND across a fresh connection to the same DB.
+    const first = getTrackedStatuses(db).map((r) => r.namespace);
+    const second = getTrackedStatuses(db).map((r) => r.namespace);
+    const other = initDatabase(TEST_DB_PATH);
+    const third = getTrackedStatuses(other).map((r) => r.namespace);
+    other.close();
+
+    expect(first).toEqual(expected);
+    expect(second).toEqual(expected);
+    expect(third).toEqual(expected);
   });
 });
 

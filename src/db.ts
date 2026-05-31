@@ -156,13 +156,21 @@ export function rebuildFTS(db: Database.Database): void {
 // --- Tracked status queries ---
 
 export function getTrackedStatuses(db: Database.Database): TrackedStatusRow[] {
+  // `updated_at` ties are common (entries written in the same millisecond,
+  // e.g. test fixtures or bulk seeds). SQL does not guarantee a stable order
+  // for equal sort keys, so two different connections can return tied rows in
+  // different relative order — which leaks into attention-injection order and
+  // the computed dashboard, and makes the runner/memory_query parity test
+  // (tests/runner-parity.test.ts) flaky under load. `rowid` (insertion order)
+  // makes the order total and connection-independent, matching the de-facto
+  // tie-break already codified in queryEntriesLexicalScored.
   return db
     .prepare(
       `SELECT id, namespace, key, substr(content, 1, 300) as content_preview, content, tags, agent_id, owner_principal_id, created_at, updated_at, valid_until, classification
        FROM entries
        WHERE entry_type = 'state' AND key = 'status'
          AND (namespace LIKE 'projects/%' ESCAPE '\\' OR namespace LIKE 'clients/%' ESCAPE '\\')
-       ORDER BY updated_at DESC`,
+       ORDER BY updated_at DESC, rowid`,
     )
     .all() as TrackedStatusRow[];
 }

@@ -17,7 +17,6 @@ import {
   getLifecycleTags,
   LIFECYCLE_TAGS,
   isStale,
-  getFreshnessScore,
   getDaysUntil,
   isEntryExpiringSoon,
   findUpcomingEventDate,
@@ -453,11 +452,22 @@ export function rerankQueryResults(
       entry,
       index,
       heuristic: getQueryHeuristicScore(entry, queryLower, trackedStatuses),
-      freshness: getFreshnessScore(entry.updated_at),
     }))
     .sort((a, b) => {
       if (b.heuristic !== a.heuristic) return b.heuristic - a.heuristic;
-      if (searchRecencyWeight > 0 && b.freshness !== a.freshness) return b.freshness - a.freshness;
+      // Recency tie-break by EXACT updated_at, not the float freshness score.
+      // getFreshnessScore clamps age to >= 0, so any entry whose updated_at is
+      // at/after the instant the ranker reads the clock collapses to freshness
+      // 1.0. Two entries written ~1ms apart therefore compare *equal* when
+      // ranked immediately (both clamped) but *distinct* when ranked a few ms
+      // later — so the order depended on WHEN the ranker ran. memory_query and
+      // the benchmark runner run milliseconds apart, so they disagreed on
+      // score-tied recent entries under load (the #74 parity flake). The
+      // stored updated_at is fixed data and order-equivalent to freshness for
+      // already-aged entries, so rankings over real corpora are unchanged.
+      if (searchRecencyWeight > 0 && a.entry.updated_at !== b.entry.updated_at) {
+        return a.entry.updated_at < b.entry.updated_at ? 1 : -1; // newer first
+      }
       return a.index - b.index;
     })
     .map((item) => item.entry);

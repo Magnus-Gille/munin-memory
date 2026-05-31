@@ -8,6 +8,25 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Deterministic recency tie-break in query reranking** — `rerankQueryResults`
+  now breaks heuristic ties by the entries' stored `updated_at` rather than by a
+  freshness score computed from the wall clock. `getFreshnessScore` clamps age
+  to `>= 0`, so any entry whose `updated_at` is at or after the instant the
+  ranker reads the clock collapsed to freshness `1.0`. Two entries written ~1ms
+  apart therefore compared *equal* when ranked immediately but *distinct* a few
+  milliseconds later — so the result order depended on **when** the ranker ran.
+  `memory_query` and the benchmark runner run milliseconds apart, which made
+  their result ordering disagree for score-tied recent entries under load (the
+  flaky `runner-parity` test, #74). The stored `updated_at` is fixed data and
+  order-equivalent to freshness for already-aged entries, so rankings over real
+  corpora are unchanged. (#74)
+- **Deterministic tracked-status ordering** — `getTrackedStatuses` now orders by
+  `updated_at DESC, rowid` instead of `updated_at DESC` alone, so tied rows
+  (same-millisecond writes) can't come back in different relative order across
+  connections. (#74)
+
 ## [0.3.0] — 2026-05-30
 
 Roughly six weeks past v0.2.0. Headline items: DB-managed bearer-token rotation,
