@@ -50,6 +50,7 @@ export function _setExtractorForTesting(fn: ExtractorFn | null): void {
 // --- Float32Array → Buffer conversion ---
 
 export function embeddingToBuffer(f32: Float32Array): Buffer {
+  // Must pass byteOffset+byteLength — bare Buffer.from(f32) silently truncates when backed by a shared ArrayBuffer
   const buf = Buffer.from(f32.buffer, f32.byteOffset, f32.byteLength);
   if (buf.length !== EMBEDDING_DIM * 4) {
     throw new Error(

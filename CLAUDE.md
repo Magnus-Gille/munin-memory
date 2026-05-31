@@ -25,32 +25,32 @@ Part of the Hugin & Munin personal AI system. See `prd.md` for full product cont
 
 ### MCP tools exposed
 
-All 22 tools registered in `TOOL_DEFINITIONS` (`src/tools.ts`) are listed below, in registration order. This table is the single human-readable inventory; `tests/claude-md-tool-inventory.test.ts` asserts every registered tool name appears here exactly once.
+All 22 tools registered in `TOOL_DEFINITIONS` (`src/tools.ts`) are listed below. `tests/claude-md-tool-inventory.test.ts` asserts every name appears here exactly once.
 
 | Tool | Purpose |
 |------|---------|
-| `memory_orient` | **Start here.** Call at the start of every conversation before any other memory tool. Returns conventions, a computed project dashboard (grouped by lifecycle), curated notes, maintenance suggestions, and a namespace overview in one call. Hides completed task namespaces by default; pass `include_full_conventions: true` for the full guide. |
-| `memory_resume` | Build a compact, targeted continuation pack after `memory_orient` from a project hint, namespace, or opener — the most relevant state, logs, and next steps to pick work back up. |
-| `memory_extract` | Suggest reviewable memory operations from explicit conversation signals (messy notes, transcript text). Proposes writes/logs for you to confirm; does not write directly. |
-| `memory_narrative` | Derive a narrative view for one namespace from current status, recent logs, and audit history — project-arc signals like momentum and direction. |
-| `memory_commitments` | Surface explicit commitments derived from tracked next steps and dated, attributable source text. Review open, at-risk, and overdue obligations. |
-| `memory_patterns` | Derive conservative, reviewable patterns from repeated decision logs, tracked-status follow-through, and commitment outcomes. |
-| `memory_handoff` | Assemble a source-backed handoff pack for one namespace: current state, recent decisions, open loops, recent actors, and recommended next actions. |
-| `memory_write` | Store/update a state entry (namespace + key + content); upserts on conflict. Supports compare-and-swap via `expected_updated_at` for tracked statuses. Auto-canonicalizes lifecycle tags. |
-| `memory_update_status` | Update a tracked status entry in `projects/*` or `clients/*` only, using server-enforced canonical sections (Phase, Current Work, Blockers, Next Steps, Notes). Supports lifecycle tag + CAS. |
-| `memory_read` | Retrieve a specific state entry by namespace + key. Returns full content, tags, and timestamps. |
-| `memory_read_batch` | Retrieve multiple state entries in a single call; returns results (found or not found) in input order. Orient across several known keys at once. |
-| `memory_get` | Retrieve the full content of any entry (state or log) by UUID. Use after `memory_query` returns truncated previews. |
-| `memory_query` | Search and filter memories: lexical (keyword), semantic (vector), or hybrid (RRF fusion). Filters by namespace, tags, type, and `since`/`until`. Query string optional — browse by filters alone. |
-| `memory_attention` | Return deterministic triage items for tracked work: blocked statuses, stale active work, expiring/expired statuses, near-term event staleness, and missing status/lifecycle tags. |
-| `memory_log` | Append an immutable, timestamped log entry to a namespace. For decisions, events, and milestones with rationale. |
-| `memory_list` | Browse namespaces and their contents with recent log previews. Demo and completed task-run namespaces hidden by default. |
-| `memory_history` | View the chronological audit trail of changes (writes, updates, deletes, namespace deletes, log appends). Supports an ascending cursor for sync/polling workflows. |
-| `memory_delete` | Delete a state entry by namespace+key, or all entries in a namespace. Call without `delete_token` to preview, then with the returned token to confirm. |
-| `memory_insights` | Per-entry retrieval analytics: impressions, opens, follow-through rate, staleness pressure, learned signals. Also returns aggregate retrieval-health metrics (reformulation rate, positive outcome rate, feedback counts). |
-| `memory_retrieval_feedback` | Submit explicit feedback on retrieval quality: bad_results, missing_result, wrong_order, stale_results, good_results. Owner-only. Auto-links to the most recent retrieval event; feeds the benchmark ground-truth pipeline. |
-| `memory_consolidate` | Manually trigger consolidation for a namespace or all eligible tracked namespaces. Synthesizes unincorporated logs into an enriched `synthesis` key via OpenRouter LLM call. Owner-only. |
-| `memory_status` | Return server capabilities, version, and feature availability — discover which search modes, tools, and features this instance supports. |
+| `memory_orient` | **Start here.** Dashboard, conventions, maintenance suggestions, namespace overview. Pass `include_full_conventions: true` for the full guide. |
+| `memory_resume` | Targeted continuation pack — most relevant state + next steps for a namespace/opener. |
+| `memory_extract` | Propose reviewable memory ops from conversation signals. Does not write directly. |
+| `memory_narrative` | Narrative + momentum view from status, logs, and audit history for a namespace. |
+| `memory_commitments` | Surface open/at-risk/overdue commitments from tracked next steps. |
+| `memory_patterns` | Derive reviewable patterns from decision logs and commitment outcomes. |
+| `memory_handoff` | Source-backed handoff pack: state, decisions, open loops, next actions. |
+| `memory_write` | Store/update state entry (upsert). CAS via `expected_updated_at`. Auto-normalizes lifecycle tags. |
+| `memory_update_status` | Update tracked status in `projects/*`/`clients/*` with canonical sections + lifecycle tag + CAS. |
+| `memory_read` | Retrieve a state entry by namespace + key. |
+| `memory_read_batch` | Retrieve multiple state entries in one call. |
+| `memory_get` | Retrieve any entry by UUID — use when `memory_query` truncates. |
+| `memory_query` | Search: lexical, semantic, or hybrid (RRF). Filters by namespace, tags, type, since/until. |
+| `memory_attention` | Triage: blocked statuses, stale active work, expiring statuses, missing tags. |
+| `memory_log` | Append immutable timestamped log entry (decisions, events, milestones). |
+| `memory_list` | Browse namespaces + recent log previews. |
+| `memory_history` | Chronological audit trail. Supports ascending cursor for sync/polling. |
+| `memory_delete` | Delete entry or namespace. Preview without token, confirm with returned token. |
+| `memory_insights` | Per-entry retrieval analytics: impressions, opens, follow-through, staleness. |
+| `memory_retrieval_feedback` | Submit explicit retrieval feedback. Owner-only. |
+| `memory_consolidate` | Synthesize unincorporated logs into `synthesis` key via OpenRouter. Owner-only. |
+| `memory_status` | Server capabilities, version, feature availability. |
 
 ## Project structure
 
@@ -79,15 +79,15 @@ munin-memory/
 │   ├── embeddings.test.ts
 │   ├── migrations.test.ts
 │   ├── http-hardening.test.ts
-│   ├── http-transport.test.ts   # Stateless HTTP route tests
-│   ├── oauth.test.ts              # OAuth provider unit tests
-│   ├── oauth-integration.test.ts  # OAuth end-to-end tests (supertest)
-│   ├── consolidation-db.test.ts    # Consolidation schema + DB function tests
-│   ├── consolidation.test.ts       # Synthesis module + worker lifecycle tests
+│   ├── http-transport.test.ts
+│   ├── oauth.test.ts
+│   ├── oauth-integration.test.ts
+│   ├── consolidation-db.test.ts
+│   ├── consolidation.test.ts
 │   ├── tools.test.ts
-│   ├── access.test.ts             # Access control unit tests
-│   ├── access-enforcement.test.ts # Authorization matrix integration tests
-│   ├── admin-cli.test.ts           # munin-admin CLI unit tests
+│   ├── access.test.ts
+│   ├── access-enforcement.test.ts
+│   ├── admin-cli.test.ts
 │   └── security.test.ts
 ├── docs/
 │   ├── appliance-profiles.md              # Tiered hardware/appliance direction and Pi Zero spike plan
@@ -356,42 +356,11 @@ When a requested mode is unavailable, `memory_query` degrades to lexical search 
 
 After `MUNIN_EMBEDDINGS_MAX_FAILURES` (default 5) consecutive embedding failures, the circuit breaker trips: embedding generation is disabled, all search degrades to lexical. Reset requires server restart.
 
-### Background worker
-
-- Uses recursive `setTimeout` (not `setInterval`) to prevent overlap
-- Claims rows atomically: `UPDATE ... SET embedding_status = 'processing' WHERE id IN (SELECT ... LIMIT batchSize)`
-- Guards against stale writes: checks `updated_at` before persisting embeddings
-- `stopEmbeddingWorker()` awaits in-flight batch before returning (graceful shutdown)
-
-### Key implementation details (from Codex adversarial review)
-
-- `embeddingToBuffer()`: uses `Buffer.from(f32.buffer, f32.byteOffset, f32.byteLength)` — NOT `Buffer.from(f32)` which silently truncates
-- RRF scoring: entries in only one result set contribute `1/(60 + rank)` from that set + 0 from the other. No Infinity sentinel.
-- Over-fetch 5x limit from each source for RRF (not 3x)
-- Vec0 tables don't have an `id` column — use `entry_id TEXT` metadata column instead
-
 ## Multi-principal access control (Feature 5)
 
 ### Overview
 
 Server-enforced namespace isolation. Each authenticated principal has scoped namespace rules; owner retains full access with zero overhead. All registered MCP tools enforce access rules via `AccessContext`.
-
-### Schema
-
-- **`principals`** (migration v5) — maps tokens/OAuth clients to principals with namespace rules
-  - `principal_id` (unique, human-readable: "sara", "agent:skuld")
-  - `principal_type` (owner/family/agent/external)
-  - `email`, `email_lower` (v6 — for consent-time identity resolution)
-  - `oauth_client_id` (legacy, pre-v6 compat — will be dropped in v7)
-  - `token_hash` (SHA-256, for agent service tokens)
-  - `namespace_rules` (JSON: `[{"pattern": "users/sara/*", "permissions": "rw"}]`)
-  - `revoked_at`, `expires_at` for lifecycle management
-- **`principal_oauth_clients`** (migration v6) — many-to-one device inventory
-  - `oauth_client_id` (PK, FK to `oauth_clients`)
-  - `principal_id` (which principal this device belongs to)
-  - `mapped_at`, `mapped_by` (consent/admin/migration)
-  - `revoked_at`, `last_used_at`
-- **Token-bound principals** (migration v6) — `principal_id` column on `oauth_auth_codes` and `oauth_tokens`. Set at consent time, carried forward on refresh. The token itself knows its principal.
 
 ### AccessContext threading
 
@@ -513,13 +482,6 @@ Inspects accumulated signals per entry: impressions, opens, follow-through rate,
 - retrieval_sessions pruned at 7 days
 - Piggybacked on existing OAuth cleanup interval + called once at startup
 
-### Phase 2 boundary (NOT YET IMPLEMENTED)
-
-- No ranking behavior changes
-- No `MUNIN_LEARNED_RANKING_ENABLED` env flag
-- No RRF boost from outcome signals
-- No `retrieval_insights_rollup` aggregation table
-
 ## OAuth 2.1 (Feature 3)
 
 ### Overview
@@ -546,20 +508,6 @@ Existing Claude Code and Claude Desktop clients using `MUNIN_API_KEY` continue w
 | `/token` | Code exchange + token refresh |
 | `/register` | Dynamic client registration (RFC 7591) |
 | `/revoke` | Token revocation (RFC 7009) |
-
-### Schema (migration v3)
-
-- **`oauth_clients`** — registered OAuth clients (client_id, secret, redirect_uris, metadata)
-- **`oauth_auth_codes`** — authorization codes (code, client_id, PKCE challenge, expiry)
-- **`oauth_tokens`** — access + refresh tokens (token, type, client_id, scopes, expiry, revoked)
-
-### Token lifecycle
-
-- Access tokens: configurable TTL (default 1 hour), checked on every request
-- Refresh tokens: configurable TTL (default 30 days), rotation on use (old token revoked)
-- Auth codes: 10-minute TTL, single use
-- Access tokens, refresh tokens, and auth codes are stored hashed at rest
-- Cleanup: expired auth codes and expired/revoked tokens swept on a periodic cleanup timer (60s)
 
 ### Reverse proxy path policies
 
@@ -632,58 +580,26 @@ See `technical-spec.md` § Security Module for the full pattern list.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MUNIN_MEMORY_DB_PATH` | `~/.munin-memory/memory.db` | Database file location |
-| `MUNIN_MEMORY_MAX_CONTENT_SIZE` | `100000` | Max content size in characters |
 | `MUNIN_TRANSPORT` | `stdio` | Transport mode: `stdio` or `http` |
 | `MUNIN_HTTP_PORT` | `3030` | HTTP server port (http mode only) |
 | `MUNIN_HTTP_HOST` | `127.0.0.1` | HTTP bind address (http mode only) |
 | `MUNIN_API_KEY` | — | Bearer token for auth (required in http mode) |
-| `MUNIN_API_KEY_DPA` | — | Optional dedicated bearer token that attests `dpa_covered` HTTP transport |
-| `MUNIN_API_KEY_CONSUMER` | — | Optional dedicated bearer token that attests `consumer` HTTP transport |
-| `MUNIN_BEARER_TRANSPORT_TYPE` | `dpa_covered` | Transport type for legacy `MUNIN_API_KEY` in HTTP mode; `local` is normalized to `dpa_covered` over HTTP |
 | `MUNIN_LIBRARIAN_ENABLED` | `false` | Enable classification enforcement / redaction behavior |
-| `MUNIN_CLASSIFICATION_DEFAULT` | `internal` | Default namespace floor for namespaces without an explicit classification rule |
 | `MUNIN_EMBEDDINGS_ENABLED` | `true` | Load embedding model + run worker |
 | `MUNIN_SEMANTIC_ENABLED` | `true` | Gate 1: accept `search_mode: "semantic"` |
 | `MUNIN_HYBRID_ENABLED` | `true` | Gate 2: accept `search_mode: "hybrid"` |
 | `MUNIN_EMBEDDINGS_MODEL` | `Xenova/all-MiniLM-L6-v2` | HuggingFace model for embeddings |
-| `MUNIN_EMBEDDINGS_BATCH_SIZE` | `25` | Entries per worker batch |
-| `MUNIN_EMBEDDINGS_BATCH_DELAY_MS` | `200` | Delay between worker batches |
 | `MUNIN_EMBEDDINGS_MAX_FAILURES` | `5` | Circuit breaker failure threshold |
-| `MUNIN_EMBEDDINGS_LOCAL_ONLY` | `false` | Only use cached models (no downloads) |
-| `MUNIN_ALLOWED_HOSTS` | — | Comma-separated extra Host headers to accept (e.g. `your-domain.com:443,your-domain.com`) |
+| `MUNIN_ALLOWED_HOSTS` | — | Comma-separated extra Host headers to accept |
 | `MUNIN_OAUTH_ISSUER_URL` | `http://localhost:3030` | OAuth issuer URL (set to your public domain in production) |
 | `MUNIN_OAUTH_ACCESS_TOKEN_TTL` | `3600` | Access token lifetime (seconds) |
 | `MUNIN_OAUTH_REFRESH_TOKEN_TTL` | `2592000` | Refresh token lifetime (30 days, seconds) |
-| `MUNIN_OAUTH_CLIENT_SECRET_KEY` | — | Optional dedicated wrapping key for encrypting confidential OAuth client secrets at rest; defaults to `MUNIN_API_KEY` |
-| `MUNIN_OAUTH_IDENTITY_HEADER` | — | Header containing authenticated user's email for multi-user consent resolution (e.g. `cf-access-authenticated-user-email`) |
-| `MUNIN_ANALYTICS_RETENTION_DAYS` | `90` | Retention period for retrieval analytics (retrieval_events/outcomes). Sessions pruned at 7 days. |
-| `MUNIN_DISPLAY_TIMEZONE` | `Europe/Stockholm` | IANA timezone for human-friendly local timestamps in tool responses (display-layer only, storage remains UTC) |
+| `MUNIN_OAUTH_IDENTITY_HEADER` | — | Header with authenticated user's email for multi-user consent (e.g. `cf-access-authenticated-user-email`) |
+| `MUNIN_ANALYTICS_RETENTION_DAYS` | `90` | Retention for retrieval_events/outcomes. Sessions pruned at 7 days. |
+| `MUNIN_DISPLAY_TIMEZONE` | `Europe/Stockholm` | IANA timezone for display timestamps (storage stays UTC) |
 | `MUNIN_CONSOLIDATION_ENABLED` | `false` | Enable the consolidation background worker |
 | `MUNIN_CONSOLIDATION_MODEL` | `anthropic/claude-haiku-4-5-20251001` | OpenRouter model ID for synthesis |
-| `MUNIN_CONSOLIDATION_INTERVAL_MS` | `60000` | Worker poll interval (ms) |
-| `MUNIN_CONSOLIDATION_BATCH_SIZE` | `5` | Max namespaces per consolidation run |
-| `MUNIN_CONSOLIDATION_MIN_LOGS` | `3` | Minimum unincorporated logs to trigger consolidation |
-| `MUNIN_CONSOLIDATION_MAX_FAILURES` | `3` | Circuit breaker failure threshold |
-| `MUNIN_CONSOLIDATION_MAX_LOGS_PER_RUN` | `15` | Max unincorporated logs synthesized per namespace per run. Excess drains over subsequent runs (drain-until-empty). |
 | `OPENROUTER_API_KEY` | — | OpenRouter API key for consolidation worker (required when consolidation enabled) |
-
-## Spec amendments from adversarial review
-
-A pre-implementation debate between Claude (Opus 4.6) and Codex (GPT-5.3) produced spec amendments. See `debate/resolution.md` for the full record. Key changes from the original `technical-spec.md`:
-
-1. **UPSERT** uses `ON CONFLICT ... DO UPDATE`, not `INSERT OR REPLACE`
-2. **All mutations** wrapped in a single `db.transaction()` (entries + audit_log)
-3. **WAL mode** + `busy_timeout=5000` + `synchronous=NORMAL` set at DB init
-4. **Composite indexes** replace the useless tags index: `(namespace, entry_type, key)` and `(namespace, entry_type, created_at DESC)`
-5. **CHECK constraints** enforce state→key NOT NULL, log→key NULL, and `json_type(tags)='array'`
-6. **Timestamps** always UTC ISO 8601 via single `nowUTC()` function
-7. **FTS rebuild** function included in `db.ts` (not just a comment)
-8. **New tool `memory_get`** for fetching full entries by ID
-9. **Delete uses token-based confirmation** instead of simple boolean
-10. **LIKE queries** escape `_` and `%` wildcards in namespace prefix search
-11. **Tag filtering** applied before `limit` in query results
-
-When `technical-spec.md` and `debate/resolution.md` conflict, the resolution takes precedence.
 
 ## Important constraints
 
