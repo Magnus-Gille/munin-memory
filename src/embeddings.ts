@@ -13,6 +13,15 @@ const config = {
   batchDelayMs: parseInt(process.env.MUNIN_EMBEDDINGS_BATCH_DELAY_MS ?? "200", 10) || 200,
   maxFailures: parseInt(process.env.MUNIN_EMBEDDINGS_MAX_FAILURES ?? "5", 10) || 5,
   localOnly: (process.env.MUNIN_EMBEDDINGS_LOCAL_ONLY ?? "false") === "true",
+  // Optional L2 distance cutoff for semantic/hybrid KNN. Unset = unbounded
+  // (current behavior). A finite, non-negative value drops vector candidates
+  // farther than the cutoff so unrelated "nearest" neighbours aren't returned.
+  semanticMaxDistance: (() => {
+    const raw = process.env.MUNIN_SEMANTIC_MAX_DISTANCE;
+    if (raw === undefined || raw === "") return undefined;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+  })(),
 };
 
 const EMBEDDING_DIM = 384;
@@ -147,6 +156,14 @@ export function isEmbeddingAvailable(): boolean {
 
 export function isSemanticEnabled(): boolean {
   return config.semanticEnabled && isEmbeddingAvailable();
+}
+
+/**
+ * Optional configured L2 distance cutoff for semantic/hybrid KNN, or undefined
+ * when MUNIN_SEMANTIC_MAX_DISTANCE is unset/invalid (unbounded — default).
+ */
+export function getSemanticMaxDistance(): number | undefined {
+  return config.semanticMaxDistance;
 }
 
 export function isHybridEnabled(): boolean {

@@ -8,6 +8,23 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Added
+
+- **`memory_query` lexical-anchor controls for semantic/hybrid recall (#77)** —
+  semantic/hybrid search ran pure KNN with no distance threshold, so a query
+  with no lexical match (e.g. a made-up identifier) still returned up to `limit`
+  loosely-related vector neighbours. Three additive controls, none of which
+  change default recall:
+  - `require_lexical_match` (boolean, default `false`) on `memory_query`: in
+    semantic/hybrid modes, drop results that have no lexical (FTS5) anchor.
+    Injected canonical/attention entries are exempt. Uses a scoped FTS existence
+    check so a genuine lexical match is never dropped for ranking low.
+  - A `warning` is now always emitted when a hybrid query degrades to
+    semantic-only (zero FTS5 matches), so callers know recall came purely from
+    vectors.
+  - `MUNIN_SEMANTIC_MAX_DISTANCE` (env, unset = unbounded): optional L2 distance
+    cutoff applied in `queryEntriesSemanticScored` to drop far vector candidates.
+
 ### Changed
 
 - **CAS docs corrected to cover all state writes** — `expected_updated_at`
