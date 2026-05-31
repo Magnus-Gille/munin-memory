@@ -1598,6 +1598,25 @@ describe("memory_query", () => {
     expect(result.results[0].provenance.principal_id).toBe("owner");
   });
 
+  it("rejects an invalid namespace filter with a validation error", async () => {
+    const raw = await callTool("memory_query", { query: "SQLite", namespace: "foo.bar" });
+    const result = parseToolResponse(raw) as { error?: string; results?: unknown[] };
+    expect(result.error).toBe("validation_error");
+  });
+
+  it("rejects an invalid namespace filter in filter-only mode", async () => {
+    const raw = await callTool("memory_query", { namespace: "bad ns", tags: ["active"] });
+    const result = parseToolResponse(raw) as { error?: string };
+    expect(result.error).toBe("validation_error");
+  });
+
+  it("accepts a valid namespace prefix filter (trailing slash)", async () => {
+    const raw = await callTool("memory_query", { query: "SQLite", namespace: "projects/" });
+    const result = parseToolResponse(raw) as { error?: string; total?: number };
+    expect(result.error).toBeUndefined();
+    expect(result.total).toBeGreaterThanOrEqual(1);
+  });
+
   it("defaults search_mode to hybrid (degrades to lexical in test env)", async () => {
     const raw = await callTool("memory_query", { query: "SQLite" });
     const result = parseToolResponse(raw) as { search_mode: string; search_mode_actual?: string };

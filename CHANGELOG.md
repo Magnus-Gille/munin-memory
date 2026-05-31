@@ -47,6 +47,11 @@ changelog is the canonical record of what moved.
 
 ### Fixed
 
+- **`memory_query` validates the `namespace` filter** — an invalid namespace
+  filter (e.g. containing a dot or space) now returns a `validation_error`
+  instead of silently returning zero results, matching the write/read/log
+  paths. Valid prefix filters with a trailing slash (e.g. `projects/`) are
+  still accepted. (#79)
 - **Deterministic recency tie-break in query reranking** — `rerankQueryResults`
   now breaks heuristic ties by the entries' stored `updated_at` rather than by a
   freshness score computed from the wall clock. `getFreshnessScore` clamps age
