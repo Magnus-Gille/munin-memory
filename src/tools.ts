@@ -2726,7 +2726,7 @@ const TOOL_DEFINITIONS = [
         dashboard_limit_per_group: {
           type: "integer",
           description:
-            "Optional. Maximum entries to return per lifecycle group in the dashboard. `compact` defaults to 5; other detail levels return all entries unless this is set.",
+            "Optional. Maximum entries to return per lifecycle group in the dashboard. `standard`/`full` default to 10 (bounds output size); `compact` returns all groups (already one-liners). Set explicitly to override. `dashboard_meta.truncated_groups` lists groups that were capped.",
         },
         namespace_limit: {
           type: "integer",
@@ -3561,7 +3561,12 @@ export function registerTools(
             const { include_demo, include_completed_tasks } = orientArgs;
             const detail = resolveOrientDetail(orientArgs);
             const includeNamespaces = orientArgs.include_namespaces ?? detail !== "compact";
-            const dashboardLimit = clampOptionalLimit(orientArgs.dashboard_limit_per_group, 50) ?? undefined;
+            // Default a sensible per-group cap in non-compact modes so
+            // standard/full output can't grow unbounded (#78). Compact already
+            // emits one-liners and is bounded by namespace_limit. Callers can
+            // override explicitly.
+            const dashboardLimit = clampOptionalLimit(orientArgs.dashboard_limit_per_group, 50)
+              ?? (detail === "compact" ? undefined : 10);
             const namespaceLimit = clampOptionalLimit(orientArgs.namespace_limit, 200) ?? (detail === "compact" ? 20 : undefined);
             // Read conventions and namespace list
             const conventions = ctx.principalType === "owner" ? readState(db, "meta/conventions", "conventions") : null;
@@ -3622,6 +3627,9 @@ export function registerTools(
               uncategorized: [],
             };
             const maintenanceNeeded: MaintenanceItem[] = [];
+            // Sort key (oldest-first) per maintenance item, so the collapsed
+            // top-N surfaces the stalest work. Keyed by item identity.
+            const maintenanceSortKey = new Map<MaintenanceItem, string>();
 
             for (const assessment of trackedStatusAssessments) {
               const entry: DashboardEntry = {
@@ -3637,7 +3645,10 @@ export function registerTools(
               if (assessment.needsAttention) {
                 entry.needs_attention = true;
               }
-              maintenanceNeeded.push(...assessment.maintenanceItems);
+              for (const item of assessment.maintenanceItems) {
+                maintenanceSortKey.set(item, assessment.row.updated_at);
+                maintenanceNeeded.push(item);
+              }
 
               // Enrich with synthesis — skip entirely in compact mode
               if (detail !== "compact") {
@@ -3695,11 +3706,13 @@ export function registerTools(
             ]);
             for (const ns of namespaces) {
               if (isTrackedNamespace(ns.namespace) && !trackedNsWithStatus.has(ns.namespace)) {
-                maintenanceNeeded.push({
+                const missingItem: MaintenanceItem = {
                   namespace: ns.namespace,
                   issue: "missing_status",
                   suggestion: "Has entries but no 'status' key. Write a status entry with a lifecycle tag.",
-                });
+                };
+                maintenanceSortKey.set(missingItem, ns.last_activity_at);
+                maintenanceNeeded.push(missingItem);
               }
             }
 
@@ -3774,9 +3787,28 @@ export function registerTools(
               }
             }
 
-            // Maintenance suggestions
+            // Maintenance suggestions. The full list can flood the response
+            // (one line per stale tracked status), so for compact/standard we
+            // collapse to the oldest-first top-N plus a count; the full list is
+            // gated behind detail:"full" (#78).
             if (maintenanceNeeded.length > 0) {
-              response.maintenance_needed = maintenanceNeeded;
+              const MAINTENANCE_TOP_N = 10;
+              // Oldest-first: items with an earlier sort key (updated_at /
+              // last_activity_at) surface first. Items lacking a key sort last.
+              const sorted = [...maintenanceNeeded].sort((a, b) => {
+                const ka = maintenanceSortKey.get(a) ?? "￿";
+                const kb = maintenanceSortKey.get(b) ?? "￿";
+                return ka < kb ? -1 : ka > kb ? 1 : 0;
+              });
+              const showAll = detail === "full" || sorted.length <= MAINTENANCE_TOP_N;
+              const shown = showAll ? sorted : sorted.slice(0, MAINTENANCE_TOP_N);
+              response.maintenance_needed = shown;
+              response.maintenance_meta = {
+                total: maintenanceNeeded.length,
+                shown: shown.length,
+                truncated: !showAll,
+                ...(showAll ? {} : { full_list_hint: 'Pass detail:"full" to see all maintenance items.' }),
+              };
             }
 
             // Legacy workbench (transition period) — owner only
