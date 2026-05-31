@@ -227,11 +227,19 @@ describe("memory_log outcome logging", () => {
 describe("memory_insights tool", () => {
   it("returns empty entries when no retrieval data exists", async () => {
     const raw = await callTool("memory_insights");
-    const result = parseToolResponse(raw) as { entries: unknown[]; total: number; min_impressions: number };
+    const result = parseToolResponse(raw) as { entries: unknown[]; total: number; min_impressions: number; message?: string };
 
     expect(result.entries).toHaveLength(0);
     expect(result.total).toBe(0);
     expect(result.min_impressions).toBe(3);
+  });
+
+  it("includes an explicit message explaining the empty result is below min_impressions", async () => {
+    const raw = await callTool("memory_insights");
+    const result = parseToolResponse(raw) as { entries: unknown[]; message?: string };
+    expect(result.entries).toHaveLength(0);
+    expect(result.message).toBeTypeOf("string");
+    expect(result.message).toContain("min_impressions");
   });
 
   it("includes session-segmented reformulation context in aggregates (#25)", async () => {
