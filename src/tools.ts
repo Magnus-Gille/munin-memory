@@ -5862,7 +5862,7 @@ export function registerTools(
             };
 
             const insightsMessage = entries.length === 0
-              ? `No retrieval data yet: no entries have reached the min_impressions threshold (${minImpressions}). Entries appear here only after they have been shown in query/orient/attention results at least ${minImpressions} time(s). Lower min_impressions to surface entries with fewer impressions.`
+              ? `No retrieval data yet: no entries have reached the min_impressions threshold (${minImpressions}). Entries appear here only after they have been shown in memory_query results at least ${minImpressions} time(s) (orient/attention do not count toward per-entry impressions). Lower min_impressions to surface entries with fewer impressions.`
               : undefined;
 
             return okResult("insights", {
