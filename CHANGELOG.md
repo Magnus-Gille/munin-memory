@@ -8,6 +8,15 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Changed
+
+- **CAS docs corrected to cover all state writes** — `expected_updated_at`
+  compare-and-swap is enforced for *every* state write (any namespace), not
+  only tracked `projects/*`/`clients/*` status writes. Updated the
+  `memory_write` description, the `expected_updated_at` parameter description,
+  and the compact conventions returned by `memory_orient` to match the actual
+  behavior. (#80)
+
 ### Fixed
 
 - **Deterministic recency tie-break in query reranking** — `rerankQueryResults`

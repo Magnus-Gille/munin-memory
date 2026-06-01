@@ -2675,7 +2675,7 @@ function compactConventions(updatedAt: string): string {
     "- **Tracked namespaces** (dashboard): projects/*, clients/*. Must have status key + lifecycle tag.",
     "- **Prefixed tags:** client:<name>, person:<name>, topic:<topic>, type:<artifact>, source:external/internal.",
     "- **No secrets** — API keys, tokens, passwords rejected by server.",
-    "- **CAS for tracked statuses** — pass expected_updated_at to prevent blind overwrites.",
+    "- **CAS (compare-and-swap)** — pass expected_updated_at on any state write to prevent blind overwrites (enforced for all namespaces, not just tracked statuses).",
     "",
     "## Namespaces",
     "projects/<name> (tracked) | clients/<name> (tracked) | people/<name> | decisions/<topic>",
@@ -2926,7 +2926,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_write",
     description:
-      "Store or update a state entry in memory. If an entry with the same namespace+key exists, it will be overwritten. Use this for mutable facts and non-tracked state. For `status` entries under `projects/*` or `clients/*`, prefer `memory_update_status`. Optional `valid_until` adds soft expiry for temporary state; direct reads still work after expiry, but broad search hides expired state by default.\n\nIf this is your first memory operation in this conversation, call memory_orient first.\n\nNamespace conventions: projects/<name> for project state, people/<name> for context about people, decisions/<topic> for cross-cutting decisions, meta/<topic> for system notes.\n\nKey conventions: 'status' = compact resumption summary (Phase / Current work / Blockers / Next — keep brief, move details to other keys like 'architecture', 'workflow', 'research'). 'index' = directory of important keys in this namespace and their purpose.\n\nTag vocabulary: Use canonical lifecycle tags on status entries: active, blocked, completed, stopped, maintenance, archived. Aliases are auto-normalized (done→completed, paused→stopped, inactive→archived). Category tags: decision, architecture, preference, milestone, convention. Type tags: bug, feature, research. Prefixed tags for cross-referencing: client:<name>, person:<name>, topic:<topic>, type:<artifact> (pdf, presentation, meeting-notes), source:external/internal.\n\nThe project dashboard is computed automatically from status entries with lifecycle tags. No manual workbench maintenance needed. Writing to 'status' in projects/* or clients/* supports compare-and-swap via expected_updated_at.\n\nTo start a new project: (1) write projects/<name>/status with a lifecycle tag (e.g. 'active'), (2) optionally write projects/<name>/index listing the keys.",
+      "Store or update a state entry in memory. If an entry with the same namespace+key exists, it will be overwritten. Use this for mutable facts and non-tracked state. For `status` entries under `projects/*` or `clients/*`, prefer `memory_update_status`. Optional `valid_until` adds soft expiry for temporary state; direct reads still work after expiry, but broad search hides expired state by default.\n\nIf this is your first memory operation in this conversation, call memory_orient first.\n\nNamespace conventions: projects/<name> for project state, people/<name> for context about people, decisions/<topic> for cross-cutting decisions, meta/<topic> for system notes.\n\nKey conventions: 'status' = compact resumption summary (Phase / Current work / Blockers / Next — keep brief, move details to other keys like 'architecture', 'workflow', 'research'). 'index' = directory of important keys in this namespace and their purpose.\n\nTag vocabulary: Use canonical lifecycle tags on status entries: active, blocked, completed, stopped, maintenance, archived. Aliases are auto-normalized (done→completed, paused→stopped, inactive→archived). Category tags: decision, architecture, preference, milestone, convention. Type tags: bug, feature, research. Prefixed tags for cross-referencing: client:<name>, person:<name>, topic:<topic>, type:<artifact> (pdf, presentation, meeting-notes), source:external/internal.\n\nThe project dashboard is computed automatically from status entries with lifecycle tags. No manual workbench maintenance needed. Compare-and-swap via expected_updated_at is supported for any state write (all namespaces), not only 'status' in projects/* or clients/*.\n\nTo start a new project: (1) write projects/<name>/status with a lifecycle tag (e.g. 'active'), (2) optionally write projects/<name>/index listing the keys.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -2970,7 +2970,7 @@ const TOOL_DEFINITIONS = [
         expected_updated_at: {
           type: "string",
           description:
-            "Optional. For tracked status writes (projects/*, clients/*): pass the updated_at from your last read to prevent blind overwrites. Returns conflict error if the entry was modified since.",
+            "Optional compare-and-swap guard for any state write (all namespaces, not only tracked projects/*/clients/* statuses): pass the updated_at from your last read to prevent blind overwrites. Returns a conflict error if the entry was modified since.",
         },
         patch: {
           type: "object",
