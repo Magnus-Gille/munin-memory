@@ -51,3 +51,6 @@ benchmark/generated/
 !benchmark/generated/
 benchmark/generated/*
 !benchmark/generated/README.md
+
+# Antigravity (agy) CLI per-conversation state, created when run inside the repo
+.antigravitycli/
