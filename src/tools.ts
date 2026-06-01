@@ -5224,6 +5224,15 @@ export function registerTools(
             }
             const searchRecencyWeight = recencyWeightCheck.value;
 
+            // Validate the namespace filter (parity with write/read/log paths).
+            // A trailing slash is permitted for prefix filters (e.g. "projects/").
+            if (namespace !== undefined && namespace !== null) {
+              const nsCheck = validateNamespace(namespace as string);
+              if (!nsCheck.valid) {
+                return errResult("query", "validation_error", nsCheck.error!);
+              }
+            }
+
             // Filter-only mode: no query text, just browse by filters
             if (!query || typeof query !== "string") {
               // Must have at least one filter to avoid returning everything
