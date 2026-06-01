@@ -29,6 +29,13 @@ changelog is the canonical record of what moved.
   `memory_history` clarifies cursor direction (`next_cursor` points to the
   oldest row of a cursorless page); the compact conventions add two inline
   example workflows.
+- **`memory_query` explain parity across search modes (#81)** — documented that
+  the per-result `match{}` block (already populated by the result formatter for
+  lexical, semantic, and hybrid modes) carries `heuristic_score`,
+  `freshness_score`, and `reasons` in every mode, plus the mode-specific
+  signals (`lexical_rank`/`lexical_score`, `semantic_rank`/`semantic_distance`,
+  and `hybrid_score`). Added a unit guard pinning the explain reasons for
+  semantic-only and hybrid match objects so the three modes stay at parity.
 
 ### Fixed
 

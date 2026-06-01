@@ -2,8 +2,9 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { existsSync, unlinkSync } from "node:fs";
 import type Database from "better-sqlite3";
 import { initDatabase, writeState, getById } from "../src/db.js";
-import { rerankQueryResults } from "../src/internal/reranker.js";
+import { rerankQueryResults, getQueryExplainReasons } from "../src/internal/reranker.js";
 import type { Entry } from "../src/types.js";
+import type { QueryResult } from "../src/types.js";
 
 const TEST_DB_PATH = "/tmp/munin-memory-reranker-test.db";
 
@@ -89,5 +90,52 @@ describe("rerankQueryResults recency tie-break (#74)", () => {
     // Same updated_at → recency is a true tie → stable input order preserved.
     const order = rerankQueryResults([eOlder, eNewer], params, new Set()).map((e) => e.namespace);
     expect(order).toEqual(["decisions/older", "decisions/newer"]);
+  });
+});
+
+/**
+ * Regression guard for #81: the per-result explain `match{}` block must reach
+ * parity across lexical / semantic / hybrid modes — including human-readable
+ * reasons derived from the mode-specific rank/score fields. The
+ * `formatQueryResult` builder in src/tools.ts already populates the
+ * mode-specific fields (semantic_rank/distance, hybrid_score, etc.); this test
+ * pins the reasons logic that turns those fields into explanations so
+ * semantic-only and hybrid results are never left without a debuggable reason.
+ */
+describe("getQueryExplainReasons mode parity (#81)", () => {
+  function entry(): Entry {
+    writeState(db, "projects/explain", "status", "explainable status content", ["active"]);
+    const id = (db.prepare("SELECT id FROM entries WHERE namespace='projects/explain'").get() as { id: string }).id;
+    return getById(db, id)!;
+  }
+
+  it("explains a semantic-only match", () => {
+    const match: NonNullable<QueryResult["match"]> = {
+      heuristic_score: 0.5,
+      freshness_score: 0.9,
+      semantic_rank: 1,
+      semantic_distance: 0.12,
+      reasons: [],
+    };
+    const reasons = getQueryExplainReasons(entry(), "vector neighbour", undefined, match);
+    expect(reasons).toContain("matched semantic similarity");
+    expect(reasons.length).toBeGreaterThan(0);
+  });
+
+  it("explains a hybrid match that fused both signals", () => {
+    const match: NonNullable<QueryResult["match"]> = {
+      heuristic_score: 0.7,
+      freshness_score: 0.9,
+      hybrid_score: 0.031,
+      lexical_rank: 2,
+      lexical_score: -3.1,
+      semantic_rank: 1,
+      semantic_distance: 0.2,
+      reasons: [],
+    };
+    const reasons = getQueryExplainReasons(entry(), "explainable status", undefined, match);
+    expect(reasons).toContain("matched lexical terms");
+    expect(reasons).toContain("matched semantic similarity");
+    expect(reasons).toContain("combined lexical and semantic signals");
   });
 });
