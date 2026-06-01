@@ -21,6 +21,14 @@ changelog is the canonical record of what moved.
   state the allowed grammar inline (start alphanumeric, then alphanumeric/`_`/
   `-`/`/`; dots and spaces invalid). `validateNamespace` now names the offending
   character and its position in the error message. (#82)
+- **`memory_insights` explains empty results** — when no entry has reached the
+  `min_impressions` threshold (default 3), the response now carries an
+  explanatory `message` field instead of a bare empty `entries` array. (#83)
+- **Docs polish (#83)** — the system-injected `classification:internal` tag is
+  now documented in the compact conventions and the `memory_read` description;
+  `memory_history` clarifies cursor direction (`next_cursor` points to the
+  oldest row of a cursorless page); the compact conventions add two inline
+  example workflows.
 
 ### Fixed
 

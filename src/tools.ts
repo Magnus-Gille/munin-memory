@@ -2676,6 +2676,11 @@ function compactConventions(updatedAt: string): string {
     "- **Prefixed tags:** client:<name>, person:<name>, topic:<topic>, type:<artifact>, source:external/internal.",
     "- **No secrets** — API keys, tokens, passwords rejected by server.",
     "- **CAS (compare-and-swap)** — pass expected_updated_at on any state write to prevent blind overwrites (enforced for all namespaces, not just tracked statuses).",
+    "- **`classification:internal` tag** — system-injected on read results to mark the entry's classification floor. You do not set or remove it; ignore it unless auditing access.",
+    "",
+    "## Example workflows",
+    "- Resume a project: memory_orient → memory_read(\"projects/<name>\", \"status\") → (if needed) memory_query for decision history.",
+    "- Record a decision: memory_log(\"projects/<name>\", \"Chose X over Y because…\", tags:[\"decision\"]) → memory_update_status(\"projects/<name>\", …) to reflect the new state.",
     "",
     "## Namespaces",
     "projects/<name> (tracked) | clients/<name> (tracked) | people/<name> | decisions/<topic>",
@@ -3043,7 +3048,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_read",
     description:
-      "Retrieve a specific state entry by namespace and key. Use this when you already know both. Returns the full content, tags, and timestamps. Returns a clear 'not found' message if the entry doesn't exist (not an error).\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Retrieve a specific state entry by namespace and key. Use this when you already know both. Returns the full content, tags, and timestamps. Returns a clear 'not found' message if the entry doesn't exist (not an error). Note: results carry a system-injected `classification:internal` (or higher) tag marking the entry's classification floor — it is set by the server, not by you.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -3282,7 +3287,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_history",
     description:
-      "View the chronological audit trail of changes to memory. Returns a timeline of writes, updates, deletes, namespace deletes, and log appends. Use this to answer 'what changed recently?' or 'what happened in this namespace?' — unlike memory_query (which is relevance-based search), this is a change feed ordered by time. For agent sync, pass `cursor` to page forward through new mutations and use `next_cursor` from the response.",
+      "View the chronological audit trail of changes to memory. Returns a timeline of writes, updates, deletes, namespace deletes, and log appends. Use this to answer 'what changed recently?' or 'what happened in this namespace?' — unlike memory_query (which is relevance-based search), this is a change feed ordered by time.\n\nCursor semantics (read carefully): a call WITHOUT `cursor` returns the most recent changes first (newest→oldest); its `next_cursor` is the audit id of the OLDEST row in that page. A call WITH `cursor` switches to ascending sync mode: it returns rows with `id > cursor` in ascending (oldest→newest) order, and `next_cursor` then advances to the NEWEST id seen. For forward polling of new mutations, do an initial cursorless call, then keep passing the latest `next_cursor` you have observed.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -3341,7 +3346,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_insights",
     description:
-      "Return per-entry retrieval analytics: how often each entry was retrieved (impressions), opened (opens), followed by writes or logs, and whether it was stale when opened. Useful for understanding which memories are most actionable and which are frequently stale. Requires at least min_impressions retrieval events to appear in results.",
+      "Return per-entry retrieval analytics: how often each entry was retrieved (impressions), opened (opens), followed by writes or logs, and whether it was stale when opened. Useful for understanding which memories are most actionable and which are frequently stale. Requires at least min_impressions retrieval events (default 3) to appear in results; when nothing clears the threshold the response carries an explanatory `message` rather than a bare empty array.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -5856,10 +5861,15 @@ export function registerTools(
               multi_event_sessions: rawAgg.multi_event_sessions,
             };
 
+            const insightsMessage = entries.length === 0
+              ? `No retrieval data yet: no entries have reached the min_impressions threshold (${minImpressions}). Entries appear here only after they have been shown in memory_query results at least ${minImpressions} time(s) (orient/attention do not count toward per-entry impressions). Lower min_impressions to surface entries with fewer impressions.`
+              : undefined;
+
             return okResult("insights", {
               entries,
               total: entries.length,
               min_impressions: minImpressions,
+              ...(insightsMessage ? { message: insightsMessage } : {}),
               aggregates,
             });
           }
