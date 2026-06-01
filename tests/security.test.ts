@@ -146,6 +146,15 @@ describe("validateNamespace", () => {
     expect(space.valid).toBe(false);
     expect(space.error).toContain("' '");
   });
+
+  it("names the offending start character for leading separators", () => {
+    for (const bad of ["/projects", "_foo", "-foo"]) {
+      const res = validateNamespace(bad);
+      expect(res.valid).toBe(false);
+      expect(res.error).toContain("start");
+      expect(res.error).toContain(`'${bad[0]}'`);
+    }
+  });
 });
 
 describe("validateKey", () => {

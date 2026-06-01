@@ -36,12 +36,18 @@ export function validateNamespace(namespace: string): SecurityResult {
     return { valid: false, error: "Namespace is required and must be a non-empty string." };
   }
   if (!NAMESPACE_RE.test(namespace)) {
-    const offending = findOffendingChar(namespace, /[a-zA-Z0-9/_-]/);
-    const detail = offending
-      ? offending.index === 0 && !/[a-zA-Z0-9]/.test(offending.char)
-        ? ` Namespaces must start with a letter or digit, but this starts with '${offending.char}'.`
-        : ` Character '${offending.char}' (position ${offending.index}) is not allowed.`
-      : "";
+    let detail = "";
+    if (!/[a-zA-Z0-9]/.test(namespace[0])) {
+      // First character must be alphanumeric. Characters like '/', '_', '-' are
+      // allowed *after* the start but not as the first character, so they would
+      // be missed by the general body scan below.
+      detail = ` Namespaces must start with a letter or digit, but this starts with '${namespace[0]}'.`;
+    } else {
+      const offending = findOffendingChar(namespace, /[a-zA-Z0-9/_-]/);
+      if (offending) {
+        detail = ` Character '${offending.char}' (position ${offending.index}) is not allowed.`;
+      }
+    }
     return {
       valid: false,
       error: `Invalid namespace "${namespace}". Must match pattern: starts with alphanumeric, then alphanumeric/underscore/hyphen/slash only.${detail}`,
