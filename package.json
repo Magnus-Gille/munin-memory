@@ -1,6 +1,6 @@
 {
   "name": "munin-memory",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "MCP server providing persistent memory across conversations",
   "author": "Magnus Gille",
   "license": "MIT",

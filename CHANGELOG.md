@@ -8,6 +8,12 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-06-01
+
+Bug fixes, user-test-driven UX improvements, and lexical-anchor controls for
+semantic/hybrid search. Ten commits since v0.3.0. No schema migration required —
+safe to deploy to Pi by replacing the binary and restarting.
+
 ### Added
 
 - **`memory_query` lexical-anchor controls for semantic/hybrid recall (#77)** —
