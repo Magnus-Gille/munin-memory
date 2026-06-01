@@ -165,6 +165,29 @@ describe("memory_query require_lexical_match + semantic-only warning (#77)", () 
     expect(withoutFlag.results.length).toBeGreaterThan(0);
   });
 
+  it.skipIf(!vecAvailable)("keeps relaxed-fallback lexical anchors under require_lexical_match", async () => {
+    // A natural-language query has no exact (AND-of-all-terms) FTS match, so the
+    // hybrid leg falls back to the relaxed lexical query and anchors the entry
+    // via the "cat" token. require_lexical_match must not drop it just because
+    // the scoped *exact*-query existence check finds nothing.
+    seedEntry("animals/cat", "info", "all about the cat", 1);
+
+    const withFlag = parse(await callTool("memory_query", {
+      query: "tell me about cat",
+      search_mode: "hybrid",
+      require_lexical_match: true,
+    })) as { results: Array<{ namespace: string }> };
+
+    const withoutFlag = parse(await callTool("memory_query", {
+      query: "tell me about cat",
+      search_mode: "hybrid",
+    })) as { results: Array<{ namespace: string }> };
+
+    // Whatever the relaxed leg returns without the flag must survive with it.
+    expect(withoutFlag.results.some((r) => r.namespace === "animals/cat")).toBe(true);
+    expect(withFlag.results.some((r) => r.namespace === "animals/cat")).toBe(true);
+  });
+
   it.skipIf(!vecAvailable)("keeps lexically-anchored hybrid results under require_lexical_match", async () => {
     seedEntry("animals/cat", "info", "all about the cat", 1);
 
@@ -175,5 +198,44 @@ describe("memory_query require_lexical_match + semantic-only warning (#77)", () 
     })) as { results: Array<{ namespace: string }> };
     expect(result.results.length).toBeGreaterThan(0);
     expect(result.results.some((r) => r.namespace === "animals/cat")).toBe(true);
+  });
+
+  it.skipIf(!vecAvailable)("keeps a lexically-matching hybrid result whose FTS rank is below the over-fetch window", async () => {
+    // The anchor check for require_lexical_match must rely on a scoped FTS
+    // existence query (filterIdsMatchingFts) rather than the RRF result's
+    // lexicalRank, which is only populated for entries inside the limit*5 FTS
+    // over-fetch window. Seed many strong "cat" lexical matches so a sparse,
+    // exact-vector-match entry ranks below that window, then assert it is not
+    // dropped as anchorless.
+    for (let i = 0; i < 14; i++) {
+      writeState(db, `bulk/cat-${i}`, "info", `cat cat cat cats cats note ${i}`, []);
+    }
+    const targetId = seedEntry("animals/special", "info", "a special cat", 1);
+
+    const result = parse(await callTool("memory_query", {
+      query: "cat",
+      search_mode: "hybrid",
+      require_lexical_match: true,
+      limit: 2,
+    })) as { results: Array<{ id: string }> };
+
+    expect(result.results.some((r) => r.id === targetId)).toBe(true);
+  });
+
+  it("computes the lexical anchor set via a scoped FTS existence check, not rank depth", () => {
+    // Direct guard for the #77 fix: filterIdsMatchingFts must report a lexical
+    // match for an entry regardless of how it would rank in a windowed FTS
+    // query. Seed many higher-ranking matches, then confirm a low-ranked but
+    // genuine match is still reported as anchored.
+    const ids: string[] = [];
+    for (let i = 0; i < 30; i++) {
+      const { id } = writeState(db, `bulk/cat-${i}`, "info", `cat cat cat cats cats ${i}`, []);
+      ids.push(id);
+    }
+    const { id: sparseId } = writeState(db, "animals/sparse", "info", "a special cat here", []);
+    ids.push(sparseId);
+
+    const anchored = filterIdsMatchingFts(db, "cat", ids);
+    expect(anchored.has(sparseId)).toBe(true);
   });
 });

@@ -5461,12 +5461,25 @@ export function registerTools(
               const vectorIds = actualMode === "hybrid"
                 ? hybridResults.map((r) => r.entry.id)
                 : semanticResults.map((r) => r.entry.id);
-              // For hybrid, lexicalRank already tells us the anchor set. For
-              // semantic mode (no FTS run), do a scoped existence check so a
-              // genuine lexical match isn't missed due to lexical rank depth.
-              const anchored = actualMode === "hybrid"
-                ? new Set(hybridResults.filter((r) => r.lexicalRank !== undefined).map((r) => r.entry.id))
-                : filterIdsMatchingFts(db, query, vectorIds);
+              // Anchor set = union of two signals (#77):
+              //  1. A scoped FTS existence check on the exact query. The hybrid
+              //     RRF result only carries `lexicalRank` for entries inside the
+              //     limited FTS over-fetch window, so a genuine exact match whose
+              //     rank falls below that window would otherwise be misclassified
+              //     as anchorless. The scoped check is authoritative for exact
+              //     matches and avoids that rank-depth false negative.
+              //  2. Any hybrid-leg result that already carries a `lexicalRank`.
+              //     This preserves relaxed-fallback anchors: when the hybrid leg
+              //     found matches only via the relaxed lexical query (e.g. a
+              //     natural-language query with stopwords), those entries are
+              //     legitimately lexically anchored even though the exact-query
+              //     scoped check above would not match them.
+              const anchored = filterIdsMatchingFts(db, query, vectorIds);
+              if (actualMode === "hybrid") {
+                for (const r of hybridResults) {
+                  if (r.lexicalRank !== undefined) anchored.add(r.entry.id);
+                }
+              }
               for (const id of vectorIds) {
                 if (!anchored.has(id)) anchorlessVectorIds.add(id);
               }
