@@ -72,6 +72,51 @@ attention inputs are time-relative and would rot a committed baseline.
 Raw-vs-production parity is guarded separately by `tests/runner-parity.test.ts`.
 Extending the gate to a time-frozen `production_ranker` run is future work.
 
+## Ground-Truth Query Pipeline
+
+Hand-curating every benchmark query doesn't scale. This pipeline grows the query
+sets from two structural sources — what users actually did, and what the corpus
+structure makes likely to break — and keeps a human in the loop before anything
+becomes ground truth. All three tools live in `scripts/` and operate on a real
+(private) memory DB, so their output lands under `benchmark/queries/`, which is
+gitignored except `example.jsonl`.
+
+```bash
+# 1. Mine real usage → reviewable candidates
+npm run benchmark:derive -- --db ~/.munin-memory/memory.db --out benchmark/queries/derived.candidates.jsonl
+# 2. Probe corpus structure for edge cases → reviewable candidates
+npm run benchmark:synthesize -- --db ~/.munin-memory/memory.db --out benchmark/queries/synthetic.candidates.jsonl
+# 3. Bless candidates into a real query set (interactive, or --accept-all)
+npm run benchmark:curate -- benchmark/queries/derived.candidates.jsonl --out benchmark/queries/derived.jsonl
+```
+
+**`derive-benchmark-queries.ts`** mines the passive analytics tables
+(`retrieval_events` / `retrieval_outcomes` / `retrieval_feedback`) into
+`source: "derived"` candidates:
+
+- `opened_result` → the opened entry is relevant (`expected_ids`).
+- `write_in_result_namespace` / `log_in_result_namespace` /
+  `opened_namespace_context` → that namespace is relevant (`expected_namespaces`).
+- `good_results` feedback confirms the shown results; corrective feedback
+  (`missing_result` / `bad_results` / `wrong_order`) with an `expected_entry_id`
+  supplies ground truth and turns the shown-but-wrong results into `negatives`.
+- `query_reformulated` marks the shown results as `negatives`. A query with only
+  negative signal and no positive ground truth is dropped (`--min-support`,
+  `--max-negatives`, `--since` tune the thresholds).
+
+**`generate-synthetic-queries.ts`** builds `source: "synthetic"` edge cases from
+corpus structure, deterministically: rare-term disambiguation (a query of terms
+unique to one entry, anchored by a shared distractor term), tag search, and
+namespace orientation. No usage history required.
+
+**`curate-benchmark-query.ts`** walks candidates (`[a]ccept / [e]dit / [s]kip /
+[q]uit`), strips the provenance tail (`support`, `signals`), and appends the
+blessed `BenchmarkQuery` lines to a target set — idempotent on re-run (skips ids
+already present). `--accept-all` blesses non-interactively for scripted use.
+
+The pure cores (`deriveQueries`, `generateSyntheticQueries`, `blessCandidate`,
+`mergeIntoQuerySet`) are unit-tested in `tests/{derive,generate-synthetic,curate}-*.test.ts`.
+
 ## Adapter Contract
 
 Adapters should produce query files compatible with `BenchmarkQuery` in `types.ts`.

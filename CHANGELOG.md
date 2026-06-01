@@ -8,6 +8,27 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Added
+
+- **Ground-truth benchmark query pipeline (#70, Phase 3)** — three developer
+  scripts that grow the retrieval benchmark query sets from real usage and
+  corpus structure instead of hand-curation, with a human-in-the-loop bless
+  step. None affect the running server; they operate on a local memory DB and
+  write to the gitignored `benchmark/queries/`.
+  - `scripts/derive-benchmark-queries.ts` (`npm run benchmark:derive`) — mines
+    `retrieval_events` / `retrieval_outcomes` / `retrieval_feedback` into
+    `source: "derived"` candidates: positive outcomes and `good_results`
+    feedback become `expected_ids` / `expected_namespaces`; reformulations and
+    corrective feedback become `negatives`. Candidates with no positive ground
+    truth are dropped. Tunable via `--min-support` / `--max-negatives` / `--since`.
+  - `scripts/generate-synthetic-queries.ts` (`npm run benchmark:synthesize`) —
+    deterministic `source: "synthetic"` edge cases from corpus structure:
+    rare-term disambiguation, tag search, namespace orientation.
+  - `scripts/curate-benchmark-query.ts` (`npm run benchmark:curate`) —
+    interactive (`accept`/`edit`/`skip`/`quit`) or `--accept-all` blessing of
+    candidates into a clean `BenchmarkQuery` set; strips provenance and is
+    idempotent on re-run.
+
 ## [0.3.1] — 2026-06-01
 
 Bug fixes, user-test-driven UX improvements, and lexical-anchor controls for
