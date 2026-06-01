@@ -36,12 +36,37 @@ export function validateNamespace(namespace: string): SecurityResult {
     return { valid: false, error: "Namespace is required and must be a non-empty string." };
   }
   if (!NAMESPACE_RE.test(namespace)) {
+    let detail = "";
+    if (!/[a-zA-Z0-9]/.test(namespace[0])) {
+      // First character must be alphanumeric. Characters like '/', '_', '-' are
+      // allowed *after* the start but not as the first character, so they would
+      // be missed by the general body scan below.
+      detail = ` Namespaces must start with a letter or digit, but this starts with '${namespace[0]}'.`;
+    } else {
+      const offending = findOffendingChar(namespace, /[a-zA-Z0-9/_-]/);
+      if (offending) {
+        detail = ` Character '${offending.char}' (position ${offending.index}) is not allowed.`;
+      }
+    }
     return {
       valid: false,
-      error: `Invalid namespace "${namespace}". Must match pattern: starts with alphanumeric, then alphanumeric/underscore/hyphen/slash only.`,
+      error: `Invalid namespace "${namespace}". Must match pattern: starts with alphanumeric, then alphanumeric/underscore/hyphen/slash only.${detail}`,
     };
   }
   return { valid: true };
+}
+
+/**
+ * Return the first character (and its index) that is not in the allowed set.
+ * Used to give actionable validation errors that name the offending character.
+ */
+function findOffendingChar(value: string, allowed: RegExp): { char: string; index: number } | null {
+  for (let i = 0; i < value.length; i++) {
+    if (!allowed.test(value[i])) {
+      return { char: value[i], index: i };
+    }
+  }
+  return null;
 }
 
 export function validateKey(key: string): SecurityResult {

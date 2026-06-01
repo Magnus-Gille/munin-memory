@@ -135,6 +135,26 @@ describe("validateNamespace", () => {
     expect(validateNamespace("projects@home").valid).toBe(false);
     expect(validateNamespace("projects.v1").valid).toBe(false);
   });
+
+  it("names the offending character in the error message", () => {
+    const dot = validateNamespace("testing/foo.bar");
+    expect(dot.valid).toBe(false);
+    expect(dot.error).toContain(".");
+    expect(dot.error).toContain("'.'");
+
+    const space = validateNamespace("bad ns");
+    expect(space.valid).toBe(false);
+    expect(space.error).toContain("' '");
+  });
+
+  it("names the offending start character for leading separators", () => {
+    for (const bad of ["/projects", "_foo", "-foo"]) {
+      const res = validateNamespace(bad);
+      expect(res.valid).toBe(false);
+      expect(res.error).toContain("start");
+      expect(res.error).toContain(`'${bad[0]}'`);
+    }
+  });
 });
 
 describe("validateKey", () => {

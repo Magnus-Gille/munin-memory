@@ -2933,12 +2933,12 @@ const TOOL_DEFINITIONS = [
         namespace: {
           type: "string",
           description:
-            "Hierarchical namespace using / separator. E.g. 'projects/hugin-munin', 'people/magnus', 'decisions/tech-stack'",
+            "Hierarchical namespace using / separator. E.g. 'projects/hugin-munin', 'people/magnus', 'decisions/tech-stack'. Grammar: must start with a letter or digit, then only letters, digits, '_', '-', and '/'. Dots and spaces are INVALID (use hyphens instead, e.g. 'testing/foo-bar' not 'testing/foo.bar').",
         },
         key: {
           type: "string",
           description:
-            "Short descriptive slug for this entry. E.g. 'status', 'architecture', 'preferences'",
+            "Short descriptive slug for this entry. E.g. 'status', 'architecture', 'preferences'. Grammar: must start with a letter or digit, then only letters, digits, '_', and '-' (no '/', dots, or spaces).",
         },
         content: {
           type: "string",
@@ -3217,7 +3217,8 @@ const TOOL_DEFINITIONS = [
       properties: {
         namespace: {
           type: "string",
-          description: "The namespace to log to",
+          description:
+            "The namespace to log to (hierarchical, '/' separator). Grammar: must start with a letter or digit, then only letters, digits, '_', '-', and '/'. Dots and spaces are INVALID (use hyphens, e.g. 'testing/foo-bar' not 'testing/foo.bar').",
         },
         content: {
           type: "string",

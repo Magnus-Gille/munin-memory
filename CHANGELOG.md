@@ -16,6 +16,11 @@ changelog is the canonical record of what moved.
   `memory_write` description, the `expected_updated_at` parameter description,
   and the compact conventions returned by `memory_orient` to match the actual
   behavior. (#80)
+- **Namespace grammar documented in the write/log tool descriptions** — the
+  `memory_write` and `memory_log` namespace (and key) parameter descriptions now
+  state the allowed grammar inline (start alphanumeric, then alphanumeric/`_`/
+  `-`/`/`; dots and spaces invalid). `validateNamespace` now names the offending
+  character and its position in the error message. (#82)
 
 ### Fixed
 
