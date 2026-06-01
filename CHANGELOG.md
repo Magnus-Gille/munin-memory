@@ -36,6 +36,14 @@ changelog is the canonical record of what moved.
   signals (`lexical_rank`/`lexical_score`, `semantic_rank`/`semantic_distance`,
   and `hybrid_score`). Added a unit guard pinning the explain reasons for
   semantic-only and hybrid match objects so the three modes stay at parity.
+- **`memory_orient` output is now bounded (#78)** — `standard`/`full` modes
+  default `dashboard_limit_per_group` to 10 (was unbounded), and
+  `maintenance_needed` is collapsed to an oldest-first top-10 list plus a new
+  `maintenance_meta` block (`total`, `shown`, `truncated`, and a
+  `full_list_hint`) in compact/standard modes. The full maintenance list is
+  available with `detail:"full"`. This prevents the standard/full response from
+  growing large enough to overflow the MCP output limit and stops the
+  maintenance list from flooding the compact handshake.
 
 ### Fixed
 

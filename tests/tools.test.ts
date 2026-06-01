@@ -5414,6 +5414,63 @@ describe("maintenance suggestions (memory_orient)", () => {
     const aliceIssue = (result.maintenance_needed ?? []).find(m => m.namespace === "people/alice");
     expect(aliceIssue).toBeUndefined();
   });
+
+  it("collapses maintenance_needed to a top-N list with a count in compact/standard (#78)", async () => {
+    // Create 25 active-but-stale tracked statuses.
+    for (let i = 0; i < 25; i++) {
+      const ns = `projects/stale-${String(i).padStart(2, "0")}`;
+      await callTool("memory_write", { namespace: ns, key: "status", content: `Stale ${i}`, tags: ["active"] });
+      // Backdate so they are flagged active_but_stale; older index = older entry.
+      const ts = new Date(Date.UTC(2020, 0, 1 + i)).toISOString();
+      db.prepare("UPDATE entries SET updated_at = ? WHERE namespace = ? AND key = 'status'").run(ts, ns);
+    }
+
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as {
+      maintenance_needed?: Array<{ namespace: string; issue: string }>;
+      maintenance_meta?: { total: number; shown: number; truncated: boolean };
+    };
+
+    expect(result.maintenance_meta).toBeDefined();
+    expect(result.maintenance_meta!.total).toBeGreaterThanOrEqual(25);
+    expect(result.maintenance_needed!.length).toBeLessThanOrEqual(10);
+    expect(result.maintenance_meta!.truncated).toBe(true);
+    expect(result.maintenance_meta!.shown).toBe(result.maintenance_needed!.length);
+    // Oldest first: the earliest-backdated namespace should be present.
+    expect(result.maintenance_needed!.some(m => m.namespace === "projects/stale-00")).toBe(true);
+  });
+
+  it("returns the full maintenance_needed list when detail is full (#78)", async () => {
+    for (let i = 0; i < 25; i++) {
+      const ns = `projects/stale-${String(i).padStart(2, "0")}`;
+      await callTool("memory_write", { namespace: ns, key: "status", content: `Stale ${i}`, tags: ["active"] });
+      const ts = new Date(Date.UTC(2020, 0, 1 + i)).toISOString();
+      db.prepare("UPDATE entries SET updated_at = ? WHERE namespace = ? AND key = 'status'").run(ts, ns);
+    }
+
+    const raw = await callTool("memory_orient", { detail: "full" });
+    const result = parseToolResponse(raw) as {
+      maintenance_needed?: Array<{ namespace: string }>;
+      maintenance_meta?: { total: number; truncated: boolean };
+    };
+    expect(result.maintenance_needed!.length).toBeGreaterThanOrEqual(25);
+    expect(result.maintenance_meta!.truncated).toBe(false);
+  });
+
+  it("defaults a dashboard_limit_per_group for non-compact modes (#78)", async () => {
+    for (let i = 0; i < 15; i++) {
+      await callTool("memory_write", { namespace: `projects/active-${String(i).padStart(2, "0")}`, key: "status", content: `Active ${i}`, tags: ["active"] });
+    }
+
+    const raw = await callTool("memory_orient", { detail: "standard" });
+    const result = parseToolResponse(raw) as {
+      dashboard: { active: unknown[] };
+      dashboard_meta: { counts: Record<string, number>; truncated_groups: string[] };
+    };
+    expect(result.dashboard.active.length).toBeLessThanOrEqual(10);
+    expect(result.dashboard_meta.counts.active).toBeGreaterThanOrEqual(15);
+    expect(result.dashboard_meta.truncated_groups).toContain("active");
+  });
 });
 
 describe("reference index (memory_orient)", () => {
