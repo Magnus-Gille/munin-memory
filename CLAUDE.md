@@ -590,6 +590,7 @@ See `technical-spec.md` § Security Module for the full pattern list.
 | `MUNIN_HYBRID_ENABLED` | `true` | Gate 2: accept `search_mode: "hybrid"` |
 | `MUNIN_EMBEDDINGS_MODEL` | `Xenova/all-MiniLM-L6-v2` | HuggingFace model for embeddings |
 | `MUNIN_EMBEDDINGS_MAX_FAILURES` | `5` | Circuit breaker failure threshold |
+| `MUNIN_SEMANTIC_MAX_DISTANCE` | — (unset = unbounded) | Optional L2 distance cutoff for semantic/hybrid KNN. When set to a finite, non-negative value, vector candidates farther than the cutoff are dropped so pure-KNN search can't return unrelated "nearest" neighbours. Embeddings are normalized 384-dim, so L2² = 2(1−cosine); L2 ranges 0 (identical) to 2 (opposite). Unset preserves prior unbounded behavior. |
 | `MUNIN_ALLOWED_HOSTS` | — | Comma-separated extra Host headers to accept |
 | `MUNIN_OAUTH_ISSUER_URL` | `http://localhost:3030` | OAuth issuer URL (set to your public domain in production) |
 | `MUNIN_OAUTH_ACCESS_TOKEN_TTL` | `3600` | Access token lifetime (seconds) |

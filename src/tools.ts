@@ -27,6 +27,7 @@ import {
   appendLog,
   queryEntries,
   queryEntriesLexicalScored,
+  filterIdsMatchingFts,
   queryEntriesSemantic,
   queryEntriesSemanticScored,
   queryEntriesHybrid,
@@ -101,6 +102,7 @@ import {
   isSemanticEnabled,
   isHybridEnabled,
   getSearchModeUnavailableReason,
+  getSemanticMaxDistance,
 } from "./embeddings.js";
 import {
   consolidateNamespace,
@@ -3162,6 +3164,10 @@ const TOOL_DEFINITIONS = [
           type: "string",
           description: "Optional. ISO 8601 timestamp. Only return entries updated at or before this time.",
         },
+        require_lexical_match: {
+          type: "boolean",
+          description: "Optional (default false). In semantic/hybrid modes, drop results that have no lexical (FTS5) match — i.e. require a lexical anchor for every result. Use when you want to avoid loosely-related vector neighbours (e.g. searching for an exact identifier). No effect in lexical mode. Note: a hybrid query that collapses to semantic-only always emits a `warning` regardless of this flag.",
+        },
       },
       required: [],
     },
@@ -5218,6 +5224,7 @@ export function registerTools(
             const { query, namespace, entry_type, tags, limit, search_mode, since, until } = queryArgs;
             const explain = queryArgs.explain === true;
             const includeExpired = queryArgs.include_expired === true;
+            const requireLexicalMatch = queryArgs.require_lexical_match === true;
             const recencyWeightCheck = resolveSearchRecencyWeight(queryArgs);
             if (!recencyWeightCheck.ok) {
               return errResult("query", "validation_error", recencyWeightCheck.error);
@@ -5358,6 +5365,7 @@ export function registerTools(
                   includeExpired: true,
                   since,
                   until,
+                  maxDistance: getSemanticMaxDistance(),
                 });
                 const filteredExpired = filterExpiredEntries(semanticResults, includeExpired);
                 semanticResults = filteredExpired.items;
@@ -5377,7 +5385,7 @@ export function registerTools(
                 const relaxedQuery = buildRelaxedLexicalQuery(query);
                 const hybridScored = queryEntriesHybridScored(db, {
                   ftsOptions: { query, namespace, entryType: entry_type, tags, limit: internalLimit, includeExpired: true, since, until },
-                  semanticOptions: { queryEmbedding: buf, namespace, entryType: entry_type, tags, limit: internalLimit, includeExpired: true, since, until },
+                  semanticOptions: { queryEmbedding: buf, namespace, entryType: entry_type, tags, limit: internalLimit, includeExpired: true, since, until, maxDistance: getSemanticMaxDistance() },
                   ftsFallbackOptions: relaxedQuery
                     ? { query: relaxedQuery, namespace, entryType: entry_type, tags, limit: internalLimit, includeExpired: true, since, until, rawFts5: true }
                     : undefined,
@@ -5439,6 +5447,49 @@ export function registerTools(
               }
             }
 
+            // #77: surface and optionally suppress purely-semantic recall.
+            // A semantic/hybrid query can return vector "nearest neighbours"
+            // that have no lexical anchor at all — useful for paraphrase recall,
+            // misleading for made-up identifiers. Determine which *vector-
+            // derived* results lack a lexical (FTS5) anchor. We always warn when
+            // a hybrid query degraded to semantic-only, and (when
+            // require_lexical_match) drop the anchorless vector results below —
+            // after canonical/attention injection, so intentionally-injected
+            // entries are never dropped by this flag.
+            const anchorlessVectorIds = new Set<string>();
+            if (actualMode === "hybrid" || actualMode === "semantic") {
+              const vectorIds = actualMode === "hybrid"
+                ? hybridResults.map((r) => r.entry.id)
+                : semanticResults.map((r) => r.entry.id);
+              // Anchor set = union of two signals (#77):
+              //  1. A scoped FTS existence check on the exact query. The hybrid
+              //     RRF result only carries `lexicalRank` for entries inside the
+              //     limited FTS over-fetch window, so a genuine exact match whose
+              //     rank falls below that window would otherwise be misclassified
+              //     as anchorless. The scoped check is authoritative for exact
+              //     matches and avoids that rank-depth false negative.
+              //  2. Any hybrid-leg result that already carries a `lexicalRank`.
+              //     This preserves relaxed-fallback anchors: when the hybrid leg
+              //     found matches only via the relaxed lexical query (e.g. a
+              //     natural-language query with stopwords), those entries are
+              //     legitimately lexically anchored even though the exact-query
+              //     scoped check above would not match them.
+              const anchored = filterIdsMatchingFts(db, query, vectorIds);
+              if (actualMode === "hybrid") {
+                for (const r of hybridResults) {
+                  if (r.lexicalRank !== undefined) anchored.add(r.entry.id);
+                }
+              }
+              for (const id of vectorIds) {
+                if (!anchored.has(id)) anchorlessVectorIds.add(id);
+              }
+              // Warn when a hybrid query produced results but none were lexically
+              // anchored (recall came purely from vectors).
+              if (actualMode === "hybrid" && results.length > 0 && anchored.size === 0 && !warning) {
+                warning = "Hybrid query had zero lexical (FTS5) matches; all results came from vector similarity only. Recall may be loosely related — pass require_lexical_match: true to require a lexical anchor.";
+              }
+            }
+
             const trackedStatuses = (shouldApplyDefaultQuerySuppression(queryParams) || explain)
               ? getTrackedStatusAssessments(db)
               : undefined;
@@ -5447,6 +5498,18 @@ export function registerTools(
             if (trackedStatuses) {
               results = injectAttentionQueryEntries(results, queryParams, trackedStatuses);
             }
+
+            // Apply require_lexical_match after injection so injected
+            // canonical/attention entries survive; only drop anchorless
+            // vector-derived results.
+            if (requireLexicalMatch && anchorlessVectorIds.size > 0) {
+              const before = results.length;
+              results = results.filter((entry) => !anchorlessVectorIds.has(entry.id));
+              if (results.length < before && !warning) {
+                warning = `require_lexical_match dropped ${before - results.length} result(s) with no lexical (FTS5) anchor.`;
+              }
+            }
+
             results = filterByAccess(ctx, results);
             const completedTasks = shouldApplyDefaultQuerySuppression(queryParams)
               ? getCompletedTaskNamespaces(db)

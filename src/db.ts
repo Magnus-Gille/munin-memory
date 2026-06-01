@@ -699,6 +699,37 @@ export function queryEntriesLexicalScored(
   });
 }
 
+/**
+ * Of the given entry IDs, return the subset that lexically match `query` via
+ * FTS5. Unlike `queryEntriesLexicalScored` this is an existence check scoped to
+ * a specific ID set with no rank/limit window, so it is safe for
+ * `require_lexical_match`: a semantic hit that matches FTS5 is never falsely
+ * dropped just because it ranks low lexically. Returns an empty set when `ids`
+ * is empty.
+ */
+export function filterIdsMatchingFts(
+  db: Database.Database,
+  query: string,
+  ids: string[],
+): Set<string> {
+  if (ids.length === 0) return new Set();
+  const placeholders = ids.map(() => "?").join(",");
+  const sql = `
+    SELECT e.id FROM entries e
+    JOIN entries_fts fts ON e.rowid = fts.rowid
+    WHERE entries_fts MATCH ? AND e.id IN (${placeholders})
+  `;
+  let rows: Array<{ id: string }>;
+  try {
+    rows = db.prepare(sql).all(escapeFtsQuery(query), ...ids) as Array<{ id: string }>;
+  } catch {
+    // Malformed FTS expression for the escaped query — treat as no matches
+    // rather than throwing inside the query path.
+    return new Set();
+  }
+  return new Set(rows.map((r) => r.id));
+}
+
 export interface FilterOptions {
   namespace?: string;
   entryType?: EntryType;
@@ -1576,6 +1607,13 @@ export interface SemanticQueryOptions {
   includeExpired?: boolean;
   since?: string;
   until?: string;
+  /**
+   * Optional maximum vec0 distance (L2 over normalized embeddings). When set,
+   * candidates whose distance exceeds this cutoff are dropped — this prevents
+   * pure-KNN search from returning unrelated "nearest" neighbours when nothing
+   * is actually close. Unset (default) preserves the prior unbounded behavior.
+   */
+  maxDistance?: number;
 }
 
 export function queryEntriesSemantic(
@@ -1589,7 +1627,7 @@ export function queryEntriesSemanticScored(
   db: Database.Database,
   options: SemanticQueryOptions,
 ): SemanticQueryResult[] {
-  const { queryEmbedding, namespace, entryType, tags, limit = 10, includeExpired = false, since, until } = options;
+  const { queryEmbedding, namespace, entryType, tags, limit = 10, includeExpired = false, since, until, maxDistance } = options;
   const clampedLimit = Math.min(Math.max(limit, 1), 50);
   const now = nowUTC();
 
@@ -1617,6 +1655,10 @@ export function queryEntriesSemanticScored(
 
   for (const { entry_id, distance } of vecResults) {
     if (results.length >= clampedLimit) break;
+
+    // Distance cutoff: vec0 returns candidates in ascending distance order, so
+    // once we exceed the cutoff every remaining candidate is farther — stop.
+    if (maxDistance !== undefined && distance > maxDistance) break;
 
     const entry = getEntry.get(entry_id) as Entry | undefined;
     if (!entry) continue;

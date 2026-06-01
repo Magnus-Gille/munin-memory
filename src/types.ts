@@ -91,6 +91,12 @@ export interface QueryParams {
   explain?: boolean;
   since?: string;
   until?: string;
+  /**
+   * In semantic/hybrid modes, drop results that had no lexical (FTS5) match —
+   * i.e. require a lexical anchor for every returned result. Default false
+   * (preserves recall). No effect in lexical mode.
+   */
+  require_lexical_match?: boolean;
 }
 
 export interface OrientParams extends ListParams {
