@@ -10,7 +10,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { initDatabase } from "../src/db.js";
+import { initDatabase, writeState, replaceCrossReferences } from "../src/db.js";
 import { registerTools } from "../src/tools.js";
 import type { AccessContext } from "../src/access.js";
 import { ownerContext } from "../src/access.js";
@@ -608,6 +608,81 @@ describe("memory_orient — access enforcement", () => {
     // projects/foo appears in dashboard
     const allDashboardNamespaces = Object.values(result.dashboard).flat().map((e) => e.namespace);
     expect(allDashboardNamespaces).toContain("projects/foo");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// memory_orient — cross-zone cross-reference leak (#96)
+// ---------------------------------------------------------------------------
+
+describe("memory_orient — cross-zone cross-reference exposure", () => {
+  function seedCrossZoneRef() {
+    // A project the requester may read, with a synthesis so orient enriches it.
+    writeState(db, "projects/shared", "status", "## Phase: Active\nShared work", ["active"]);
+    writeState(db, "projects/shared", "synthesis", "## Phase: Active\nSynthesis", ["active"]);
+    // A sensitive client namespace the agent cannot read.
+    writeState(db, "clients/secret", "status", "## Phase\nSensitive", ["active"]);
+    // A down-reference clients/secret -> projects/shared (allowed at generation
+    // time) surfaces as an INBOUND edge on projects/shared.
+    replaceCrossReferences(db, "clients/secret", [
+      { source_namespace: "clients/secret", target_namespace: "projects/shared", reference_type: "related_to", context: "x", confidence: 0.9 },
+    ]);
+  }
+
+  function sharedReaderContext(): AccessContext {
+    return {
+      principalId: "agent:shared",
+      principalType: "agent",
+      accessibleNamespaces: [{ pattern: "projects/shared", permissions: "rw" }],
+      maxClassification: "internal",
+    };
+  }
+
+  function findRow(result: unknown, namespace: string): { synthesis?: { cross_references?: Array<{ target_namespace: string }>; cross_reference_count?: number } } | undefined {
+    const dashboard = (result as { dashboard: Record<string, Array<{ namespace: string }>> }).dashboard ?? {};
+    return Object.values(dashboard).flat().find((e) => e.namespace === namespace) as never;
+  }
+
+  it("does not surface a sensitive inbound source to a requester who cannot read it (full)", async () => {
+    seedCrossZoneRef();
+    const call = makeServer(db, sharedReaderContext());
+    const result = parse(await call("memory_orient", { detail: "full" }));
+
+    const shared = findRow(result, "projects/shared");
+    expect(shared).toBeDefined();
+    const names = (shared!.synthesis?.cross_references ?? []).map((r) => r.target_namespace);
+    expect(names).not.toContain("clients/secret");
+  });
+
+  it("does not leak a sensitive inbound source via the count (standard)", async () => {
+    seedCrossZoneRef();
+    const call = makeServer(db, sharedReaderContext());
+    const result = parse(await call("memory_orient", { detail: "standard" }));
+
+    const shared = findRow(result, "projects/shared");
+    expect(shared).toBeDefined();
+    expect(shared!.synthesis?.cross_reference_count).toBe(0);
+  });
+
+  it("owner still sees the cross-reference (no over-redaction)", async () => {
+    seedCrossZoneRef();
+    const result = parse(await ownerCall("memory_orient", { detail: "full" }));
+
+    const shared = findRow(result, "projects/shared");
+    expect(shared).toBeDefined();
+    const names = (shared!.synthesis?.cross_references ?? []).map((r) => r.target_namespace);
+    expect(names).toContain("clients/secret");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// memory_history — cross_zone_block filter (#96)
+// ---------------------------------------------------------------------------
+
+describe("memory_history — cross_zone_block action filter", () => {
+  it("accepts the cross_zone_block action without a validation error", async () => {
+    const result = parse(await ownerCall("memory_history", { action: "cross_zone_block" })) as { error?: string };
+    expect(result.error).toBeUndefined();
   });
 });
 

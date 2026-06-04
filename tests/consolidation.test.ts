@@ -30,6 +30,7 @@ import {
   type ChatCompletionResponse,
 } from "../src/consolidation.js";
 import type { Entry } from "../src/types.js";
+import type { AccessContext } from "../src/access.js";
 
 const TEST_DB_PATH = "/tmp/munin-memory-consolidation-synthesis-test.db";
 
@@ -534,6 +535,80 @@ describe("cross-zone exfil guard", () => {
     const refs = getCrossReferences(db, "clients/acme").map((r) => r.target_namespace);
     expect(refs).toContain("projects/beta");
     expect(crossZoneBlocks(db).length).toBe(0);
+  });
+
+  it("blocks a case-variation near-miss that would evade the lowercase floor pattern", async () => {
+    writeState(db, "clients/acme", "status", "acme status", ["active"]);
+    for (let i = 0; i < 3; i++) appendLog(db, "projects/alpha", `Log ${i}`, []);
+
+    const mock = vi
+      .fn<(prompt: string) => Promise<ChatCompletionResponse>>()
+      .mockResolvedValue(
+        // "Clients/acme" would resolve to the default `internal` floor unless the
+        // guard normalizes case — and thus smuggle a near-exact client name.
+        mockResponseWith([
+          { target_namespace: "Clients/acme", reference_type: "related_to", context: "leak", confidence: 0.9 },
+        ]),
+      );
+
+    await consolidateNamespace(db, "projects/alpha", mock);
+
+    const refs = getCrossReferences(db, "projects/alpha").map((r) => r.target_namespace);
+    expect(refs).not.toContain("Clients/acme");
+    expect(crossZoneBlocks(db).some((b) => b.key === "Clients/acme")).toBe(true);
+  });
+
+  it("drops a malformed target namespace (fail-closed) and audit-logs it", async () => {
+    for (let i = 0; i < 3; i++) appendLog(db, "projects/alpha", `Log ${i}`, []);
+
+    const mock = vi
+      .fn<(prompt: string) => Promise<ChatCompletionResponse>>()
+      .mockResolvedValue(
+        mockResponseWith([
+          { target_namespace: "../clients/acme", reference_type: "related_to", context: "x", confidence: 0.9 },
+        ]),
+      );
+
+    await consolidateNamespace(db, "projects/alpha", mock);
+
+    expect(getCrossReferences(db, "projects/alpha").length).toBe(0);
+    expect(crossZoneBlocks(db).some((b) => b.key === "../clients/acme")).toBe(true);
+  });
+
+  it("loadTargetVocabulary applies the requester ceiling (canRead) when ctx is supplied", () => {
+    writeState(db, "projects/beta", "status", "beta", ["active"]);
+    writeState(db, "projects/gamma", "status", "gamma", ["active"]);
+
+    const ctx: AccessContext = {
+      principalId: "agent:x",
+      principalType: "agent",
+      accessibleNamespaces: [
+        { pattern: "projects/alpha/*", permissions: "rw" },
+        { pattern: "projects/beta", permissions: "read" },
+      ],
+      maxClassification: "internal",
+    };
+
+    const targets = loadTargetVocabulary(db, "projects/alpha", ctx).map((t) => t.namespace);
+    expect(targets).toEqual(["projects/beta"]); // gamma is not readable by this principal
+  });
+
+  it("fails closed before reading logs when the source floor exceeds the requester ceiling", async () => {
+    for (let i = 0; i < 3; i++) appendLog(db, "clients/secret", `Sensitive log ${i}`, []);
+
+    const ctx: AccessContext = {
+      principalId: "agent:x",
+      principalType: "agent",
+      accessibleNamespaces: [{ pattern: "clients/*", permissions: "rw" }],
+      maxClassification: "internal", // below clients/* floor (client-confidential)
+    };
+
+    const mock = vi.fn<(prompt: string) => Promise<ChatCompletionResponse>>();
+    const result = await consolidateNamespace(db, "clients/secret", mock, ctx);
+
+    expect(result.error).toBe("access_denied");
+    expect(result.logs_processed).toBe(0);
+    expect(mock).not.toHaveBeenCalled(); // never built a prompt / read content
   });
 });
 

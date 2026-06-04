@@ -26,7 +26,17 @@ changelog is the canonical record of what moved.
   regardless of `MUNIN_LIBRARIAN_ENABLED` (it only suppresses derived links,
   never owner-authored content). The `memory_consolidate` tool additionally
   threads the requester's `AccessContext` so its ceiling applies as
-  defense-in-depth. Reuses the existing per-namespace classification floor table
+  defense-in-depth: the scanner now prunes out-of-zone targets *before* reading
+  their state content, and a source whose own floor exceeds the requester's
+  ceiling fails closed before any logs are read. The floor lookup is hardened
+  against case-variation near-misses (e.g. `Clients/acme` evading the lowercase
+  `clients/*` floor) and fails closed on malformed targets, since cross-reference
+  targets are untrusted model output. The read path is closed too:
+  `memory_orient` now filters dashboard cross-references so an inbound edge from a
+  namespace the requester cannot read (a permitted sensitive→less-sensitive link)
+  is hidden from both the `cross_references` array and the count (the owner still
+  sees everything). The new `cross_zone_block` audit action is filterable via
+  `memory_history`. Reuses the existing per-namespace classification floor table
   (no new sensitivity model). Mirrors PAI's `ContainmentGuard`.
 - **Write-time prompt-injection / memory-poisoning advisory scan (#94)** — a new
   `scanForInjection` heuristic flags instruction-shaped content (e.g. "ignore

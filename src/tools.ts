@@ -77,6 +77,7 @@ import {
   enforceClassification,
   filterSourcesByClassification,
   getLibrarianConfigWarnings,
+  classificationAllowed,
   isClassificationLevel,
   isLibrarianEnabled,
   isRedactionLogEnabled,
@@ -155,6 +156,7 @@ import type {
   AuditAction,
   AuditEntry,
   ConsolidationRunResult,
+  CrossReference,
   RetrievalFeedbackParams,
   RetrievalAggregates,
   ClassificationLevel,
@@ -820,11 +822,36 @@ const VALID_AUDIT_ACTIONS: Array<AuditAction | "delete_namespace" | "log"> = [
   "log_append",
   "delete_namespace",
   "log",
+  "cross_zone_block",
 ];
 
 function contentPreview(content: string, maxLen = 500): string {
   if (content.length <= maxLen) return content;
   return content.slice(0, maxLen) + "...";
+}
+
+/**
+ * Cross-references are stored directionally but `getCrossReferences` returns
+ * both outgoing and incoming rows for a namespace. An allowed down-reference
+ * (a sensitive source linking a less-sensitive target) therefore surfaces as an
+ * *inbound* edge on the less-sensitive namespace's dashboard, leaking the
+ * sensitive source's name/count to a requester who can see the target but not
+ * the source (#96). Filter cross-references so the *other* endpoint is only
+ * surfaced when the requester may actually read it (canRead + classification
+ * ceiling). Owner/local connections see everything (no behaviour change).
+ */
+function visibleCrossReferences(
+  db: Database.Database,
+  ctx: AccessContext,
+  namespace: string,
+): CrossReference[] {
+  const maxClassification = getContextMaxClassification(ctx);
+  return getCrossReferences(db, namespace).filter((ref) => {
+    const other = ref.source_namespace === namespace ? ref.target_namespace : ref.source_namespace;
+    if (!canRead(ctx, other)) return false;
+    if (!classificationAllowed(resolveNamespaceClassificationFloor(db, other), maxClassification)) return false;
+    return true;
+  });
 }
 
 /**
@@ -3310,8 +3337,8 @@ const TOOL_DEFINITIONS = [
         },
         action: {
           type: "string",
-          enum: ["write", "update", "delete", "delete_namespace", "log"],
-          description: "Optional. Filter by action type.",
+          enum: ["write", "update", "delete", "delete_namespace", "log", "cross_zone_block"],
+          description: "Optional. Filter by action type. 'cross_zone_block' surfaces containment-guard security events.",
         },
         cursor: {
           type: "integer",
@@ -3670,7 +3697,7 @@ export function registerTools(
 
                   if (detail === "standard") {
                     // Standard: synthesis summary (or stale marker) + cross-ref count, no full cross-ref array
-                    const crossRefCount = getCrossReferences(db, assessment.row.namespace).length;
+                    const crossRefCount = visibleCrossReferences(db, ctx, assessment.row.namespace).length;
                     entry.synthesis = {
                       ...(synthesisIsStale ? { stale: true as const } : { summary: contentPreview(synthesis.content) }),
                       updated_at: synthesis.updated_at,
@@ -3683,7 +3710,7 @@ export function registerTools(
                     };
                   } else {
                     // Full: everything
-                    const crossRefs = getCrossReferences(db, assessment.row.namespace);
+                    const crossRefs = visibleCrossReferences(db, ctx, assessment.row.namespace);
                     entry.synthesis = {
                       ...(synthesisIsStale ? { stale: true as const } : { summary: contentPreview(synthesis.content) }),
                       updated_at: synthesis.updated_at,
@@ -6105,7 +6132,7 @@ export function registerTools(
               return errResult(
                 "history",
                 "validation_error",
-                `Invalid action "${action}". Must be one of: write, update, delete, delete_namespace, log. Legacy aliases namespace_delete and log_append are also accepted.`,
+                `Invalid action "${action}". Must be one of: write, update, delete, delete_namespace, log, cross_zone_block. Legacy aliases namespace_delete and log_append are also accepted.`,
               );
             }
 
