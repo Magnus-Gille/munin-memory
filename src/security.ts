@@ -35,7 +35,10 @@ const INJECTION_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
     label: "concealment instruction",
   },
   {
-    pattern: /\b(new|updated|revised|real|actual|true)\s+(instruction|instructions|directive|directives|task|tasks|rule|rules|system\s+prompt)\s*:/i,
+    // Deliberately narrow: "new task:" / "updated rules:" are routine PM prose, so
+    // only genuinely injection-shaped nouns (instructions / system prompt / message)
+    // trip this. Override/directive forms are covered by the phrases above.
+    pattern: /\b(new|updated|revised|additional|real|actual|true)\s+(instruction|instructions|system\s+prompt|system\s+message)\s*:/i,
     label: "injected directive block",
   },
   {

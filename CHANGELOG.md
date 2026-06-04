@@ -24,9 +24,11 @@ changelog is the canonical record of what moved.
 ### Added
 
 - **Telos ideal-state anchor surfaced by `memory_orient` / `memory_resume` (#95)** —
-  a new owner-only `meta/telos` entry (mission, goals, beliefs, priority-ranked
-  challenges) is loaded as a first-class `telos` field in the orient handshake and
-  the resume continuation pack. Where the computed dashboard answers "what's
+  a new `meta/telos` entry (mission, goals, beliefs, priority-ranked challenges) is
+  loaded as a first-class `telos` field in the orient handshake and the resume
+  continuation pack. The projection is owner-scoped (only the owner principal sees
+  the field), consistent with the other curated overlays; the entry itself uses
+  ordinary `meta/*` namespace access rules. Where the computed dashboard answers "what's
   happening" (reactive), Telos answers "what is the owner trying to achieve"
   (proactive), so sessions can anticipate rather than only report. Convention
   documented in `CLAUDE.md`. Inspired by Daniel Miessler's PAI TELOS.

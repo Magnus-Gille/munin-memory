@@ -4851,7 +4851,14 @@ export function registerTools(
                 syncCommitmentsForEntry(db, patchedEntry.id, extractCommitmentsFromEntry(patchedEntry, getResolvedNamespaces(db)));
               }
 
-              return okResult("write", { status: "patched", id: patchResult.id, namespace, key, hint: hintPatch });
+              const patchedResponse: Record<string, unknown> = { status: "patched", id: patchResult.id, namespace, key, hint: hintPatch };
+              // Advisory injection scan on the merged result — a patch can introduce
+              // instruction-shaped content just like a full write.
+              if (patchedEntry) {
+                const patchInjectionWarning = injectionWarning(patchedEntry.content);
+                if (patchInjectionWarning) patchedResponse.warnings = [patchInjectionWarning];
+              }
+              return okResult("write", patchedResponse);
             }
 
             // --- Full write path ---
