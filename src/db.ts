@@ -218,6 +218,23 @@ function insertAuditRow(
   ).run(timestamp, agentId, action, namespace, key, detail, entryId);
 }
 
+/**
+ * Record a cross-zone containment block as a security event in the audit log.
+ * Used when an aggregate/derived operation (e.g. consolidation cross-references)
+ * would otherwise surface a more-sensitive namespace inside a less-sensitive
+ * output. `namespace` is the source (output) namespace; `key` is the blocked
+ * target namespace.
+ */
+export function recordCrossZoneBlock(
+  db: Database.Database,
+  sourceNamespace: string,
+  targetNamespace: string,
+  detail: string,
+  agentId = "consolidation-worker",
+): void {
+  insertAuditRow(db, nowUTC(), agentId, "cross_zone_block", sourceNamespace, targetNamespace, detail);
+}
+
 function resolveWriteClassification(
   db: Database.Database,
   namespace: string,

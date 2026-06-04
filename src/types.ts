@@ -4,7 +4,7 @@ export type EntryType = "state" | "log";
 export type EmbeddingStatus = "pending" | "processing" | "generated" | "failed";
 export type SearchMode = "lexical" | "semantic" | "hybrid";
 export type OrientDetail = "compact" | "standard" | "full";
-export type AuditAction = "write" | "update" | "patch" | "delete" | "namespace_delete" | "log_append";
+export type AuditAction = "write" | "update" | "patch" | "delete" | "namespace_delete" | "log_append" | "cross_zone_block";
 export type CommitmentStatus = "open" | "done" | "cancelled";
 export type ClassificationLevel =
   | "public"

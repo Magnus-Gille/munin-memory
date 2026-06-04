@@ -10,6 +10,34 @@ changelog is the canonical record of what moved.
 
 ### Security
 
+- **Cross-zone exfil guard on consolidation cross-references (#96)** — the
+  consolidation worker derives `cross_references` across `projects/*`,
+  `clients/*`, `people/*`, and `decisions/*`. A synthesis in a less-sensitive
+  namespace (e.g. `projects/*`, floor `internal`) could previously emit a
+  reference revealing the existence of a more-sensitive namespace (e.g.
+  `clients/*` / `people/*`, floor `client-confidential`) — exfil-by-aggregation.
+  A cross-reference for a source namespace whose classification floor is `F_S`
+  may now only point at a target whose floor is `≤ F_S`. The orphan scanner
+  prunes out-of-zone targets before it even reads their content, and an
+  authoritative chokepoint drops any remaining out-of-zone reference
+  (LLM- or scanner-sourced), recording a `cross_zone_block` security event in
+  `audit_log`. The guard is a **blanket floor independent of the requester**, so
+  it also protects the autonomous background worker, and it is enforced
+  regardless of `MUNIN_LIBRARIAN_ENABLED` (it only suppresses derived links,
+  never owner-authored content). The `memory_consolidate` tool additionally
+  threads the requester's `AccessContext` so its ceiling applies as
+  defense-in-depth: the scanner now prunes out-of-zone targets *before* reading
+  their state content, and a source whose own floor exceeds the requester's
+  ceiling fails closed before any logs are read. The floor lookup is hardened
+  against case-variation near-misses (e.g. `Clients/acme` evading the lowercase
+  `clients/*` floor) and fails closed on malformed targets, since cross-reference
+  targets are untrusted model output. The read path is closed too:
+  `memory_orient` now filters dashboard cross-references so an inbound edge from a
+  namespace the requester cannot read (a permitted sensitive→less-sensitive link)
+  is hidden from both the `cross_references` array and the count (the owner still
+  sees everything). The new `cross_zone_block` audit action is filterable via
+  `memory_history`. Reuses the existing per-namespace classification floor table
+  (no new sensitivity model). Mirrors PAI's `ContainmentGuard`.
 - **Write-time prompt-injection / memory-poisoning advisory scan (#94)** — a new
   `scanForInjection` heuristic flags instruction-shaped content (e.g. "ignore
   previous instructions", concealment directives, jailbreak markers, chat-control
