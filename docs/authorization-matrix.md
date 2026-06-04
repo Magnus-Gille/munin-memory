@@ -148,6 +148,14 @@ Invisible denial is critical: non-owner principals must not be able to distingui
 | **Who can call** | Owner only |
 | **Non-owner** | Return empty results (not an error). Insights expose retrieval patterns that could leak information about hidden namespaces. |
 
+### memory_consolidate
+
+| Field | Rule |
+|-------|------|
+| **Who can call** | Owner only |
+| **Non-owner** | Invisible denial (`access_denied` for agents) |
+| **Cross-zone guard (#96)** | The derived `cross_references` are floor-bounded: a reference for a source namespace whose classification floor is `F_S` may only point at a target whose floor is `≤ F_S`. The orphan scanner prunes out-of-zone targets before reading their content; an authoritative chokepoint drops any remaining out-of-zone reference (LLM- or scanner-sourced) and records a `cross_zone_block` event in `audit_log`. This is a **blanket floor independent of the requester** (it also protects the autonomous background worker) and is enforced regardless of `MUNIN_LIBRARIAN_ENABLED`. When invoked via the tool, the requester's `AccessContext` ceiling (`canRead` + `maxClassification`) applies as additional defense-in-depth. |
+
 ### memory_history (admin view)
 
 | Field | Rule |

@@ -414,6 +414,129 @@ describe("consolidateNamespace", () => {
   });
 });
 
+// ─── Cross-zone exfil guard (#96) ────────────────────────────────────────────
+
+function mockResponseWith(
+  crossRefs: Array<{
+    target_namespace: string;
+    reference_type: string;
+    context: string;
+    confidence: number;
+  }>,
+): ChatCompletionResponse {
+  return {
+    choices: [
+      {
+        message: {
+          content: JSON.stringify({
+            status_content: "## Phase: Active\n\nSynthesis content.",
+            tags: ["active"],
+            cross_references: crossRefs,
+          }),
+        },
+      },
+    ],
+    usage: { prompt_tokens: 500, completion_tokens: 300 },
+  };
+}
+
+function crossZoneBlocks(
+  database: Database.Database,
+): Array<{ namespace: string; key: string | null; detail: string | null }> {
+  return database
+    .prepare("SELECT namespace, key, detail FROM audit_log WHERE action = 'cross_zone_block'")
+    .all() as Array<{ namespace: string; key: string | null; detail: string | null }>;
+}
+
+describe("cross-zone exfil guard", () => {
+  it("loadTargetVocabulary prunes targets above the source namespace floor", () => {
+    writeState(db, "projects/beta", "status", "beta", ["active"]);
+    writeState(db, "decisions/architecture", "status", "arch", []);
+    writeState(db, "clients/acme", "status", "acme", ["active"]); // client-confidential
+    writeState(db, "people/sara", "status", "sara", []); // client-confidential
+
+    const targets = loadTargetVocabulary(db, "projects/alpha") // internal floor
+      .map((t) => t.namespace)
+      .sort();
+
+    expect(targets).toEqual(["decisions/architecture", "projects/beta"]);
+    expect(targets).not.toContain("clients/acme");
+    expect(targets).not.toContain("people/sara");
+  });
+
+  it("loadTargetVocabulary keeps equal/lower-floor targets when the source is more sensitive", () => {
+    writeState(db, "projects/beta", "status", "beta", ["active"]); // internal
+    writeState(db, "clients/other", "status", "other", ["active"]); // client-confidential
+
+    const targets = loadTargetVocabulary(db, "clients/acme") // client-confidential floor
+      .map((t) => t.namespace)
+      .sort();
+
+    expect(targets).toEqual(["clients/other", "projects/beta"]);
+  });
+
+  it("drops an LLM-proposed cross-reference above the source floor and audit-logs it", async () => {
+    writeState(db, "clients/acme", "status", "acme status", ["active"]);
+    for (let i = 0; i < 3; i++) appendLog(db, "projects/alpha", `Log ${i}`, []);
+
+    const mock = vi
+      .fn<(prompt: string) => Promise<ChatCompletionResponse>>()
+      .mockResolvedValue(
+        mockResponseWith([
+          { target_namespace: "clients/acme", reference_type: "related_to", context: "leak", confidence: 0.9 },
+        ]),
+      );
+
+    const result = await consolidateNamespace(db, "projects/alpha", mock);
+
+    expect(result.error).toBeUndefined();
+    const refs = getCrossReferences(db, "projects/alpha").map((r) => r.target_namespace);
+    expect(refs).not.toContain("clients/acme");
+    expect(result.cross_references_found).toBe(0);
+
+    const blocks = crossZoneBlocks(db);
+    expect(blocks.some((b) => b.namespace === "projects/alpha" && b.key === "clients/acme")).toBe(true);
+  });
+
+  it("keeps a cross-reference at an equal-or-lower floor and writes no block", async () => {
+    writeState(db, "projects/beta", "status", "beta status", ["active"]);
+    for (let i = 0; i < 3; i++) appendLog(db, "projects/alpha", `Log ${i}`, []);
+
+    const mock = vi
+      .fn<(prompt: string) => Promise<ChatCompletionResponse>>()
+      .mockResolvedValue(
+        mockResponseWith([
+          { target_namespace: "projects/beta", reference_type: "related_to", context: "ok", confidence: 0.9 },
+        ]),
+      );
+
+    await consolidateNamespace(db, "projects/alpha", mock);
+
+    const refs = getCrossReferences(db, "projects/alpha").map((r) => r.target_namespace);
+    expect(refs).toContain("projects/beta");
+    expect(crossZoneBlocks(db).length).toBe(0);
+  });
+
+  it("allows a sensitive source to reference a less-sensitive namespace", async () => {
+    writeState(db, "projects/beta", "status", "beta status", ["active"]);
+    for (let i = 0; i < 3; i++) appendLog(db, "clients/acme", `Log ${i}`, []);
+
+    const mock = vi
+      .fn<(prompt: string) => Promise<ChatCompletionResponse>>()
+      .mockResolvedValue(
+        mockResponseWith([
+          { target_namespace: "projects/beta", reference_type: "related_to", context: "ok", confidence: 0.9 },
+        ]),
+      );
+
+    await consolidateNamespace(db, "clients/acme", mock);
+
+    const refs = getCrossReferences(db, "clients/acme").map((r) => r.target_namespace);
+    expect(refs).toContain("projects/beta");
+    expect(crossZoneBlocks(db).length).toBe(0);
+  });
+});
+
 // ─── Worker lifecycle ────────────────────────────────────────────────────────
 
 describe("initConsolidation", () => {
@@ -522,16 +645,17 @@ describe("isConsolidationAvailable", () => {
 
 describe("loadTargetVocabulary", () => {
   it("returns tracked namespaces and excludes the source", () => {
+    // Targets at or below the source floor only; cross-zone pruning is covered
+    // by the dedicated "cross-zone exfil guard" tests below.
     writeState(db, "projects/alpha", "status", "alpha status", ["active"]);
     writeState(db, "projects/beta", "status", "beta status", ["active"]);
-    writeState(db, "clients/acme", "status", "acme status", ["active"]);
-    writeState(db, "people/sara", "status", "sara profile", []);
+    writeState(db, "decisions/memory-arch", "status", "decision", []);
     writeState(db, "meta/workbench", "status", "irrelevant", []);
 
     const targets = loadTargetVocabulary(db, "projects/alpha");
     const namespaces = targets.map((t) => t.namespace).sort();
 
-    expect(namespaces).toEqual(["clients/acme", "people/sara", "projects/beta"]);
+    expect(namespaces).toEqual(["decisions/memory-arch", "projects/beta"]);
     expect(namespaces).not.toContain("projects/alpha");
     expect(namespaces).not.toContain("meta/workbench");
   });

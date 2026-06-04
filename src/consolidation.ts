@@ -8,9 +8,78 @@ import {
   addCrossReferences,
   hasMoreLogsAfter,
   writeState,
+  recordCrossZoneBlock,
   nowUTC,
 } from "./db.js";
+import {
+  resolveNamespaceClassificationFloor,
+  compareClassificationLevels,
+  classificationAllowed,
+} from "./librarian.js";
+import { canRead, getContextMaxClassification } from "./access.js";
+import type { AccessContext } from "./access.js";
 import type { Entry, SynthesisResult, ConsolidationRunResult, CrossReferenceType } from "./types.js";
+
+// --- Cross-zone containment guard (#96) ---
+//
+// Aggregate/derived operations must not surface a more-sensitive namespace
+// inside a less-sensitive output. A cross-reference written for source
+// namespace S (floor F_S) may not point at a target namespace T whose floor
+// F_T is higher than F_S. This is a blanket rule independent of the requester
+// (so it also protects the autonomous background worker), and is enforced
+// regardless of MUNIN_LIBRARIAN_ENABLED — it only suppresses derived links,
+// never owner-authored content.
+
+/**
+ * Is `targetNamespace` within the containment zone of a source namespace whose
+ * classification floor is `sourceFloor`? Optionally also enforces the
+ * requester's ceiling (canRead + maxClassification) when an AccessContext is
+ * supplied (defense-in-depth for the tool path).
+ */
+function isTargetWithinZone(
+  db: Database.Database,
+  sourceFloor: ReturnType<typeof resolveNamespaceClassificationFloor>,
+  targetNamespace: string,
+  ctx?: AccessContext,
+): boolean {
+  const targetFloor = resolveNamespaceClassificationFloor(db, targetNamespace);
+  // Blanket floor: target must not be more sensitive than the source.
+  if (compareClassificationLevels(targetFloor, sourceFloor) > 0) return false;
+  // Requester ceiling (only when a context is threaded through the tool path).
+  if (ctx) {
+    if (!canRead(ctx, targetNamespace)) return false;
+    if (!classificationAllowed(targetFloor, getContextMaxClassification(ctx))) return false;
+  }
+  return true;
+}
+
+/**
+ * Drop cross-references that would exfiltrate a more-sensitive namespace into a
+ * less-sensitive synthesis, audit-logging each block. Catches both LLM-proposed
+ * and scanner-discovered refs (the authoritative chokepoint).
+ */
+function filterCrossZoneRefs(
+  db: Database.Database,
+  sourceNamespace: string,
+  refs: SynthesisResult["cross_references"],
+  ctx?: AccessContext,
+): SynthesisResult["cross_references"] {
+  const sourceFloor = resolveNamespaceClassificationFloor(db, sourceNamespace);
+  const allowed: SynthesisResult["cross_references"] = [];
+  for (const ref of refs) {
+    if (isTargetWithinZone(db, sourceFloor, ref.target_namespace, ctx)) {
+      allowed.push(ref);
+      continue;
+    }
+    const targetFloor = resolveNamespaceClassificationFloor(db, ref.target_namespace);
+    const reason =
+      compareClassificationLevels(targetFloor, sourceFloor) > 0
+        ? `target floor ${targetFloor} exceeds source floor ${sourceFloor}`
+        : `requester ${ctx?.principalId ?? "unknown"} not permitted target floor ${targetFloor}`;
+    recordCrossZoneBlock(db, sourceNamespace, ref.target_namespace, `Blocked cross-reference: ${reason}`);
+  }
+  return allowed;
+}
 
 // --- Configuration from env vars ---
 
@@ -170,6 +239,7 @@ export async function consolidateNamespace(
   db: Database.Database,
   namespace: string,
   callApi?: (prompt: string) => Promise<ChatCompletionResponse>,
+  ctx?: AccessContext,
 ): Promise<ConsolidationRunResult> {
   // Step 1: Read current state
   const metadata = getConsolidationMetadata(db, namespace);
@@ -242,7 +312,15 @@ export async function consolidateNamespace(
     // Step 5: Discover orphaned cross-references via scanner, merge with LLM refs
     const scanner = discoverOrphanedReferences(db, namespace, logs);
     const scannerOrphans = scanner.orphans;
-    const mergedRefs = mergeCrossReferences(result.cross_references, scannerOrphans);
+    // Authoritative cross-zone chokepoint: drop any ref (LLM- or scanner-
+    // sourced) that points above the source floor or past the requester's
+    // ceiling, audit-logging each block.
+    const mergedRefs = filterCrossZoneRefs(
+      db,
+      namespace,
+      mergeCrossReferences(result.cross_references, scannerOrphans),
+      ctx,
+    );
     const droppedByLlmMerge = scannerOrphans.length - (mergedRefs.length - result.cross_references.length);
 
     if (scanner.diagnostics.candidates_above_threshold > 0) {
@@ -362,11 +440,16 @@ export function loadTargetVocabulary(
     )
     .all(sourceNamespace) as Array<{ namespace: string }>;
 
+  // Blanket cross-zone guard: never scan or link namespaces more sensitive than
+  // the source — prevents the orphan scanner from even reading their content.
+  const sourceFloor = resolveNamespaceClassificationFloor(db, sourceNamespace);
+
   const targets: TargetNamespace[] = [];
   for (const row of rows) {
     const segments = row.namespace.split("/");
     const bareName = segments[segments.length - 1] ?? "";
     if (bareName.length < MIN_BARE_NAME_LENGTH) continue;
+    if (!isTargetWithinZone(db, sourceFloor, row.namespace)) continue;
     targets.push({ namespace: row.namespace, bareName });
   }
   return targets;

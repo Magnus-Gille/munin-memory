@@ -6148,7 +6148,7 @@ export function registerTools(
                 return errResult("consolidate", "validation_error", nsCheck.error!);
               }
 
-              const result = await consolidateNamespace(db, consolidateNs);
+              const result = await consolidateNamespace(db, consolidateNs, undefined, ctx);
               if (result.error) {
                 return errResult("consolidate", "synthesis_error", result.error);
               }
@@ -6169,7 +6169,7 @@ export function registerTools(
 
             const consolidateResults: ConsolidationRunResult[] = [];
             for (const candidate of candidates) {
-              const result = await consolidateNamespace(db, candidate.namespace);
+              const result = await consolidateNamespace(db, candidate.namespace, undefined, ctx);
               consolidateResults.push(result);
             }
 
