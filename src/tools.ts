@@ -94,6 +94,7 @@ import {
   validateNamespace,
   validateKey,
   validateTags,
+  injectionWarning,
 } from "./security.js";
 import {
   generateEmbedding,
@@ -3791,6 +3792,29 @@ export function registerTools(
                   }
                 }
               }
+
+              // Telos — ideal-state anchor (mission/goals/challenges), surfaced
+              // proactively so the handshake starts from "what is the owner trying
+              // to achieve + what's in the way", not only "what's open" (#95).
+              const telos = readState(db, "meta", "telos");
+              if (telos) {
+                const filteredTelos = filterDerivedSources(
+                  db,
+                  ctx,
+                  [telos],
+                  "memory_orient",
+                  (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
+                  sessionId,
+                );
+                orientRedactedSources.push(...filteredTelos.redacted);
+                if (filteredTelos.allowed.length > 0) {
+                  const parsedTelos = parseEntry(filteredTelos.allowed[0]);
+                  response.telos = {
+                    content: parsedTelos.content,
+                    updated_at: parsedTelos.updated_at,
+                  };
+                }
+              }
             }
 
             // Maintenance suggestions. The full list can flood the response
@@ -4067,6 +4091,31 @@ export function registerTools(
               why_this_set: whyThisSet,
             };
             if (scope) response.target_namespace = scope;
+
+            // Telos — ideal-state anchor surfaced in the continuation pack so
+            // resumed work stays anchored to the owner's goals/challenges (#95).
+            if (ctx.principalType === "owner") {
+              const telos = readState(db, "meta", "telos");
+              if (telos) {
+                const filteredTelos = filterDerivedSources(
+                  db,
+                  ctx,
+                  [telos],
+                  "memory_resume",
+                  (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
+                  sessionId,
+                );
+                resumeRedactedSources.push(...filteredTelos.redacted);
+                if (filteredTelos.allowed.length > 0) {
+                  const parsedTelos = parseEntry(filteredTelos.allowed[0]);
+                  response.telos = {
+                    content: parsedTelos.content,
+                    updated_at: parsedTelos.updated_at,
+                  };
+                }
+              }
+            }
+
             const redactedSourcesSummary = summarizeRedactedSources(ctx, resumeRedactedSources);
             if (redactedSourcesSummary) {
               response.redacted_sources = redactedSourcesSummary;
@@ -4825,6 +4874,11 @@ export function registerTools(
 
             const isTrackedStatus = key === "status" && isTrackedNamespace(namespace);
             const warnings: string[] = [];
+
+            // Advisory: flag instruction-shaped content (prompt-injection / memory-poisoning).
+            // Non-blocking — the entry is still stored; we only warn.
+            const writeInjectionWarning = injectionWarning(content);
+            if (writeInjectionWarning) warnings.push(writeInjectionWarning);
 
             // Canonicalize tags for tracked status writes
             let effectiveTags = tags ?? [];
@@ -5753,6 +5807,9 @@ export function registerTools(
             };
             const logNsWarning = uppercaseNamespaceWarning(namespace);
             if (logNsWarning) logResponse.warning = logNsWarning;
+            // Advisory: flag instruction-shaped content (prompt-injection / memory-poisoning).
+            const logInjectionWarning = injectionWarning(content);
+            if (logInjectionWarning) logResponse.warnings = [logInjectionWarning];
             return okResult("log", logResponse);
           }
 
