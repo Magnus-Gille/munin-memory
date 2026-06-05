@@ -64,6 +64,21 @@ changelog is the canonical record of what moved.
   via silently stale synthesis. Additive: no schema change, no migration, no new
   env var. Distilled from the Letta memory-design harvest (see
   `decisions/letta-harvest`; Sleep-time Compute).
+- **Opt-in boundary serialization for `memory_query`** — a new
+  `serialization: "boundary"` parameter reorders ranked search results so the
+  strongest sit at the two context edges (rank 1 first, rank 2 last, rank 3
+  second, …) instead of strict best-first, countering the "Lost in the Middle"
+  attention dip (arXiv 2307.03172) when a long result list is dropped straight
+  into context. Default (`"linear"`) is unchanged. The transform is display-only
+  — the result set and underlying ranks are identical, it is applied **after**
+  analytics logging so `retrieval_events` keep the true linear rank order (the
+  outcome-correlation signal is never corrupted), and it has no effect on
+  filter-only browse queries. `retrieval.serialization` is always present and
+  echoes the mode actually applied (always `"linear"` on the filter-only browse
+  path). An unrecognized value fails with a `validation_error` rather than being
+  silently coerced. Additive: no schema change, no migration, no new env var.
+  Distilled from the Letta memory-design harvest (see `decisions/letta-harvest`;
+  Lost in the Middle).
 - **Synthesis provenance tag + age on the query read path** — the consolidation
   worker now force-stamps a reserved `source:synthesis` tag on the `synthesis`
   entry server-side (deduped, regardless of what the LLM proposed), and

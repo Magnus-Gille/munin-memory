@@ -433,6 +433,26 @@ function buildReadMissHint(
     : `No entries found in namespace "${namespace}".`;
 }
 
+/**
+ * Reorder a rank-sorted array so the strongest items sit at the two edges and
+ * the weakest in the middle — countering the "Lost in the Middle" attention dip
+ * (arXiv 2307.03172) when a long result list is dropped straight into context.
+ * Given best-first input [r1, r2, r3, r4, r5] it returns [r1, r3, r5, r4, r2]:
+ * rank 1 at the start, rank 2 at the end. Pure and order-only — the same items
+ * come back, so callers must not derive ranks from the returned order. A no-op
+ * for 0–2 items.
+ */
+function boundarySerialize<T>(items: T[]): T[] {
+  const front: T[] = [];
+  const back: T[] = [];
+  items.forEach((item, i) => {
+    if (i % 2 === 0) front.push(item);
+    else back.push(item);
+  });
+  back.reverse();
+  return [...front, ...back];
+}
+
 function formatQueryResult(
   db: Database.Database,
   ctx: AccessContext,
@@ -3180,6 +3200,11 @@ const TOOL_DEFINITIONS = [
           type: "boolean",
           description: "Optional (default false). In semantic/hybrid modes, drop results that have no lexical (FTS5) match — i.e. require a lexical anchor for every result. Use when you want to avoid loosely-related vector neighbours (e.g. searching for an exact identifier). No effect in lexical mode. Note: a hybrid query that collapses to semantic-only always emits a `warning` regardless of this flag.",
         },
+        serialization: {
+          type: "string",
+          enum: ["linear", "boundary"],
+          description: "Optional (default \"linear\"). Output ordering of ranked results. \"linear\" returns strict best-first rank order. \"boundary\" places the strongest results at the two context edges (rank 1 first, rank 2 last, rank 3 second, …) to counter the \"Lost in the Middle\" attention dip when dropping a long result list straight into context. The result set and underlying ranks are unchanged — only display order — and retrieval analytics always record the true linear rank order. No effect on filter-only browse queries.",
+        },
       },
       required: [],
     },
@@ -5336,6 +5361,18 @@ export function registerTools(
             const explain = queryArgs.explain === true;
             const includeExpired = queryArgs.include_expired === true;
             const requireLexicalMatch = queryArgs.require_lexical_match === true;
+            // Validate serialization up front (parity with namespace/recency
+            // validation) so a typo like "boundry" fails loudly instead of being
+            // silently coerced to "linear". Applies to both the ranked and
+            // filter-only paths since it is read before the branch.
+            if (
+              queryArgs.serialization !== undefined &&
+              queryArgs.serialization !== "linear" &&
+              queryArgs.serialization !== "boundary"
+            ) {
+              return errResult("query", "validation_error", "serialization must be 'linear' or 'boundary'.");
+            }
+            const serialization = queryArgs.serialization ?? "linear";
             const recencyWeightCheck = resolveSearchRecencyWeight(queryArgs);
             if (!recencyWeightCheck.ok) {
               return errResult("query", "validation_error", recencyWeightCheck.error);
@@ -5415,6 +5452,9 @@ export function registerTools(
                   recency_applied: false,
                   search_recency_weight: 0,
                   expired_filtered_count: filteredExpired.expiredFilteredCount,
+                  // Browse results are not relevance-ranked, so boundary
+                  // placement never applies here — always report linear.
+                  serialization: "linear",
                 },
               });
             }
@@ -5668,6 +5708,7 @@ export function registerTools(
               recency_applied: searchRecencyWeight > 0,
               search_recency_weight: searchRecencyWeight,
               expired_filtered_count: expiredFilteredCount,
+              serialization,
             };
             if (actualMode === "hybrid" && hybridResults.length > 0) {
               const inFts = hybridResults.filter((r) => r.lexicalRank !== undefined).length;
@@ -5696,6 +5737,13 @@ export function registerTools(
                 resultNamespaces,
                 resultRanks,
               });
+            }
+
+            // Boundary serialization is purely a display-order transform, applied
+            // AFTER analytics so retrieval_events keep the true linear rank order
+            // (outcome correlation must not see the reordered list).
+            if (serialization === "boundary") {
+              response.results = boundarySerialize(formatted);
             }
 
             return okResult("query", response);
