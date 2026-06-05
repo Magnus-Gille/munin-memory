@@ -385,7 +385,12 @@ export async function consolidateNamespace(
     const moreRemain = hasMoreLogsAfter(db, namespace, lastLog.created_at, lastLog.id);
     const draining = metadata?.drain_in_progress === 1 || moreRemain;
 
-    writeState(db, namespace, "synthesis", result.status_content, result.tags, "consolidation-worker");
+    // Force-stamp the reserved provenance tag server-side, regardless of what the
+    // LLM proposed, so machine synthesis is always distinguishable and filterable
+    // from owner-authored facts on the primary read path (reinforces the
+    // constitutional data-not-commands rule). See decisions/letta-harvest.
+    const synthesisTags = [...new Set([...result.tags, "source:synthesis"])];
+    writeState(db, namespace, "synthesis", result.status_content, synthesisTags, "consolidation-worker");
 
     const refRows = mergedRefs.map((ref) => ({
       source_namespace: namespace,

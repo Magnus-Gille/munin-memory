@@ -320,6 +320,10 @@ export interface QueryResult {
   classification?: ClassificationLevel;
   expired?: boolean;
   provenance?: EntryProvenance;
+  /** True when this entry is machine-generated consolidation synthesis (agent_id = consolidation-worker). */
+  is_synthesis?: boolean;
+  /** Days since the synthesis entry was last written. Only present when is_synthesis is true. */
+  synthesis_age_days?: number;
   redacted?: boolean;
   redaction_reason?: string;
   match?: {

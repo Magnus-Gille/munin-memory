@@ -99,6 +99,25 @@ export function canonicalizeTags(tags: string[]): { canonical: string[]; normali
   return { canonical, normalized };
 }
 
+/**
+ * Tags that are server-injected only and must never be accepted from client
+ * input. The consolidation worker stamps `source:synthesis` (via writeState,
+ * which bypasses the tool layer); stripping it from user-supplied tags keeps the
+ * provenance signal unspoofable. Applied unconditionally on every write/log/patch
+ * path (separate from alias canonicalization, which only runs for status writes).
+ */
+export const RESERVED_SERVER_TAGS = new Set<string>(["source:synthesis"]);
+
+export function stripReservedTags(tags: string[]): { kept: string[]; removed: string[] } {
+  const kept: string[] = [];
+  const removed: string[] = [];
+  for (const t of tags) {
+    if (RESERVED_SERVER_TAGS.has(t)) removed.push(t);
+    else kept.push(t);
+  }
+  return { kept, removed };
+}
+
 export function getLifecycleTags(tags: string[]): string[] {
   return tags.filter(t => LIFECYCLE_TAGS.has(t));
 }
