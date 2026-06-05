@@ -136,6 +136,27 @@ benchmark regression gate, across a Node 20 + 22 matrix (`.github/workflows/ci.y
 - `tsconfig.json` runs `strict` plus `noUnusedLocals` / `noUnusedParameters` /
   `noFallthroughCasesInSwitch`. Mark intentional fire-and-forget Promises with `void`.
 
+## Code review workflow
+
+Most substantive PRs get a **cross-model Codex review before merge**, on top of the CI gates
+above. The automated gates catch correctness regressions; the Codex pass is a second, independent
+pair of eyes that has repeatedly caught defects a single-model (Claude-only) review missed — e.g.
+on #102 it flagged a documented-but-unenforced reserved tag (spoofable), and on #103 a `shutdown()`
+path that could skip `db.close()`. Cross-model diversity is the point: do not skip it on the
+security-, auth-, or data-integrity-sensitive PRs where it pays off most.
+
+```bash
+/review-pr-codex   # Claude Code skill — runs Codex headless over the current branch diff,
+                   # then reads findings and either fixes them or surfaces them to you.
+```
+
+- **Always Codex-review:** security/auth changes, DB schema/migrations, the embedding/consolidation
+  worker paths, OAuth/access-control, anything touching `memory_write`/`memory_log` validation.
+- **Skip Codex review:** Dependabot dependency bumps, docs-only changes, trivial one-liners,
+  and pure refactors with no behavior change. (The CI gates still run on these.)
+- It is **advisory** — Codex findings are reviewed, not auto-applied. A finding you disagree with is
+  recorded in the PR discussion, not silently dropped.
+
 ## How to run locally
 
 **Stdio mode** (default — for Claude Code, Claude Desktop local):
