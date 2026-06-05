@@ -11,7 +11,7 @@ import * as sqliteVec from "sqlite-vec";
 import { readFileSync, readdirSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
-import { basename, join, dirname, resolve } from "node:path";
+import { basename, join, dirname } from "node:path";
 import {
   queryEntriesLexicalScored,
   queryEntriesHybridScored,

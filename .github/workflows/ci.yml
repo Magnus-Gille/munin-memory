@@ -5,6 +5,10 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege: the job only reads the checked-out code; it needs no write scopes.
+permissions:
+  contents: read
+
 # Cancel superseded runs on the same ref (e.g. rapid pushes to a PR branch).
 concurrency:
   group: ci-${{ github.ref }}
@@ -28,6 +32,7 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck
+      - run: npm run typecheck:tools
       - run: npm run build
       - run: npm test
       # Retrieval regression gate: deterministic raw/lexical benchmark over a
