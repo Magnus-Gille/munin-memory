@@ -5361,7 +5361,18 @@ export function registerTools(
             const explain = queryArgs.explain === true;
             const includeExpired = queryArgs.include_expired === true;
             const requireLexicalMatch = queryArgs.require_lexical_match === true;
-            const serialization = queryArgs.serialization === "boundary" ? "boundary" : "linear";
+            // Validate serialization up front (parity with namespace/recency
+            // validation) so a typo like "boundry" fails loudly instead of being
+            // silently coerced to "linear". Applies to both the ranked and
+            // filter-only paths since it is read before the branch.
+            if (
+              queryArgs.serialization !== undefined &&
+              queryArgs.serialization !== "linear" &&
+              queryArgs.serialization !== "boundary"
+            ) {
+              return errResult("query", "validation_error", "serialization must be 'linear' or 'boundary'.");
+            }
+            const serialization = queryArgs.serialization ?? "linear";
             const recencyWeightCheck = resolveSearchRecencyWeight(queryArgs);
             if (!recencyWeightCheck.ok) {
               return errResult("query", "validation_error", recencyWeightCheck.error);
@@ -5441,6 +5452,9 @@ export function registerTools(
                   recency_applied: false,
                   search_recency_weight: 0,
                   expired_filtered_count: filteredExpired.expiredFilteredCount,
+                  // Browse results are not relevance-ranked, so boundary
+                  // placement never applies here — always report linear.
+                  serialization: "linear",
                 },
               });
             }

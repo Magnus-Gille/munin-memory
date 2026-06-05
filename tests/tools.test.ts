@@ -1687,6 +1687,49 @@ describe("memory_query", () => {
       expect(loggedIds).toEqual(linearIds);
       expect(loggedRanks).toEqual(linearIds.map((_, i) => i + 1));
     });
+
+    it("rejects an invalid serialization value on a ranked query", async () => {
+      const raw = await callTool("memory_query", { query: "boundarykeyword", search_mode: "lexical", serialization: "boundry" });
+      const result = parseToolResponse(raw) as { ok: boolean; error?: string };
+      expect(result.ok).toBe(false);
+      expect(result.error).toBe("validation_error");
+    });
+
+    it("rejects an invalid serialization value on the filter-only path", async () => {
+      const raw = await callTool("memory_query", { tags: ["active"], serialization: "sideways" });
+      const result = parseToolResponse(raw) as { ok: boolean; error?: string };
+      expect(result.ok).toBe(false);
+      expect(result.error).toBe("validation_error");
+    });
+
+    it("reports serialization: linear and does not reorder the filter-only browse path", async () => {
+      await seedBoundaryCorpus();
+      const browseLinear = parseToolResponse(
+        await callTool("memory_query", { namespace: "projects/", limit: 50 }),
+      ) as { results: Array<{ id: string }> };
+      const browseBoundary = parseToolResponse(
+        await callTool("memory_query", { namespace: "projects/", limit: 50, serialization: "boundary" }),
+      ) as { results: Array<{ id: string }>; retrieval: { serialization: string } };
+
+      expect(browseBoundary.retrieval.serialization).toBe("linear");
+      // Browse order is unaffected by serialization.
+      expect(browseBoundary.results.map((r) => r.id)).toEqual(browseLinear.results.map((r) => r.id));
+    });
+
+    it("is a no-op for a 2-result boundary query (rank 1 first, rank 2 last == identity)", async () => {
+      await callTool("memory_write", { namespace: "projects/two-a", key: "status", content: "twoword corpus alpha", tags: ["active"] });
+      await callTool("memory_write", { namespace: "projects/two-b", key: "status", content: "twoword corpus beta", tags: ["active"] });
+
+      const linear = (parseToolResponse(
+        await callTool("memory_query", { query: "twoword", search_mode: "lexical", limit: 50 }),
+      ) as { results: Array<{ id: string }> }).results.map((r) => r.id);
+      const boundary = (parseToolResponse(
+        await callTool("memory_query", { query: "twoword", search_mode: "lexical", limit: 50, serialization: "boundary" }),
+      ) as { results: Array<{ id: string }> }).results.map((r) => r.id);
+
+      expect(linear.length).toBe(2);
+      expect(boundary).toEqual(linear);
+    });
   });
 
   it("marks consolidation synthesis with is_synthesis + synthesis_age_days", async () => {

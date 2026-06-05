@@ -363,6 +363,8 @@ export interface QueryResponse {
     recency_applied: boolean;
     search_recency_weight: number;
     expired_filtered_count: number;
+    /** Output ordering actually applied. Filter-only browse is always "linear". */
+    serialization: "linear" | "boundary";
   };
 }
 
