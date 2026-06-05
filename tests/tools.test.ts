@@ -1618,6 +1618,77 @@ describe("memory_query", () => {
     expect(result.results[0].provenance.principal_id).toBe("owner");
   });
 
+  describe("boundary serialization", () => {
+    async function seedBoundaryCorpus() {
+      for (let i = 0; i < 5; i++) {
+        await callTool("memory_write", {
+          namespace: `projects/bs${i}`,
+          key: "status",
+          content: `boundarykeyword entry number ${i}`,
+          tags: ["active"],
+        });
+      }
+    }
+
+    it("defaults to linear order and reports serialization: linear", async () => {
+      await seedBoundaryCorpus();
+      const raw = await callTool("memory_query", { query: "boundarykeyword", search_mode: "lexical", limit: 50 });
+      const result = parseToolResponse(raw) as { retrieval: { serialization: string } };
+      expect(result.retrieval.serialization).toBe("linear");
+    });
+
+    it("reorders display to boundary placement while preserving the result set and ranks", async () => {
+      await seedBoundaryCorpus();
+
+      const linear = parseToolResponse(
+        await callTool("memory_query", { query: "boundarykeyword", search_mode: "lexical", limit: 50 }),
+      ) as { results: Array<{ id: string }> };
+      const linearIds = linear.results.map((r) => r.id);
+      expect(linearIds.length).toBeGreaterThanOrEqual(5);
+
+      const boundary = parseToolResponse(
+        await callTool("memory_query", { query: "boundarykeyword", search_mode: "lexical", limit: 50, serialization: "boundary" }),
+      ) as { results: Array<{ id: string }>; retrieval: { serialization: string } };
+      const boundaryIds = boundary.results.map((r) => r.id);
+
+      expect(boundary.retrieval.serialization).toBe("boundary");
+      // Same set of results — only the order differs.
+      expect([...boundaryIds].sort()).toEqual([...linearIds].sort());
+      // Strongest results at the two edges: rank 1 first, rank 2 last.
+      expect(boundaryIds[0]).toBe(linearIds[0]);
+      expect(boundaryIds[boundaryIds.length - 1]).toBe(linearIds[1]);
+      // Matches the documented interleave: front = even indices, back = odd reversed.
+      const front: string[] = [];
+      const back: string[] = [];
+      linearIds.forEach((id, i) => (i % 2 === 0 ? front : back).push(id));
+      back.reverse();
+      expect(boundaryIds).toEqual([...front, ...back]);
+    });
+
+    it("records true linear rank order in analytics even when serialization is boundary", async () => {
+      await seedBoundaryCorpus();
+
+      const linearIds = (parseToolResponse(
+        await callTool("memory_query", { query: "boundarykeyword", search_mode: "lexical", limit: 50 }),
+      ) as { results: Array<{ id: string }> }).results.map((r) => r.id);
+
+      const sessionCall = makeContextCallTool(ownerContext(), "boundary-analytics-session");
+      await sessionCall("memory_query", { query: "boundarykeyword", search_mode: "lexical", limit: 50, serialization: "boundary" });
+
+      const row = db
+        .prepare(
+          "SELECT result_ids, result_ranks FROM retrieval_events WHERE session_id = ? AND tool_name = 'memory_query' ORDER BY rowid DESC LIMIT 1",
+        )
+        .get("boundary-analytics-session") as { result_ids: string; result_ranks: string };
+      const loggedIds = JSON.parse(row.result_ids) as string[];
+      const loggedRanks = JSON.parse(row.result_ranks) as number[];
+
+      // Analytics must see the true linear order, not the boundary display order.
+      expect(loggedIds).toEqual(linearIds);
+      expect(loggedRanks).toEqual(linearIds.map((_, i) => i + 1));
+    });
+  });
+
   it("marks consolidation synthesis with is_synthesis + synthesis_age_days", async () => {
     writeState(
       db,

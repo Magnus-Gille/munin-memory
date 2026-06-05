@@ -97,6 +97,16 @@ export interface QueryParams {
    * (preserves recall). No effect in lexical mode.
    */
   require_lexical_match?: boolean;
+  /**
+   * Output ordering of ranked search results. `"linear"` (default) returns
+   * strict best-first rank order. `"boundary"` places the strongest results at
+   * the two context edges (rank 1 first, rank 2 last, rank 3 second, …) to
+   * counter the "Lost in the Middle" attention dip in long contexts. The set of
+   * results and their underlying ranks are unchanged — only display order — and
+   * retrieval analytics always record the true linear rank order. No effect on
+   * filter-only browse queries.
+   */
+  serialization?: "linear" | "boundary";
 }
 
 export interface OrientParams extends ListParams {
