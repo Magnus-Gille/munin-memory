@@ -476,6 +476,15 @@ function formatQueryResult(
     result.expired = true;
   }
 
+  // Mark machine-generated consolidation synthesis on the primary read path so a
+  // session can downweight stale auto-inference rather than treat it as an
+  // owner-authored fact. Keyed on agent_id (not key === "synthesis") so a
+  // manually-authored entry named "synthesis" is never misclassified.
+  if (entry.agent_id === "consolidation-worker") {
+    result.is_synthesis = true;
+    result.synthesis_age_days = getDaysSince(entry.updated_at);
+  }
+
   if (explain && queryLower !== null) {
     const heuristicScore = getQueryHeuristicScore(entry, queryLower, trackedStatuses);
     const match: NonNullable<QueryResult["match"]> = {

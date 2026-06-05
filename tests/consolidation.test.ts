@@ -283,6 +283,10 @@ describe("consolidateNamespace", () => {
     expect(synthesis).toBeDefined();
     expect(synthesis!.content).toBe(cannedSynthesisResult.status_content);
 
+    // Reserved provenance tag is force-stamped server-side even though the canned
+    // LLM response only proposed ["active","test"].
+    expect(JSON.parse(synthesis!.tags)).toContain("source:synthesis");
+
     // Verify cross-references written
     const crossRefs = getCrossReferences(db, "projects/alpha");
     expect(crossRefs.length).toBeGreaterThan(0);
@@ -292,6 +296,35 @@ describe("consolidateNamespace", () => {
     const meta = getConsolidationMetadata(db, "projects/alpha");
     expect(meta).not.toBeNull();
     expect(meta!.synthesis_token_count).toBe(300);
+  });
+
+  it("does not duplicate source:synthesis when the LLM already proposed it", async () => {
+    const withTag: ChatCompletionResponse = {
+      choices: [
+        {
+          message: {
+            content: JSON.stringify({
+              status_content: cannedSynthesisResult.status_content,
+              tags: ["active", "source:synthesis"],
+              cross_references: [],
+            }),
+          },
+        },
+      ],
+      usage: { prompt_tokens: 500, completion_tokens: 300 },
+    };
+    const oneOff = vi.fn<(prompt: string) => Promise<ChatCompletionResponse>>().mockResolvedValue(withTag);
+
+    for (let i = 0; i < 3; i++) {
+      appendLog(db, "projects/dedup", `Log entry ${i}`, ["progress"]);
+    }
+    await consolidateNamespace(db, "projects/dedup", oneOff);
+
+    const synthesis = db
+      .prepare("SELECT tags FROM entries WHERE namespace = ? AND key = 'synthesis' AND entry_type = 'state'")
+      .get("projects/dedup") as { tags: string } | undefined;
+    const tags = JSON.parse(synthesis!.tags) as string[];
+    expect(tags.filter((t) => t === "source:synthesis")).toHaveLength(1);
   });
 
   it("consolidates with existing status + synthesis — both included in API call", async () => {

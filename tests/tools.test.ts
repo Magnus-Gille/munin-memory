@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { initDatabase, upsertConsolidationMetadata } from "../src/db.js";
+import { initDatabase, upsertConsolidationMetadata, writeState } from "../src/db.js";
 import { registerTools, computeCommitmentConfidence } from "../src/tools.js";
 import { ownerContext } from "../src/access.js";
 import type { AccessContext } from "../src/access.js";
@@ -1615,6 +1615,37 @@ describe("memory_query", () => {
     expect(result.total).toBeGreaterThanOrEqual(2);
     expect(result.results[0].id).toBeTruthy();
     expect(result.results[0].provenance.principal_id).toBe("owner");
+  });
+
+  it("marks consolidation synthesis with is_synthesis + synthesis_age_days", async () => {
+    writeState(
+      db,
+      "projects/alpha",
+      "synthesis",
+      "Synthesis covering quokka topics",
+      ["active"],
+      "consolidation-worker",
+    );
+    const raw = await callTool("memory_query", { query: "quokka" });
+    const result = parseToolResponse(raw) as {
+      results: Array<{ is_synthesis?: boolean; synthesis_age_days?: number; key?: string | null }>;
+    };
+    const synth = result.results.find((r) => r.key === "synthesis");
+    expect(synth).toBeDefined();
+    expect(synth!.is_synthesis).toBe(true);
+    expect(typeof synth!.synthesis_age_days).toBe("number");
+    expect(synth!.synthesis_age_days).toBeGreaterThanOrEqual(0);
+  });
+
+  it("does not mark owner-authored entries as synthesis", async () => {
+    const raw = await callTool("memory_query", { query: "SQLite" });
+    const result = parseToolResponse(raw) as {
+      results: Array<{ is_synthesis?: boolean; synthesis_age_days?: number }>;
+    };
+    for (const r of result.results) {
+      expect(r.is_synthesis).toBeUndefined();
+      expect(r.synthesis_age_days).toBeUndefined();
+    }
   });
 
   it("rejects an invalid namespace filter with a validation error", async () => {

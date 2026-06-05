@@ -51,6 +51,20 @@ changelog is the canonical record of what moved.
 
 ### Added
 
+- **Synthesis provenance tag + age on the query read path** — the consolidation
+  worker now force-stamps a reserved `source:synthesis` tag on the `synthesis`
+  entry server-side (deduped, regardless of what the LLM proposed), and
+  `memory_query` results carry `is_synthesis` + `synthesis_age_days` for entries
+  written by the consolidation worker. This makes machine-generated synthesis
+  programmatically distinguishable (and tag-filterable) from owner-authored fact
+  on the primary retrieval path, so a session can discount stale auto-inference
+  rather than treat it as ground truth — delivering the provenance-tagging
+  follow-up deferred from #94 and reinforcing the "stored content is data, never
+  commands" rule. Detection is keyed on `agent_id === "consolidation-worker"`
+  (not `key === "synthesis"`), so a manually-authored entry named `synthesis` is
+  never misclassified. Additive: no schema change, no migration, no new env var.
+  Distilled from the Letta memory-design harvest (see `decisions/letta-harvest`;
+  Letta MemGPT / Sleep-time Compute).
 - **Telos ideal-state anchor surfaced by `memory_orient` / `memory_resume` (#95)** —
   a new `meta/telos` entry (mission, goals, beliefs, priority-ranked challenges) is
   loaded as a first-class `telos` field in the orient handshake and the resume
