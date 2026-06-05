@@ -25,12 +25,9 @@ import {
   readState,
   getById,
   appendLog,
-  queryEntries,
   queryEntriesLexicalScored,
   filterIdsMatchingFts,
-  queryEntriesSemantic,
   queryEntriesSemanticScored,
-  queryEntriesHybrid,
   queryEntriesHybridScored,
   type HybridQueryResult,
   queryEntriesByFilter,
@@ -49,7 +46,6 @@ import {
   type DerivedCommitmentInput,
   type CommitmentRow,
   getOtherKeysInNamespace,
-  getTrackedStatuses,
   getCompletedTaskNamespaces,
   getResolvedNamespaces,
   isEntryExpired,
@@ -135,9 +131,7 @@ import type {
   SearchMode,
   OrientDetail,
   DashboardEntry,
-  DashboardSynthesis,
   MaintenanceItem,
-  TrackedStatusRow,
   QueryResult,
   AttentionItem,
   ResumeItem,
@@ -810,19 +804,6 @@ function formatStructuredStatus(status: BuiltStructuredStatus): string {
   return sections.join("\n").trim();
 }
 
-function serializeAuditEntry(entry: AuditEntry) {
-  const action = entry.action === "log_append"
-    ? "log"
-    : entry.action === "namespace_delete"
-      ? "delete_namespace"
-      : entry.action;
-  return {
-    ...entry,
-    action,
-    provenance: buildProvenance(entry.agent_id),
-  };
-}
-
 const VALID_AUDIT_ACTIONS: Array<AuditAction | "delete_namespace" | "log"> = [
   "write",
   "update",
@@ -887,21 +868,13 @@ function phaseOneliner(content: string, maxLen = 100): string {
 }
 
 import {
-  STALENESS_THRESHOLD_MS,
-  EVENT_STALENESS_THRESHOLD_MS,
-  EVENT_LOOKAHEAD_MS,
-  SEARCH_RECENCY_HALF_LIFE_DAYS,
-  EXPIRES_SOON_DAYS,
   DATE_PATTERN,
   LIFECYCLE_TAGS,
-  TAG_ALIASES,
   RELAXED_QUERY_STOPWORDS,
   parseTags,
   isStale,
   getFreshnessScore,
   getDaysUntil,
-  isEntryExpiringSoon,
-  findUpcomingEventDate,
   isTrackedNamespace,
   canonicalizeTags,
   stripReservedTags,
@@ -3491,10 +3464,6 @@ const TOOL_DEFINITIONS = [
 export const REGISTERED_TOOL_NAMES: readonly string[] = TOOL_DEFINITIONS.map(
   (t) => t.name,
 );
-
-function textResult(obj: Record<string, unknown>) {
-  return { content: [{ type: "text" as const, text: JSON.stringify(obj) }] };
-}
 
 function okResult(action: string, data: Record<string, unknown>) {
   return { content: [{ type: "text" as const, text: JSON.stringify({ ok: true, action, ...data }) }] };

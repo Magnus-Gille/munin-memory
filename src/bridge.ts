@@ -291,7 +291,7 @@ export function createBridge(config: BridgeConfig) {
     // During reconnect, the old transport is replaced — its onclose must NOT trigger cleanup.
     client.onclose = () => {
       if (client === httpClient) {
-        cleanup();
+        void cleanup();
       }
     };
   }
@@ -444,21 +444,21 @@ export function createBridge(config: BridgeConfig) {
     sending = false;
 
     if (stdinClosed) {
-      cleanup();
+      void cleanup();
     }
   }
 
   // Wire stdio → httpClient forwarding
   stdio.onmessage = (message: JSONRPCMessage) => {
     sendQueue.push(message);
-    processSendQueue();
+    void processSendQueue();
   };
   stdio.onerror = (err) => log(`Stdio: ${err.message}`);
   stdio.onclose = () => {
     stdinClosed = true;
     // If no sends are in-flight, exit now. Otherwise processSendQueue handles it.
     if (!sending && sendQueue.length === 0) {
-      cleanup();
+      void cleanup();
     }
   };
 
@@ -520,10 +520,10 @@ async function main(): Promise<void> {
   });
 
   process.on("SIGINT", () => {
-    bridge.cleanup();
+    void bridge.cleanup();
   });
   process.on("SIGTERM", () => {
-    bridge.cleanup();
+    void bridge.cleanup();
   });
 
   await bridge.start();

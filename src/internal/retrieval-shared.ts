@@ -6,8 +6,6 @@
  * These are pure-utility declarations with no dependency on tools.ts.
  */
 
-import { isEntryExpired } from "../db.js";
-import type { Entry } from "../types.js";
 
 // --- Staleness / recency thresholds ---
 
