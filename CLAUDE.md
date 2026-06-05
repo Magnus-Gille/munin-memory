@@ -294,7 +294,7 @@ Tags support colon-separated prefixes for cross-referencing:
 | `type:<artifact>` | `type:pdf`, `type:meeting-notes` | Document/artifact type |
 | `source:external` | `source:external` | Content from outside (Hugin-ingested) |
 | `source:internal` | `source:internal` | Internally produced content |
-| `source:synthesis` | `source:synthesis` | **Reserved / server-injected.** Force-stamped on the `synthesis` entry by the consolidation worker (machine-generated). Do not hand-apply it to owner-authored content. Surfaced as `is_synthesis` + `synthesis_age_days` in `memory_query` results so stale auto-inference can be discounted vs. owner-authored fact. |
+| `source:synthesis` | `source:synthesis` | **Reserved / server-injected.** Force-stamped on the `synthesis` entry by the consolidation worker (machine-generated). Client-supplied instances are **stripped on write** (`memory_write`/`memory_log`/patch) so the tag cannot be spoofed onto owner-authored entries. The **authoritative** provenance signal is the `is_synthesis` field (derived from `agent_id`), surfaced with `synthesis_age_days` in `memory_query` results so stale auto-inference can be discounted vs. owner-authored fact; the tag is a convenience for filtering. |
 
 Unprefixed tags remain valid for lifecycle (`active`, `blocked`, etc.) and category (`decision`, `architecture`, etc.) use.
 

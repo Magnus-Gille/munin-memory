@@ -904,6 +904,7 @@ import {
   findUpcomingEventDate,
   isTrackedNamespace,
   canonicalizeTags,
+  stripReservedTags,
   getLifecycleTags,
 } from "./internal/retrieval-shared.js";
 // The reranker pipeline lives in ./internal/reranker.js (issue #59).
@@ -4823,10 +4824,18 @@ export function registerTools(
             // --- Patch path ---
             if (patch !== undefined) {
               // Validate any new tags being added
+              let patchReservedRemoved: string[] = [];
               if (patch.tags_add) {
                 const tagsCheck = validateTags(patch.tags_add);
                 if (!tagsCheck.valid) {
                   return errResult("write", "validation_error", tagsCheck.error!);
+                }
+                // Strip server-reserved tags (e.g. source:synthesis) so they can't
+                // be spoofed onto owner content via a patch.
+                const { kept, removed } = stripReservedTags(patch.tags_add);
+                if (removed.length > 0) {
+                  patch.tags_add = kept;
+                  patchReservedRemoved = removed;
                 }
               }
 
@@ -4888,12 +4897,17 @@ export function registerTools(
               }
 
               const patchedResponse: Record<string, unknown> = { status: "patched", id: patchResult.id, namespace, key, hint: hintPatch };
+              const patchWarnings: string[] = [];
+              if (patchReservedRemoved.length > 0) {
+                patchWarnings.push(`Removed reserved tag(s): ${patchReservedRemoved.join(", ")}`);
+              }
               // Advisory injection scan on the merged result — a patch can introduce
               // instruction-shaped content just like a full write.
               if (patchedEntry) {
                 const patchInjectionWarning = injectionWarning(patchedEntry.content);
-                if (patchInjectionWarning) patchedResponse.warnings = [patchInjectionWarning];
+                if (patchInjectionWarning) patchWarnings.push(patchInjectionWarning);
               }
+              if (patchWarnings.length > 0) patchedResponse.warnings = patchWarnings;
               return okResult("write", patchedResponse);
             }
 
@@ -4923,8 +4937,17 @@ export function registerTools(
             const writeInjectionWarning = injectionWarning(content);
             if (writeInjectionWarning) warnings.push(writeInjectionWarning);
 
-            // Canonicalize tags for tracked status writes
+            // Strip server-reserved tags (e.g. source:synthesis) from client input
+            // so machine-provenance markers can't be spoofed onto owner content.
             let effectiveTags = tags ?? [];
+            {
+              const { kept, removed } = stripReservedTags(effectiveTags);
+              if (removed.length > 0) {
+                warnings.push(`Removed reserved tag(s): ${removed.join(", ")}`);
+                effectiveTags = kept;
+              }
+            }
+            // Canonicalize tags for tracked status writes
             if (isTrackedStatus && effectiveTags.length > 0) {
               const { canonical, normalized } = canonicalizeTags(effectiveTags);
               if (normalized.length > 0) {
@@ -5809,10 +5832,12 @@ export function registerTools(
             if (!canWrite(ctx, namespace)) {
               return accessDeniedResponse(ctx, "log");
             }
+            // Strip server-reserved tags (e.g. source:synthesis) from client input.
+            const { kept: logTags, removed: logReservedRemoved } = stripReservedTags(tags ?? []);
             // Pre-flight: reject logs that would create Librarian-orphaned entries
             {
               const orphanError = preflightWriteClassification(
-                db, ctx, namespace, tags ?? [],
+                db, ctx, namespace, logTags,
                 classification, classification_override,
               );
               if (orphanError) {
@@ -5821,7 +5846,7 @@ export function registerTools(
             }
             let result;
             try {
-              result = appendLog(db, namespace, content, tags ?? [], ctx.principalId, {
+              result = appendLog(db, namespace, content, logTags, ctx.principalId, {
                 classification,
                 classificationOverride: classification_override,
               });
@@ -5850,9 +5875,14 @@ export function registerTools(
             };
             const logNsWarning = uppercaseNamespaceWarning(namespace);
             if (logNsWarning) logResponse.warning = logNsWarning;
+            const logWarnings: string[] = [];
+            if (logReservedRemoved.length > 0) {
+              logWarnings.push(`Removed reserved tag(s): ${logReservedRemoved.join(", ")}`);
+            }
             // Advisory: flag instruction-shaped content (prompt-injection / memory-poisoning).
             const logInjectionWarning = injectionWarning(content);
-            if (logInjectionWarning) logResponse.warnings = [logInjectionWarning];
+            if (logInjectionWarning) logWarnings.push(logInjectionWarning);
+            if (logWarnings.length > 0) logResponse.warnings = logWarnings;
             return okResult("log", logResponse);
           }
 
