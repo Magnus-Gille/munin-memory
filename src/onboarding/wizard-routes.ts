@@ -6,7 +6,6 @@
 import type { Router, Request, Response } from "express";
 import { Router as createRouter } from "express";
 import { DeviceState } from "./state.js";
-import type { DeviceStateData } from "./state.js";
 import type { WifiAdapter } from "./wifi.js";
 import type { ApAdapter } from "./ap.js";
 import { renderWizardPage } from "./pages/wizard.js";
@@ -22,7 +21,7 @@ export interface WizardDeps {
 export function createWizardRoutes(deps: WizardDeps): Router {
   const router = createRouter();
 
-  router.get("/setup", async (req: Request, res: Response) => {
+  router.get("/setup", async (_req: Request, res: Response) => {
     const current = deps.deviceState.load();
     if (!current) {
       res.status(500).send("Device not initialized");
@@ -80,7 +79,7 @@ export function createWizardRoutes(deps: WizardDeps): Router {
     }));
 
     // Attempt connection in background
-    setTimeout(async () => {
+    setTimeout(() => { void (async () => {
       try {
         // Stop the AP before connecting (single radio)
         await deps.ap.stopHotspot();
@@ -108,10 +107,10 @@ export function createWizardRoutes(deps: WizardDeps): Router {
           // State may have already been changed
         }
       }
-    }, 100);
+    })(); }, 100);
   });
 
-  router.get("/setup/status", (req: Request, res: Response) => {
+  router.get("/setup/status", (_req: Request, res: Response) => {
     const current = deps.deviceState.load();
     if (!current) {
       res.json({ state: "UNCONFIGURED", error: "Not initialized" });
@@ -125,7 +124,7 @@ export function createWizardRoutes(deps: WizardDeps): Router {
   });
 
   // Redirect root to setup
-  router.get("/", (req: Request, res: Response) => {
+  router.get("/", (_req: Request, res: Response) => {
     res.redirect("/setup");
   });
 

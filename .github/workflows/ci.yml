@@ -4,16 +4,30 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+
+# Cancel superseded runs on the same ref (e.g. rapid pushes to a PR branch).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Target Node 20 (engines floor) and 22 (current LTS) — the Pi runs an
+        # ARM64 Node in this range; the matrix is cheap drift insurance.
+        node-version: [20, 22]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ matrix.node-version }}
           cache: npm
       - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
       - run: npm run build
       - run: npm test
       # Retrieval regression gate: deterministic raw/lexical benchmark over a

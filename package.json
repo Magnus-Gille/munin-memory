@@ -27,6 +27,8 @@
   },
   "scripts": {
     "build": "tsc && chmod +x dist/admin-cli.js",
+    "typecheck": "tsc --noEmit -p tsconfig.test.json",
+    "lint": "eslint .",
     "admin": "tsx src/admin-cli.ts",
     "dev": "tsx watch src/index.ts",
     "test": "vitest run",
@@ -73,9 +75,11 @@
     "@types/node": "^22.13.4",
     "@types/supertest": "^6.0.3",
     "@types/uuid": "^10.0.0",
+    "eslint": "^10.4.1",
     "supertest": "^7.2.2",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3",
+    "typescript-eslint": "^8.60.1",
     "vitest": "^3.0.5"
   },
   "engines": {

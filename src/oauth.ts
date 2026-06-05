@@ -208,7 +208,6 @@ function matchesBearerToken(token: string, expected: Buffer | undefined): boolea
 
 export class MuninOAuthProvider implements OAuthServerProvider {
   public readonly clientsStore: MuninClientsStore;
-  private readonly legacyApiKey: string | undefined;
   private readonly legacyApiKeyBuf: Buffer | undefined;
   private readonly dpaApiKeyBuf: Buffer | undefined;
   private readonly consumerApiKeyBuf: Buffer | undefined;
@@ -223,7 +222,6 @@ export class MuninOAuthProvider implements OAuthServerProvider {
     const options = typeof legacyApiKeyOrOptions === "string"
       ? { legacyApiKey: legacyApiKeyOrOptions }
       : (legacyApiKeyOrOptions ?? {});
-    this.legacyApiKey = options.legacyApiKey;
     this.legacyApiKeyBuf = options.legacyApiKey ? Buffer.from(options.legacyApiKey) : undefined;
     this.dpaApiKeyBuf = options.dpaApiKey ? Buffer.from(options.dpaApiKey) : undefined;
     this.consumerApiKeyBuf = options.consumerApiKey ? Buffer.from(options.consumerApiKey) : undefined;

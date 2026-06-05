@@ -1,0 +1,21 @@
+version: 2
+updates:
+  # npm dependencies — Munin is a security-sensitive auth/OAuth/access-control
+  # server, so keep deps patched. Grouped to reduce PR noise for a solo maintainer.
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      dev-dependencies:
+        dependency-type: development
+      production-dependencies:
+        dependency-type: production
+
+  # Keep GitHub Actions (checkout, setup-node, codeql, etc.) pinned + current.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

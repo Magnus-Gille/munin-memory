@@ -172,7 +172,7 @@ export class MockWifiAdapter implements WifiAdapter {
     return [...this.networks];
   }
 
-  async connect(ssid: string, password: string): Promise<ConnectionResult> {
+  async connect(ssid: string, _password: string): Promise<ConnectionResult> {
     if (this.shouldFailConnect) {
       return { success: false, error: this.connectError };
     }
