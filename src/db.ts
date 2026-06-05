@@ -9,7 +9,6 @@ import type {
   CommitmentStatus,
   Entry,
   AuditAction,
-  AuditEntry,
   EntryType,
   TrackedStatusRow,
   TransportType,

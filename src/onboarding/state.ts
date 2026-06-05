@@ -7,7 +7,7 @@
 
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from "node:fs";
 import { fdatasyncSync, openSync, closeSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { dirname } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 
 // --- Types ---

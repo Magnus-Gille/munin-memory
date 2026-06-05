@@ -2,7 +2,7 @@
  * Claim page — enter the printed claim code to take ownership of the device.
  */
 
-import { escapeHtml, escapeAttr, pageShell } from "./shared.js";
+import { escapeHtml, pageShell } from "./shared.js";
 
 export function renderClaimPage(params: {
   deviceId: string;

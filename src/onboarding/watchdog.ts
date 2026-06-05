@@ -32,7 +32,7 @@ export class ConnectivityWatchdog {
   start(): void {
     this.stopped = false;
     this.disconnectedSince = null;
-    this.timer = setInterval(() => this.check(), this.checkIntervalMs);
+    this.timer = setInterval(() => { void this.check(); }, this.checkIntervalMs);
   }
 
   stop(): void {

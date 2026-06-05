@@ -876,11 +876,20 @@ async function shutdown() {
     clearInterval(cleanupTimerId);
     cleanupTimerId = undefined;
   }
-  await stopEmbeddingWorker();
-  await stopConsolidationWorker();
-  activeDb?.close();
-  activeDb = undefined;
-  process.exit(0);
+  let exitCode = 0;
+  try {
+    await stopEmbeddingWorker();
+    await stopConsolidationWorker();
+  } catch (err) {
+    // A worker stop can reject (in-flight DB/write/embedding errors). Don't let
+    // that drop the rest of shutdown — the finally still closes the DB and exits.
+    console.error("Error stopping workers during shutdown:", err);
+    exitCode = 1;
+  } finally {
+    activeDb?.close();
+    activeDb = undefined;
+    process.exit(exitCode);
+  }
 }
 
 const isMainModule =
@@ -888,8 +897,8 @@ const isMainModule =
   import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (isMainModule) {
-  process.on("SIGINT", () => { shutdown(); });
-  process.on("SIGTERM", () => { shutdown(); });
+  process.on("SIGINT", () => { void shutdown(); });
+  process.on("SIGTERM", () => { void shutdown(); });
 
   main().catch(async (err) => {
     console.error("Fatal error:", err);

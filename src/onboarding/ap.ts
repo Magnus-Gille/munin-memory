@@ -10,7 +10,6 @@ const execFileAsync = promisify(execFile);
 
 const HOTSPOT_PROFILE = "MuninSetup";
 const AP_IP = "192.168.4.1";
-const AP_SUBNET = "192.168.4.0/24";
 
 // --- ApAdapter interface (for mocking) ---
 

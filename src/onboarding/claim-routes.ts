@@ -10,7 +10,6 @@ import { timingSafeEqual, randomBytes, createHash } from "node:crypto";
 import { writeFileSync, renameSync, openSync, closeSync } from "node:fs";
 import { fdatasyncSync } from "node:fs";
 import { DeviceState, hashSecret } from "./state.js";
-import type { DeviceStateData } from "./state.js";
 import { renderClaimPage } from "./pages/claim.js";
 import { renderClaimedPage, renderAlreadyClaimedPage } from "./pages/claimed.js";
 
@@ -86,7 +85,7 @@ export function createClaimRoutes(deps: ClaimDeps): Router {
   const router = createRouter();
   const rateLimiter = createClaimRateLimiter();
 
-  router.get("/setup/claim", (req: Request, res: Response) => {
+  router.get("/setup/claim", (_req: Request, res: Response) => {
     const current = deps.deviceState.load();
     if (!current) {
       res.status(500).send("Device not initialized");
@@ -183,7 +182,7 @@ export function createClaimRoutes(deps: ClaimDeps): Router {
   });
 
   // Redirect root to claim when in RUNNING_UNCLAIMED
-  router.get("/", (req: Request, res: Response) => {
+  router.get("/", (_req: Request, res: Response) => {
     res.redirect("/setup/claim");
   });
 
