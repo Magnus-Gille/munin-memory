@@ -58,12 +58,12 @@
     "benchmark:locomo:dialog:hybrid": "./scripts/fetch-benchmark-data.sh locomo && tsx benchmark/adapters/locomo/run.ts --granularity dialog --search-mode hybrid"
   },
   "dependencies": {
-    "@huggingface/transformers": "^3.8.1",
-    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@huggingface/transformers": "^4.2.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "better-sqlite3": "^12.10.0",
     "express": "^5.2.1",
-    "sqlite-vec": "^0.1.7-alpha.2",
-    "uuid": "^11.1.0"
+    "sqlite-vec": "^0.1.9",
+    "uuid": "^14.0.0"
   },
   "overrides": {
     "hono": "^4.12.18",
