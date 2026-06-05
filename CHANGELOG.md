@@ -53,8 +53,10 @@ changelog is the canonical record of what moved.
 
 - **Consolidation-pressure signal in `memory_orient`** — the orient dashboard
   now surfaces a `consolidation_backlog` maintenance item (owner-only) for each
-  `projects/*`/`clients/*` namespace whose unincorporated-log count has reached
-  the consolidation worker's `minLogs` threshold. Gated on
+  `projects/*`/`clients/*` namespace the consolidation worker is eligible to
+  drain — unincorporated logs at or above its `minLogs` threshold, plus the
+  sub-threshold tail of a namespace already mid-drain (`drain_in_progress`),
+  matching the worker's own candidate query exactly. Gated on
   `isConsolidationAvailable()`: when the worker is disabled the signal is
   suppressed entirely (a backlog nothing will drain is noise), and when it is
   live a persistent backlog means the worker is stalled or rate-limited — a
