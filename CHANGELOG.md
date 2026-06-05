@@ -51,6 +51,19 @@ changelog is the canonical record of what moved.
 
 ### Added
 
+- **Consolidation-pressure signal in `memory_orient`** — the orient dashboard
+  now surfaces a `consolidation_backlog` maintenance item (owner-only) for each
+  `projects/*`/`clients/*` namespace the consolidation worker is eligible to
+  drain — unincorporated logs at or above its `minLogs` threshold, plus the
+  sub-threshold tail of a namespace already mid-drain (`drain_in_progress`),
+  matching the worker's own candidate query exactly. Gated on
+  `isConsolidationAvailable()`: when the worker is disabled the signal is
+  suppressed entirely (a backlog nothing will drain is noise), and when it is
+  live a persistent backlog means the worker is stalled or rate-limited — a
+  pull-based health signal the owner sees at handshake instead of discovering
+  via silently stale synthesis. Additive: no schema change, no migration, no new
+  env var. Distilled from the Letta memory-design harvest (see
+  `decisions/letta-harvest`; Sleep-time Compute).
 - **Synthesis provenance tag + age on the query read path** — the consolidation
   worker now force-stamps a reserved `source:synthesis` tag on the `synthesis`
   entry server-side (deduped, regardless of what the LLM proposed), and

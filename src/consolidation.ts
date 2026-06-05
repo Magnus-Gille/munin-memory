@@ -20,7 +20,7 @@ import { canRead, getContextMaxClassification } from "./access.js";
 import type { AccessContext } from "./access.js";
 import { validateNamespace } from "./security.js";
 import type { ClassificationLevel } from "./types.js";
-import type { Entry, SynthesisResult, ConsolidationRunResult, CrossReferenceType } from "./types.js";
+import type { Entry, SynthesisResult, ConsolidationRunResult, CrossReferenceType, ConsolidationCandidate } from "./types.js";
 
 // --- Cross-zone containment guard (#96) ---
 //
@@ -203,6 +203,18 @@ export async function stopConsolidationWorker(): Promise<void> {
 
 export function isConsolidationAvailable(): boolean {
   return config.enabled && apiKey !== null && !circuitBreakerTripped;
+}
+
+/**
+ * Namespaces with enough unincorporated logs to be picked up by the worker on
+ * its next run, using the worker's own `minLogs` threshold. Surfaced by
+ * `memory_orient` as a `consolidation_backlog` maintenance signal so the owner
+ * can see when consolidation is falling behind (a persistent backlog while the
+ * worker is available implies it is stalled or rate-limited). Encapsulates the
+ * configured threshold so callers don't have to know it.
+ */
+export function getConsolidationBacklog(db: Database.Database): ConsolidationCandidate[] {
+  return getNamespacesNeedingConsolidation(db, config.minLogs);
 }
 
 export function resetConsolidationCircuitBreaker(): void {

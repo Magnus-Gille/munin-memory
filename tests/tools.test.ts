@@ -6,6 +6,7 @@ import { initDatabase, upsertConsolidationMetadata, writeState } from "../src/db
 import { registerTools, computeCommitmentConfidence } from "../src/tools.js";
 import { ownerContext } from "../src/access.js";
 import type { AccessContext } from "../src/access.js";
+import { _setApiKey, _consolidationConfig, resetConsolidationCircuitBreaker } from "../src/consolidation.js";
 import type { LibrarianRuntimeConfig } from "../src/librarian.js";
 
 const TEST_DB_PATH = "/tmp/munin-memory-tools-test.db";
@@ -2548,6 +2549,65 @@ describe("memory_orient", () => {
     const raw = await callTool("memory_orient", {});
     const result = parseToolResponse(raw) as { telos?: unknown };
     expect(result.telos).toBeUndefined();
+  });
+
+  describe("consolidation backlog signal", () => {
+    async function seedBacklog(namespace: string, count: number) {
+      for (let i = 0; i < count; i++) {
+        await callTool("memory_log", { namespace, content: `Decision ${i} in ${namespace}`, tags: ["decision"] });
+      }
+    }
+
+    afterEach(() => {
+      // Module-level consolidation state is shared across the file — restore it.
+      _setApiKey(null);
+      _consolidationConfig.enabled = false;
+      resetConsolidationCircuitBreaker();
+    });
+
+    it("surfaces a consolidation_backlog maintenance item for the owner when the worker is available and a namespace has enough unincorporated logs", async () => {
+      _consolidationConfig.enabled = true;
+      _setApiKey("test-key");
+      resetConsolidationCircuitBreaker();
+      await seedBacklog("projects/busy", 3);
+
+      const raw = await callTool("memory_orient", {});
+      const result = parseToolResponse(raw) as {
+        maintenance_needed?: Array<{ namespace: string; issue: string; suggestion: string }>;
+      };
+      const item = result.maintenance_needed?.find((m) => m.issue === "consolidation_backlog");
+      expect(item).toBeDefined();
+      expect(item!.namespace).toBe("projects/busy");
+      expect(item!.suggestion).toContain("unincorporated");
+    });
+
+    it("omits consolidation_backlog when consolidation is unavailable, even with a log backlog", async () => {
+      // consolidation disabled (default) — backlog exists but nothing will drain it
+      await seedBacklog("projects/busy", 3);
+
+      const raw = await callTool("memory_orient", {});
+      const result = parseToolResponse(raw) as { maintenance_needed?: Array<{ issue: string }> };
+      expect(result.maintenance_needed?.some((m) => m.issue === "consolidation_backlog") ?? false).toBe(false);
+    });
+
+    it("does not surface consolidation_backlog to a non-owner principal", async () => {
+      _consolidationConfig.enabled = true;
+      _setApiKey("test-key");
+      resetConsolidationCircuitBreaker();
+      await seedBacklog("projects/busy", 3);
+
+      const familyCall = makeContextCallTool({
+        principalId: "sara",
+        principalType: "family",
+        accessibleNamespaces: [{ pattern: "projects/*", permissions: "rw" }],
+        transportType: "consumer",
+        maxClassification: "internal",
+      });
+
+      const raw = await familyCall("memory_orient", {});
+      const result = parseToolResponse(raw) as { maintenance_needed?: Array<{ issue: string }> };
+      expect(result.maintenance_needed?.some((m) => m.issue === "consolidation_backlog") ?? false).toBe(false);
+    });
   });
 
   it("excludes demo namespaces by default", async () => {

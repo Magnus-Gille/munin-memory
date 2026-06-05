@@ -105,6 +105,7 @@ import {
 import {
   consolidateNamespace,
   isConsolidationAvailable,
+  getConsolidationBacklog,
 } from "./consolidation.js";
 import type {
   WriteParams,
@@ -3726,6 +3727,27 @@ export function registerTools(
                 };
                 maintenanceSortKey.set(missingItem, ns.last_activity_at);
                 maintenanceNeeded.push(missingItem);
+              }
+            }
+
+            // Consolidation pressure (owner-only). Only meaningful when the
+            // worker is actually available — otherwise a backlog is noise
+            // nothing will drain. A persistent backlog while consolidation is
+            // available means the worker is stalled or rate-limited. Tracked
+            // namespaces are owner-readable, so no per-namespace canRead pass is
+            // needed here (the whole signal is gated on owner). Distilled from
+            // the Letta memory-design harvest (see decisions/letta-harvest).
+            if (ctx.principalType === "owner" && isConsolidationAvailable()) {
+              for (const candidate of getConsolidationBacklog(db)) {
+                const backlogItem: MaintenanceItem = {
+                  namespace: candidate.namespace,
+                  issue: "consolidation_backlog",
+                  suggestion: `${candidate.unincorporated_log_count} unincorporated log${candidate.unincorporated_log_count === 1 ? "" : "s"} awaiting consolidation. The worker drains these on its next run; a persistent backlog suggests it is stalled or rate-limited.`,
+                };
+                // Oldest-first: never-consolidated namespaces (null) sort ahead
+                // of those with an older last-consolidated timestamp.
+                maintenanceSortKey.set(backlogItem, candidate.last_consolidated_at ?? "");
+                maintenanceNeeded.push(backlogItem);
               }
             }
 
