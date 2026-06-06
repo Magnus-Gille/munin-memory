@@ -384,6 +384,7 @@ export function convertLocomoDataset(
         notes: answerText
           ? `LoCoMo ${sample.sample_id} cat ${qa.category}; answer=${answerText}`
           : `LoCoMo ${sample.sample_id} cat ${qa.category}; no reference answer`,
+        reference_answer: answerText || undefined,
       });
     }
   }

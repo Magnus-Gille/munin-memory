@@ -31,6 +31,13 @@ export interface BenchmarkQuery {
   negatives?: string[];
   /** Optional notes for maintainers. */
   notes?: string;
+  /**
+   * Gold reference answer for answer-quality eval.
+   * Ignored by the IR runner. Required for a query to participate in the
+   * answer-quality harness (queries lacking this field are counted in
+   * `skipped_no_reference`).
+   */
+  reference_answer?: string;
 }
 
 /**

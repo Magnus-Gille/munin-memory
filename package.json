@@ -55,7 +55,11 @@
     "benchmark:locomo": "./scripts/fetch-benchmark-data.sh locomo && tsx benchmark/adapters/locomo/run.ts",
     "benchmark:locomo:dialog": "./scripts/fetch-benchmark-data.sh locomo && tsx benchmark/adapters/locomo/run.ts --granularity dialog",
     "benchmark:locomo:hybrid": "./scripts/fetch-benchmark-data.sh locomo && tsx benchmark/adapters/locomo/run.ts --search-mode hybrid",
-    "benchmark:locomo:dialog:hybrid": "./scripts/fetch-benchmark-data.sh locomo && tsx benchmark/adapters/locomo/run.ts --granularity dialog --search-mode hybrid"
+    "benchmark:locomo:dialog:hybrid": "./scripts/fetch-benchmark-data.sh locomo && tsx benchmark/adapters/locomo/run.ts --granularity dialog --search-mode hybrid",
+    "answer-quality": "tsx benchmark/answer-quality/run.ts",
+    "answer-quality:locomo": "tsx benchmark/answer-quality/run.ts --queries benchmark/generated/locomo.jsonl --snapshot benchmark/generated/locomo.db --runner-mode production_ranker",
+    "answer-quality:ab": "tsx benchmark/answer-quality/run.ts --ab --queries benchmark/generated/locomo.jsonl --snapshot benchmark/generated/locomo.db",
+    "answer-quality:ab:locomo": "tsx benchmark/adapters/locomo/build.ts --include-adversarial && tsx benchmark/answer-quality/run.ts --ab --queries benchmark/generated/locomo.jsonl --snapshot benchmark/generated/locomo.db"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
