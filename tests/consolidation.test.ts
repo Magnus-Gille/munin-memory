@@ -221,13 +221,13 @@ describe("buildSynthesisPrompt", () => {
     const logs: Entry[] = [makeEntry({ content: malicious })];
     const prompt = buildSynthesisPrompt("projects/victim", "Phase: Active", null, logs);
 
-    // Exactly one UNescaped Ground Truth header (the genuine, server-emitted
-    // one); the spoofed copy from the log body is backslash-escaped so it
-    // renders as literal text, not an authoritative section.
-    const unescaped = (prompt.match(/(?<!\\)## Ground Truth \(human-maintained — DO NOT contradict\)/g) ?? []).length;
-    expect(unescaped).toBe(1);
-    // the escaped header survives as literal text (content preserved, structure neutralized)
-    expect(prompt).toContain("\\## Ground Truth (human-maintained — DO NOT contradict)");
+    // Exactly one LINE-START Ground Truth header (the genuine, server-emitted
+    // one); the spoofed copy from the log body is line-prefixed so it cannot
+    // begin a line as an authoritative section.
+    const lineStart = (prompt.match(/^## Ground Truth \(human-maintained — DO NOT contradict\)/gm) ?? []).length;
+    expect(lineStart).toBe(1);
+    // the log's copy is neutralized (prefixed), preserved as quoted data
+    expect(prompt).toContain("| ## Ground Truth (human-maintained — DO NOT contradict)");
   });
 
   it("escapes fence markers in log content so a log cannot break out of the untrusted block", () => {
@@ -265,10 +265,10 @@ describe("buildSynthesisPrompt", () => {
 
     expect(prompt).toContain("<<<BEGIN UNTRUSTED PRIOR SYNTHESIS>>>");
     expect(prompt).toContain("<<<END UNTRUSTED PRIOR SYNTHESIS>>>");
-    // the spoofed header inside the prior synthesis is escaped; only the genuine
-    // grounding-section header remains unescaped.
-    const unescaped = (prompt.match(/(?<!\\)## Ground Truth \(human-maintained — DO NOT contradict\)/g) ?? []).length;
-    expect(unescaped).toBe(1);
+    // the spoofed header inside the prior synthesis is line-prefixed; only the
+    // genuine grounding-section header begins a line.
+    const lineStart = (prompt.match(/^## Ground Truth \(human-maintained — DO NOT contradict\)/gm) ?? []).length;
+    expect(lineStart).toBe(1);
   });
 });
 

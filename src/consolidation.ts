@@ -675,22 +675,23 @@ function escapeFenceMarkers(content: string): string {
   return content.replace(/\\/g, "\\\\").replace(/<<<+|>>>+/g, (m) => "\\" + m);
 }
 
-// Neutralize markdown structural tokens inside UNTRUSTED content so it cannot
-// impersonate an authoritative prompt section (e.g. reproduce the "## Ground
-// Truth (human-maintained — DO NOT contradict)" header), the "---" section
-// separators, or the untrusted-data fence markers. Such content is data the
-// model summarizes, never prompt structure. Leading ATX headers and horizontal
-// rules are escaped so they render as literal text inside the fenced block.
-// (security: consolidation prompt-injection / synthesis poisoning — a non-owner
-// writer could otherwise steer the owner-run worker.)
+// Neutralize markdown structure inside UNTRUSTED content so it cannot impersonate
+// an authoritative prompt section (e.g. reproduce the "## Ground Truth
+// (human-maintained — DO NOT contradict)" header), the "---" section separators,
+// or the untrusted-data fence markers. First the fence markers are escaped
+// (so content can't break OUT of its block), then every line is prefixed with a
+// quote marker so no line can BEGIN a markdown header or horizontal rule. Line
+// prefixing — rather than backslash-escaping individual tokens — keeps the
+// sanitizer free of escape-character pitfalls. Used together with the fence and
+// the "ignore any heading inside" instruction. (security: consolidation
+// prompt-injection / synthesis poisoning — a non-owner writer could otherwise
+// steer the owner-run worker.)
+const UNTRUSTED_LINE_PREFIX = "| ";
+
 function neutralizeUntrustedMarkdown(content: string): string {
   return escapeFenceMarkers(content)
     .split("\n")
-    .map((line) => {
-      if (/^\s{0,3}#{1,6}(\s|$)/.test(line)) return line.replace(/^(\s{0,3})(#{1,6})/, "$1\\$2");
-      if (/^\s{0,3}-{3,}\s*$/.test(line)) return line.replace(/-/g, "\\-");
-      return line;
-    })
+    .map((line) => `${UNTRUSTED_LINE_PREFIX}${line}`)
     .join("\n");
 }
 
