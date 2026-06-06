@@ -373,7 +373,14 @@ export function convertLocomoDataset(
         continue;
       }
 
-      const answerText = qa.answer === undefined || qa.answer === null ? "" : String(qa.answer);
+      const hasAnswer =
+        qa.answer !== undefined && qa.answer !== null && String(qa.answer).trim() !== "";
+      const answerText = hasAnswer ? String(qa.answer) : "";
+      // Adversarial (category 5) questions are deliberately unanswerable. Keep an
+      // empty-string reference_answer so the runner judges the abstention rather
+      // than skipping the whole adversarial category — the runner skips a query
+      // only when reference_answer is `undefined`, not when it is `""`.
+      const referenceAnswer = hasAnswer ? answerText : qa.category === 5 ? "" : undefined;
       queries.push({
         id: `locomo-${sample.sample_id}-${queries.length}`,
         query: qa.question,
@@ -381,10 +388,12 @@ export function convertLocomoDataset(
         category: mapLocomoCategory(qa.category),
         search_mode: searchMode,
         expected_ids: expectedIds,
-        notes: answerText
+        notes: hasAnswer
           ? `LoCoMo ${sample.sample_id} cat ${qa.category}; answer=${answerText}`
-          : `LoCoMo ${sample.sample_id} cat ${qa.category}; no reference answer`,
-        reference_answer: answerText || undefined,
+          : qa.category === 5
+            ? `LoCoMo ${sample.sample_id} cat ${qa.category}; adversarial/unanswerable (empty reference)`
+            : `LoCoMo ${sample.sample_id} cat ${qa.category}; no reference answer`,
+        reference_answer: referenceAnswer,
       });
     }
   }

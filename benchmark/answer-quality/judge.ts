@@ -196,7 +196,21 @@ function parseJudgeResponse(
   }
 
   const obj = parsed as Record<string, unknown>;
-  const correct = Boolean(obj.correct);
+  // Require a real boolean — truthiness-coercing (Boolean(obj.correct)) would
+  // count a malformed `"correct":"false"` (a non-empty string) as correct and
+  // inflate accuracy / make the judge game-able. A non-boolean is a malformed
+  // verdict.
+  if (typeof obj.correct !== "boolean") {
+    return {
+      correct: false,
+      score: 0,
+      reasoning: "Judge JSON 'correct' field is not a boolean",
+      parse_ok: false,
+      raw: text.slice(0, 500),
+      usage: judgeUsage,
+    };
+  }
+  const correct = obj.correct;
   const score =
     typeof obj.score === "number" && obj.score >= 0 && obj.score <= 1
       ? obj.score

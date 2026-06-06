@@ -444,6 +444,20 @@ describe("judge JSON robustness", () => {
     expect(verdict.parse_ok).toBe(false);
     expect(verdict.correct).toBe(false);
   });
+
+  it("does not truthiness-coerce a non-boolean 'correct' (e.g. the string \"false\")", async () => {
+    const chat: ChatFn = async () => ({
+      choices: [{ message: { content: '{"correct":"false","score":1,"reasoning":"r"}' } }],
+    });
+    const verdict = await judgeAnswer(
+      { question: "q", referenceAnswer: "r", candidateAnswer: "a", category: "c", model: "m", apiKey: "k" },
+      chat,
+    );
+    // The string "false" is truthy; Boolean("false") === true would inflate
+    // accuracy. A non-boolean 'correct' is treated as a malformed verdict.
+    expect(verdict.correct).toBe(false);
+    expect(verdict.parse_ok).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -685,10 +699,14 @@ describe("A/B driver", () => {
 // 8. Live smoke (opt-in, skipped in CI)
 // ---------------------------------------------------------------------------
 
-describe("live smoke (OPENROUTER_API_KEY required)", () => {
+describe("live smoke (opt-in: MUNIN_LIVE_OPENROUTER_TESTS=1 + OPENROUTER_API_KEY)", () => {
   const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+  // Require an EXPLICIT opt-in in addition to the key, so a normal `npm test`
+  // never makes paid network calls just because the environment happens to
+  // expose OPENROUTER_API_KEY (e.g. a developer's .env or a CI secret).
+  const LIVE = process.env.MUNIN_LIVE_OPENROUTER_TESTS === "1" && !!OPENROUTER_API_KEY;
 
-  it.skipIf(!OPENROUTER_API_KEY)("generateAnswer and judgeAnswer make real round-trip calls", async () => {
+  it.skipIf(!LIVE)("generateAnswer and judgeAnswer make real round-trip calls", async () => {
     const { db, dbPath } = makeTempDb();
     writeState(db, "projects/test", "session-1", "The capital of France is Paris.", ["active"]);
     db.close();

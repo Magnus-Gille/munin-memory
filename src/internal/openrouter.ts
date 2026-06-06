@@ -1,10 +1,14 @@
 /**
- * Shared OpenRouter client for Munin sub-systems that need to call the
- * OpenRouter chat-completion API (consolidation worker, answer-quality eval).
+ * Two-role (system+user) OpenRouter chat-completion client.
  *
- * The consolidation worker previously had an inline `callOpenRouter` that
- * was user-message-only.  This module lifts it to a two-role (system+user)
- * shape while preserving all the same defaults (ZDR, headers, model param).
+ * NOTE: currently used ONLY by the answer-quality eval harness. The
+ * consolidation worker still has its own inline, user-message-only
+ * `callOpenRouter` in `src/consolidation.ts` — deliberately left untouched by
+ * the eval PR (its prompt path was just security-hardened). This module mirrors
+ * the same defaults (ZDR `provider: { zdr: true }`, HTTP-Referer / X-Title
+ * headers, model param) so the two can be unified later WITHOUT a behavior
+ * change. Until that follow-up lands, keep fixes to OpenRouter behavior in sync
+ * across both copies.
  */
 
 // --- Types ---
