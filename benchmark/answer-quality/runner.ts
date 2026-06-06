@@ -336,7 +336,7 @@ async function runAnswerQualityInner(
         chat,
       );
       verdict = judgeResult;
-      // Judge usage not directly returned from judgeAnswer — accumulated below
+      judgeUsage = judgeResult.usage;
     } catch (err) {
       verdict = {
         correct: false,

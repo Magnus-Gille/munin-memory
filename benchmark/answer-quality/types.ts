@@ -37,6 +37,8 @@ export interface JudgeVerdict {
   parse_ok: boolean;
   /** Raw judge output when parse_ok is false. */
   raw?: string;
+  /** Token usage of the judge call, when the provider reported it. */
+  usage?: TokenUsage;
 }
 
 /** Result for one evaluated query. */

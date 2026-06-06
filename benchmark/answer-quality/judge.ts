@@ -165,7 +165,7 @@ function parseJudgeResponse(
       reasoning: "Judge response did not contain a valid JSON object",
       parse_ok: false,
       raw: text.slice(0, 500),
-      ...(judgeUsage ? {} : {}), // usage carried separately in the caller
+      usage: judgeUsage,
     };
   }
 
@@ -180,6 +180,7 @@ function parseJudgeResponse(
       reasoning: "Failed to parse judge JSON",
       parse_ok: false,
       raw: text.slice(0, 500),
+      usage: judgeUsage,
     };
   }
 
@@ -190,6 +191,7 @@ function parseJudgeResponse(
       reasoning: "Judge JSON is not an object",
       parse_ok: false,
       raw: text.slice(0, 500),
+      usage: judgeUsage,
     };
   }
 
@@ -204,17 +206,6 @@ function parseJudgeResponse(
   const reasoning =
     typeof obj.reasoning === "string" ? obj.reasoning.trim() : "(no reasoning)";
 
-  return { correct, score, reasoning, parse_ok: true };
+  return { correct, score, reasoning, parse_ok: true, usage: judgeUsage };
 }
-
-// Export judgeUsage extractor for tests
-export function extractJudgeUsage(
-  response: ChatCompletionResponse,
-): TokenUsage | undefined {
-  return response.usage
-    ? {
-        prompt_tokens: response.usage.prompt_tokens,
-        completion_tokens: response.usage.completion_tokens,
-      }
-    : undefined;
-}
+// (dead extractJudgeUsage removed — judge usage now travels on JudgeVerdict.usage)

@@ -318,6 +318,12 @@ describe("runAnswerQuality happy path", () => {
 
     // chat was called twice (answer + judge)
     expect(vi.mocked(chat)).toHaveBeenCalledTimes(2);
+    // total_usage must sum BOTH calls — the judge usage must be counted, not
+    // dropped (regression: judge_usage was previously always undefined).
+    expect(report.total_usage).toEqual({ prompt_tokens: 20, completion_tokens: 10 });
+    // per-result usage is populated for both the answer and the judge call.
+    expect(report.results[0].answer_usage).toEqual({ prompt_tokens: 10, completion_tokens: 5 });
+    expect(report.results[0].judge_usage).toEqual({ prompt_tokens: 10, completion_tokens: 5 });
   });
 });
 
