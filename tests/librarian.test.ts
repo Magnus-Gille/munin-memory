@@ -46,6 +46,22 @@ describe("resolveNamespaceClassificationFloorFromRows", () => {
 
     expect(resolveNamespaceClassificationFloorFromRows("shared/y/doc", ambiguous)).toBe("client-restricted");
   });
+
+  // security: a case-variation namespace must not evade a lower-case floor
+  // pattern and fall through to the (less restrictive) default. Mirrors the #96
+  // cross-zone guard hardening so the write-path floor agrees with it.
+  it("does not let case-variation evade a lower-case floor pattern", () => {
+    const sensitive = [
+      { namespace_pattern: "clients/*", min_classification: "client-confidential" as const },
+      { namespace_pattern: "people/*", min_classification: "client-confidential" as const },
+    ];
+    // exact match (baseline)
+    expect(resolveNamespaceClassificationFloorFromRows("clients/acme", sensitive)).toBe("client-confidential");
+    // case-variation must resolve to the SAME restrictive floor, not the default
+    expect(resolveNamespaceClassificationFloorFromRows("Clients/acme", sensitive)).toBe("client-confidential");
+    expect(resolveNamespaceClassificationFloorFromRows("CLIENTS/acme", sensitive)).toBe("client-confidential");
+    expect(resolveNamespaceClassificationFloorFromRows("People/Sara", sensitive)).toBe("client-confidential");
+  });
 });
 
 describe("parseExplicitClassification", () => {
