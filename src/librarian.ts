@@ -291,10 +291,10 @@ export function getConfiguredDefaultClassificationFloor(): ClassificationLevel {
   return DEFAULT_CLASSIFICATION_FLOOR;
 }
 
-export function resolveNamespaceClassificationFloorFromRows(
+function floorForExactNamespace(
   namespace: string,
   rows: NamespaceClassificationFloor[],
-  fallback = getConfiguredDefaultClassificationFloor(),
+  fallback: ClassificationLevel,
 ): ClassificationLevel {
   let best = fallback;
   let bestSpecificity = -1;
@@ -314,6 +314,26 @@ export function resolveNamespaceClassificationFloorFromRows(
   }
 
   return best;
+}
+
+export function resolveNamespaceClassificationFloorFromRows(
+  namespace: string,
+  rows: NamespaceClassificationFloor[],
+  fallback = getConfiguredDefaultClassificationFloor(),
+): ClassificationLevel {
+  // Resolve the floor for the literal namespace AND its lower-cased form, and
+  // take the MOST RESTRICTIVE of the two. namespaceMatchesPattern is
+  // case-sensitive, so a case-variation namespace (e.g. "Clients/acme") would
+  // otherwise miss the lower-case "clients/*" floor pattern and fall through to
+  // the (less restrictive) default — smuggling sensitive data into a lower
+  // zone. Mirrors the #96 cross-zone guard's effectiveTargetFloor hardening so
+  // the write-path floor and the cross-reference guard agree. (security:
+  // classification-floor case-evasion)
+  const literalFloor = floorForExactNamespace(namespace, rows, fallback);
+  const lower = namespace.toLowerCase();
+  if (lower === namespace) return literalFloor;
+  const lowerFloor = floorForExactNamespace(lower, rows, fallback);
+  return compareClassificationLevels(literalFloor, lowerFloor) >= 0 ? literalFloor : lowerFloor;
 }
 
 export function listNamespaceClassificationFloors(
