@@ -668,7 +668,11 @@ const MAX_PROMPT_CONTENT_CHARS = 12000;
 // untrusted/derived value, including the owner-framed status. (security: fence
 // breakout)
 function escapeFenceMarkers(content: string): string {
-  return content.replace(/<<<+|>>>+/g, (m) => "\\" + m);
+  // Escape backslashes FIRST so an attacker-supplied backslash before a marker
+  // cannot, under a `\\` -> `\` interpretation, leave the marker effectively
+  // unescaped — i.e. the escape function must escape its own escape character
+  // (CodeQL js/incomplete-sanitization).
+  return content.replace(/\\/g, "\\\\").replace(/<<<+|>>>+/g, (m) => "\\" + m);
 }
 
 // Neutralize markdown structural tokens inside UNTRUSTED content so it cannot
