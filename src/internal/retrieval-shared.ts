@@ -121,3 +121,42 @@ export function stripReservedTags(tags: string[]): { kept: string[]; removed: st
 export function getLifecycleTags(tags: string[]): string[] {
   return tags.filter(t => LIFECYCLE_TAGS.has(t));
 }
+
+// --- Boundary serialization ---
+
+/**
+ * Boundary-priority serialization: place the highest-ranked items at the
+ * boundaries of the list (where LLM attention is strongest) rather than in
+ * the middle (where it is weakest — "lost in the middle" problem).
+ *
+ * Given best-first input [r1, r2, r3, r4, r5] it returns [r1, r3, r5, r4, r2]:
+ * rank 1 at the start, rank 2 at the end. Pure and order-only — the same items
+ * come back, so callers must not derive ranks from the returned order. A no-op
+ * for 0–2 items.
+ *
+ * Moved from src/tools.ts (where it was private) to this module so both the
+ * MCP tool layer and the answer-quality eval harness share one implementation.
+ */
+export function boundarySerialize<T>(items: T[]): T[] {
+  if (items.length <= 2) return items;
+  const front: T[] = [];
+  const back: T[] = [];
+  items.forEach((item, i) => {
+    if (i % 2 === 0) front.push(item);
+    else back.push(item);
+  });
+  back.reverse();
+  return [...front, ...back];
+}
+
+/** Serialization mode: "linear" preserves rank order, "boundary" reorders for LLM attention. */
+export type SerializationMode = "linear" | "boundary";
+
+/**
+ * Apply a serialization mode to an ordered list of items.
+ * "linear" = identity (preserves rank order).
+ * "boundary" = boundarySerialize (reorders for LLM primacy/recency effect).
+ */
+export function serializeOrder<T>(items: T[], mode: SerializationMode): T[] {
+  return mode === "boundary" ? boundarySerialize(items) : items;
+}
