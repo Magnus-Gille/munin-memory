@@ -146,3 +146,90 @@ describe("GET /", () => {
     expect(res.headers.location).toBe("/setup");
   });
 });
+
+describe("POST /setup/connect — uninitialized state", () => {
+  it("returns 500 when state not initialized", async () => {
+    // No ds.save() — state file does not exist
+    const res = await request(app)
+      .post("/setup/connect")
+      .send("ssid=HomeNetwork&password=pass");
+    expect(res.status).toBe(500);
+    expect(res.text).toContain("not initialized");
+  });
+});
+
+describe("POST /setup/connect — transition failure", () => {
+  it("shows error page when transition() throws (invalid state machine transition)", async () => {
+    // Put device in CLAIMED state — transition to CONNECTING is not allowed
+    ds.save(makeState({ state: "CLAIMED" }));
+    const res = await request(app)
+      .post("/setup/connect")
+      .send("ssid=HomeNetwork&password=pass");
+
+    // Should show wizard with error, not crash
+    expect(res.status).toBe(200);
+    expect(res.type).toMatch(/html/);
+    expect(res.text).toContain("Unable to start connection");
+  });
+});
+
+describe("POST /setup/connect — background connection flow", () => {
+  it("transitions to RUNNING_UNCLAIMED and calls onTransition when wifi succeeds", async () => {
+    ds.save(makeState());
+    wifi.shouldFailConnect = false;
+
+    const res = await request(app)
+      .post("/setup/connect")
+      .send("ssid=HomeNetwork&password=testpass");
+
+    expect(res.status).toBe(200);
+    expect(ds.load()!.state).toBe("CONNECTING");
+
+    // Let the background setTimeout fire
+    await new Promise((r) => setTimeout(r, 300));
+
+    expect(ds.load()!.state).toBe("RUNNING_UNCLAIMED");
+    expect(transitionCalled).toBe(true);
+  });
+
+  it("transitions back to UNCONFIGURED and restarts AP when wifi connect fails", async () => {
+    ds.save(makeState());
+    wifi.shouldFailConnect = true;
+    wifi.connectError = "Incorrect password";
+
+    await request(app)
+      .post("/setup/connect")
+      .send("ssid=HomeNetwork&password=wrong");
+
+    // Wait for background callback
+    await new Promise((r) => setTimeout(r, 300));
+
+    const state = ds.load();
+    expect(state!.state).toBe("UNCONFIGURED");
+    expect(state!.lastError).toBe("Incorrect password");
+    // AP should have been restarted
+    expect(ap.active).toBe(true);
+  });
+
+  it("uses 'Connection failed' fallback when wifi result.error is undefined", async () => {
+    ds.save(makeState());
+    wifi.shouldFailConnect = true;
+    wifi.connectError = ""; // empty — triggers fallback message
+
+    // Override connect to return success:false with no error string
+    const originalConnect = wifi.connect.bind(wifi);
+    wifi.connect = async () => ({ success: false, error: undefined });
+
+    await request(app)
+      .post("/setup/connect")
+      .send("ssid=HomeNetwork&password=x");
+
+    await new Promise((r) => setTimeout(r, 300));
+
+    const state = ds.load();
+    expect(state!.state).toBe("UNCONFIGURED");
+    expect(state!.lastError).toBe("Connection failed");
+
+    wifi.connect = originalConnect;
+  });
+});
