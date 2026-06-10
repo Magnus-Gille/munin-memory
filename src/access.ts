@@ -376,11 +376,7 @@ export function resolveAccessContext(
   clientId: string,
   token?: string,
   tokenPrincipalId?: string,
-  authMethod: AuthMethod = clientId === "legacy-bearer"
-    ? "legacy_bearer"
-    : clientId.startsWith("principal:")
-      ? "agent_token"
-      : "oauth",
+  authMethod: AuthMethod = defaultAuthMethod(clientId),
   transportTypeHint?: string,
 ): AccessContext {
   try {
@@ -396,65 +392,8 @@ export function resolveAccessContext(
       };
     }
 
-    let row: PrincipalRow | undefined;
-
-    // 2. Direct principal_id lookup (for internal/agent principals)
-    if (clientId.startsWith("principal:")) {
-      const principalId = clientId.slice("principal:".length);
-      row = db
-        .prepare(
-          `SELECT principal_id, principal_type, namespace_rules, revoked_at, expires_at, max_classification, transport_type
-           FROM principals
-           WHERE principal_id = ?`
-        )
-        .get(principalId) as PrincipalRow | undefined;
-    }
-
-    // 3. Token-bound principal (v6+): token carries its own principal_id
-    if (row === undefined && tokenPrincipalId) {
-      row = db
-        .prepare(
-          `SELECT principal_id, principal_type, namespace_rules, revoked_at, expires_at, max_classification, transport_type
-           FROM principals
-           WHERE principal_id = ?`
-        )
-        .get(tokenPrincipalId) as PrincipalRow | undefined;
-    }
-
-    // 4. Lookup via principal_oauth_clients mapping table (v6+)
-    if (row === undefined && !clientId.startsWith("principal:")) {
-      row = db
-        .prepare(
-          `SELECT p.principal_id, p.principal_type, p.namespace_rules, p.revoked_at, p.expires_at, p.max_classification, p.transport_type
-           FROM principal_oauth_clients poc
-           JOIN principals p ON poc.principal_id = p.principal_id
-           WHERE poc.oauth_client_id = ? AND poc.revoked_at IS NULL`
-        )
-        .get(clientId) as PrincipalRow | undefined;
-
-      // Fallback: legacy oauth_client_id column (pre-v6 compat, until v7)
-      if (row === undefined) {
-        row = db
-          .prepare(
-            `SELECT principal_id, principal_type, namespace_rules, revoked_at, expires_at, max_classification, transport_type
-             FROM principals
-             WHERE oauth_client_id = ?`
-          )
-          .get(clientId) as PrincipalRow | undefined;
-      }
-    }
-
-    // 5. Fallback: lookup by token hash (agent service tokens)
-    if (row === undefined && token !== undefined) {
-      const tokenHash = createHash("sha256").update(token).digest("hex");
-      row = db
-        .prepare(
-          `SELECT principal_id, principal_type, namespace_rules, revoked_at, expires_at, max_classification, transport_type
-           FROM principals
-           WHERE token_hash = ?`
-        )
-        .get(tokenHash) as PrincipalRow | undefined;
-    }
+    // 2-5. Principal lookup chain (fail-closed on no match)
+    const row = lookupPrincipalRow(db, clientId, token, tokenPrincipalId);
 
     // 6. Not found → zero access
     if (row === undefined) {
@@ -511,4 +450,85 @@ interface PrincipalRow {
   expires_at: string | null;
   max_classification: string | null;
   transport_type: string | null;
+}
+
+function defaultAuthMethod(clientId: string): AuthMethod {
+  return clientId === "legacy-bearer"
+    ? "legacy_bearer"
+    : clientId.startsWith("principal:")
+      ? "agent_token"
+      : "oauth";
+}
+
+/**
+ * Steps 2-5 of the resolution order: principal row lookup by client ID,
+ * token-bound principal ID, OAuth client mapping, or token hash.
+ */
+function lookupPrincipalRow(
+  db: Database.Database,
+  clientId: string,
+  token?: string,
+  tokenPrincipalId?: string,
+): PrincipalRow | undefined {
+  let row: PrincipalRow | undefined;
+
+  // 2. Direct principal_id lookup (for internal/agent principals)
+  if (clientId.startsWith("principal:")) {
+    const principalId = clientId.slice("principal:".length);
+    row = db
+      .prepare(
+        `SELECT principal_id, principal_type, namespace_rules, revoked_at, expires_at, max_classification, transport_type
+         FROM principals
+         WHERE principal_id = ?`
+      )
+      .get(principalId) as PrincipalRow | undefined;
+  }
+
+  // 3. Token-bound principal (v6+): token carries its own principal_id
+  if (row === undefined && tokenPrincipalId) {
+    row = db
+      .prepare(
+        `SELECT principal_id, principal_type, namespace_rules, revoked_at, expires_at, max_classification, transport_type
+         FROM principals
+         WHERE principal_id = ?`
+      )
+      .get(tokenPrincipalId) as PrincipalRow | undefined;
+  }
+
+  // 4. Lookup via principal_oauth_clients mapping table (v6+)
+  if (row === undefined && !clientId.startsWith("principal:")) {
+    row = db
+      .prepare(
+        `SELECT p.principal_id, p.principal_type, p.namespace_rules, p.revoked_at, p.expires_at, p.max_classification, p.transport_type
+         FROM principal_oauth_clients poc
+         JOIN principals p ON poc.principal_id = p.principal_id
+         WHERE poc.oauth_client_id = ? AND poc.revoked_at IS NULL`
+      )
+      .get(clientId) as PrincipalRow | undefined;
+
+    // Fallback: legacy oauth_client_id column (pre-v6 compat, until v7)
+    if (row === undefined) {
+      row = db
+        .prepare(
+          `SELECT principal_id, principal_type, namespace_rules, revoked_at, expires_at, max_classification, transport_type
+           FROM principals
+           WHERE oauth_client_id = ?`
+        )
+        .get(clientId) as PrincipalRow | undefined;
+    }
+  }
+
+  // 5. Fallback: lookup by token hash (agent service tokens)
+  if (row === undefined && token !== undefined) {
+    const tokenHash = createHash("sha256").update(token).digest("hex");
+    row = db
+      .prepare(
+        `SELECT principal_id, principal_type, namespace_rules, revoked_at, expires_at, max_classification, transport_type
+         FROM principals
+         WHERE token_hash = ?`
+      )
+      .get(tokenHash) as PrincipalRow | undefined;
+  }
+
+  return row;
 }

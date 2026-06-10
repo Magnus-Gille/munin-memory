@@ -1412,6 +1412,157 @@ function handleBearerRevoke(
 // Main
 // ---------------------------------------------------------------------------
 
+const VALID_RESOURCES = new Set(["principals", "oauth-clients", "classification", "bearer"]);
+
+const RESOURCE_COMMANDS: Record<string, string> = {
+  "oauth-clients": "list, remove, clear",
+  "classification": "list-floors, set-floor, audit",
+  "bearer": "list, rotate, revoke",
+  "principals": "list, show, add, revoke, update, rotate-token, test",
+};
+
+function validateResourceAndCommand(parsed: ParsedArgs): void {
+  if (!VALID_RESOURCES.has(parsed.resource ?? "")) {
+    if (!parsed.resource) {
+      console.error("Missing resource. Expected: munin-admin principals|classification|oauth-clients|bearer <command>");
+    } else {
+      console.error(`Unknown resource: ${parsed.resource}. Expected: principals, classification, oauth-clients, or bearer`);
+    }
+    console.error("\nRun 'munin-admin --help' for usage.");
+    process.exit(1);
+  }
+
+  if (!parsed.command) {
+    const cmds = RESOURCE_COMMANDS[parsed.resource!];
+    console.error(`Missing command. Expected: ${cmds}`);
+    console.error("\nRun 'munin-admin --help' for usage.");
+    process.exit(1);
+  }
+}
+
+function dispatchOAuthClients(
+  db: Database.Database,
+  parsed: ParsedArgs,
+): void {
+  const pid = parsed.positionals[0];
+  switch (parsed.command) {
+    case "list":
+      handleOAuthClientsList(db, parsed.flags, parsed.json);
+      break;
+    case "remove":
+      if (!pid) throw new Error("Missing <oauth-client-id> argument.");
+      handleOAuthClientsRemove(db, pid, parsed.json);
+      break;
+    case "clear":
+      if (!pid) throw new Error("Missing <principal-id> argument.");
+      handleOAuthClientsClear(db, pid, parsed.json);
+      break;
+    default:
+      console.error(`Unknown oauth-clients command: ${parsed.command}`);
+      console.error("\nRun 'munin-admin --help' for usage.");
+      process.exit(1);
+  }
+}
+
+function dispatchBearer(
+  db: Database.Database,
+  parsed: ParsedArgs,
+): void {
+  switch (parsed.command) {
+    case "list":
+      handleBearerList(db, parsed.flags, parsed.json);
+      break;
+    case "rotate":
+      handleBearerRotate(db, parsed.flags, parsed.json);
+      break;
+    case "revoke": {
+      const keyId = parsed.positionals[0];
+      if (!keyId) throw new Error("Missing <key-id> argument.");
+      handleBearerRevoke(db, keyId, parsed.json);
+      break;
+    }
+    default:
+      console.error(`Unknown bearer command: ${parsed.command}`);
+      console.error("\nRun 'munin-admin --help' for usage.");
+      process.exit(1);
+  }
+}
+
+function dispatchClassification(
+  db: Database.Database,
+  parsed: ParsedArgs,
+): void {
+  const arg1 = parsed.positionals[0];
+  const arg2 = parsed.positionals[1];
+  switch (parsed.command) {
+    case "list-floors":
+      handleClassificationListFloors(db, parsed.json);
+      break;
+    case "set-floor":
+      if (!arg1) throw new Error("Missing <namespace-pattern> argument.");
+      if (!arg2) throw new Error("Missing <classification> argument.");
+      handleClassificationSetFloor(db, arg1, arg2, parsed.json);
+      break;
+    case "audit":
+      handleClassificationAudit(db, arg1, parsed.json);
+      break;
+    default:
+      console.error(`Unknown classification command: ${parsed.command}`);
+      console.error("\nRun 'munin-admin --help' for usage.");
+      process.exit(1);
+  }
+}
+
+function dispatchPrincipals(
+  db: Database.Database,
+  parsed: ParsedArgs,
+): void {
+  const pid = parsed.positionals[0];
+  switch (parsed.command) {
+    case "list":
+      handleList(db, parsed.json);
+      break;
+
+    case "show":
+      if (!pid) throw new Error("Missing <principal-id> argument.");
+      handleShow(db, pid, parsed.json);
+      break;
+
+    case "add":
+      if (!pid) throw new Error("Missing <principal-id> argument.");
+      handleAdd(db, pid, parsed.flags, parsed.force, parsed.json);
+      break;
+
+    case "revoke":
+      if (!pid) throw new Error("Missing <principal-id> argument.");
+      handleRevoke(db, pid, parsed.json);
+      break;
+
+    case "update":
+      if (!pid) throw new Error("Missing <principal-id> argument.");
+      handleUpdate(db, pid, parsed.flags, parsed.json);
+      break;
+
+    case "rotate-token":
+      if (!pid) throw new Error("Missing <principal-id> argument.");
+      handleRotateToken(db, pid, parsed.json);
+      break;
+
+    case "test": {
+      if (!pid) throw new Error("Missing <principal-id> argument.");
+      const ns = parsed.positionals[1];
+      if (!ns) throw new Error("Missing <namespace> argument.");
+      handleTest(db, pid, ns, parsed.json);
+      break;
+    }
+
+    default:
+      console.error(`Unknown command: ${parsed.command}`);
+      console.error("\nRun 'munin-admin --help' for usage.");
+      process.exit(1);
+  }
+}
+
 function main(): void {
   let parsed: ParsedArgs;
   try {
@@ -1427,33 +1578,7 @@ function main(): void {
     process.exit(0);
   }
 
-  if (
-    parsed.resource !== "principals"
-    && parsed.resource !== "oauth-clients"
-    && parsed.resource !== "classification"
-    && parsed.resource !== "bearer"
-  ) {
-    if (!parsed.resource) {
-      console.error("Missing resource. Expected: munin-admin principals|classification|oauth-clients|bearer <command>");
-    } else {
-      console.error(`Unknown resource: ${parsed.resource}. Expected: principals, classification, oauth-clients, or bearer`);
-    }
-    console.error("\nRun 'munin-admin --help' for usage.");
-    process.exit(1);
-  }
-
-  if (!parsed.command) {
-    const cmds = parsed.resource === "oauth-clients"
-      ? "list, remove, clear"
-      : parsed.resource === "classification"
-        ? "list-floors, set-floor, audit"
-        : parsed.resource === "bearer"
-          ? "list, rotate, revoke"
-          : "list, show, add, revoke, update, rotate-token, test";
-    console.error(`Missing command. Expected: ${cmds}`);
-    console.error("\nRun 'munin-admin --help' for usage.");
-    process.exit(1);
-  }
+  validateResourceAndCommand(parsed);
 
   let db: Database.Database;
   try {
@@ -1464,117 +1589,14 @@ function main(): void {
   }
 
   try {
-    const pid = parsed.positionals[0];
-
-    // Handle oauth-clients resource
     if (parsed.resource === "oauth-clients") {
-      switch (parsed.command) {
-        case "list":
-          handleOAuthClientsList(db, parsed.flags, parsed.json);
-          break;
-        case "remove":
-          if (!pid) throw new Error("Missing <oauth-client-id> argument.");
-          handleOAuthClientsRemove(db, pid, parsed.json);
-          break;
-        case "clear":
-          if (!pid) throw new Error("Missing <principal-id> argument.");
-          handleOAuthClientsClear(db, pid, parsed.json);
-          break;
-        default:
-          console.error(`Unknown oauth-clients command: ${parsed.command}`);
-          console.error("\nRun 'munin-admin --help' for usage.");
-          process.exit(1);
-      }
-      return;
-    }
-
-    if (parsed.resource === "bearer") {
-      switch (parsed.command) {
-        case "list":
-          handleBearerList(db, parsed.flags, parsed.json);
-          break;
-        case "rotate":
-          handleBearerRotate(db, parsed.flags, parsed.json);
-          break;
-        case "revoke": {
-          const keyId = parsed.positionals[0];
-          if (!keyId) throw new Error("Missing <key-id> argument.");
-          handleBearerRevoke(db, keyId, parsed.json);
-          break;
-        }
-        default:
-          console.error(`Unknown bearer command: ${parsed.command}`);
-          console.error("\nRun 'munin-admin --help' for usage.");
-          process.exit(1);
-      }
-      return;
-    }
-
-    if (parsed.resource === "classification") {
-      const arg1 = parsed.positionals[0];
-      const arg2 = parsed.positionals[1];
-      switch (parsed.command) {
-        case "list-floors":
-          handleClassificationListFloors(db, parsed.json);
-          break;
-        case "set-floor":
-          if (!arg1) throw new Error("Missing <namespace-pattern> argument.");
-          if (!arg2) throw new Error("Missing <classification> argument.");
-          handleClassificationSetFloor(db, arg1, arg2, parsed.json);
-          break;
-        case "audit":
-          handleClassificationAudit(db, arg1, parsed.json);
-          break;
-        default:
-          console.error(`Unknown classification command: ${parsed.command}`);
-          console.error("\nRun 'munin-admin --help' for usage.");
-          process.exit(1);
-      }
-      return;
-    }
-
-    switch (parsed.command) {
-      case "list":
-        handleList(db, parsed.json);
-        break;
-
-      case "show":
-        if (!pid) throw new Error("Missing <principal-id> argument.");
-        handleShow(db, pid, parsed.json);
-        break;
-
-      case "add":
-        if (!pid) throw new Error("Missing <principal-id> argument.");
-        handleAdd(db, pid, parsed.flags, parsed.force, parsed.json);
-        break;
-
-      case "revoke":
-        if (!pid) throw new Error("Missing <principal-id> argument.");
-        handleRevoke(db, pid, parsed.json);
-        break;
-
-      case "update":
-        if (!pid) throw new Error("Missing <principal-id> argument.");
-        handleUpdate(db, pid, parsed.flags, parsed.json);
-        break;
-
-      case "rotate-token":
-        if (!pid) throw new Error("Missing <principal-id> argument.");
-        handleRotateToken(db, pid, parsed.json);
-        break;
-
-      case "test": {
-        if (!pid) throw new Error("Missing <principal-id> argument.");
-        const ns = parsed.positionals[1];
-        if (!ns) throw new Error("Missing <namespace> argument.");
-        handleTest(db, pid, ns, parsed.json);
-        break;
-      }
-
-      default:
-        console.error(`Unknown command: ${parsed.command}`);
-        console.error("\nRun 'munin-admin --help' for usage.");
-        process.exit(1);
+      dispatchOAuthClients(db, parsed);
+    } else if (parsed.resource === "bearer") {
+      dispatchBearer(db, parsed);
+    } else if (parsed.resource === "classification") {
+      dispatchClassification(db, parsed);
+    } else {
+      dispatchPrincipals(db, parsed);
     }
   } catch (err: unknown) {
     if (parsed.json) {

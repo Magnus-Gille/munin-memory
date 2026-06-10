@@ -75,6 +75,77 @@ function readStringField(
   return value;
 }
 
+function checkFilePermissions(
+  filePath: string,
+  platform: NodeJS.Platform,
+  stat: (p: string) => { mode: number },
+): void {
+  let stats: { mode: number };
+  try {
+    stats = stat(filePath);
+  } catch (err) {
+    throw new Error(
+      `MUNIN_CREDENTIALS_FILE set but file is not readable at ${filePath}: ${
+        (err as Error).message
+      }`,
+    );
+  }
+  if (platform !== "win32") {
+    const mode = stats.mode & 0o777;
+    if ((mode & 0o077) !== 0) {
+      throw new Error(
+        `MUNIN_CREDENTIALS_FILE at ${filePath} has mode 0${mode
+          .toString(8)
+          .padStart(3, "0")}; refusing to read a group/world-accessible credentials file (use \`chmod 600\`).`,
+      );
+    }
+  }
+}
+
+function parseCredentialsFile(
+  filePath: string,
+  readFile: (p: string) => string,
+): CredentialsFileShape {
+  let raw: string;
+  try {
+    raw = readFile(filePath);
+  } catch (err) {
+    throw new Error(
+      `Failed to read MUNIN_CREDENTIALS_FILE at ${filePath}: ${
+        (err as Error).message
+      }`,
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `MUNIN_CREDENTIALS_FILE at ${filePath} is not valid JSON: ${
+        (err as Error).message
+      }`,
+    );
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(
+      `MUNIN_CREDENTIALS_FILE at ${filePath} must contain a JSON object at the top level.`,
+    );
+  }
+  return parsed as CredentialsFileShape;
+}
+
+function warnOverriddenEnvVars(env: NodeJS.ProcessEnv, log: (msg: string) => void): void {
+  const overriddenEnv: string[] = [];
+  if (env.MUNIN_AUTH_TOKEN) overriddenEnv.push("MUNIN_AUTH_TOKEN");
+  if (env.MUNIN_CF_CLIENT_ID) overriddenEnv.push("MUNIN_CF_CLIENT_ID");
+  if (env.MUNIN_CF_CLIENT_SECRET) overriddenEnv.push("MUNIN_CF_CLIENT_SECRET");
+  if (overriddenEnv.length > 0) {
+    log(
+      `MUNIN_CREDENTIALS_FILE is set; ignoring inline env vars: ${overriddenEnv.join(", ")}`,
+    );
+  }
+}
+
 export function loadBridgeCredentials(
   options: CredentialsLoaderOptions = {},
 ): BridgeCredentials {
@@ -98,71 +169,14 @@ export function loadBridgeCredentials(
 
   const filePath = expandHome(rawPath);
 
-  let stats: { mode: number };
-  try {
-    stats = stat(filePath);
-  } catch (err) {
-    throw new Error(
-      `MUNIN_CREDENTIALS_FILE set but file is not readable at ${filePath}: ${
-        (err as Error).message
-      }`,
-    );
-  }
+  checkFilePermissions(filePath, platform, stat);
 
-  if (platform !== "win32") {
-    const mode = stats.mode & 0o777;
-    if ((mode & 0o077) !== 0) {
-      throw new Error(
-        `MUNIN_CREDENTIALS_FILE at ${filePath} has mode 0${mode
-          .toString(8)
-          .padStart(3, "0")}; refusing to read a group/world-accessible credentials file (use \`chmod 600\`).`,
-      );
-    }
-  }
-
-  let raw: string;
-  try {
-    raw = readFile(filePath);
-  } catch (err) {
-    throw new Error(
-      `Failed to read MUNIN_CREDENTIALS_FILE at ${filePath}: ${
-        (err as Error).message
-      }`,
-    );
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (err) {
-    throw new Error(
-      `MUNIN_CREDENTIALS_FILE at ${filePath} is not valid JSON: ${
-        (err as Error).message
-      }`,
-    );
-  }
-
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error(
-      `MUNIN_CREDENTIALS_FILE at ${filePath} must contain a JSON object at the top level.`,
-    );
-  }
-
-  const obj = parsed as CredentialsFileShape;
+  const obj = parseCredentialsFile(filePath, readFile);
   const authToken = readStringField(obj, "auth_token", filePath);
   const cfClientId = readStringField(obj, "cf_client_id", filePath);
   const cfClientSecret = readStringField(obj, "cf_client_secret", filePath);
 
-  const overriddenEnv: string[] = [];
-  if (env.MUNIN_AUTH_TOKEN) overriddenEnv.push("MUNIN_AUTH_TOKEN");
-  if (env.MUNIN_CF_CLIENT_ID) overriddenEnv.push("MUNIN_CF_CLIENT_ID");
-  if (env.MUNIN_CF_CLIENT_SECRET) overriddenEnv.push("MUNIN_CF_CLIENT_SECRET");
-  if (overriddenEnv.length > 0) {
-    log(
-      `MUNIN_CREDENTIALS_FILE is set; ignoring inline env vars: ${overriddenEnv.join(", ")}`,
-    );
-  }
-
+  warnOverriddenEnvVars(env, log);
   log(`Credentials loaded from file: ${filePath}`);
 
   return { authToken, cfClientId, cfClientSecret };

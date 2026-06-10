@@ -174,30 +174,92 @@ export function trackedStatusRowToEntry(row: TrackedStatusRow): Entry {
   };
 }
 
-export function assessTrackedStatus(row: TrackedStatusRow): TrackedStatusAssessment {
-  const maintenanceItems: MaintenanceItem[] = [];
+function resolveLifecycle(
+  row: TrackedStatusRow,
+  maintenanceItems: MaintenanceItem[],
+): string {
   const tags = parseTags(row.tags);
   const { canonical } = canonicalizeTags(tags);
   const lifecycleTags = getLifecycleTags(canonical);
 
-  let lifecycle: string;
   if (lifecycleTags.length === 0) {
-    lifecycle = "uncategorized";
     maintenanceItems.push({
       namespace: row.namespace,
       issue: "missing_lifecycle",
       suggestion: `Status has no lifecycle tag. Add one of: ${[...LIFECYCLE_TAGS].join(", ")}.`,
     });
-  } else if (lifecycleTags.length > 1) {
-    lifecycle = lifecycleTags[0];
+    return "uncategorized";
+  }
+  if (lifecycleTags.length > 1) {
     maintenanceItems.push({
       namespace: row.namespace,
       issue: "conflicting_lifecycle",
       suggestion: `Status has tags [${lifecycleTags.join(", ")}]. Use exactly one.`,
     });
-  } else {
-    lifecycle = lifecycleTags[0];
   }
+  return lifecycleTags[0];
+}
+
+function applyValidityAttention(
+  row: TrackedStatusRow,
+  maintenanceItems: MaintenanceItem[],
+): TrackedStatusAssessment["attentionReason"] | undefined {
+  if (!row.valid_until) return undefined;
+
+  if (isEntryExpired({ entry_type: "state", valid_until: row.valid_until })) {
+    maintenanceItems.push({
+      namespace: row.namespace,
+      issue: "expired",
+      suggestion: `Status expired at ${row.valid_until}. Refresh it or rewrite without valid_until if it should remain current.`,
+    });
+    return "expired";
+  }
+
+  if (isEntryExpiringSoon({ entry_type: "state", valid_until: row.valid_until })) {
+    const daysUntil = Math.max(1, Math.ceil(getDaysUntil(row.valid_until)));
+    maintenanceItems.push({
+      namespace: row.namespace,
+      issue: "expiring_soon",
+      suggestion: `Status expires in ${daysUntil} day${daysUntil === 1 ? "" : "s"} (${row.valid_until}). Refresh it if it should remain current.`,
+    });
+    return "expiring_soon";
+  }
+
+  return undefined;
+}
+
+function applyActiveLifecycleAttention(
+  row: TrackedStatusRow,
+  maintenanceItems: MaintenanceItem[],
+): TrackedStatusAssessment["attentionReason"] | undefined {
+  if (isStale(row.updated_at)) {
+    const daysSince = Math.floor((Date.now() - new Date(row.updated_at).getTime()) / (24 * 60 * 60 * 1000));
+    maintenanceItems.push({
+      namespace: row.namespace,
+      issue: "active_but_stale",
+      suggestion: `Last updated ${daysSince} days ago. Update status or change lifecycle to maintenance/archived.`,
+    });
+    return "active_but_stale";
+  }
+
+  const upcomingDate = findUpcomingEventDate(row.content, row.updated_at);
+  if (upcomingDate) {
+    const daysUntil = Math.ceil((new Date(upcomingDate + "T23:59:59Z").getTime() - Date.now()) / (24 * 60 * 60 * 1000));
+    const daysSinceUpdate = Math.floor((Date.now() - new Date(row.updated_at).getTime()) / (24 * 60 * 60 * 1000));
+    maintenanceItems.push({
+      namespace: row.namespace,
+      issue: "upcoming_event_stale",
+      suggestion: `Event date ${upcomingDate} is ${daysUntil} day${daysUntil === 1 ? "" : "s"} away but status was last updated ${daysSinceUpdate} days ago. Verify status is current.`,
+    });
+    return "upcoming_event_stale";
+  }
+
+  return undefined;
+}
+
+export function assessTrackedStatus(row: TrackedStatusRow): TrackedStatusAssessment {
+  const maintenanceItems: MaintenanceItem[] = [];
+  const lifecycle = resolveLifecycle(row, maintenanceItems);
 
   let needsAttention = false;
   let attentionReason: TrackedStatusAssessment["attentionReason"];
@@ -206,48 +268,15 @@ export function assessTrackedStatus(row: TrackedStatusRow): TrackedStatusAssessm
     attentionReason = "blocked";
   }
 
-  if (row.valid_until && isEntryExpired({ entry_type: "state", valid_until: row.valid_until })) {
+  const validityReason = applyValidityAttention(row, maintenanceItems);
+  if (validityReason) {
     needsAttention = true;
-    attentionReason = "expired";
-    maintenanceItems.push({
-      namespace: row.namespace,
-      issue: "expired",
-      suggestion: `Status expired at ${row.valid_until}. Refresh it or rewrite without valid_until if it should remain current.`,
-    });
-  } else if (row.valid_until && isEntryExpiringSoon({ entry_type: "state", valid_until: row.valid_until })) {
-    needsAttention = true;
-    attentionReason = "expiring_soon";
-    const daysUntil = Math.max(1, Math.ceil(getDaysUntil(row.valid_until)));
-    maintenanceItems.push({
-      namespace: row.namespace,
-      issue: "expiring_soon",
-      suggestion: `Status expires in ${daysUntil} day${daysUntil === 1 ? "" : "s"} (${row.valid_until}). Refresh it if it should remain current.`,
-    });
-  }
-
-  if (lifecycle === "active" && !needsAttention && isStale(row.updated_at)) {
-    needsAttention = true;
-    attentionReason = "active_but_stale";
-    const daysSince = Math.floor((Date.now() - new Date(row.updated_at).getTime()) / (24 * 60 * 60 * 1000));
-    maintenanceItems.push({
-      namespace: row.namespace,
-      issue: "active_but_stale",
-      suggestion: `Last updated ${daysSince} days ago. Update status or change lifecycle to maintenance/archived.`,
-    });
-  }
-
-  if (lifecycle === "active" && !needsAttention) {
-    const upcomingDate = findUpcomingEventDate(row.content, row.updated_at);
-    if (upcomingDate) {
+    attentionReason = validityReason;
+  } else if (lifecycle === "active") {
+    const activeReason = applyActiveLifecycleAttention(row, maintenanceItems);
+    if (activeReason) {
       needsAttention = true;
-      attentionReason = "upcoming_event_stale";
-      const daysUntil = Math.ceil((new Date(upcomingDate + "T23:59:59Z").getTime() - Date.now()) / (24 * 60 * 60 * 1000));
-      const daysSinceUpdate = Math.floor((Date.now() - new Date(row.updated_at).getTime()) / (24 * 60 * 60 * 1000));
-      maintenanceItems.push({
-        namespace: row.namespace,
-        issue: "upcoming_event_stale",
-        suggestion: `Event date ${upcomingDate} is ${daysUntil} day${daysUntil === 1 ? "" : "s"} away but status was last updated ${daysSinceUpdate} days ago. Verify status is current.`,
-      });
+      attentionReason = activeReason;
     }
   }
 
@@ -271,6 +300,79 @@ export function getTrackedStatusAssessments(db: Database.Database): Map<string, 
   return new Map(assessments.map((assessment) => [assessment.entry.id, assessment]));
 }
 
+// --- Shared predicates used by both getQueryHeuristicScore and getQueryExplainReasons ---
+
+export function isTrackedStatusEntry(entry: Entry): boolean {
+  return isTrackedNamespace(entry.namespace) && entry.key === "status";
+}
+
+export function isPeopleProfileEntry(entry: Entry): boolean {
+  return entry.namespace.startsWith("people/") && entry.key === "profile";
+}
+
+export function isMetaConventionsEntry(entry: Entry): boolean {
+  return entry.namespace === "meta/conventions" && entry.key === "conventions";
+}
+
+export function isMetaReferenceIndexEntry(entry: Entry): boolean {
+  return entry.namespace === "meta" && entry.key === "reference-index";
+}
+
+// --- Score segment helpers ---
+
+function scoreTrackedStatusEntry(queryLower: string, orientationQuery: boolean, triageQuery: boolean): number {
+  let s = 20;
+  if (queryMentionsAny(queryLower, ["active", "work", "blocker", "blockers", "next", "steps", "project"])) s += 4;
+  if (orientationQuery) s += 2;
+  if (triageQuery) s += 6;
+  return s;
+}
+
+function scorePeopleProfileEntry(queryLower: string): number {
+  let s = 18;
+  if (queryMentionsAny(queryLower, ["personal", "profile", "collaboration", "style", "preference", "preferences", "context"])) s += 10;
+  if (queryMentionsAny(queryLower, ["magnus", "working on", "what should i know"])) s += 12;
+  return s;
+}
+
+function scoreStatusTagPenalties(tags: string[]): number {
+  let s = 0;
+  if (tags.includes("archived")) s -= 12;
+  if (tags.includes("completed")) s -= 8;
+  if (tags.includes("stopped")) s -= 8;
+  return s;
+}
+
+function scoreMetaConventionsEntry(queryLower: string): number {
+  let s = 16;
+  if (queryMentionsAny(queryLower, ["convention", "handshake", "cas", "lifecycle", "write protocol"])) s += 8;
+  return s;
+}
+
+function scoreMetaReferenceIndexEntry(orientationQuery: boolean): number {
+  return orientationQuery ? 28 : 10;
+}
+
+function scoreLogEntry(triageQuery: boolean): number {
+  return triageQuery ? -9 : -3;
+}
+
+function scoreTasksNamespace(triageQuery: boolean): number {
+  return triageQuery ? -22 : -8;
+}
+
+function scoreTriageTrackedStatus(trackedStatus: TrackedStatusAssessment): number {
+  if (trackedStatus.lifecycle === "blocked") return 36;
+  if (trackedStatus.needsAttention) {
+    let s = 28;
+    if (trackedStatus.attentionReason === "upcoming_event_stale") s += 4;
+    if (trackedStatus.attentionReason === "active_but_stale") s += 2;
+    return s;
+  }
+  if (trackedStatus.lifecycle === "active") return -8;
+  return 0;
+}
+
 export function getQueryHeuristicScore(
   entry: Entry,
   queryLower: string,
@@ -283,79 +385,16 @@ export function getQueryHeuristicScore(
   const trackedStatus = trackedStatuses?.get(entry.id);
 
   if (entry.entry_type === "state") score += 6;
-
-  if (isTrackedNamespace(entry.namespace) && entry.key === "status") {
-    score += 20;
-    if (queryMentionsAny(queryLower, ["active", "work", "blocker", "blockers", "next", "steps", "project"])) {
-      score += 4;
-    }
-    if (orientationQuery) {
-      score += 2;
-    }
-    if (triageQuery) {
-      score += 6;
-    }
-  }
-
-  if (entry.namespace.startsWith("people/") && entry.key === "profile") {
-    score += 18;
-    if (queryMentionsAny(queryLower, ["personal", "profile", "collaboration", "style", "preference", "preferences", "context"])) {
-      score += 10;
-    }
-    if (queryMentionsAny(queryLower, ["magnus", "working on", "what should i know"])) {
-      score += 12;
-    }
-  }
-
-  if (entry.namespace === "meta/conventions" && entry.key === "conventions") {
-    score += 16;
-    if (queryMentionsAny(queryLower, ["convention", "handshake", "cas", "lifecycle", "write protocol"])) {
-      score += 8;
-    }
-  }
-
-  if (entry.namespace === "meta" && entry.key === "reference-index") {
-    score += 10;
-    if (orientationQuery) {
-      score += 18;
-    }
-  }
-
-  if (entry.entry_type === "log") {
-    score -= 3;
-    if (triageQuery) score -= 6;
-  }
-
-  if (looksLikeTombstone(entry.content)) {
-    score -= 30;
-  }
-
-  if (entry.key === "status") {
-    if (tags.includes("archived")) score -= 12;
-    if (tags.includes("completed")) score -= 8;
-    if (tags.includes("stopped")) score -= 8;
-  }
-
-  if (entry.namespace.startsWith("tasks/")) {
-    score -= 8;
-    if (triageQuery) score -= 14;
-  }
-
-  if (triageQuery && entry.key === "index") {
-    score -= 10;
-  }
-
-  if (triageQuery && trackedStatus) {
-    if (trackedStatus.lifecycle === "blocked") {
-      score += 36;
-    } else if (trackedStatus.needsAttention) {
-      score += 28;
-      if (trackedStatus.attentionReason === "upcoming_event_stale") score += 4;
-      if (trackedStatus.attentionReason === "active_but_stale") score += 2;
-    } else if (trackedStatus.lifecycle === "active") {
-      score -= 8;
-    }
-  }
+  if (isTrackedStatusEntry(entry)) score += scoreTrackedStatusEntry(queryLower, orientationQuery, triageQuery);
+  if (isPeopleProfileEntry(entry)) score += scorePeopleProfileEntry(queryLower);
+  if (isMetaConventionsEntry(entry)) score += scoreMetaConventionsEntry(queryLower);
+  if (isMetaReferenceIndexEntry(entry)) score += scoreMetaReferenceIndexEntry(orientationQuery);
+  if (entry.entry_type === "log") score += scoreLogEntry(triageQuery);
+  if (looksLikeTombstone(entry.content)) score -= 30;
+  if (entry.key === "status") score += scoreStatusTagPenalties(tags);
+  if (entry.namespace.startsWith("tasks/")) score += scoreTasksNamespace(triageQuery);
+  if (triageQuery && entry.key === "index") score -= 10;
+  if (triageQuery && trackedStatus) score += scoreTriageTrackedStatus(trackedStatus);
 
   return score;
 }
@@ -486,34 +525,58 @@ export function resolveSearchRecencyWeight(params: QueryParams): { ok: true; val
   return { ok: true, value: params.search_recency_weight };
 }
 
+function findMatchedQueryTerm(entry: Entry, queryLower: string): string | undefined {
+  const queryTerms = queryLower
+    .split(/[^a-z0-9_-]+/i)
+    .map((term) => term.trim())
+    .filter((term) => term.length >= 4 && !RELAXED_QUERY_STOPWORDS.has(term));
+  const contentLower = entry.content.toLowerCase();
+  const namespaceLower = entry.namespace.toLowerCase();
+  const keyLower = entry.key?.toLowerCase() ?? "";
+  return queryTerms.find(
+    (term) => contentLower.includes(term) || namespaceLower.includes(term) || keyLower.includes(term),
+  );
+}
+
+function explainMatchSignals(match: NonNullable<QueryResult["match"]>): string[] {
+  const out: string[] = [];
+  if (match.lexical_rank !== undefined) out.push("matched lexical terms");
+  if (match.semantic_rank !== undefined) out.push("matched semantic similarity");
+  if (match.hybrid_score !== undefined && match.lexical_rank !== undefined && match.semantic_rank !== undefined) {
+    out.push("combined lexical and semantic signals");
+  }
+  return out;
+}
+
+function explainEntryClassification(
+  entry: Entry,
+  trackedStatus: TrackedStatusAssessment | undefined,
+  match: NonNullable<QueryResult["match"]>,
+): string[] {
+  const out: string[] = [];
+  if (isTrackedStatusEntry(entry)) out.push("tracked status");
+  if (trackedStatus?.lifecycle === "blocked") out.push("blocked item");
+  else if (trackedStatus?.needsAttention) out.push("needs attention");
+  if (isPeopleProfileEntry(entry)) out.push("profile entry");
+  if (isMetaConventionsEntry(entry)) out.push("conventions reference");
+  if (isMetaReferenceIndexEntry(entry)) out.push("reference index");
+  if (match.freshness_score !== undefined && match.freshness_score >= 0.5) out.push("recently updated");
+  if (isEntryExpired(entry)) out.push("expired entry included on request");
+  return out;
+}
+
 export function getQueryExplainReasons(
   entry: Entry,
   queryLower: string,
   trackedStatus: TrackedStatusAssessment | undefined,
   match: NonNullable<QueryResult["match"]>,
 ): string[] {
-  const reasons: string[] = [];
+  const reasons = [
+    ...explainMatchSignals(match),
+    ...explainEntryClassification(entry, trackedStatus, match),
+  ];
 
-  if (match.lexical_rank !== undefined) reasons.push("matched lexical terms");
-  if (match.semantic_rank !== undefined) reasons.push("matched semantic similarity");
-  if (match.hybrid_score !== undefined && match.lexical_rank !== undefined && match.semantic_rank !== undefined) {
-    reasons.push("combined lexical and semantic signals");
-  }
-  if (isTrackedNamespace(entry.namespace) && entry.key === "status") reasons.push("tracked status");
-  if (trackedStatus?.lifecycle === "blocked") reasons.push("blocked item");
-  else if (trackedStatus?.needsAttention) reasons.push("needs attention");
-  if (entry.namespace.startsWith("people/") && entry.key === "profile") reasons.push("profile entry");
-  if (entry.namespace === "meta/conventions" && entry.key === "conventions") reasons.push("conventions reference");
-  if (entry.namespace === "meta" && entry.key === "reference-index") reasons.push("reference index");
-  if (match.freshness_score !== undefined && match.freshness_score >= 0.5) reasons.push("recently updated");
-  if (isEntryExpired(entry)) reasons.push("expired entry included on request");
-
-  const queryTerms = queryLower
-    .split(/[^a-z0-9_-]+/i)
-    .map((term) => term.trim())
-    .filter((term) => term.length >= 4 && !RELAXED_QUERY_STOPWORDS.has(term));
-  const contentLower = entry.content.toLowerCase();
-  const matchedTerm = queryTerms.find((term) => contentLower.includes(term) || entry.namespace.toLowerCase().includes(term) || (entry.key?.toLowerCase().includes(term) ?? false));
+  const matchedTerm = findMatchedQueryTerm(entry, queryLower);
   if (matchedTerm) reasons.push(`matched term: ${matchedTerm}`);
 
   return [...new Set(reasons)];
