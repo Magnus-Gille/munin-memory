@@ -26,6 +26,11 @@ export default tseslint.config(
       "@typescript-eslint/no-floating-promises": "error",
       "@typescript-eslint/no-misused-promises": "error",
       "@typescript-eslint/await-thenable": "error",
+      // Complexity backstop, not a style preference: the ceiling sits above
+      // every current function (max 73 after the 2026-06 dispatcher split,
+      // which removed a cx-536 switch). It exists solely to stop a new
+      // monster function from accreting unnoticed. Refactor, don't raise.
+      "complexity": ["error", 80],
     },
   },
 );

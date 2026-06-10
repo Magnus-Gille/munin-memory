@@ -33,6 +33,7 @@
     "admin": "tsx src/admin-cli.ts",
     "dev": "tsx watch src/index.ts",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
     "benchmark": "MUNIN_BENCHMARK=true vitest run tests/benchmark.test.ts",
     "benchmark:ci-gate": "tsx benchmark/ci-gate.ts",
