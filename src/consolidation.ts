@@ -271,6 +271,211 @@ export async function processConsolidationBatch(): Promise<void> {
 
 // --- Core consolidation logic ---
 
+function makeRunResult(
+  namespace: string,
+  overrides: Partial<ConsolidationRunResult>,
+): ConsolidationRunResult {
+  return {
+    namespace,
+    logs_processed: 0,
+    synthesis_model: config.model,
+    token_count: null,
+    duration_ms: 0,
+    cross_references_found: 0,
+    orphans_discovered: 0,
+    ...overrides,
+  };
+}
+
+// Step 0 helper: returns an access_denied result when ctx blocks this namespace,
+// or null when the caller may proceed.
+function checkAccessGuard(
+  db: Database.Database,
+  namespace: string,
+  ctx: AccessContext,
+): ConsolidationRunResult | null {
+  const sourceFloor = resolveNamespaceClassificationFloor(db, namespace);
+  if (!canRead(ctx, namespace) || !classificationAllowed(sourceFloor, getContextMaxClassification(ctx))) {
+    return makeRunResult(namespace, { error: "access_denied" });
+  }
+  return null;
+}
+
+// Step 2 helper: reads the current status and synthesis state entries.
+function readExistingStateEntries(
+  db: Database.Database,
+  namespace: string,
+): { existingStatus: { content: string; tags: string } | undefined; existingSynthesis: { content: string; tags: string } | undefined } {
+  const existingStatus = db
+    .prepare("SELECT content, tags FROM entries WHERE namespace = ? AND key = 'status' AND entry_type = 'state'")
+    .get(namespace) as { content: string; tags: string } | undefined;
+
+  const existingSynthesis = db
+    .prepare("SELECT content, tags FROM entries WHERE namespace = ? AND key = 'synthesis' AND entry_type = 'state'")
+    .get(namespace) as { content: string; tags: string } | undefined;
+
+  return { existingStatus, existingSynthesis };
+}
+
+interface RefDiscoveryResult {
+  mergedRefs: SynthesisResult["cross_references"];
+  scannerOrphans: SynthesisResult["cross_references"];
+}
+
+// Step 5 helper: runs the orphan scanner, merges with LLM refs, applies the
+// cross-zone chokepoint, and emits the scanner diagnostic log.
+function discoverAndFilterRefs(
+  db: Database.Database,
+  namespace: string,
+  logs: Entry[],
+  llmRefs: SynthesisResult["cross_references"],
+  ctx?: AccessContext,
+): RefDiscoveryResult {
+  // ctx is threaded so the scanner prunes out-of-zone targets BEFORE reading
+  // their state content (not just at the chokepoint below).
+  const scanner = discoverOrphanedReferences(db, namespace, logs, ctx);
+  const scannerOrphans = scanner.orphans;
+  // Merge first so the LLM-vs-scanner collision diagnostic reflects only the
+  // merge, then apply the authoritative cross-zone chokepoint: drop any ref
+  // (LLM- or scanner-sourced) that points above the source floor or past the
+  // requester's ceiling, audit-logging each block.
+  const merged = mergeCrossReferences(llmRefs, scannerOrphans);
+  const droppedByLlmMerge = scannerOrphans.length - (merged.length - llmRefs.length);
+  const mergedRefs = filterCrossZoneRefs(db, namespace, merged, ctx);
+  const droppedByCrossZone = merged.length - mergedRefs.length;
+
+  if (scanner.diagnostics.candidates_above_threshold > 0 || droppedByCrossZone > 0) {
+    console.log(
+      `Scanner[${namespace}]: targets=${scanner.diagnostics.targets_considered} ` +
+        `candidates=${scanner.diagnostics.candidates_above_threshold} ` +
+        `dropped_reciprocal=${scanner.diagnostics.dropped_by_reciprocal} ` +
+        `dropped_llm_merge=${droppedByLlmMerge} ` +
+        `dropped_cross_zone=${droppedByCrossZone} ` +
+        `kept=${scannerOrphans.length - droppedByLlmMerge}`,
+    );
+  }
+
+  return { mergedRefs, scannerOrphans };
+}
+
+// Step 6 helper: secret-scans generated strings, then persists synthesis,
+// cross-references, and consolidation metadata. Returns a withheld result on
+// secret-scan failure, or a success result on clean write.
+function persistRunResults(
+  db: Database.Database,
+  namespace: string,
+  logs: Entry[],
+  result: SynthesisResult,
+  mergedRefs: SynthesisResult["cross_references"],
+  scannerOrphans: SynthesisResult["cross_references"],
+  response: ChatCompletionResponse,
+  metadata: ReturnType<typeof getConsolidationMetadata>,
+  durationMs: number,
+): ConsolidationRunResult {
+  // Backstop: re-scan EVERY model-produced string that will be persisted —
+  // status_content AND every cross-reference context (both are surfaced to the
+  // owner) — for secrets before writing anything. Untrusted log content flows
+  // through the model, so a poisoned run could surface a credential in either.
+  // If any field trips, withhold the WHOLE run: persist nothing, preserve the
+  // last-good synthesis, and do NOT advance the drain cursor (so the window is
+  // re-examined, not silently consumed). The circuit breaker bounds repeated
+  // failures. (security: synthesis poisoning)
+  const persistedModelStrings = [result.status_content, ...mergedRefs.map((r) => r.context ?? "")];
+  if (persistedModelStrings.some((s) => !scanForSecrets(s).valid)) {
+    console.warn(
+      `consolidation: run for "${namespace}" withheld — generated content failed the secret scan; ` +
+        `preserving the last-good synthesis and not advancing the cursor.`,
+    );
+    return makeRunResult(namespace, {
+      duration_ms: durationMs,
+      orphans_discovered: scannerOrphans.length,
+      error: "synthesis withheld: generated content failed the secret scan",
+    });
+  }
+
+  const lastLog = logs[logs.length - 1];
+  // Did the capped window leave more backlog? If so this run is one slice of
+  // a multi-run drain, and its refs are NOT an authoritative full set.
+  const moreRemain = hasMoreLogsAfter(db, namespace, lastLog.created_at, lastLog.id);
+  const draining = metadata?.drain_in_progress === 1 || moreRemain;
+
+  // Force-stamp the reserved provenance tag server-side, regardless of what the
+  // LLM proposed, so machine synthesis is always distinguishable and filterable
+  // from owner-authored facts on the primary read path (reinforces the
+  // constitutional data-not-commands rule). See decisions/letta-harvest.
+  const synthesisTags = [...new Set([...result.tags, "source:synthesis"])];
+  writeState(db, namespace, "synthesis", result.status_content, synthesisTags, "consolidation-worker");
+
+  const refRows = mergedRefs.map((ref) => ({
+    source_namespace: namespace,
+    target_namespace: ref.target_namespace,
+    reference_type: ref.reference_type,
+    context: ref.context,
+    confidence: ref.confidence,
+  }));
+  // While draining, accumulate refs (a partial window must not wipe refs found
+  // in earlier/later slices, #51 finding 3). Only a single complete run does
+  // an authoritative replace that can prune stale refs.
+  if (draining) {
+    addCrossReferences(db, namespace, refRows);
+  } else {
+    replaceCrossReferences(db, namespace, refRows);
+  }
+
+  upsertConsolidationMetadata(db, {
+    namespace,
+    last_consolidated_at: nowUTC(),
+    last_log_id: lastLog.id,
+    last_log_created_at: lastLog.created_at,
+    synthesis_model: config.model,
+    synthesis_token_count: response.usage?.completion_tokens ?? null,
+    run_duration_ms: durationMs,
+    drain_in_progress: moreRemain ? 1 : 0,
+  });
+
+  return {
+    namespace,
+    logs_processed: logs.length,
+    synthesis_model: config.model,
+    token_count: response.usage?.completion_tokens ?? null,
+    duration_ms: durationMs,
+    cross_references_found: mergedRefs.length,
+    orphans_discovered: scannerOrphans.length,
+  };
+}
+
+// Step 1 helper: reads the consolidation metadata and the pending log window.
+function readLogsWindow(
+  db: Database.Database,
+  namespace: string,
+): { metadata: ReturnType<typeof getConsolidationMetadata>; logs: Entry[] } {
+  const metadata = getConsolidationMetadata(db, namespace);
+  const logs = getLogsForConsolidation(
+    db,
+    namespace,
+    metadata?.last_log_created_at ?? null,
+    metadata?.last_log_id ?? null,
+    config.maxLogsPerRun,
+  );
+  return { metadata, logs };
+}
+
+// Steps 3–4 helper: dispatches the API call and parses the synthesis response.
+async function callAndParseSynthesis(
+  doCall: (prompt: string) => Promise<ChatCompletionResponse>,
+  prompt: string,
+): Promise<{ response: ChatCompletionResponse; result: SynthesisResult; durationMs: number }> {
+  const startTime = Date.now();
+  const response = await doCall(prompt);
+  const durationMs = Date.now() - startTime;
+  const text = response.choices?.[0]?.message?.content;
+  if (!text) {
+    throw new Error("Unexpected response format: no content in first choice");
+  }
+  const result = parseSynthesisResponse(text);
+  return { response, result, durationMs };
+}
+
 export async function consolidateNamespace(
   db: Database.Database,
   namespace: string,
@@ -281,55 +486,21 @@ export async function consolidateNamespace(
   // the tool path, never read a source whose own classification floor exceeds
   // the requester's ceiling — fail closed before touching its logs.
   if (ctx) {
-    const sourceFloor = resolveNamespaceClassificationFloor(db, namespace);
-    if (!canRead(ctx, namespace) || !classificationAllowed(sourceFloor, getContextMaxClassification(ctx))) {
-      return {
-        namespace,
-        logs_processed: 0,
-        synthesis_model: config.model,
-        token_count: null,
-        duration_ms: 0,
-        cross_references_found: 0,
-        orphans_discovered: 0,
-        error: "access_denied",
-      };
-    }
+    const denied = checkAccessGuard(db, namespace, ctx);
+    if (denied) return denied;
   }
 
   // Step 1: Read current state
-  const metadata = getConsolidationMetadata(db, namespace);
-  const sinceTimestamp = metadata?.last_log_created_at ?? null;
-  const sinceId = metadata?.last_log_id ?? null;
-  const logs = getLogsForConsolidation(
-    db,
-    namespace,
-    sinceTimestamp,
-    sinceId,
-    config.maxLogsPerRun,
-  );
+  const { metadata, logs } = readLogsWindow(db, namespace);
 
   if (logs.length === 0) {
-    return {
-      namespace,
-      logs_processed: 0,
-      synthesis_model: config.model,
-      token_count: null,
-      duration_ms: 0,
-      cross_references_found: 0,
-      orphans_discovered: 0,
-    };
+    return makeRunResult(namespace, {});
   }
 
   // Step 2: Read existing entries
-  const existingStatus = db
-    .prepare("SELECT content, tags FROM entries WHERE namespace = ? AND key = 'status' AND entry_type = 'state'")
-    .get(namespace) as { content: string; tags: string } | undefined;
+  const { existingStatus, existingSynthesis } = readExistingStateEntries(db, namespace);
 
-  const existingSynthesis = db
-    .prepare("SELECT content, tags FROM entries WHERE namespace = ? AND key = 'synthesis' AND entry_type = 'state'")
-    .get(namespace) as { content: string; tags: string } | undefined;
-
-  // Step 3: Build prompt and call API
+  // Step 3: Build prompt and resolve caller
   const prompt = buildSynthesisPrompt(
     namespace,
     existingStatus?.content ?? null,
@@ -339,145 +510,26 @@ export async function consolidateNamespace(
 
   const doCall = callApi ?? callOpenRouter;
   if (!callApi && !apiKey) {
-    return {
-      namespace,
-      logs_processed: 0,
-      synthesis_model: config.model,
-      token_count: null,
-      duration_ms: 0,
-      cross_references_found: 0,
-      orphans_discovered: 0,
-      error: "No API key available — consolidation not initialized",
-    };
+    return makeRunResult(namespace, { error: "No API key available — consolidation not initialized" });
   }
 
   const startTime = Date.now();
 
   try {
-    const response = await doCall(prompt);
-    const durationMs = Date.now() - startTime;
-
-    // Step 4: Parse response
-    const text = response.choices?.[0]?.message?.content;
-    if (!text) {
-      throw new Error("Unexpected response format: no content in first choice");
-    }
-    const result = parseSynthesisResponse(text);
+    // Steps 3–4: call API and parse response
+    const { response, result, durationMs } = await callAndParseSynthesis(doCall, prompt);
 
     // Step 5: Discover orphaned cross-references via scanner, merge with LLM refs.
-    // ctx is threaded so the scanner prunes out-of-zone targets BEFORE reading
-    // their state content (not just at the chokepoint below).
-    const scanner = discoverOrphanedReferences(db, namespace, logs, ctx);
-    const scannerOrphans = scanner.orphans;
-    // Merge first so the LLM-vs-scanner collision diagnostic reflects only the
-    // merge, then apply the authoritative cross-zone chokepoint: drop any ref
-    // (LLM- or scanner-sourced) that points above the source floor or past the
-    // requester's ceiling, audit-logging each block.
-    const merged = mergeCrossReferences(result.cross_references, scannerOrphans);
-    const droppedByLlmMerge = scannerOrphans.length - (merged.length - result.cross_references.length);
-    const mergedRefs = filterCrossZoneRefs(db, namespace, merged, ctx);
-    const droppedByCrossZone = merged.length - mergedRefs.length;
-
-    if (scanner.diagnostics.candidates_above_threshold > 0 || droppedByCrossZone > 0) {
-      console.log(
-        `Scanner[${namespace}]: targets=${scanner.diagnostics.targets_considered} ` +
-          `candidates=${scanner.diagnostics.candidates_above_threshold} ` +
-          `dropped_reciprocal=${scanner.diagnostics.dropped_by_reciprocal} ` +
-          `dropped_llm_merge=${droppedByLlmMerge} ` +
-          `dropped_cross_zone=${droppedByCrossZone} ` +
-          `kept=${scannerOrphans.length - droppedByLlmMerge}`,
-      );
-    }
+    const { mergedRefs, scannerOrphans } = discoverAndFilterRefs(db, namespace, logs, result.cross_references, ctx);
 
     // Step 6: Write results
-    const lastLog = logs[logs.length - 1];
-
-    // Did the capped window leave more backlog? If so this run is one slice of
-    // a multi-run drain, and its refs are NOT an authoritative full set.
-    const moreRemain = hasMoreLogsAfter(db, namespace, lastLog.created_at, lastLog.id);
-    const draining = metadata?.drain_in_progress === 1 || moreRemain;
-
-    // Force-stamp the reserved provenance tag server-side, regardless of what the
-    // LLM proposed, so machine synthesis is always distinguishable and filterable
-    // from owner-authored facts on the primary read path (reinforces the
-    // constitutional data-not-commands rule). See decisions/letta-harvest.
-    // Backstop: re-scan EVERY model-produced string that will be persisted —
-    // status_content AND every cross-reference context (both are surfaced to the
-    // owner) — for secrets before writing anything. Untrusted log content flows
-    // through the model, so a poisoned run could surface a credential in either.
-    // If any field trips, withhold the WHOLE run: persist nothing, preserve the
-    // last-good synthesis, and do NOT advance the drain cursor (so the window is
-    // re-examined, not silently consumed). The circuit breaker bounds repeated
-    // failures. (security: synthesis poisoning)
-    const persistedModelStrings = [result.status_content, ...mergedRefs.map((r) => r.context ?? "")];
-    if (persistedModelStrings.some((s) => !scanForSecrets(s).valid)) {
-      console.warn(
-        `consolidation: run for "${namespace}" withheld — generated content failed the secret scan; ` +
-          `preserving the last-good synthesis and not advancing the cursor.`,
-      );
-      return {
-        namespace,
-        logs_processed: 0,
-        synthesis_model: config.model,
-        token_count: null,
-        duration_ms: durationMs,
-        cross_references_found: 0,
-        orphans_discovered: scannerOrphans.length,
-        error: "synthesis withheld: generated content failed the secret scan",
-      };
-    }
-
-    const synthesisTags = [...new Set([...result.tags, "source:synthesis"])];
-    writeState(db, namespace, "synthesis", result.status_content, synthesisTags, "consolidation-worker");
-
-    const refRows = mergedRefs.map((ref) => ({
-      source_namespace: namespace,
-      target_namespace: ref.target_namespace,
-      reference_type: ref.reference_type,
-      context: ref.context,
-      confidence: ref.confidence,
-    }));
-    // While draining, accumulate refs (a partial window must not wipe refs found
-    // in earlier/later slices, #51 finding 3). Only a single complete run does
-    // an authoritative replace that can prune stale refs.
-    if (draining) {
-      addCrossReferences(db, namespace, refRows);
-    } else {
-      replaceCrossReferences(db, namespace, refRows);
-    }
-
-    upsertConsolidationMetadata(db, {
-      namespace,
-      last_consolidated_at: nowUTC(),
-      last_log_id: lastLog.id,
-      last_log_created_at: lastLog.created_at,
-      synthesis_model: config.model,
-      synthesis_token_count: response.usage?.completion_tokens ?? null,
-      run_duration_ms: durationMs,
-      drain_in_progress: moreRemain ? 1 : 0,
-    });
-
-    return {
-      namespace,
-      logs_processed: logs.length,
-      synthesis_model: config.model,
-      token_count: response.usage?.completion_tokens ?? null,
-      duration_ms: durationMs,
-      cross_references_found: mergedRefs.length,
-      orphans_discovered: scannerOrphans.length,
-    };
+    return persistRunResults(db, namespace, logs, result, mergedRefs, scannerOrphans, response, metadata, durationMs);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return {
-      namespace,
-      logs_processed: 0,
-      synthesis_model: config.model,
-      token_count: null,
+    return makeRunResult(namespace, {
       duration_ms: Date.now() - startTime,
-      cross_references_found: 0,
-      orphans_discovered: 0,
       error: message,
-    };
+    });
   }
 }
 
@@ -833,7 +885,7 @@ const VALID_REFERENCE_TYPES: CrossReferenceType[] = [
   "feeds_into",
 ];
 
-export function parseSynthesisResponse(text: string): SynthesisResult {
+function extractJsonObject(text: string): Record<string, unknown> {
   // Find first { and last } to handle markdown code fences
   const firstBrace = text.indexOf("{");
   const lastBrace = text.lastIndexOf("}");
@@ -855,7 +907,31 @@ export function parseSynthesisResponse(text: string): SynthesisResult {
     throw new Error("Parsed JSON is not an object");
   }
 
-  const obj = parsed as Record<string, unknown>;
+  return parsed as Record<string, unknown>;
+}
+
+function validateCrossReferenceItem(ref: Record<string, unknown>, i: number): void {
+  if (typeof ref.target_namespace !== "string") {
+    throw new Error(`cross_references[${i}].target_namespace must be a string`);
+  }
+
+  if (!VALID_REFERENCE_TYPES.includes(ref.reference_type as CrossReferenceType)) {
+    throw new Error(
+      `cross_references[${i}].reference_type "${ref.reference_type}" is not valid. Must be one of: ${VALID_REFERENCE_TYPES.join(", ")}`,
+    );
+  }
+
+  if (typeof ref.context !== "string") {
+    throw new Error(`cross_references[${i}].context must be a string`);
+  }
+
+  if (typeof ref.confidence !== "number") {
+    throw new Error(`cross_references[${i}].confidence must be a number`);
+  }
+}
+
+export function parseSynthesisResponse(text: string): SynthesisResult {
+  const obj = extractJsonObject(text);
 
   // Validate status_content
   if (typeof obj.status_content !== "string" || obj.status_content.trim() === "") {
@@ -873,25 +949,7 @@ export function parseSynthesisResponse(text: string): SynthesisResult {
   }
 
   for (let i = 0; i < obj.cross_references.length; i++) {
-    const ref = obj.cross_references[i] as Record<string, unknown>;
-
-    if (typeof ref.target_namespace !== "string") {
-      throw new Error(`cross_references[${i}].target_namespace must be a string`);
-    }
-
-    if (!VALID_REFERENCE_TYPES.includes(ref.reference_type as CrossReferenceType)) {
-      throw new Error(
-        `cross_references[${i}].reference_type "${ref.reference_type}" is not valid. Must be one of: ${VALID_REFERENCE_TYPES.join(", ")}`,
-      );
-    }
-
-    if (typeof ref.context !== "string") {
-      throw new Error(`cross_references[${i}].context must be a string`);
-    }
-
-    if (typeof ref.confidence !== "number") {
-      throw new Error(`cross_references[${i}].confidence must be a number`);
-    }
+    validateCrossReferenceItem(obj.cross_references[i] as Record<string, unknown>, i);
   }
 
   return {

@@ -112,8 +112,13 @@ npm run build    # Compiles TypeScript to dist/
 
 ```bash
 npm test         # Runs vitest (single run)
+npm run test:coverage  # Suite + V8 coverage, enforces ratchet floors in vitest.config.ts
 npm run test:watch  # Runs vitest in watch mode
 ```
+
+Coverage thresholds (statements/branches/functions/lines) are ratchet floors in
+`vitest.config.ts`, set just below measured coverage. Raise them when coverage
+rises; never lower them to admit a regression.
 
 For substantive code changes, default to red/green TDD: write the failing test first, confirm it fails, then implement until it passes. Skip for refactors with no behavior change, config tweaks, and trivial fixes.
 
@@ -125,14 +130,15 @@ npm run typecheck       # tsc --noEmit over src/ + tests/ (tsconfig.test.json)
 npm run typecheck:tools # tsc --noEmit over benchmark/ + scripts/ (tsconfig.tools.json)
 ```
 
-CI gates every push/PR on `lint`, `typecheck`, `typecheck:tools`, `build`, `test`, and the
-benchmark regression gate, across a Node 20 + 22 matrix (`.github/workflows/ci.yml`). CodeQL
-(`security-extended`) and Dependabot run separately.
+CI gates every push/PR on `lint`, `typecheck`, `typecheck:tools`, `build`, `test:coverage`
+(suite + coverage ratchet floors), and the benchmark regression gate, across a Node 20 + 22
+matrix (`.github/workflows/ci.yml`). CodeQL (`security-extended`) and Dependabot run separately.
 
 - **ESLint is deliberately minimal** — not a style/formatting config. `eslint.config.js` enables
   only high-signal, type-aware rules (`no-floating-promises`, `no-misused-promises`,
   `await-thenable`) over `src/`, because a dropped Promise in the worker/DB/OAuth paths is a real
-  corruption/race risk. Prettier is intentionally omitted. Tests are type-checked, not linted.
+  corruption/race risk, plus a `complexity` backstop (`error` at 80) that only fires on a new
+  monster function. Prettier is intentionally omitted. Tests are type-checked, not linted.
 - `tsconfig.json` runs `strict` plus `noUnusedLocals` / `noUnusedParameters` /
   `noFallthroughCasesInSwitch`. Mark intentional fire-and-forget Promises with `void`.
 

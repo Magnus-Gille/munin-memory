@@ -34,7 +34,10 @@ jobs:
       - run: npm run typecheck
       - run: npm run typecheck:tools
       - run: npm run build
-      - run: npm test
+      # Runs the full suite with V8 coverage and enforces the ratchet floors
+      # in vitest.config.ts (statements/branches/functions/lines). Raise the
+      # floors when coverage rises; never lower them to admit a regression.
+      - run: npm run test:coverage
       # Retrieval regression gate: deterministic raw/lexical benchmark over a
       # committed synthetic corpus, compared to benchmark/ci-gate/baseline.json.
       # Fails the build if recall/ranking regresses. Re-bless an intentional

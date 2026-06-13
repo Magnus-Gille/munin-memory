@@ -10,13 +10,18 @@ import {
   syncCommitmentsForEntry,
   listCommitments,
   queryEntries,
+  queryEntriesByFilter,
+  filterIdsMatchingFts,
   listNamespaces,
   listNamespaceContents,
   previewDelete,
   executeDelete,
   getOtherKeysInNamespace,
+  getNamespaceStateEntries,
+  getNamespaceTagVocabulary,
   getCompletedTaskNamespaces,
   getTrackedStatuses,
+  getAuditHistoryPage,
   rebuildFTS,
   logToolCall,
   getToolCallAggregates,
@@ -895,5 +900,229 @@ describe("getToolCallAggregates p95_response_size_bytes", () => {
       "tool_name",
       "total_calls",
     ]);
+  });
+});
+
+describe("queryEntriesByFilter (no FTS)", () => {
+  beforeEach(() => {
+    writeState(db, "projects/a", "status", "active project alpha", ["active"]);
+    writeState(db, "projects/a", "notes", "some notes", ["decision"]);
+    writeState(db, "projects/b", "status", "blocked beta", ["blocked"]);
+    appendLog(db, "projects/a", "log entry one", ["milestone"]);
+    writeState(db, "clients/acme", "status", "client status", ["active"]);
+  });
+
+  it("returns all entries when no filters given", () => {
+    const results = queryEntriesByFilter(db, {});
+    expect(results.length).toBeGreaterThanOrEqual(5);
+  });
+
+  it("filters by exact namespace", () => {
+    const results = queryEntriesByFilter(db, { namespace: "projects/a" });
+    expect(results.every((r) => r.namespace === "projects/a")).toBe(true);
+    expect(results.length).toBe(3); // status, notes, log
+  });
+
+  it("filters by namespace prefix (trailing slash)", () => {
+    const results = queryEntriesByFilter(db, { namespace: "projects/" });
+    expect(results.every((r) => r.namespace.startsWith("projects/"))).toBe(true);
+    expect(results.length).toBe(4); // projects/a and projects/b entries
+  });
+
+  it("filters by entry type", () => {
+    const results = queryEntriesByFilter(db, { entryType: "log" });
+    expect(results.every((r) => r.entry_type === "log")).toBe(true);
+    expect(results.length).toBe(1);
+  });
+
+  it("filters by tag", () => {
+    const results = queryEntriesByFilter(db, { tags: ["active"] });
+    for (const r of results) {
+      const tags = JSON.parse(r.tags) as string[];
+      expect(tags).toContain("active");
+    }
+    expect(results.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("respects limit", () => {
+    const results = queryEntriesByFilter(db, { limit: 2 });
+    expect(results.length).toBeLessThanOrEqual(2);
+  });
+
+  it("clamps limit to minimum 1 and maximum 50", () => {
+    const zeroLimit = queryEntriesByFilter(db, { limit: 0 });
+    expect(zeroLimit.length).toBeGreaterThanOrEqual(1);
+    const bigLimit = queryEntriesByFilter(db, { limit: 1000 });
+    expect(bigLimit.length).toBeLessThanOrEqual(50);
+  });
+
+  it("filters by since and until timestamps", () => {
+    const before = new Date(Date.now() - 1000).toISOString();
+    const after = new Date(Date.now() + 1000).toISOString();
+    const results = queryEntriesByFilter(db, { since: before, until: after });
+    expect(results.length).toBeGreaterThan(0);
+  });
+
+  it("returns expired state entries when includeExpired is true", () => {
+    const past = new Date(Date.now() - 5000).toISOString();
+    writeState(db, "projects/a", "expiring", "will expire", [], "default", undefined, past);
+    const withExpired = queryEntriesByFilter(db, { includeExpired: true, namespace: "projects/a" });
+    const withoutExpired = queryEntriesByFilter(db, { includeExpired: false, namespace: "projects/a" });
+    expect(withExpired.length).toBeGreaterThan(withoutExpired.length);
+  });
+
+  it("combines namespace prefix with entry type", () => {
+    const results = queryEntriesByFilter(db, { namespace: "projects/", entryType: "state" });
+    expect(results.every((r) => r.namespace.startsWith("projects/") && r.entry_type === "state")).toBe(true);
+  });
+});
+
+describe("filterIdsMatchingFts", () => {
+  beforeEach(() => {
+    writeState(db, "projects/alpha", "status", "SQLite full-text search", ["active"]);
+    writeState(db, "projects/beta", "status", "Raspberry Pi deployment target", ["active"]);
+  });
+
+  it("returns matching IDs from the given set", () => {
+    const alphaId = (db.prepare("SELECT id FROM entries WHERE namespace='projects/alpha'").get() as { id: string }).id;
+    const betaId = (db.prepare("SELECT id FROM entries WHERE namespace='projects/beta'").get() as { id: string }).id;
+
+    const matched = filterIdsMatchingFts(db, "SQLite", [alphaId, betaId]);
+    expect(matched.has(alphaId)).toBe(true);
+    expect(matched.has(betaId)).toBe(false);
+  });
+
+  it("returns empty set when ids array is empty", () => {
+    const result = filterIdsMatchingFts(db, "SQLite", []);
+    expect(result.size).toBe(0);
+  });
+
+  it("returns empty set when no ids match", () => {
+    const alphaId = (db.prepare("SELECT id FROM entries WHERE namespace='projects/alpha'").get() as { id: string }).id;
+    const result = filterIdsMatchingFts(db, "nonexistent-term-xyz", [alphaId]);
+    expect(result.size).toBe(0);
+  });
+});
+
+describe("getAuditHistoryPage", () => {
+  beforeEach(() => {
+    writeState(db, "projects/test", "status", "v1", []);
+    writeState(db, "projects/test", "status", "v2", []);
+    appendLog(db, "projects/other", "event", []);
+  });
+
+  it("returns entries without filters", () => {
+    const page = getAuditHistoryPage(db, {});
+    expect(page.entries.length).toBeGreaterThan(0);
+    expect(page.hasMore).toBe(false);
+  });
+
+  it("filters by exact namespace and includes child namespaces", () => {
+    writeState(db, "projects/test/sub", "notes", "subproject notes", []);
+    const page = getAuditHistoryPage(db, { namespace: "projects/test" });
+    // Should include projects/test AND projects/test/sub entries
+    expect(page.entries.every((e) =>
+      e.namespace === "projects/test" || e.namespace.startsWith("projects/test/"),
+    )).toBe(true);
+    expect(page.entries.length).toBeGreaterThan(0);
+  });
+
+  it("filters by namespace prefix (trailing slash) — covers the endsWith('/') branch", () => {
+    const page = getAuditHistoryPage(db, { namespace: "projects/" });
+    expect(page.entries.every((e) => e.namespace.startsWith("projects/"))).toBe(true);
+    expect(page.entries.length).toBeGreaterThan(0);
+  });
+
+  it("filters by since timestamp", () => {
+    const since = new Date(Date.now() - 1000).toISOString();
+    const page = getAuditHistoryPage(db, { since });
+    expect(page.entries.length).toBeGreaterThan(0);
+  });
+
+  it("filters by action type", () => {
+    const page = getAuditHistoryPage(db, { action: "write" });
+    expect(page.entries.every((e) => e.action === "write")).toBe(true);
+  });
+
+  it("throws on invalid since timestamp", () => {
+    expect(() => getAuditHistoryPage(db, { since: "not-a-date" })).toThrow(/Invalid "since"/);
+  });
+
+  it("throws on non-integer cursor", () => {
+    expect(() => getAuditHistoryPage(db, { cursor: 1.5 })).toThrow(/Invalid "cursor"/);
+  });
+
+  it("throws on negative cursor", () => {
+    expect(() => getAuditHistoryPage(db, { cursor: -1 })).toThrow(/Invalid "cursor"/);
+  });
+
+  it("supports ascending cursor pagination", () => {
+    // Insert enough entries to span multiple pages
+    for (let i = 0; i < 5; i++) {
+      writeState(db, "projects/paginate", `key-${i}`, `content-${i}`, []);
+    }
+    const first = getAuditHistoryPage(db, { limit: 3, cursor: 0 });
+    expect(first.entries.length).toBe(3);
+    // With cursor: ascending order, nextCursor advances
+    const second = getAuditHistoryPage(db, { limit: 3, cursor: first.nextCursor! });
+    expect(second.entries.length).toBeGreaterThanOrEqual(1);
+    // IDs must be strictly increasing (ascending order)
+    const allIds = [...first.entries, ...second.entries].map((e) => e.id);
+    for (let i = 1; i < allIds.length; i++) {
+      expect(allIds[i]).toBeGreaterThan(allIds[i - 1]);
+    }
+  });
+
+  it("hasMore is true when more entries exist beyond limit", () => {
+    for (let i = 0; i < 5; i++) {
+      writeState(db, "projects/paginate", `k${i}`, `v${i}`, []);
+    }
+    const page = getAuditHistoryPage(db, { limit: 2 });
+    expect(page.hasMore).toBe(true);
+  });
+});
+
+describe("getNamespaceStateEntries", () => {
+  it("returns all state entries in a namespace ordered by key", () => {
+    writeState(db, "projects/ns-test", "status", "active", ["active"]);
+    writeState(db, "projects/ns-test", "arch", "microservices", []);
+    appendLog(db, "projects/ns-test", "some log", []);
+
+    const entries = getNamespaceStateEntries(db, "projects/ns-test");
+    expect(entries).toHaveLength(2);
+    expect(entries.map((e) => e.key)).toEqual(["arch", "status"]);
+    expect(entries.every((e) => e.entry_type === "state")).toBe(true);
+  });
+
+  it("excludes log entries", () => {
+    appendLog(db, "projects/log-only", "log1", []);
+    const entries = getNamespaceStateEntries(db, "projects/log-only");
+    expect(entries).toHaveLength(0);
+  });
+
+  it("returns empty array for nonexistent namespace", () => {
+    expect(getNamespaceStateEntries(db, "nonexistent/ns")).toEqual([]);
+  });
+});
+
+describe("getNamespaceTagVocabulary", () => {
+  it("returns unique tags from all state entries in namespace", () => {
+    writeState(db, "projects/vocab", "status", "active", ["active", "decision"]);
+    writeState(db, "projects/vocab", "arch", "notes", ["decision", "architecture"]);
+    appendLog(db, "projects/vocab", "log with tag", ["log-tag"]); // should be excluded
+
+    const vocab = getNamespaceTagVocabulary(db, "projects/vocab");
+    // Should include tags from state entries; the full set includes auto-added classification tags
+    expect(vocab).toContain("active");
+    expect(vocab).toContain("decision");
+    expect(vocab).toContain("architecture");
+    // log-tag from log entry should NOT appear
+    expect(vocab).not.toContain("log-tag");
+    // Should be unique (no duplicates for "decision")
+    expect(vocab.filter((t) => t === "decision")).toHaveLength(1);
+  });
+
+  it("returns empty array for nonexistent namespace", () => {
+    expect(getNamespaceTagVocabulary(db, "nonexistent/ns")).toEqual([]);
   });
 });

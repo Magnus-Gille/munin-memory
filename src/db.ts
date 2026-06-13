@@ -1352,6 +1352,104 @@ function classificationInClause(levels: ClassificationLevel[]): string {
   return levels.map(() => "?").join(", ");
 }
 
+// Helpers for executeDelete / executeDeleteByClassification
+
+function cleanVecSingleEntry(db: Database.Database, sql: string, params: unknown[]): void {
+  const entry = db.prepare(sql).get(...params) as { id: string } | undefined;
+  if (entry) {
+    db.prepare("DELETE FROM entries_vec WHERE entry_id = ?").run(entry.id);
+  }
+}
+
+function cleanVecNamespace(db: Database.Database, sql: string, params: unknown[]): void {
+  const ids = db.prepare(sql).all(...params) as Array<{ id: string }>;
+  const deleteVec = db.prepare("DELETE FROM entries_vec WHERE entry_id = ?");
+  for (const { id } of ids) {
+    deleteVec.run(id);
+  }
+}
+
+function buildOwnerClause(allowGlobal: boolean, agentId: string): { clause: string; params: string[] } {
+  if (allowGlobal) return { clause: "", params: [] };
+  return { clause: " AND COALESCE(owner_principal_id, agent_id) = ?", params: [agentId] };
+}
+
+function deleteKeyClassified(
+  db: Database.Database,
+  now: string,
+  namespace: string,
+  key: string,
+  agentId: string,
+  allowGlobal: boolean,
+  placeholders: string,
+  visibleLevels: ClassificationLevel[],
+): number {
+  const owner = buildOwnerClause(allowGlobal, agentId);
+  const stateCond = `namespace = ? AND key = ? AND entry_type = 'state'${owner.clause} AND classification IN (${placeholders})`;
+  const selectParams = [namespace, key, ...owner.params, ...visibleLevels];
+  const entry = db.prepare(`SELECT id FROM entries WHERE ${stateCond}`).get(...selectParams) as { id: string } | undefined;
+  const result = db.prepare(`DELETE FROM entries WHERE ${stateCond}`).run(...selectParams);
+  if (result.changes > 0) {
+    insertAuditRow(db, now, agentId, "delete", namespace, key, null, entry?.id ?? null);
+  }
+  return result.changes;
+}
+
+function deleteNamespaceClassified(
+  db: Database.Database,
+  now: string,
+  namespace: string,
+  agentId: string,
+  allowGlobal: boolean,
+  placeholders: string,
+  visibleLevels: ClassificationLevel[],
+): number {
+  const owner = buildOwnerClause(allowGlobal, agentId);
+  const nsCond = `namespace = ?${owner.clause} AND classification IN (${placeholders})`;
+  const params = [namespace, ...owner.params, ...visibleLevels];
+  const result = db.prepare(`DELETE FROM entries WHERE ${nsCond}`).run(...params);
+  if (result.changes > 0) {
+    insertAuditRow(db, now, agentId, "namespace_delete", namespace, null, `deleted ${result.changes} entries (classification-scoped)`);
+  }
+  return result.changes;
+}
+
+function deleteKeySingle(
+  db: Database.Database,
+  now: string,
+  namespace: string,
+  key: string,
+  agentId: string,
+  allowGlobal: boolean,
+): number {
+  const owner = buildOwnerClause(allowGlobal, agentId);
+  const stateCond = `namespace = ? AND key = ? AND entry_type = 'state'${owner.clause}`;
+  const params = [namespace, key, ...owner.params];
+  const entry = db.prepare(`SELECT id FROM entries WHERE ${stateCond}`).get(...params) as { id: string } | undefined;
+  const result = db.prepare(`DELETE FROM entries WHERE ${stateCond}`).run(...params);
+  if (result.changes > 0) {
+    insertAuditRow(db, now, agentId, "delete", namespace, key, null, entry?.id ?? null);
+  }
+  return result.changes;
+}
+
+function deleteNamespaceSingle(
+  db: Database.Database,
+  now: string,
+  namespace: string,
+  agentId: string,
+  allowGlobal: boolean,
+): number {
+  const owner = buildOwnerClause(allowGlobal, agentId);
+  const nsCond = `namespace = ?${owner.clause}`;
+  const params = [namespace, ...owner.params];
+  const result = db.prepare(`DELETE FROM entries WHERE ${nsCond}`).run(...params);
+  if (result.changes > 0) {
+    insertAuditRow(db, now, agentId, "namespace_delete", namespace, null, `deleted ${result.changes} entries`);
+  }
+  return result.changes;
+}
+
 export function previewDelete(
   db: Database.Database,
   namespace: string,
@@ -1472,70 +1570,20 @@ export function executeDeleteByClassification(
   const txn = db.transaction(() => {
     // App-level vec cleanup (no SQL trigger — extension may not be loaded)
     if (_vecLoaded) {
+      const owner = buildOwnerClause(allowGlobalNamespaceDelete, agentId);
       if (key) {
-        const selectSql = allowGlobalNamespaceDelete
-          ? `SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND classification IN (${placeholders})`
-          : `SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND COALESCE(owner_principal_id, agent_id) = ? AND classification IN (${placeholders})`;
-        const selectParams = allowGlobalNamespaceDelete
-          ? [namespace, key, ...visibleLevels]
-          : [namespace, key, agentId, ...visibleLevels];
-        const entry = db.prepare(selectSql).get(...selectParams) as { id: string } | undefined;
-        if (entry) {
-          db.prepare("DELETE FROM entries_vec WHERE entry_id = ?").run(entry.id);
-        }
+        const cond = `namespace = ? AND key = ? AND entry_type = 'state'${owner.clause} AND classification IN (${placeholders})`;
+        cleanVecSingleEntry(db, `SELECT id FROM entries WHERE ${cond}`, [namespace, key, ...owner.params, ...visibleLevels]);
       } else {
-        const idsSql = allowGlobalNamespaceDelete
-          ? `SELECT id FROM entries WHERE namespace = ? AND classification IN (${placeholders})`
-          : `SELECT id FROM entries WHERE namespace = ? AND COALESCE(owner_principal_id, agent_id) = ? AND classification IN (${placeholders})`;
-        const idsParams = allowGlobalNamespaceDelete
-          ? [namespace, ...visibleLevels]
-          : [namespace, agentId, ...visibleLevels];
-        const ids = db.prepare(idsSql).all(...idsParams) as Array<{ id: string }>;
-        const deleteVec = db.prepare("DELETE FROM entries_vec WHERE entry_id = ?");
-        for (const { id } of ids) {
-          deleteVec.run(id);
-        }
+        const cond = `namespace = ?${owner.clause} AND classification IN (${placeholders})`;
+        cleanVecNamespace(db, `SELECT id FROM entries WHERE ${cond}`, [namespace, ...owner.params, ...visibleLevels]);
       }
     }
-
-    let deletedCount: number;
 
     if (key) {
-      const selectSql = allowGlobalNamespaceDelete
-        ? `SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND classification IN (${placeholders})`
-        : `SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND COALESCE(owner_principal_id, agent_id) = ? AND classification IN (${placeholders})`;
-      const selectParams = allowGlobalNamespaceDelete
-        ? [namespace, key, ...visibleLevels]
-        : [namespace, key, agentId, ...visibleLevels];
-      const entry = db.prepare(selectSql).get(...selectParams) as { id: string } | undefined;
-      const deleteSql = allowGlobalNamespaceDelete
-        ? `DELETE FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND classification IN (${placeholders})`
-        : `DELETE FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND COALESCE(owner_principal_id, agent_id) = ? AND classification IN (${placeholders})`;
-      const deleteParams = allowGlobalNamespaceDelete
-        ? [namespace, key, ...visibleLevels]
-        : [namespace, key, agentId, ...visibleLevels];
-      const result = db.prepare(deleteSql).run(...deleteParams);
-      deletedCount = result.changes;
-
-      if (deletedCount > 0) {
-        insertAuditRow(db, now, agentId, "delete", namespace, key, null, entry?.id ?? null);
-      }
-    } else {
-      const deleteSql = allowGlobalNamespaceDelete
-        ? `DELETE FROM entries WHERE namespace = ? AND classification IN (${placeholders})`
-        : `DELETE FROM entries WHERE namespace = ? AND COALESCE(owner_principal_id, agent_id) = ? AND classification IN (${placeholders})`;
-      const deleteParams = allowGlobalNamespaceDelete
-        ? [namespace, ...visibleLevels]
-        : [namespace, agentId, ...visibleLevels];
-      const result = db.prepare(deleteSql).run(...deleteParams);
-      deletedCount = result.changes;
-
-      if (deletedCount > 0) {
-        insertAuditRow(db, now, agentId, "namespace_delete", namespace, null, `deleted ${deletedCount} entries (classification-scoped)`);
-      }
+      return deleteKeyClassified(db, now, namespace, key, agentId, allowGlobalNamespaceDelete, placeholders, visibleLevels);
     }
-
-    return deletedCount;
+    return deleteNamespaceClassified(db, now, namespace, agentId, allowGlobalNamespaceDelete, placeholders, visibleLevels);
   });
 
   return txn();
@@ -1553,60 +1601,20 @@ export function executeDelete(
   const txn = db.transaction(() => {
     // App-level vec cleanup (no SQL trigger — extension may not be loaded)
     if (_vecLoaded) {
+      const owner = buildOwnerClause(allowGlobalNamespaceDelete, agentId);
       if (key) {
-        const selectSql = allowGlobalNamespaceDelete
-          ? "SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'"
-          : "SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND COALESCE(owner_principal_id, agent_id) = ?";
-        const selectParams = allowGlobalNamespaceDelete ? [namespace, key] : [namespace, key, agentId];
-        const entry = db.prepare(selectSql).get(...selectParams) as { id: string } | undefined;
-        if (entry) {
-          db.prepare("DELETE FROM entries_vec WHERE entry_id = ?").run(entry.id);
-        }
+        const cond = `namespace = ? AND key = ? AND entry_type = 'state'${owner.clause}`;
+        cleanVecSingleEntry(db, `SELECT id FROM entries WHERE ${cond}`, [namespace, key, ...owner.params]);
       } else {
-        const idsSql = allowGlobalNamespaceDelete
-          ? "SELECT id FROM entries WHERE namespace = ?"
-          : "SELECT id FROM entries WHERE namespace = ? AND COALESCE(owner_principal_id, agent_id) = ?";
-        const idsParams = allowGlobalNamespaceDelete ? [namespace] : [namespace, agentId];
-        const ids = db.prepare(idsSql).all(...idsParams) as Array<{ id: string }>;
-        const deleteVec = db.prepare("DELETE FROM entries_vec WHERE entry_id = ?");
-        for (const { id } of ids) {
-          deleteVec.run(id);
-        }
+        const cond = `namespace = ?${owner.clause}`;
+        cleanVecNamespace(db, `SELECT id FROM entries WHERE ${cond}`, [namespace, ...owner.params]);
       }
     }
-
-    let deletedCount: number;
 
     if (key) {
-      const selectSql = allowGlobalNamespaceDelete
-        ? "SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'"
-        : "SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND COALESCE(owner_principal_id, agent_id) = ?";
-      const selectParams = allowGlobalNamespaceDelete ? [namespace, key] : [namespace, key, agentId];
-      const entry = db.prepare(selectSql).get(...selectParams) as { id: string } | undefined;
-      const deleteSql = allowGlobalNamespaceDelete
-        ? "DELETE FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'"
-        : "DELETE FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND COALESCE(owner_principal_id, agent_id) = ?";
-      const deleteParams = allowGlobalNamespaceDelete ? [namespace, key] : [namespace, key, agentId];
-      const result = db.prepare(deleteSql).run(...deleteParams);
-      deletedCount = result.changes;
-
-      if (deletedCount > 0) {
-        insertAuditRow(db, now, agentId, "delete", namespace, key, null, entry?.id ?? null);
-      }
-    } else {
-      const deleteSql = allowGlobalNamespaceDelete
-        ? "DELETE FROM entries WHERE namespace = ?"
-        : "DELETE FROM entries WHERE namespace = ? AND COALESCE(owner_principal_id, agent_id) = ?";
-      const deleteParams = allowGlobalNamespaceDelete ? [namespace] : [namespace, agentId];
-      const result = db.prepare(deleteSql).run(...deleteParams);
-      deletedCount = result.changes;
-
-      if (deletedCount > 0) {
-        insertAuditRow(db, now, agentId, "namespace_delete", namespace, null, `deleted ${deletedCount} entries`);
-      }
+      return deleteKeySingle(db, now, namespace, key, agentId, allowGlobalNamespaceDelete);
     }
-
-    return deletedCount;
+    return deleteNamespaceSingle(db, now, namespace, agentId, allowGlobalNamespaceDelete);
   });
 
   return txn();
@@ -1639,6 +1647,34 @@ export function queryEntriesSemantic(
   return queryEntriesSemanticScored(db, options).map((result) => result.entry);
 }
 
+interface SemanticFilterOptions {
+  namespace?: string;
+  entryType?: EntryType;
+  tags?: string[];
+  includeExpired: boolean;
+  since?: string;
+  until?: string;
+  now: string;
+}
+
+function entryMatchesNamespace(entryNamespace: string, filter: string): boolean {
+  if (filter.endsWith("/")) return entryNamespace.startsWith(filter);
+  return entryNamespace === filter;
+}
+
+function passesSemanticFilters(entry: Entry, opts: SemanticFilterOptions): boolean {
+  if (opts.namespace && !entryMatchesNamespace(entry.namespace, opts.namespace)) return false;
+  if (opts.entryType && entry.entry_type !== opts.entryType) return false;
+  if (!opts.includeExpired && isEntryExpired(entry, opts.now)) return false;
+  if (opts.tags && opts.tags.length > 0) {
+    const entryTags: string[] = JSON.parse(entry.tags);
+    if (!opts.tags.every((t) => entryTags.includes(t))) return false;
+  }
+  if (opts.since && entry.updated_at < opts.since) return false;
+  if (opts.until && entry.updated_at > opts.until) return false;
+  return true;
+}
+
 export function queryEntriesSemanticScored(
   db: Database.Database,
   options: SemanticQueryOptions,
@@ -1668,6 +1704,7 @@ export function queryEntriesSemanticScored(
   // inline so that clampedLimit applies to the filtered result set.
   const getEntry = db.prepare("SELECT * FROM entries WHERE id = ?");
   const results: SemanticQueryResult[] = [];
+  const filterOpts: SemanticFilterOptions = { namespace, entryType, tags, includeExpired, since, until, now };
 
   for (const { entry_id, distance } of vecResults) {
     if (results.length >= clampedLimit) break;
@@ -1679,25 +1716,7 @@ export function queryEntriesSemanticScored(
     const entry = getEntry.get(entry_id) as Entry | undefined;
     if (!entry) continue;
 
-    if (namespace) {
-      if (namespace.endsWith("/")) {
-        if (!entry.namespace.startsWith(namespace)) continue;
-      } else {
-        if (entry.namespace !== namespace) continue;
-      }
-    }
-
-    if (entryType && entry.entry_type !== entryType) continue;
-
-    if (!includeExpired && isEntryExpired(entry, now)) continue;
-
-    if (tags && tags.length > 0) {
-      const entryTags: string[] = JSON.parse(entry.tags);
-      if (!tags.every((t) => entryTags.includes(t))) continue;
-    }
-
-    if (since && entry.updated_at < since) continue;
-    if (until && entry.updated_at > until) continue;
+    if (!passesSemanticFilters(entry, filterOpts)) continue;
 
     results.push({
       entry,

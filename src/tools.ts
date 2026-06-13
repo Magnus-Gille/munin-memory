@@ -508,34 +508,45 @@ function formatQueryResult(
       reasons: [],
     };
 
-    if (actualMode === "lexical") {
-      const lexical = lexicalById.get(entry.id);
-      if (lexical) {
-        match.lexical_rank = lexical.rank;
-        match.lexical_score = lexical.score;
-      }
-    } else if (actualMode === "semantic") {
-      const semantic = semanticById.get(entry.id);
-      if (semantic) {
-        match.semantic_rank = semantic.rank;
-        match.semantic_distance = semantic.distance;
-      }
-    } else if (actualMode === "hybrid") {
-      const hybrid = hybridById.get(entry.id);
-      if (hybrid) {
-        match.hybrid_score = hybrid.score;
-        if (hybrid.lexicalRank !== undefined) match.lexical_rank = hybrid.lexicalRank;
-        if (hybrid.lexicalScore !== undefined) match.lexical_score = hybrid.lexicalScore;
-        if (hybrid.semanticRank !== undefined) match.semantic_rank = hybrid.semanticRank;
-        if (hybrid.semanticDistance !== undefined) match.semantic_distance = hybrid.semanticDistance;
-      }
-    }
+    applyQueryMatchScores(match, entry, actualMode, lexicalById, semanticById, hybridById);
 
     match.reasons = getQueryExplainReasons(entry, queryLower, trackedStatuses?.get(entry.id), match);
     result.match = match;
   }
 
   return result;
+}
+
+function applyQueryMatchScores(
+  match: NonNullable<QueryResult["match"]>,
+  entry: Entry,
+  actualMode: SearchMode,
+  lexicalById: Map<string, ReturnType<typeof queryEntriesLexicalScored>[number]>,
+  semanticById: Map<string, ReturnType<typeof queryEntriesSemanticScored>[number]>,
+  hybridById: Map<string, HybridQueryResult>,
+): void {
+  if (actualMode === "lexical") {
+    const lexical = lexicalById.get(entry.id);
+    if (lexical) {
+      match.lexical_rank = lexical.rank;
+      match.lexical_score = lexical.score;
+    }
+  } else if (actualMode === "semantic") {
+    const semantic = semanticById.get(entry.id);
+    if (semantic) {
+      match.semantic_rank = semantic.rank;
+      match.semantic_distance = semantic.distance;
+    }
+  } else if (actualMode === "hybrid") {
+    const hybrid = hybridById.get(entry.id);
+    if (hybrid) {
+      match.hybrid_score = hybrid.score;
+      if (hybrid.lexicalRank !== undefined) match.lexical_rank = hybrid.lexicalRank;
+      if (hybrid.lexicalScore !== undefined) match.lexical_score = hybrid.lexicalScore;
+      if (hybrid.semanticRank !== undefined) match.semantic_rank = hybrid.semanticRank;
+      if (hybrid.semanticDistance !== undefined) match.semantic_distance = hybrid.semanticDistance;
+    }
+  }
 }
 
 function serializeHistoryAction(
@@ -791,13 +802,17 @@ type BuiltStructuredStatus = Required<Omit<StructuredStatus, "extras">> & {
   extras: StatusExtraSection[];
 };
 
+function mergeStatusText(updateValue: string | undefined, existingValue: string | undefined, fallback: string): string {
+  return normalizeStatusText(updateValue) ?? normalizeStatusText(existingValue) ?? fallback;
+}
+
 function buildStructuredStatus(update: StructuredStatus, existing?: StructuredStatus): BuiltStructuredStatus {
   const merged: BuiltStructuredStatus = {
-    phase: normalizeStatusText(update.phase) ?? normalizeStatusText(existing?.phase) ?? "Unspecified.",
-    current_work: normalizeStatusText(update.current_work) ?? normalizeStatusText(existing?.current_work) ?? "Unspecified.",
-    blockers: normalizeStatusText(update.blockers) ?? normalizeStatusText(existing?.blockers) ?? "None.",
+    phase: mergeStatusText(update.phase, existing?.phase, "Unspecified."),
+    current_work: mergeStatusText(update.current_work, existing?.current_work, "Unspecified."),
+    blockers: mergeStatusText(update.blockers, existing?.blockers, "None."),
     next_steps: normalizeStatusList(update.next_steps) ?? normalizeStatusList(existing?.next_steps) ?? ["None."],
-    notes: normalizeStatusText(update.notes) ?? normalizeStatusText(existing?.notes) ?? "",
+    notes: mergeStatusText(update.notes, existing?.notes, ""),
     extras: update.extras ?? existing?.extras ?? [],
   };
   return merged;
@@ -1290,6 +1305,49 @@ function extractResumeOpenLoops(assessment: TrackedStatusAssessment): ResumeOpen
   return loops;
 }
 
+function scoreResumeStatusCandidate(
+  assessment: TrackedStatusAssessment,
+  inScope: boolean,
+  includeAttention: boolean,
+  matchedTerms: number,
+): number {
+  let score = 0;
+  if (inScope) score += 140;
+  if (assessment.lifecycle === "blocked") score += 80;
+  else if (includeAttention && assessment.needsAttention) score += 70;
+  else if (assessment.lifecycle === "active") score += 60;
+  else if (assessment.lifecycle === "maintenance") score += 30;
+  else if (assessment.lifecycle === "completed" || assessment.lifecycle === "stopped" || assessment.lifecycle === "archived") score -= 20;
+  score += matchedTerms * 8;
+  score += getFreshnessScore(assessment.row.updated_at) * 10;
+  return score;
+}
+
+function buildResumeStatusReasons(
+  assessment: TrackedStatusAssessment,
+  inScope: boolean,
+  includeAttention: boolean,
+  matchedTerms: number,
+): string[] {
+  const reasons: string[] = [];
+  if (inScope) reasons.push("current tracked status in the requested scope");
+  else if (assessment.lifecycle === "blocked") reasons.push("blocked tracked status");
+  else if (includeAttention && assessment.needsAttention) reasons.push("attention-worthy tracked status");
+  else reasons.push(`${assessment.lifecycle} tracked status`);
+  if (matchedTerms > 0) reasons.push("matched opener/project terms");
+  return reasons;
+}
+
+function resolveResumeStatusAction(assessment: TrackedStatusAssessment, includeAttention: boolean): string {
+  if (assessment.lifecycle === "blocked") {
+    return "Read the blocker context first, then decide whether to unblock or re-plan.";
+  }
+  if (includeAttention && assessment.needsAttention && assessment.maintenanceItems.length > 0) {
+    return assessment.maintenanceItems[0].suggestion;
+  }
+  return "Read the current status, then continue from the listed next steps.";
+}
+
 function buildResumeStatusCandidate(
   assessment: TrackedStatusAssessment,
   scope: string | undefined,
@@ -1311,29 +1369,9 @@ function buildResumeStatusCandidate(
     return null;
   }
 
-  let score = 0;
-  if (inScope) score += 140;
-  if (assessment.lifecycle === "blocked") score += 80;
-  else if (includeAttention && assessment.needsAttention) score += 70;
-  else if (assessment.lifecycle === "active") score += 60;
-  else if (assessment.lifecycle === "maintenance") score += 30;
-  else if (assessment.lifecycle === "completed" || assessment.lifecycle === "stopped" || assessment.lifecycle === "archived") score -= 20;
-  score += matchedTerms * 8;
-  score += getFreshnessScore(assessment.row.updated_at) * 10;
-
-  const reasons: string[] = [];
-  if (inScope) reasons.push("current tracked status in the requested scope");
-  else if (assessment.lifecycle === "blocked") reasons.push("blocked tracked status");
-  else if (includeAttention && assessment.needsAttention) reasons.push("attention-worthy tracked status");
-  else reasons.push(`${assessment.lifecycle} tracked status`);
-  if (matchedTerms > 0) reasons.push("matched opener/project terms");
-
-  let suggestedAction = "Read the current status, then continue from the listed next steps.";
-  if (assessment.lifecycle === "blocked") {
-    suggestedAction = "Read the blocker context first, then decide whether to unblock or re-plan.";
-  } else if (includeAttention && assessment.needsAttention && assessment.maintenanceItems.length > 0) {
-    suggestedAction = assessment.maintenanceItems[0].suggestion;
-  }
+  const score = scoreResumeStatusCandidate(assessment, inScope, includeAttention, matchedTerms);
+  const reasons = buildResumeStatusReasons(assessment, inScope, includeAttention, matchedTerms);
+  const suggestedAction = resolveResumeStatusAction(assessment, includeAttention);
 
   return {
     item: {
@@ -1573,109 +1611,141 @@ function inferExtractLifecycle(line: string): ExtractSignals["lifecycle"] | unde
   return undefined;
 }
 
+type ExtractSignalAccumulator = {
+  decisions: string[];
+  nextSteps: string[];
+  preferences: string[];
+  currentWork: string | undefined;
+  blockers: string | undefined;
+  phase: string | undefined;
+  lifecycle: ExtractSignals["lifecycle"] | undefined;
+  section: "next_steps" | "decisions" | "preferences" | null;
+  hasRelativeDates: boolean;
+};
+
+function applyExtractListSectionHeader(line: string, acc: ExtractSignalAccumulator): boolean {
+  if (/^next steps?:/i.test(line) || /^action items?:/i.test(line) || /^todo:?/i.test(line)) {
+    acc.section = "next_steps";
+    const remainder = line.replace(/^(next steps?|action items?|todo):\s*/i, "").trim();
+    if (remainder) acc.nextSteps.push(...extractActionableNextSteps(remainder, true));
+    return true;
+  }
+  if (/^decisions?:/i.test(line)) {
+    acc.section = "decisions";
+    const remainder = line.replace(/^decisions?:\s*/i, "").trim();
+    if (remainder) acc.decisions.push(remainder);
+    return true;
+  }
+  if (/^preferences?:/i.test(line)) {
+    acc.section = "preferences";
+    const remainder = line.replace(/^preferences?:\s*/i, "").trim();
+    if (remainder) acc.preferences.push(remainder);
+    return true;
+  }
+  return false;
+}
+
+function applyExtractFieldHeader(line: string, acc: ExtractSignalAccumulator): boolean {
+  if (/^phase:/i.test(line)) {
+    acc.phase = line.replace(/^phase:\s*/i, "").trim();
+    return true;
+  }
+  if (/^current work:/i.test(line)) {
+    acc.currentWork = line.replace(/^current work:\s*/i, "").trim();
+    return true;
+  }
+  if (/^blockers?:/i.test(line)) {
+    acc.blockers = line.replace(/^blockers?:\s*/i, "").trim();
+    acc.lifecycle = acc.lifecycle ?? "blocked";
+    return true;
+  }
+  return false;
+}
+
+function applyExtractBulletLine(rawLine: string, line: string, acc: ExtractSignalAccumulator): boolean {
+  const isBullet = /^[-*]\s+/.test(rawLine.trim()) || /^\d+\.\s+/.test(rawLine.trim());
+  if (isBullet && acc.section === "next_steps") {
+    acc.nextSteps.push(...extractActionableNextSteps(line, true));
+    return true;
+  }
+  if (isBullet && acc.section === "decisions") {
+    acc.decisions.push(line);
+    return true;
+  }
+  if (isBullet && acc.section === "preferences") {
+    acc.preferences.push(line);
+    return true;
+  }
+  return false;
+}
+
+function applyExtractFragmentSignals(line: string, acc: ExtractSignalAccumulator): void {
+  for (const fragment of splitExtractFragments(line)) {
+    if (/\b(decided|decision:|agreed to|settled on|chose to)\b/i.test(fragment)) {
+      acc.decisions.push(fragment);
+    }
+    acc.nextSteps.push(...extractActionableNextSteps(fragment));
+    if (/\b(i prefer|i don't like|i do not like|please remember|remember that|i always|i never)\b/i.test(fragment)) {
+      acc.preferences.push(fragment);
+    }
+
+    if (!acc.currentWork && /\b(current work|working on|in progress)\b/i.test(fragment)) {
+      acc.currentWork = fragment;
+    }
+    if (!acc.blockers && /\b(blocked|waiting on|depends on)\b/i.test(fragment.toLowerCase())) {
+      acc.blockers = fragment;
+      acc.lifecycle = "blocked";
+    }
+    if (!acc.lifecycle) {
+      acc.lifecycle = inferExtractLifecycle(fragment);
+    }
+  }
+}
+
 function extractConversationSignals(conversationText: string): ExtractSignals {
   const lines = conversationText
     .split("\n")
     .map((line) => line.trimEnd())
     .filter((line) => line.trim().length > 0);
 
-  const decisions: string[] = [];
-  const nextSteps: string[] = [];
-  const preferences: string[] = [];
-  let currentWork: string | undefined;
-  let blockers: string | undefined;
-  let phase: string | undefined;
-  let lifecycle: ExtractSignals["lifecycle"];
-  let section: "next_steps" | "decisions" | "preferences" | null = null;
-  let hasRelativeDates = false;
+  const acc: ExtractSignalAccumulator = {
+    decisions: [],
+    nextSteps: [],
+    preferences: [],
+    currentWork: undefined,
+    blockers: undefined,
+    phase: undefined,
+    lifecycle: undefined,
+    section: null,
+    hasRelativeDates: false,
+  };
 
   for (const rawLine of lines) {
     const line = normalizeTranscriptLine(rawLine);
     if (!line) {
-      section = null;
+      acc.section = null;
       continue;
     }
 
     if (/\b(today|tomorrow|yesterday|by friday|by monday|by tuesday|by wednesday|by thursday|by saturday|by sunday|next week|next month)\b/i.test(line)) {
-      hasRelativeDates = true;
+      acc.hasRelativeDates = true;
     }
-    if (/^next steps?:/i.test(line) || /^action items?:/i.test(line) || /^todo:?/i.test(line)) {
-      section = "next_steps";
-      const remainder = line.replace(/^(next steps?|action items?|todo):\s*/i, "").trim();
-      if (remainder) nextSteps.push(...extractActionableNextSteps(remainder, true));
-      continue;
-    }
-    if (/^decisions?:/i.test(line)) {
-      section = "decisions";
-      const remainder = line.replace(/^decisions?:\s*/i, "").trim();
-      if (remainder) decisions.push(remainder);
-      continue;
-    }
-    if (/^preferences?:/i.test(line)) {
-      section = "preferences";
-      const remainder = line.replace(/^preferences?:\s*/i, "").trim();
-      if (remainder) preferences.push(remainder);
-      continue;
-    }
-    if (/^phase:/i.test(line)) {
-      phase = line.replace(/^phase:\s*/i, "").trim();
-      continue;
-    }
-    if (/^current work:/i.test(line)) {
-      currentWork = line.replace(/^current work:\s*/i, "").trim();
-      continue;
-    }
-    if (/^blockers?:/i.test(line)) {
-      blockers = line.replace(/^blockers?:\s*/i, "").trim();
-      lifecycle = lifecycle ?? "blocked";
-      continue;
-    }
+    if (applyExtractListSectionHeader(line, acc)) continue;
+    if (applyExtractFieldHeader(line, acc)) continue;
+    if (applyExtractBulletLine(rawLine, line, acc)) continue;
 
-    const isBullet = /^[-*]\s+/.test(rawLine.trim()) || /^\d+\.\s+/.test(rawLine.trim());
-    if (isBullet && section === "next_steps") {
-      nextSteps.push(...extractActionableNextSteps(line, true));
-      continue;
-    }
-    if (isBullet && section === "decisions") {
-      decisions.push(line);
-      continue;
-    }
-    if (isBullet && section === "preferences") {
-      preferences.push(line);
-      continue;
-    }
-
-    for (const fragment of splitExtractFragments(line)) {
-      if (/\b(decided|decision:|agreed to|settled on|chose to)\b/i.test(fragment)) {
-        decisions.push(fragment);
-      }
-      nextSteps.push(...extractActionableNextSteps(fragment));
-      if (/\b(i prefer|i don't like|i do not like|please remember|remember that|i always|i never)\b/i.test(fragment)) {
-        preferences.push(fragment);
-      }
-
-      if (!currentWork && /\b(current work|working on|in progress)\b/i.test(fragment)) {
-        currentWork = fragment;
-      }
-      if (!blockers && /\b(blocked|waiting on|depends on)\b/i.test(fragment.toLowerCase())) {
-        blockers = fragment;
-        lifecycle = "blocked";
-      }
-      if (!lifecycle) {
-        lifecycle = inferExtractLifecycle(fragment);
-      }
-    }
+    applyExtractFragmentSignals(line, acc);
   }
 
   return {
-    decisions: [...new Set(decisions.map((line) => line.trim()).filter(Boolean))],
-    nextSteps: [...new Set(nextSteps.map((line) => line.trim()).filter(Boolean))],
-    preferences: [...new Set(preferences.map((line) => line.trim()).filter(Boolean))],
-    currentWork: currentWork?.trim() || undefined,
-    blockers: blockers?.trim() || undefined,
-    phase: phase?.trim() || undefined,
-    lifecycle,
-    hasRelativeDates,
+    decisions: [...new Set(acc.decisions.map((line) => line.trim()).filter(Boolean))],
+    nextSteps: [...new Set(acc.nextSteps.map((line) => line.trim()).filter(Boolean))],
+    preferences: [...new Set(acc.preferences.map((line) => line.trim()).filter(Boolean))],
+    currentWork: acc.currentWork?.trim() || undefined,
+    blockers: acc.blockers?.trim() || undefined,
+    phase: acc.phase?.trim() || undefined,
+    lifecycle: acc.lifecycle,
+    hasRelativeDates: acc.hasRelativeDates,
   };
 }
 
@@ -1826,6 +1896,107 @@ function determineWriteTags(namespace: string): string[] {
   return ["note"];
 }
 
+function pushExtractDecisionSuggestions(
+  signals: ExtractSignals,
+  namespace: string,
+  suggestions: ExtractSuggestion[],
+  dedupeLine: (line: string) => boolean,
+): void {
+  if (signals.decisions.length > 0) {
+    for (const line of signals.decisions) {
+      if (dedupeLine(line)) continue;
+      suggestions.push({
+        action: "memory_log",
+        namespace,
+        content: line,
+        tags: ["decision"],
+        rationale: "Explicit decision-style language was found in the conversation.",
+        confidence: 0.96,
+      });
+    }
+  }
+}
+
+function buildExtractStatusPatch(
+  signals: ExtractSignals,
+  dedupeLine: (line: string) => boolean,
+): NonNullable<ExtractSuggestion["status_patch"]> {
+  const statusPatch: NonNullable<ExtractSuggestion["status_patch"]> = {};
+  if (signals.phase) statusPatch.phase = signals.phase;
+  if (signals.currentWork) statusPatch.current_work = signals.currentWork;
+  if (signals.blockers) statusPatch.blockers = signals.blockers;
+  if (signals.nextSteps.length > 0) {
+    const dedupedSteps = signals.nextSteps.filter((line) => !dedupeLine(line));
+    if (dedupedSteps.length > 0) statusPatch.next_steps = dedupedSteps;
+  }
+  if (signals.lifecycle) statusPatch.lifecycle = signals.lifecycle;
+  return statusPatch;
+}
+
+function pushExtractStatusSuggestions(
+  signals: ExtractSignals,
+  namespace: string,
+  isTracked: boolean,
+  statusPatch: NonNullable<ExtractSuggestion["status_patch"]>,
+  duplicateLines: string[],
+  suggestions: ExtractSuggestion[],
+): void {
+  if (isTracked && (
+    statusPatch.phase !== undefined ||
+    statusPatch.current_work !== undefined ||
+    statusPatch.blockers !== undefined ||
+    (statusPatch.next_steps !== undefined && statusPatch.next_steps.length > 0) ||
+    statusPatch.lifecycle !== undefined
+  )) {
+    suggestions.push({
+      action: "memory_update_status",
+      namespace,
+      status_patch: statusPatch,
+      rationale: "The conversation included explicit project-status signals such as current work, blockers, next steps, or lifecycle changes.",
+      confidence: 0.91,
+    });
+  } else if (!isTracked && signals.nextSteps.length > 0) {
+    const nonDuplicateSteps = signals.nextSteps.filter((line) => !duplicateLines.includes(line));
+    if (nonDuplicateSteps.length > 0) {
+      suggestions.push({
+        action: "memory_write",
+        namespace,
+        key: determineWriteKeyForNamespace(namespace),
+        content: nonDuplicateSteps.map((step) => `- ${step}`).join("\n"),
+        tags: determineWriteTags(namespace),
+        rationale: "The conversation included explicit next steps, but the target namespace is not tracked, so a state write is a better fit than status patching.",
+        confidence: 0.79,
+      });
+    }
+  }
+}
+
+function pushExtractPreferenceSuggestions(
+  signals: ExtractSignals,
+  namespace: string,
+  isPeopleNamespace: boolean,
+  suggestions: ExtractSuggestion[],
+  warnings: string[],
+  dedupeLine: (line: string) => boolean,
+): void {
+  if (signals.preferences.length > 0 && isPeopleNamespace) {
+    const nonDuplicatePreferences = signals.preferences.filter((line) => !dedupeLine(line));
+    if (nonDuplicatePreferences.length > 0) {
+      suggestions.push({
+        action: "memory_write",
+        namespace,
+        key: "profile",
+        content: nonDuplicatePreferences.map((line) => `- ${line}`).join("\n"),
+        tags: ["preference"],
+        rationale: "The conversation included explicit preference-style statements suited for a people profile.",
+        confidence: 0.82,
+      });
+    }
+  } else if (signals.preferences.length > 0) {
+    warnings.push("Preference-style lines were found, but no people/* namespace was identified, so no profile suggestion was produced.");
+  }
+}
+
 function buildExtractSuggestions(
   signals: ExtractSignals,
   namespace: string | undefined,
@@ -1858,75 +2029,11 @@ function buildExtractSuggestions(
     return false;
   };
 
-  if (signals.decisions.length > 0) {
-    for (const line of signals.decisions) {
-      if (dedupeLine(line)) continue;
-      suggestions.push({
-        action: "memory_log",
-        namespace,
-        content: line,
-        tags: ["decision"],
-        rationale: "Explicit decision-style language was found in the conversation.",
-        confidence: 0.96,
-      });
-    }
-  }
+  pushExtractDecisionSuggestions(signals, namespace, suggestions, dedupeLine);
 
-  const statusPatch: NonNullable<ExtractSuggestion["status_patch"]> = {};
-  if (signals.phase) statusPatch.phase = signals.phase;
-  if (signals.currentWork) statusPatch.current_work = signals.currentWork;
-  if (signals.blockers) statusPatch.blockers = signals.blockers;
-  if (signals.nextSteps.length > 0) {
-    const dedupedSteps = signals.nextSteps.filter((line) => !dedupeLine(line));
-    if (dedupedSteps.length > 0) statusPatch.next_steps = dedupedSteps;
-  }
-  if (signals.lifecycle) statusPatch.lifecycle = signals.lifecycle;
-
-  if (isTracked && (
-    statusPatch.phase !== undefined ||
-    statusPatch.current_work !== undefined ||
-    statusPatch.blockers !== undefined ||
-    (statusPatch.next_steps !== undefined && statusPatch.next_steps.length > 0) ||
-    statusPatch.lifecycle !== undefined
-  )) {
-    suggestions.push({
-      action: "memory_update_status",
-      namespace,
-      status_patch: statusPatch,
-      rationale: "The conversation included explicit project-status signals such as current work, blockers, next steps, or lifecycle changes.",
-      confidence: 0.91,
-    });
-  } else if (!isTracked && signals.nextSteps.length > 0) {
-    const nonDuplicateSteps = signals.nextSteps.filter((line) => !duplicateLines.includes(line));
-    if (nonDuplicateSteps.length > 0) {
-      suggestions.push({
-        action: "memory_write",
-        namespace,
-        key: determineWriteKeyForNamespace(namespace),
-        content: nonDuplicateSteps.map((step) => `- ${step}`).join("\n"),
-        tags: determineWriteTags(namespace),
-        rationale: "The conversation included explicit next steps, but the target namespace is not tracked, so a state write is a better fit than status patching.",
-        confidence: 0.79,
-      });
-    }
-  }
-
-  if (signals.preferences.length > 0 && isPeopleNamespace) {
-    const nonDuplicatePreferences = signals.preferences.filter((line) => !dedupeLine(line));
-    if (nonDuplicatePreferences.length > 0) {
-      suggestions.push({
-        action: "memory_write",
-        namespace,
-        key: "profile",
-        content: nonDuplicatePreferences.map((line) => `- ${line}`).join("\n"),
-        tags: ["preference"],
-        rationale: "The conversation included explicit preference-style statements suited for a people profile.",
-        confidence: 0.82,
-      });
-    }
-  } else if (signals.preferences.length > 0) {
-    warnings.push("Preference-style lines were found, but no people/* namespace was identified, so no profile suggestion was produced.");
-  }
+  const statusPatch = buildExtractStatusPatch(signals, dedupeLine);
+  pushExtractStatusSuggestions(signals, namespace, isTracked, statusPatch, duplicateLines, suggestions);
+  pushExtractPreferenceSuggestions(signals, namespace, isPeopleNamespace, suggestions, warnings, dedupeLine);
 
   if (duplicateLines.length > 0) {
     warnings.push(`Skipped ${duplicateLines.length} extracted line${duplicateLines.length === 1 ? "" : "s"} that already appeared in the related context.`);
@@ -1998,77 +2105,68 @@ function buildNarrativeStatusSummary(entry: Entry): string {
   return `Status in phase ${phase}.${currentWork}`;
 }
 
-function buildNarrativeSignals(
-  namespace: string,
-  statusEntry: Entry | null,
-  logs: Entry[],
-  history: AuditHistoryEntry[],
-): NarrativeSignal[] {
-  const signals: NarrativeSignal[] = [];
-  const seenSummaries = new Set<string>();
+type NarrativeSignalPush = (signal: NarrativeSignal) => void;
 
-  const pushSignal = (signal: NarrativeSignal) => {
-    if (seenSummaries.has(signal.summary)) return;
-    seenSummaries.add(signal.summary);
-    signals.push(signal);
-  };
+function pushNarrativePhaseSignals(statusEntry: Entry, pushSignal: NarrativeSignalPush): void {
+  const structured = parseStructuredStatus(statusEntry.content);
+  const lifecycle = getLifecycleFromEntry(statusEntry);
+  const phase = structured.phase ?? lifecycle ?? "Unspecified";
+  const daysInPhase = getDaysSince(statusEntry.updated_at);
 
-  if (statusEntry) {
-    const structured = parseStructuredStatus(statusEntry.content);
-    const lifecycle = getLifecycleFromEntry(statusEntry);
-    const phase = structured.phase ?? lifecycle ?? "Unspecified";
-    const daysInPhase = getDaysSince(statusEntry.updated_at);
-
-    if (daysInPhase >= 3) {
-      pushSignal({
-        category: "time_in_phase",
-        severity: daysInPhase > NARRATIVE_LONG_GAP_DAYS && (lifecycle === "active" || lifecycle === "blocked") ? "medium" : "low",
-        summary: `Current phase "${phase}" has held for ${daysInPhase} day${daysInPhase === 1 ? "" : "s"}.`,
-        reason: "Derived from the current tracked status timestamp.",
-        source_entry_ids: [statusEntry.id],
-        source_audit_ids: [],
-      });
-    }
-
-    const blockerText = structured.blockers?.trim();
-    if (
-      ((lifecycle === "blocked") || (blockerText && !isNoneLikeStatusText(blockerText))) &&
-      daysInPhase >= NARRATIVE_BLOCKER_DAYS
-    ) {
-      pushSignal({
-        category: "blocker_age",
-        severity: daysInPhase > NARRATIVE_LONG_GAP_DAYS ? "high" : "medium",
-        summary: `Blocker context has been unchanged for ${daysInPhase} day${daysInPhase === 1 ? "" : "s"}.`,
-        reason: "Current status is blocked or still lists blockers, and the status has not been refreshed recently.",
-        source_entry_ids: [statusEntry.id],
-        source_audit_ids: [],
-      });
-    }
-
-    const latestActivity = [statusEntry.updated_at, ...logs.map((entry) => entry.updated_at)]
-      .sort()
-      .at(-1);
-    if (latestActivity) {
-      const daysSinceActivity = getDaysSince(latestActivity);
-      if (
-        daysSinceActivity >= NARRATIVE_LONG_GAP_DAYS &&
-        lifecycle !== "maintenance" &&
-        lifecycle !== "completed" &&
-        lifecycle !== "stopped" &&
-        lifecycle !== "archived"
-      ) {
-        pushSignal({
-          category: "long_gap",
-          severity: lifecycle === "blocked" ? "high" : "medium",
-          summary: `No meaningful updates have landed for ${daysSinceActivity} day${daysSinceActivity === 1 ? "" : "s"}.`,
-          reason: "Derived from the most recent status or log activity in this namespace.",
-          source_entry_ids: [statusEntry.id, ...logs.slice(0, 2).map((entry) => entry.id)],
-          source_audit_ids: [],
-        });
-      }
-    }
+  if (daysInPhase >= 3) {
+    pushSignal({
+      category: "time_in_phase",
+      severity: daysInPhase > NARRATIVE_LONG_GAP_DAYS && (lifecycle === "active" || lifecycle === "blocked") ? "medium" : "low",
+      summary: `Current phase "${phase}" has held for ${daysInPhase} day${daysInPhase === 1 ? "" : "s"}.`,
+      reason: "Derived from the current tracked status timestamp.",
+      source_entry_ids: [statusEntry.id],
+      source_audit_ids: [],
+    });
   }
 
+  const blockerText = structured.blockers?.trim();
+  if (
+    ((lifecycle === "blocked") || (blockerText && !isNoneLikeStatusText(blockerText))) &&
+    daysInPhase >= NARRATIVE_BLOCKER_DAYS
+  ) {
+    pushSignal({
+      category: "blocker_age",
+      severity: daysInPhase > NARRATIVE_LONG_GAP_DAYS ? "high" : "medium",
+      summary: `Blocker context has been unchanged for ${daysInPhase} day${daysInPhase === 1 ? "" : "s"}.`,
+      reason: "Current status is blocked or still lists blockers, and the status has not been refreshed recently.",
+      source_entry_ids: [statusEntry.id],
+      source_audit_ids: [],
+    });
+  }
+}
+
+function pushNarrativeLongGapSignal(statusEntry: Entry, logs: Entry[], pushSignal: NarrativeSignalPush): void {
+  const lifecycle = getLifecycleFromEntry(statusEntry);
+  const latestActivity = [statusEntry.updated_at, ...logs.map((entry) => entry.updated_at)]
+    .sort()
+    .at(-1);
+  if (latestActivity) {
+    const daysSinceActivity = getDaysSince(latestActivity);
+    if (
+      daysSinceActivity >= NARRATIVE_LONG_GAP_DAYS &&
+      lifecycle !== "maintenance" &&
+      lifecycle !== "completed" &&
+      lifecycle !== "stopped" &&
+      lifecycle !== "archived"
+    ) {
+      pushSignal({
+        category: "long_gap",
+        severity: lifecycle === "blocked" ? "high" : "medium",
+        summary: `No meaningful updates have landed for ${daysSinceActivity} day${daysSinceActivity === 1 ? "" : "s"}.`,
+        reason: "Derived from the most recent status or log activity in this namespace.",
+        source_entry_ids: [statusEntry.id, ...logs.slice(0, 2).map((entry) => entry.id)],
+        source_audit_ids: [],
+      });
+    }
+  }
+}
+
+function pushNarrativeDecisionChurnSignal(logs: Entry[], pushSignal: NarrativeSignalPush): void {
   const decisionLogs = logs.filter((entry) => isChurnRelevantDecisionLog(entry));
   const churnMarkerLogs = decisionLogs.filter((entry) => hasNarrativeChurnMarker(entry));
   if (decisionLogs.length >= NARRATIVE_DECISION_CHURN_THRESHOLD && churnMarkerLogs.length >= 2) {
@@ -2087,7 +2185,14 @@ function buildNarrativeSignals(
       source_audit_ids: [],
     });
   }
+}
 
+function pushNarrativeReversalSignal(
+  namespace: string,
+  logs: Entry[],
+  history: AuditHistoryEntry[],
+  pushSignal: NarrativeSignalPush,
+): void {
   const reversalLogs = logs.filter((entry) =>
     NARRATIVE_REVERSAL_KEYWORDS.test(entry.content) && !isNarrativeMetaDiscussion(entry.content)
   );
@@ -2108,6 +2213,30 @@ function buildNarrativeSignals(
       source_audit_ids: statusHistory.slice(0, 3).map((entry) => entry.id),
     });
   }
+}
+
+function buildNarrativeSignals(
+  namespace: string,
+  statusEntry: Entry | null,
+  logs: Entry[],
+  history: AuditHistoryEntry[],
+): NarrativeSignal[] {
+  const signals: NarrativeSignal[] = [];
+  const seenSummaries = new Set<string>();
+
+  const pushSignal = (signal: NarrativeSignal) => {
+    if (seenSummaries.has(signal.summary)) return;
+    seenSummaries.add(signal.summary);
+    signals.push(signal);
+  };
+
+  if (statusEntry) {
+    pushNarrativePhaseSignals(statusEntry, pushSignal);
+    pushNarrativeLongGapSignal(statusEntry, logs, pushSignal);
+  }
+
+  pushNarrativeDecisionChurnSignal(logs, pushSignal);
+  pushNarrativeReversalSignal(namespace, logs, history, pushSignal);
 
   const severityRank: Record<NarrativeSignal["severity"], number> = { high: 3, medium: 2, low: 1 };
   return signals.sort((a, b) => severityRank[b.severity] - severityRank[a.severity] || a.category.localeCompare(b.category));
@@ -2331,6 +2460,20 @@ function extractCommitmentsFromEntry(
     commitments.push(commitment);
   };
 
+  pushTrackedNextStepCommitments(entry, pushCommitment);
+
+  for (const segment of extractCandidateSegments(entry.content)) {
+    const derived = buildSegmentCommitment(segment, entry.updated_at);
+    if (derived) pushCommitment(derived.commitment, derived.normalized);
+  }
+
+  return commitments;
+}
+
+function pushTrackedNextStepCommitments(
+  entry: Entry,
+  pushCommitment: (commitment: DerivedCommitmentInput, normalizedText: string) => void,
+): void {
   if (entry.entry_type === "state" && entry.key === "status" && isTrackedNamespace(entry.namespace)) {
     const structured = parseStructuredStatus(entry.content);
     for (const step of structured.next_steps ?? []) {
@@ -2347,39 +2490,45 @@ function extractCommitmentsFromEntry(
       }, normalized);
     }
   }
+}
 
-  for (const segment of extractCandidateSegments(entry.content)) {
-    if (COMMITMENT_EXPLICIT_PREFIX.test(segment)) {
-      if (looksLikeRetrospectiveCompletion(segment)) continue;
-      const normalized = normalizeCommitmentText(segment);
-      if (!normalized) continue;
-      const dueAt = extractDueAtFromText(segment);
-      pushCommitment({
+function buildSegmentCommitment(
+  segment: string,
+  entryUpdatedAt: string,
+): { commitment: DerivedCommitmentInput; normalized: string } | null {
+  if (COMMITMENT_EXPLICIT_PREFIX.test(segment)) {
+    if (looksLikeRetrospectiveCompletion(segment)) return null;
+    const normalized = normalizeCommitmentText(segment);
+    if (!normalized) return null;
+    const dueAt = extractDueAtFromText(segment);
+    return {
+      commitment: {
         sourceType: "explicit_commitment",
         fingerprint: `explicit_commitment:${normalized}`,
         text: segment.trim(),
         dueAt,
-        confidence: computeCommitmentConfidence("explicit_commitment", entry.updated_at, !!dueAt, segment.trim()),
-      }, normalized);
-      continue;
-    }
+        confidence: computeCommitmentConfidence("explicit_commitment", entryUpdatedAt, !!dueAt, segment.trim()),
+      },
+      normalized,
+    };
+  }
 
-    const dueAt = extractDueAtFromText(segment);
-    if (!dueAt) continue;
-    if (!isForwardLookingDatedCommitment(segment)) continue;
+  const dueAt = extractDueAtFromText(segment);
+  if (!dueAt) return null;
+  if (!isForwardLookingDatedCommitment(segment)) return null;
 
-    const normalized = normalizeCommitmentText(segment);
-    if (!normalized) continue;
-    pushCommitment({
+  const normalized = normalizeCommitmentText(segment);
+  if (!normalized) return null;
+  return {
+    commitment: {
       sourceType: "explicit_dated_commitment",
       fingerprint: `explicit_dated_commitment:${normalized}`,
       text: segment.trim(),
       dueAt,
-      confidence: computeCommitmentConfidence("explicit_dated_commitment", entry.updated_at, !!dueAt, segment.trim()),
-    }, normalized);
-  }
-
-  return commitments;
+      confidence: computeCommitmentConfidence("explicit_dated_commitment", entryUpdatedAt, !!dueAt, segment.trim()),
+    },
+    normalized,
+  };
 }
 
 function syncCommitmentsForScope(
@@ -2532,6 +2681,35 @@ function compareCommitmentItems(a: CommitmentItem, b: CommitmentItem): number {
   return a.namespace.localeCompare(b.namespace);
 }
 
+function buildAtRiskCommitmentItem(
+  row: CommitmentRow,
+  assessment: TrackedStatusAssessment | undefined,
+): CommitmentItem | null {
+  const dueSoon = row.due_at
+    ? getDaysUntil(row.due_at) <= COMMITMENT_SOON_DAYS
+    : false;
+  const blockedNamespace = assessment?.lifecycle === "blocked";
+  const attentionNamespace = assessment?.needsAttention ?? false;
+
+  const lowConfidence = row.confidence < 0.60;
+
+  if (dueSoon || blockedNamespace || attentionNamespace || lowConfidence) {
+    let reason = row.due_at
+      ? `Due soon at ${row.due_at}.`
+      : "Source namespace needs attention.";
+    if (blockedNamespace) {
+      reason = "Source namespace is currently blocked.";
+    } else if (attentionNamespace && assessment?.maintenanceItems[0]) {
+      reason = assessment.maintenanceItems[0].suggestion;
+    } else if (lowConfidence) {
+      reason = "Low confidence: commitment may be stale or from an uncertain source.";
+    }
+    return buildCommitmentItem(row, reason);
+  }
+
+  return null;
+}
+
 function classifyCommitments(
   rows: CommitmentRow[],
   trackedStatusByNamespace: Map<string, TrackedStatusAssessment>,
@@ -2560,26 +2738,9 @@ function classifyCommitments(
       continue;
     }
 
-    const dueSoon = row.due_at
-      ? getDaysUntil(row.due_at) <= COMMITMENT_SOON_DAYS
-      : false;
-    const blockedNamespace = assessment?.lifecycle === "blocked";
-    const attentionNamespace = assessment?.needsAttention ?? false;
-
-    const lowConfidence = row.confidence < 0.60;
-
-    if (dueSoon || blockedNamespace || attentionNamespace || lowConfidence) {
-      let reason = row.due_at
-        ? `Due soon at ${row.due_at}.`
-        : "Source namespace needs attention.";
-      if (blockedNamespace) {
-        reason = "Source namespace is currently blocked.";
-      } else if (attentionNamespace && assessment?.maintenanceItems[0]) {
-        reason = assessment.maintenanceItems[0].suggestion;
-      } else if (lowConfidence) {
-        reason = "Low confidence: commitment may be stale or from an uncertain source.";
-      }
-      atRisk.push(buildCommitmentItem(row, reason));
+    const atRiskItem = buildAtRiskCommitmentItem(row, assessment);
+    if (atRiskItem) {
+      atRisk.push(atRiskItem);
       continue;
     }
 
@@ -3596,1273 +3757,1419 @@ export function registerTools(
       try {
         const result = await (async () => { switch (name) {
           case "memory_orient": {
-            const orientArgs = (args ?? {}) as OrientParams;
-            const { include_demo, include_completed_tasks } = orientArgs;
-            const detail = resolveOrientDetail(orientArgs);
-            const includeNamespaces = orientArgs.include_namespaces ?? detail !== "compact";
-            // Default a sensible per-group cap in non-compact modes so
-            // standard/full output can't grow unbounded (#78). Compact already
-            // emits one-liners and is bounded by namespace_limit. Callers can
-            // override explicitly.
-            const dashboardLimit = clampOptionalLimit(orientArgs.dashboard_limit_per_group, 50)
-              ?? (detail === "compact" ? undefined : 10);
-            const namespaceLimit = clampOptionalLimit(orientArgs.namespace_limit, 200) ?? (detail === "compact" ? 20 : undefined);
-            // Read conventions and namespace list
-            const conventions = ctx.principalType === "owner" ? readState(db, "meta/conventions", "conventions") : null;
-            const namespaces = listVisibleNamespaces(db, ctx).filter(ns => canRead(ctx, ns.namespace));
-            const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_orient", sessionId);
-            const orientRedactedSources: RedactableEntryMetadata[] = [...visibleTrackedStatuses.redacted];
+            const handleMemoryOrient = async () => {
+              const orientArgs = (args ?? {}) as OrientParams;
+              const { include_demo, include_completed_tasks } = orientArgs;
+              const detail = resolveOrientDetail(orientArgs);
+              const includeNamespaces = orientArgs.include_namespaces ?? detail !== "compact";
+              // Default a sensible per-group cap in non-compact modes so
+              // standard/full output can't grow unbounded (#78). Compact already
+              // emits one-liners and is bounded by namespace_limit. Callers can
+              // override explicitly.
+              const dashboardLimit = clampOptionalLimit(orientArgs.dashboard_limit_per_group, 50)
+                ?? (detail === "compact" ? undefined : 10);
+              const namespaceLimit = clampOptionalLimit(orientArgs.namespace_limit, 200) ?? (detail === "compact" ? 20 : undefined);
+              // Read conventions and namespace list
+              const conventions = ctx.principalType === "owner" ? readState(db, "meta/conventions", "conventions") : null;
+              const namespaces = listVisibleNamespaces(db, ctx).filter(ns => canRead(ctx, ns.namespace));
+              const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_orient", sessionId);
+              const orientRedactedSources: RedactableEntryMetadata[] = [...visibleTrackedStatuses.redacted];
 
-            const response: Record<string, unknown> = {};
+              const response: Record<string, unknown> = {};
 
-            // Conventions — owner only; compact by default, full on request
-            if (ctx.principalType !== "owner") {
-              response.conventions = null;
-            } else if (conventions) {
-              const filteredConventions = filterDerivedSources(
-                db,
-                ctx,
-                [conventions],
-                "memory_orient",
-                (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
-                sessionId,
-              );
-              orientRedactedSources.push(...filteredConventions.redacted);
-
-              if (filteredConventions.allowed.length > 0) {
-                const parsed = parseEntry(filteredConventions.allowed[0]);
-                const content = detail === "full"
-                  ? parsed.content
-                  : compactConventions(parsed.updated_at);
-                const conv: Record<string, unknown> = {
-                  content,
-                  updated_at: parsed.updated_at,
-                };
-                if (detail !== "full") {
-                  conv.compact = true;
-                  conv.full_conventions_hint = 'memory_read("meta/conventions", "conventions")';
-                }
-                if (isStale(parsed.updated_at)) conv.stale = true;
-                response.conventions = conv;
-              } else {
+              // Conventions — owner only; compact by default, full on request
+              if (ctx.principalType !== "owner") {
                 response.conventions = null;
-              }
-            } else {
-              response.conventions = {
-                content: null,
-                message: "No conventions found. Write to meta/conventions with key 'conventions' to set them up.",
-              };
-            }
-
-            // Computed dashboard from tracked status entries
-            const trackedStatusAssessments = visibleTrackedStatuses.allowed;
-            const dashboard: Record<string, DashboardEntry[]> = {
-              active: [],
-              blocked: [],
-              maintenance: [],
-              stopped: [],
-              completed: [],
-              archived: [],
-              uncategorized: [],
-            };
-            const maintenanceNeeded: MaintenanceItem[] = [];
-            // Sort key (oldest-first) per maintenance item, so the collapsed
-            // top-N surfaces the stalest work. Keyed by item identity.
-            const maintenanceSortKey = new Map<MaintenanceItem, string>();
-
-            for (const assessment of trackedStatusAssessments) {
-              const entry: DashboardEntry = {
-                namespace: assessment.row.namespace,
-                summary: detail === "compact"
-                  ? phaseOneliner(assessment.row.content_preview)
-                  : assessment.row.content_preview.slice(0, 150),
-                updated_at: assessment.row.updated_at,
-                updated_at_local: toLocalDisplay(assessment.row.updated_at),
-                lifecycle: assessment.lifecycle,
-              };
-
-              if (assessment.needsAttention) {
-                entry.needs_attention = true;
-              }
-              for (const item of assessment.maintenanceItems) {
-                maintenanceSortKey.set(item, assessment.row.updated_at);
-                maintenanceNeeded.push(item);
-              }
-
-              // Enrich with synthesis — skip entirely in compact mode
-              if (detail !== "compact") {
-                const synthesis = readState(db, assessment.row.namespace, "synthesis");
-                if (synthesis) {
-                  const synthesisMeta = getConsolidationMetadata(db, assessment.row.namespace);
-                  const synthesisAgeMs = Date.now() - new Date(synthesis.updated_at).getTime();
-                  const synthesisAgeDays = Math.floor(synthesisAgeMs / (1000 * 60 * 60 * 24));
-                  const logsIncorporated = countLogsIncorporated(db, assessment.row.namespace);
-                  const synthesisIsStale =
-                    new Date(synthesis.updated_at) < new Date(assessment.row.updated_at);
-
-                  if (detail === "standard") {
-                    // Standard: synthesis summary (or stale marker) + cross-ref count, no full cross-ref array
-                    const crossRefCount = visibleCrossReferences(db, ctx, assessment.row.namespace).length;
-                    entry.synthesis = {
-                      ...(synthesisIsStale ? { stale: true as const } : { summary: contentPreview(synthesis.content) }),
-                      updated_at: synthesis.updated_at,
-                      updated_at_local: toLocalDisplay(synthesis.updated_at),
-                      synthesis_age_days: synthesisAgeDays,
-                      logs_incorporated: logsIncorporated,
-                      origin: synthesisMeta ? "auto" : "manual",
-                      cross_references: [],
-                      cross_reference_count: crossRefCount,
-                    };
-                  } else {
-                    // Full: everything
-                    const crossRefs = visibleCrossReferences(db, ctx, assessment.row.namespace);
-                    entry.synthesis = {
-                      ...(synthesisIsStale ? { stale: true as const } : { summary: contentPreview(synthesis.content) }),
-                      updated_at: synthesis.updated_at,
-                      updated_at_local: toLocalDisplay(synthesis.updated_at),
-                      synthesis_age_days: synthesisAgeDays,
-                      logs_incorporated: logsIncorporated,
-                      origin: synthesisMeta ? "auto" : "manual",
-                      cross_references: crossRefs.map((ref) => ({
-                        target_namespace: ref.target_namespace === assessment.row.namespace ? ref.source_namespace : ref.target_namespace,
-                        reference_type: ref.reference_type,
-                        context: ref.context,
-                        confidence: ref.confidence,
-                      })),
-                    };
-                  }
-                }
-              }
-
-              const group = dashboard[assessment.lifecycle] ?? dashboard.uncategorized;
-              group.push(entry);
-            }
-
-            // Check for tracked namespaces that have entries but no status key
-            const trackedNsWithStatus = new Set([
-              ...trackedStatusAssessments.map((assessment) => assessment.row.namespace),
-              ...visibleTrackedStatuses.redacted.map((entry) => entry.namespace),
-            ]);
-            for (const ns of namespaces) {
-              if (isTrackedNamespace(ns.namespace) && !trackedNsWithStatus.has(ns.namespace)) {
-                const missingItem: MaintenanceItem = {
-                  namespace: ns.namespace,
-                  issue: "missing_status",
-                  suggestion: "Has entries but no 'status' key. Write a status entry with a lifecycle tag.",
-                };
-                maintenanceSortKey.set(missingItem, ns.last_activity_at);
-                maintenanceNeeded.push(missingItem);
-              }
-            }
-
-            // Consolidation pressure (owner-only). Only meaningful when the
-            // worker is actually available — otherwise a backlog is noise
-            // nothing will drain. A persistent backlog while consolidation is
-            // available means the worker is stalled or rate-limited. Tracked
-            // namespaces are owner-readable, so no per-namespace canRead pass is
-            // needed here (the whole signal is gated on owner). Distilled from
-            // the Letta memory-design harvest (see decisions/letta-harvest).
-            if (ctx.principalType === "owner" && isConsolidationAvailable()) {
-              for (const candidate of getConsolidationBacklog(db)) {
-                const backlogItem: MaintenanceItem = {
-                  namespace: candidate.namespace,
-                  issue: "consolidation_backlog",
-                  suggestion: `${candidate.unincorporated_log_count} unincorporated log${candidate.unincorporated_log_count === 1 ? "" : "s"} awaiting consolidation. The worker drains these on its next run; a persistent backlog suggests it is stalled or rate-limited.`,
-                };
-                // Oldest-first: never-consolidated namespaces (null) sort ahead
-                // of those with an older last-consolidated timestamp.
-                maintenanceSortKey.set(backlogItem, candidate.last_consolidated_at ?? "");
-                maintenanceNeeded.push(backlogItem);
-              }
-            }
-
-            const dashboardCounts: Record<string, number> = {};
-            const truncatedGroups: string[] = [];
-            for (const [groupName, entries] of Object.entries(dashboard)) {
-              dashboardCounts[groupName] = entries.length;
-              if (dashboardLimit !== undefined && entries.length > dashboardLimit) {
-                dashboard[groupName] = entries.slice(0, dashboardLimit);
-                truncatedGroups.push(groupName);
-              }
-            }
-
-            response.dashboard = dashboard;
-            response.dashboard_meta = {
-              counts: dashboardCounts,
-              truncated_groups: truncatedGroups,
-            };
-
-            // Curated overlay (meta/workbench-notes) — owner only
-            if (ctx.principalType === "owner") {
-              const notes = readState(db, "meta", "workbench-notes");
-              if (notes) {
-                const filteredNotes = filterDerivedSources(
+              } else if (conventions) {
+                const filteredConventions = filterDerivedSources(
                   db,
                   ctx,
-                  [notes],
+                  [conventions],
                   "memory_orient",
                   (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
                   sessionId,
                 );
-                orientRedactedSources.push(...filteredNotes.redacted);
-                if (filteredNotes.allowed.length > 0) {
-                  response.notes = filteredNotes.allowed[0].content;
-                }
-              }
+                orientRedactedSources.push(...filteredConventions.redacted);
 
-              // Reference index — data-driven discoverability for key entries
-              const refIndex = readState(db, "meta", "reference-index");
-              if (refIndex) {
-                const filteredReferenceIndex = filterDerivedSources(
-                  db,
-                  ctx,
-                  [refIndex],
-                  "memory_orient",
-                  (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
-                  sessionId,
-                );
-                orientRedactedSources.push(...filteredReferenceIndex.redacted);
-                if (filteredReferenceIndex.allowed.length > 0) {
-                  try {
-                    const parsed = JSON.parse(filteredReferenceIndex.allowed[0].content);
-                    if (parsed && Array.isArray(parsed.references)) {
-                      const validEntries = parsed.references.filter(
-                        (r: Record<string, unknown>) =>
-                          typeof r.namespace === "string" &&
-                          typeof r.key === "string" &&
-                          typeof r.title === "string" &&
-                          typeof r.when_to_load === "string",
-                      );
-                      if (validEntries.length > 0) {
-                        response.references = {
-                          entries: validEntries,
-                          updated_at: filteredReferenceIndex.allowed[0].updated_at,
-                        };
-                      }
-                    }
-                  } catch {
-                    // Malformed JSON — skip silently, don't break orient
-                  }
-                }
-              }
-
-              // Telos — ideal-state anchor (mission/goals/challenges), surfaced
-              // proactively so the handshake starts from "what is the owner trying
-              // to achieve + what's in the way", not only "what's open" (#95).
-              const telos = readState(db, "meta", "telos");
-              if (telos) {
-                const filteredTelos = filterDerivedSources(
-                  db,
-                  ctx,
-                  [telos],
-                  "memory_orient",
-                  (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
-                  sessionId,
-                );
-                orientRedactedSources.push(...filteredTelos.redacted);
-                if (filteredTelos.allowed.length > 0) {
-                  const parsedTelos = parseEntry(filteredTelos.allowed[0]);
-                  response.telos = {
-                    content: parsedTelos.content,
-                    updated_at: parsedTelos.updated_at,
-                  };
-                }
-              }
-            }
-
-            // Maintenance suggestions. The full list can flood the response
-            // (one line per stale tracked status), so for compact/standard we
-            // collapse to the oldest-first top-N plus a count; the full list is
-            // gated behind detail:"full" (#78).
-            if (maintenanceNeeded.length > 0) {
-              const MAINTENANCE_TOP_N = 10;
-              // Oldest-first: items with an earlier sort key (updated_at /
-              // last_activity_at) surface first. Items lacking a key sort last.
-              const sorted = [...maintenanceNeeded].sort((a, b) => {
-                const ka = maintenanceSortKey.get(a) ?? "￿";
-                const kb = maintenanceSortKey.get(b) ?? "￿";
-                return ka < kb ? -1 : ka > kb ? 1 : 0;
-              });
-              const showAll = detail === "full" || sorted.length <= MAINTENANCE_TOP_N;
-              const shown = showAll ? sorted : sorted.slice(0, MAINTENANCE_TOP_N);
-              response.maintenance_needed = shown;
-              response.maintenance_meta = {
-                total: maintenanceNeeded.length,
-                shown: shown.length,
-                truncated: !showAll,
-                ...(showAll ? {} : { full_list_hint: 'Pass detail:"full" to see all maintenance items.' }),
-              };
-            }
-
-            // Legacy workbench (transition period) — owner only
-            if (ctx.principalType === "owner") {
-              const workbench = readState(db, "meta", "workbench");
-              if (workbench) {
-                const filteredWorkbench = filterDerivedSources(
-                  db,
-                  ctx,
-                  [workbench],
-                  "memory_orient",
-                  (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
-                  sessionId,
-                );
-                orientRedactedSources.push(...filteredWorkbench.redacted);
-                if (filteredWorkbench.allowed.length > 0) {
-                  const parsed = parseEntry(filteredWorkbench.allowed[0]);
-                  response.legacy_workbench = {
-                    content: parsed.content,
+                if (filteredConventions.allowed.length > 0) {
+                  const parsed = parseEntry(filteredConventions.allowed[0]);
+                  const content = detail === "full"
+                    ? parsed.content
+                    : compactConventions(parsed.updated_at);
+                  const conv: Record<string, unknown> = {
+                    content,
                     updated_at: parsed.updated_at,
-                    deprecation_note: "The workbench is deprecated. The computed dashboard above is now the source of truth for project/client state. Delete meta/workbench when ready.",
                   };
+                  if (detail !== "full") {
+                    conv.compact = true;
+                    conv.full_conventions_hint = 'memory_read("meta/conventions", "conventions")';
+                  }
+                  if (isStale(parsed.updated_at)) conv.stale = true;
+                  response.conventions = conv;
+                } else {
+                  response.conventions = null;
+                }
+              } else {
+                response.conventions = {
+                  content: null,
+                  message: "No conventions found. Write to meta/conventions with key 'conventions' to set them up.",
+                };
+              }
+
+              // Computed dashboard from tracked status entries
+              const trackedStatusAssessments = visibleTrackedStatuses.allowed;
+              const dashboard: Record<string, DashboardEntry[]> = {
+                active: [],
+                blocked: [],
+                maintenance: [],
+                stopped: [],
+                completed: [],
+                archived: [],
+                uncategorized: [],
+              };
+              const maintenanceNeeded: MaintenanceItem[] = [];
+              // Sort key (oldest-first) per maintenance item, so the collapsed
+              // top-N surfaces the stalest work. Keyed by item identity.
+              const maintenanceSortKey = new Map<MaintenanceItem, string>();
+
+              for (const assessment of trackedStatusAssessments) {
+                const entry: DashboardEntry = {
+                  namespace: assessment.row.namespace,
+                  summary: detail === "compact"
+                    ? phaseOneliner(assessment.row.content_preview)
+                    : assessment.row.content_preview.slice(0, 150),
+                  updated_at: assessment.row.updated_at,
+                  updated_at_local: toLocalDisplay(assessment.row.updated_at),
+                  lifecycle: assessment.lifecycle,
+                };
+
+                if (assessment.needsAttention) {
+                  entry.needs_attention = true;
+                }
+                for (const item of assessment.maintenanceItems) {
+                  maintenanceSortKey.set(item, assessment.row.updated_at);
+                  maintenanceNeeded.push(item);
+                }
+
+                // Enrich with synthesis — skip entirely in compact mode
+                if (detail !== "compact") {
+                  const synthesis = readState(db, assessment.row.namespace, "synthesis");
+                  if (synthesis) {
+                    const synthesisMeta = getConsolidationMetadata(db, assessment.row.namespace);
+                    const synthesisAgeMs = Date.now() - new Date(synthesis.updated_at).getTime();
+                    const synthesisAgeDays = Math.floor(synthesisAgeMs / (1000 * 60 * 60 * 24));
+                    const logsIncorporated = countLogsIncorporated(db, assessment.row.namespace);
+                    const synthesisIsStale =
+                      new Date(synthesis.updated_at) < new Date(assessment.row.updated_at);
+
+                    if (detail === "standard") {
+                      // Standard: synthesis summary (or stale marker) + cross-ref count, no full cross-ref array
+                      const crossRefCount = visibleCrossReferences(db, ctx, assessment.row.namespace).length;
+                      entry.synthesis = {
+                        ...(synthesisIsStale ? { stale: true as const } : { summary: contentPreview(synthesis.content) }),
+                        updated_at: synthesis.updated_at,
+                        updated_at_local: toLocalDisplay(synthesis.updated_at),
+                        synthesis_age_days: synthesisAgeDays,
+                        logs_incorporated: logsIncorporated,
+                        origin: synthesisMeta ? "auto" : "manual",
+                        cross_references: [],
+                        cross_reference_count: crossRefCount,
+                      };
+                    } else {
+                      // Full: everything
+                      const crossRefs = visibleCrossReferences(db, ctx, assessment.row.namespace);
+                      entry.synthesis = {
+                        ...(synthesisIsStale ? { stale: true as const } : { summary: contentPreview(synthesis.content) }),
+                        updated_at: synthesis.updated_at,
+                        updated_at_local: toLocalDisplay(synthesis.updated_at),
+                        synthesis_age_days: synthesisAgeDays,
+                        logs_incorporated: logsIncorporated,
+                        origin: synthesisMeta ? "auto" : "manual",
+                        cross_references: crossRefs.map((ref) => ({
+                          target_namespace: ref.target_namespace === assessment.row.namespace ? ref.source_namespace : ref.target_namespace,
+                          reference_type: ref.reference_type,
+                          context: ref.context,
+                          confidence: ref.confidence,
+                        })),
+                      };
+                    }
+                  }
+                }
+
+                const group = dashboard[assessment.lifecycle] ?? dashboard.uncategorized;
+                group.push(entry);
+              }
+
+              // Check for tracked namespaces that have entries but no status key
+              const trackedNsWithStatus = new Set([
+                ...trackedStatusAssessments.map((assessment) => assessment.row.namespace),
+                ...visibleTrackedStatuses.redacted.map((entry) => entry.namespace),
+              ]);
+              for (const ns of namespaces) {
+                if (isTrackedNamespace(ns.namespace) && !trackedNsWithStatus.has(ns.namespace)) {
+                  const missingItem: MaintenanceItem = {
+                    namespace: ns.namespace,
+                    issue: "missing_status",
+                    suggestion: "Has entries but no 'status' key. Write a status entry with a lifecycle tag.",
+                  };
+                  maintenanceSortKey.set(missingItem, ns.last_activity_at);
+                  maintenanceNeeded.push(missingItem);
                 }
               }
-            }
 
-            // Namespace overview — filter demo and completed task-run namespaces by default
-            const completedTasks = include_completed_tasks ? new Set<string>() : getCompletedTaskNamespaces(db);
-            const filteredNamespaces = namespaces.filter((ns) => {
-              if (!include_demo && (ns.namespace.startsWith("demo/") || ns.namespace === "demo")) return false;
-              if (!include_completed_tasks && completedTasks.has(ns.namespace)) return false;
-              return true;
-            });
-            if (includeNamespaces) {
-              const limitedNamespaces = namespaceLimit !== undefined
-                ? filteredNamespaces.slice(0, namespaceLimit)
-                : filteredNamespaces;
-              response.namespaces = limitedNamespaces;
-              response.namespaces_meta = {
-                total: filteredNamespaces.length,
-                returned: limitedNamespaces.length,
-                truncated: limitedNamespaces.length < filteredNamespaces.length,
+              // Consolidation pressure (owner-only). Only meaningful when the
+              // worker is actually available — otherwise a backlog is noise
+              // nothing will drain. A persistent backlog while consolidation is
+              // available means the worker is stalled or rate-limited. Tracked
+              // namespaces are owner-readable, so no per-namespace canRead pass is
+              // needed here (the whole signal is gated on owner). Distilled from
+              // the Letta memory-design harvest (see decisions/letta-harvest).
+              if (ctx.principalType === "owner" && isConsolidationAvailable()) {
+                for (const candidate of getConsolidationBacklog(db)) {
+                  const backlogItem: MaintenanceItem = {
+                    namespace: candidate.namespace,
+                    issue: "consolidation_backlog",
+                    suggestion: `${candidate.unincorporated_log_count} unincorporated log${candidate.unincorporated_log_count === 1 ? "" : "s"} awaiting consolidation. The worker drains these on its next run; a persistent backlog suggests it is stalled or rate-limited.`,
+                  };
+                  // Oldest-first: never-consolidated namespaces (null) sort ahead
+                  // of those with an older last-consolidated timestamp.
+                  maintenanceSortKey.set(backlogItem, candidate.last_consolidated_at ?? "");
+                  maintenanceNeeded.push(backlogItem);
+                }
+              }
+
+              const dashboardCounts: Record<string, number> = {};
+              const truncatedGroups: string[] = [];
+              for (const [groupName, entries] of Object.entries(dashboard)) {
+                dashboardCounts[groupName] = entries.length;
+                if (dashboardLimit !== undefined && entries.length > dashboardLimit) {
+                  dashboard[groupName] = entries.slice(0, dashboardLimit);
+                  truncatedGroups.push(groupName);
+                }
+              }
+
+              response.dashboard = dashboard;
+              response.dashboard_meta = {
+                counts: dashboardCounts,
+                truncated_groups: truncatedGroups,
               };
-            }
 
-            const redactedSourcesSummary = summarizeRedactedSources(ctx, orientRedactedSources);
-            response.librarian_summary = buildLibrarianRuntimeSummary(ctx, {
-              redactedDashboardCount: visibleTrackedStatuses.redacted.length,
-              redactedSourceCount: orientRedactedSources.length,
-            });
-            if (redactedSourcesSummary) {
-              response.redacted_sources = redactedSourcesSummary;
-            }
+              // Curated overlay (meta/workbench-notes) — owner only
+              if (ctx.principalType === "owner") {
+                const notes = readState(db, "meta", "workbench-notes");
+                if (notes) {
+                  const filteredNotes = filterDerivedSources(
+                    db,
+                    ctx,
+                    [notes],
+                    "memory_orient",
+                    (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
+                    sessionId,
+                  );
+                  orientRedactedSources.push(...filteredNotes.redacted);
+                  if (filteredNotes.allowed.length > 0) {
+                    response.notes = filteredNotes.allowed[0].content;
+                  }
+                }
 
-            // Analytics: log orient event (no result IDs — orient has no specific entries)
-            if (sessionId) {
-              logRetrievalEvent(db, {
-                sessionId,
-                toolName: "memory_orient",
-                resultIds: [],
-                resultNamespaces: [],
-                resultRanks: [],
+                // Reference index — data-driven discoverability for key entries
+                const refIndex = readState(db, "meta", "reference-index");
+                if (refIndex) {
+                  const filteredReferenceIndex = filterDerivedSources(
+                    db,
+                    ctx,
+                    [refIndex],
+                    "memory_orient",
+                    (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
+                    sessionId,
+                  );
+                  orientRedactedSources.push(...filteredReferenceIndex.redacted);
+                  if (filteredReferenceIndex.allowed.length > 0) {
+                    try {
+                      const parsed = JSON.parse(filteredReferenceIndex.allowed[0].content);
+                      if (parsed && Array.isArray(parsed.references)) {
+                        const validEntries = parsed.references.filter(
+                          (r: Record<string, unknown>) =>
+                            typeof r.namespace === "string" &&
+                            typeof r.key === "string" &&
+                            typeof r.title === "string" &&
+                            typeof r.when_to_load === "string",
+                        );
+                        if (validEntries.length > 0) {
+                          response.references = {
+                            entries: validEntries,
+                            updated_at: filteredReferenceIndex.allowed[0].updated_at,
+                          };
+                        }
+                      }
+                    } catch {
+                      // Malformed JSON — skip silently, don't break orient
+                    }
+                  }
+                }
+
+                // Telos — ideal-state anchor (mission/goals/challenges), surfaced
+                // proactively so the handshake starts from "what is the owner trying
+                // to achieve + what's in the way", not only "what's open" (#95).
+                const telos = readState(db, "meta", "telos");
+                if (telos) {
+                  const filteredTelos = filterDerivedSources(
+                    db,
+                    ctx,
+                    [telos],
+                    "memory_orient",
+                    (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
+                    sessionId,
+                  );
+                  orientRedactedSources.push(...filteredTelos.redacted);
+                  if (filteredTelos.allowed.length > 0) {
+                    const parsedTelos = parseEntry(filteredTelos.allowed[0]);
+                    response.telos = {
+                      content: parsedTelos.content,
+                      updated_at: parsedTelos.updated_at,
+                    };
+                  }
+                }
+              }
+
+              // Maintenance suggestions. The full list can flood the response
+              // (one line per stale tracked status), so for compact/standard we
+              // collapse to the oldest-first top-N plus a count; the full list is
+              // gated behind detail:"full" (#78).
+              if (maintenanceNeeded.length > 0) {
+                const MAINTENANCE_TOP_N = 10;
+                // Oldest-first: items with an earlier sort key (updated_at /
+                // last_activity_at) surface first. Items lacking a key sort last.
+                const sorted = [...maintenanceNeeded].sort((a, b) => {
+                  const ka = maintenanceSortKey.get(a) ?? "￿";
+                  const kb = maintenanceSortKey.get(b) ?? "￿";
+                  return ka < kb ? -1 : ka > kb ? 1 : 0;
+                });
+                const showAll = detail === "full" || sorted.length <= MAINTENANCE_TOP_N;
+                const shown = showAll ? sorted : sorted.slice(0, MAINTENANCE_TOP_N);
+                response.maintenance_needed = shown;
+                response.maintenance_meta = {
+                  total: maintenanceNeeded.length,
+                  shown: shown.length,
+                  truncated: !showAll,
+                  ...(showAll ? {} : { full_list_hint: 'Pass detail:"full" to see all maintenance items.' }),
+                };
+              }
+
+              // Legacy workbench (transition period) — owner only
+              if (ctx.principalType === "owner") {
+                const workbench = readState(db, "meta", "workbench");
+                if (workbench) {
+                  const filteredWorkbench = filterDerivedSources(
+                    db,
+                    ctx,
+                    [workbench],
+                    "memory_orient",
+                    (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
+                    sessionId,
+                  );
+                  orientRedactedSources.push(...filteredWorkbench.redacted);
+                  if (filteredWorkbench.allowed.length > 0) {
+                    const parsed = parseEntry(filteredWorkbench.allowed[0]);
+                    response.legacy_workbench = {
+                      content: parsed.content,
+                      updated_at: parsed.updated_at,
+                      deprecation_note: "The workbench is deprecated. The computed dashboard above is now the source of truth for project/client state. Delete meta/workbench when ready.",
+                    };
+                  }
+                }
+              }
+
+              // Namespace overview — filter demo and completed task-run namespaces by default
+              const completedTasks = include_completed_tasks ? new Set<string>() : getCompletedTaskNamespaces(db);
+              const filteredNamespaces = namespaces.filter((ns) => {
+                if (!include_demo && (ns.namespace.startsWith("demo/") || ns.namespace === "demo")) return false;
+                if (!include_completed_tasks && completedTasks.has(ns.namespace)) return false;
+                return true;
               });
-            }
+              if (includeNamespaces) {
+                const limitedNamespaces = namespaceLimit !== undefined
+                  ? filteredNamespaces.slice(0, namespaceLimit)
+                  : filteredNamespaces;
+                response.namespaces = limitedNamespaces;
+                response.namespaces_meta = {
+                  total: filteredNamespaces.length,
+                  returned: limitedNamespaces.length,
+                  truncated: limitedNamespaces.length < filteredNamespaces.length,
+                };
+              }
 
-            return okResult("orient", response);
+              const redactedSourcesSummary = summarizeRedactedSources(ctx, orientRedactedSources);
+              response.librarian_summary = buildLibrarianRuntimeSummary(ctx, {
+                redactedDashboardCount: visibleTrackedStatuses.redacted.length,
+                redactedSourceCount: orientRedactedSources.length,
+              });
+              if (redactedSourcesSummary) {
+                response.redacted_sources = redactedSourcesSummary;
+              }
+
+              // Analytics: log orient event (no result IDs — orient has no specific entries)
+              if (sessionId) {
+                logRetrievalEvent(db, {
+                  sessionId,
+                  toolName: "memory_orient",
+                  resultIds: [],
+                  resultNamespaces: [],
+                  resultRanks: [],
+                });
+              }
+
+              return okResult("orient", response);
+            };
+            return handleMemoryOrient();
           }
 
           case "memory_resume": {
-            const resumeArgs = (args ?? {}) as ResumeParams;
-            const includeAttention = resumeArgs.include_attention !== false;
-            const includeHistory = resumeArgs.include_history === true;
-            const limit = clampOptionalLimit(resumeArgs.limit, 10) ?? 6;
+            const handleMemoryResume = async () => {
+              const resumeArgs = (args ?? {}) as ResumeParams;
+              const includeAttention = resumeArgs.include_attention !== false;
+              const includeHistory = resumeArgs.include_history === true;
+              const limit = clampOptionalLimit(resumeArgs.limit, 10) ?? 6;
 
-            if (resumeArgs.namespace !== undefined) {
-              const namespaceCheck = validateNamespace(resumeArgs.namespace);
-              if (!namespaceCheck.valid) {
-                return errResult("resume", "validation_error", namespaceCheck.error!);
+              if (resumeArgs.namespace !== undefined) {
+                const namespaceCheck = validateNamespace(resumeArgs.namespace);
+                if (!namespaceCheck.valid) {
+                  return errResult("resume", "validation_error", namespaceCheck.error!);
+                }
               }
-            }
-            if (
-              typeof resumeArgs.project === "string" &&
-              (resumeArgs.project.startsWith("projects/") || resumeArgs.project.startsWith("clients/"))
-            ) {
-              const projectNamespaceCheck = validateNamespace(resumeArgs.project);
-              if (!projectNamespaceCheck.valid) {
-                return errResult("resume", "validation_error", projectNamespaceCheck.error!);
+              if (
+                typeof resumeArgs.project === "string" &&
+                (resumeArgs.project.startsWith("projects/") || resumeArgs.project.startsWith("clients/"))
+              ) {
+                const projectNamespaceCheck = validateNamespace(resumeArgs.project);
+                if (!projectNamespaceCheck.valid) {
+                  return errResult("resume", "validation_error", projectNamespaceCheck.error!);
+                }
               }
-            }
 
-            const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_resume", sessionId);
-            const scope = resolveResumeScope(resumeArgs, visibleTrackedStatuses.allowed);
-            const hintTerms = extractResumeTerms(resumeArgs.opener, resumeArgs.project, scope);
-            const resumeRedactedSources: RedactableEntryMetadata[] = [...visibleTrackedStatuses.redacted];
+              const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_resume", sessionId);
+              const scope = resolveResumeScope(resumeArgs, visibleTrackedStatuses.allowed);
+              const hintTerms = extractResumeTerms(resumeArgs.opener, resumeArgs.project, scope);
+              const resumeRedactedSources: RedactableEntryMetadata[] = [...visibleTrackedStatuses.redacted];
 
-            const candidates: ResumeCandidate[] = [];
-            const statusCandidates = visibleTrackedStatuses.allowed
-              .map((assessment) => buildResumeStatusCandidate(assessment, scope, hintTerms, includeAttention))
-              .filter((candidate): candidate is ResumeCandidate => candidate !== null)
-              .sort(compareResumeCandidates);
-            candidates.push(...statusCandidates);
+              const candidates: ResumeCandidate[] = [];
+              const statusCandidates = visibleTrackedStatuses.allowed
+                .map((assessment) => buildResumeStatusCandidate(assessment, scope, hintTerms, includeAttention))
+                .filter((candidate): candidate is ResumeCandidate => candidate !== null)
+                .sort(compareResumeCandidates);
+              candidates.push(...statusCandidates);
 
-            const focusNamespaces = new Set(statusCandidates.slice(0, 3).map((candidate) => candidate.item.namespace));
+              const focusNamespaces = new Set(statusCandidates.slice(0, 3).map((candidate) => candidate.item.namespace));
 
-            const rawLogPool = queryEntriesByFilter(db, {
-              namespace: scope,
-              entryType: "log",
-              limit: scope ? Math.max(limit, 4) : Math.max(limit * 2, 8),
-            }).filter((entry) => canRead(ctx, entry.namespace));
-            const logPool = filterDerivedSources(
-              db,
-              ctx,
-              rawLogPool,
-              "memory_resume",
-              (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
-              sessionId,
-            );
-            resumeRedactedSources.push(...logPool.redacted);
-
-            for (const entry of logPool.allowed) {
-              const matchedTerms = countResumeTermMatches(`${entry.namespace} ${entry.content}`, hintTerms);
-              if (!scope && focusNamespaces.size > 0 && !focusNamespaces.has(entry.namespace) && matchedTerms === 0) {
-                continue;
-              }
-              const candidate = buildResumeLogCandidate(entry, scope, hintTerms);
-              if (candidate) candidates.push(candidate);
-            }
-
-            if (scope) {
-              const rawScopedStateEntries = queryEntriesByFilter(db, {
+              const rawLogPool = queryEntriesByFilter(db, {
                 namespace: scope,
-                entryType: "state",
-                includeExpired: true,
-                limit: 4,
-              })
-                .filter((entry) => canRead(ctx, entry.namespace))
-                .filter((entry) => entry.key !== "status");
-              const scopedStateEntries = filterDerivedSources(
+                entryType: "log",
+                limit: scope ? Math.max(limit, 4) : Math.max(limit * 2, 8),
+              }).filter((entry) => canRead(ctx, entry.namespace));
+              const logPool = filterDerivedSources(
                 db,
                 ctx,
-                rawScopedStateEntries,
+                rawLogPool,
                 "memory_resume",
                 (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
                 sessionId,
               );
-              resumeRedactedSources.push(...scopedStateEntries.redacted);
+              resumeRedactedSources.push(...logPool.redacted);
 
-              for (const entry of scopedStateEntries.allowed) {
-                candidates.push(buildResumeStateCandidate(entry, scope, hintTerms));
+              for (const entry of logPool.allowed) {
+                const matchedTerms = countResumeTermMatches(`${entry.namespace} ${entry.content}`, hintTerms);
+                if (!scope && focusNamespaces.size > 0 && !focusNamespaces.has(entry.namespace) && matchedTerms === 0) {
+                  continue;
+                }
+                const candidate = buildResumeLogCandidate(entry, scope, hintTerms);
+                if (candidate) candidates.push(candidate);
               }
-            }
 
-            if (includeHistory && scope) {
-              const historyPage = getAuditHistoryPage(db, { namespace: scope, limit: 3 });
-              const filteredHistory = filterDerivedSources(
-                db,
-                ctx,
-                historyPage.entries.filter((historyEntry) => canRead(ctx, historyEntry.namespace)),
-                "memory_resume",
-                (entry) => buildAuditHistoryMetadata(db, entry),
-                sessionId,
-              );
-              resumeRedactedSources.push(...filteredHistory.redacted);
-              for (const entry of filteredHistory.allowed) {
-                candidates.push(buildResumeHistoryCandidate(entry, scope));
-              }
-            }
-
-            const dedupedCandidates: ResumeCandidate[] = [];
-            const seenCandidateIds = new Set<string>();
-            for (const candidate of candidates.sort(compareResumeCandidates)) {
-              const dedupeKey = candidate.item.entry_id
-                ? `entry:${candidate.item.entry_id}`
-                : `${candidate.item.category}:${candidate.item.namespace}:${candidate.item.key ?? ""}:${candidate.item.updated_at}`;
-              if (seenCandidateIds.has(dedupeKey)) continue;
-              seenCandidateIds.add(dedupeKey);
-              dedupedCandidates.push(candidate);
-            }
-
-            const selected = dedupedCandidates.slice(0, limit);
-
-            const openLoops: ResumeOpenLoop[] = [];
-            const seenLoops = new Set<string>();
-            for (const loop of selected.flatMap((candidate) => candidate.openLoops)) {
-              const loopKey = `${loop.namespace}:${loop.type}:${loop.summary}`;
-              if (seenLoops.has(loopKey)) continue;
-              seenLoops.add(loopKey);
-              openLoops.push(loop);
-              if (openLoops.length >= Math.max(4, limit)) break;
-            }
-
-            const suggestedReads: ResumeSuggestedRead[] = [];
-            const seenReads = new Set<string>();
-            for (const candidate of selected) {
-              if (!candidate.suggestedRead) continue;
-              const read = candidate.suggestedRead;
-              const readKey = `${read.tool}:${read.namespace ?? ""}:${read.key ?? ""}:${read.id ?? ""}`;
-              if (seenReads.has(readKey)) continue;
-              seenReads.add(readKey);
-              suggestedReads.push(read);
-            }
-
-            const whyThisSet: string[] = [];
-            if (scope) {
-              whyThisSet.push(`Focused on ${scope}.`);
-            } else if (resumeArgs.project) {
-              whyThisSet.push("Biased toward the supplied project hint.");
-            } else if (resumeArgs.opener) {
-              whyThisSet.push("Biased toward terms from the opener.");
-            }
-            if (selected.some((candidate) => candidate.item.category === "status")) {
-              whyThisSet.push("Tracked statuses were prioritized over generic notes.");
-            }
-            if (selected.some((candidate) => candidate.item.category === "decision_log")) {
-              whyThisSet.push("Recent decision logs were included for rationale.");
-            }
-            if (
-              includeAttention &&
-              selected.some((candidate) =>
-                candidate.item.category === "status" &&
-                (candidate.item.reason.includes("blocked") || candidate.item.reason.includes("attention-worthy"))
-              )
-            ) {
-              whyThisSet.push("Blocked or attention-worthy work was ranked ahead of generic historical noise.");
-            }
-            if (includeHistory && selected.some((candidate) => candidate.item.category === "history")) {
-              whyThisSet.push("Recent namespace history was included because include_history was enabled.");
-            }
-            if (whyThisSet.length === 0) {
-              whyThisSet.push("Returned the most relevant accessible context available.");
-            }
-
-            const statusCount = selected.filter((candidate) => candidate.item.category === "status").length;
-            const logCount = selected.filter((candidate) => candidate.item.category === "decision_log").length;
-            const historyCount = selected.filter((candidate) => candidate.item.category === "history").length;
-            const summaryPrefix = scope
-              ? `Resume pack for ${scope}`
-              : resumeArgs.project
-                ? `Resume pack for ${resumeArgs.project}`
-                : "Resume pack";
-            const summary = selected.length === 0
-              ? `${summaryPrefix}: no matching context found.`
-              : `${summaryPrefix}: ${statusCount} tracked status item${statusCount === 1 ? "" : "s"}, ${logCount} recent decision log${logCount === 1 ? "" : "s"}, ${openLoops.length} open loop${openLoops.length === 1 ? "" : "s"}${historyCount > 0 ? `, ${historyCount} history item${historyCount === 1 ? "" : "s"}` : ""}.`;
-
-            const response: Record<string, unknown> = {
-              summary,
-              items: selected.map((candidate) => candidate.item),
-              open_loops: openLoops,
-              suggested_reads: suggestedReads,
-              why_this_set: whyThisSet,
-            };
-            if (scope) response.target_namespace = scope;
-
-            // Telos — ideal-state anchor surfaced in the continuation pack so
-            // resumed work stays anchored to the owner's goals/challenges (#95).
-            if (ctx.principalType === "owner") {
-              const telos = readState(db, "meta", "telos");
-              if (telos) {
-                const filteredTelos = filterDerivedSources(
+              if (scope) {
+                const rawScopedStateEntries = queryEntriesByFilter(db, {
+                  namespace: scope,
+                  entryType: "state",
+                  includeExpired: true,
+                  limit: 4,
+                })
+                  .filter((entry) => canRead(ctx, entry.namespace))
+                  .filter((entry) => entry.key !== "status");
+                const scopedStateEntries = filterDerivedSources(
                   db,
                   ctx,
-                  [telos],
+                  rawScopedStateEntries,
                   "memory_resume",
                   (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
                   sessionId,
                 );
-                resumeRedactedSources.push(...filteredTelos.redacted);
-                if (filteredTelos.allowed.length > 0) {
-                  const parsedTelos = parseEntry(filteredTelos.allowed[0]);
-                  response.telos = {
-                    content: parsedTelos.content,
-                    updated_at: parsedTelos.updated_at,
-                  };
+                resumeRedactedSources.push(...scopedStateEntries.redacted);
+
+                for (const entry of scopedStateEntries.allowed) {
+                  candidates.push(buildResumeStateCandidate(entry, scope, hintTerms));
                 }
               }
-            }
 
-            const redactedSourcesSummary = summarizeRedactedSources(ctx, resumeRedactedSources);
-            if (redactedSourcesSummary) {
-              response.redacted_sources = redactedSourcesSummary;
-            }
+              if (includeHistory && scope) {
+                const historyPage = getAuditHistoryPage(db, { namespace: scope, limit: 3 });
+                const filteredHistory = filterDerivedSources(
+                  db,
+                  ctx,
+                  historyPage.entries.filter((historyEntry) => canRead(ctx, historyEntry.namespace)),
+                  "memory_resume",
+                  (entry) => buildAuditHistoryMetadata(db, entry),
+                  sessionId,
+                );
+                resumeRedactedSources.push(...filteredHistory.redacted);
+                for (const entry of filteredHistory.allowed) {
+                  candidates.push(buildResumeHistoryCandidate(entry, scope));
+                }
+              }
 
-            return okResult("resume", response);
+              const dedupedCandidates: ResumeCandidate[] = [];
+              const seenCandidateIds = new Set<string>();
+              for (const candidate of candidates.sort(compareResumeCandidates)) {
+                const dedupeKey = candidate.item.entry_id
+                  ? `entry:${candidate.item.entry_id}`
+                  : `${candidate.item.category}:${candidate.item.namespace}:${candidate.item.key ?? ""}:${candidate.item.updated_at}`;
+                if (seenCandidateIds.has(dedupeKey)) continue;
+                seenCandidateIds.add(dedupeKey);
+                dedupedCandidates.push(candidate);
+              }
+
+              const selected = dedupedCandidates.slice(0, limit);
+
+              const openLoops: ResumeOpenLoop[] = [];
+              const seenLoops = new Set<string>();
+              for (const loop of selected.flatMap((candidate) => candidate.openLoops)) {
+                const loopKey = `${loop.namespace}:${loop.type}:${loop.summary}`;
+                if (seenLoops.has(loopKey)) continue;
+                seenLoops.add(loopKey);
+                openLoops.push(loop);
+                if (openLoops.length >= Math.max(4, limit)) break;
+              }
+
+              const suggestedReads: ResumeSuggestedRead[] = [];
+              const seenReads = new Set<string>();
+              for (const candidate of selected) {
+                if (!candidate.suggestedRead) continue;
+                const read = candidate.suggestedRead;
+                const readKey = `${read.tool}:${read.namespace ?? ""}:${read.key ?? ""}:${read.id ?? ""}`;
+                if (seenReads.has(readKey)) continue;
+                seenReads.add(readKey);
+                suggestedReads.push(read);
+              }
+
+              const whyThisSet: string[] = [];
+              if (scope) {
+                whyThisSet.push(`Focused on ${scope}.`);
+              } else if (resumeArgs.project) {
+                whyThisSet.push("Biased toward the supplied project hint.");
+              } else if (resumeArgs.opener) {
+                whyThisSet.push("Biased toward terms from the opener.");
+              }
+              if (selected.some((candidate) => candidate.item.category === "status")) {
+                whyThisSet.push("Tracked statuses were prioritized over generic notes.");
+              }
+              if (selected.some((candidate) => candidate.item.category === "decision_log")) {
+                whyThisSet.push("Recent decision logs were included for rationale.");
+              }
+              if (
+                includeAttention &&
+                selected.some((candidate) =>
+                  candidate.item.category === "status" &&
+                  (candidate.item.reason.includes("blocked") || candidate.item.reason.includes("attention-worthy"))
+                )
+              ) {
+                whyThisSet.push("Blocked or attention-worthy work was ranked ahead of generic historical noise.");
+              }
+              if (includeHistory && selected.some((candidate) => candidate.item.category === "history")) {
+                whyThisSet.push("Recent namespace history was included because include_history was enabled.");
+              }
+              if (whyThisSet.length === 0) {
+                whyThisSet.push("Returned the most relevant accessible context available.");
+              }
+
+              const statusCount = selected.filter((candidate) => candidate.item.category === "status").length;
+              const logCount = selected.filter((candidate) => candidate.item.category === "decision_log").length;
+              const historyCount = selected.filter((candidate) => candidate.item.category === "history").length;
+              const summaryPrefix = scope
+                ? `Resume pack for ${scope}`
+                : resumeArgs.project
+                  ? `Resume pack for ${resumeArgs.project}`
+                  : "Resume pack";
+              const summary = selected.length === 0
+                ? `${summaryPrefix}: no matching context found.`
+                : `${summaryPrefix}: ${statusCount} tracked status item${statusCount === 1 ? "" : "s"}, ${logCount} recent decision log${logCount === 1 ? "" : "s"}, ${openLoops.length} open loop${openLoops.length === 1 ? "" : "s"}${historyCount > 0 ? `, ${historyCount} history item${historyCount === 1 ? "" : "s"}` : ""}.`;
+
+              const response: Record<string, unknown> = {
+                summary,
+                items: selected.map((candidate) => candidate.item),
+                open_loops: openLoops,
+                suggested_reads: suggestedReads,
+                why_this_set: whyThisSet,
+              };
+              if (scope) response.target_namespace = scope;
+
+              // Telos — ideal-state anchor surfaced in the continuation pack so
+              // resumed work stays anchored to the owner's goals/challenges (#95).
+              if (ctx.principalType === "owner") {
+                const telos = readState(db, "meta", "telos");
+                if (telos) {
+                  const filteredTelos = filterDerivedSources(
+                    db,
+                    ctx,
+                    [telos],
+                    "memory_resume",
+                    (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
+                    sessionId,
+                  );
+                  resumeRedactedSources.push(...filteredTelos.redacted);
+                  if (filteredTelos.allowed.length > 0) {
+                    const parsedTelos = parseEntry(filteredTelos.allowed[0]);
+                    response.telos = {
+                      content: parsedTelos.content,
+                      updated_at: parsedTelos.updated_at,
+                    };
+                  }
+                }
+              }
+
+              const redactedSourcesSummary = summarizeRedactedSources(ctx, resumeRedactedSources);
+              if (redactedSourcesSummary) {
+                response.redacted_sources = redactedSourcesSummary;
+              }
+
+              return okResult("resume", response);
+            };
+            return handleMemoryResume();
           }
 
           case "memory_extract": {
-            const extractArgs = (args ?? {}) as unknown as ExtractParams;
-            const maxSuggestions = clampOptionalLimit(extractArgs.max_suggestions, 10) ?? 5;
+            const handleMemoryExtract = async () => {
+              const extractArgs = (args ?? {}) as unknown as ExtractParams;
+              const maxSuggestions = clampOptionalLimit(extractArgs.max_suggestions, 10) ?? 5;
 
-            if (typeof extractArgs.conversation_text !== "string" || extractArgs.conversation_text.trim().length === 0) {
-              return errResult("extract", "validation_error", '"conversation_text" is required and must be a non-empty string.');
-            }
-            if (extractArgs.namespace_hint !== undefined) {
-              const namespaceCheck = validateNamespace(extractArgs.namespace_hint);
-              if (!namespaceCheck.valid) {
-                return errResult("extract", "validation_error", namespaceCheck.error!);
+              if (typeof extractArgs.conversation_text !== "string" || extractArgs.conversation_text.trim().length === 0) {
+                return errResult("extract", "validation_error", '"conversation_text" is required and must be a non-empty string.');
               }
-            }
-            if (
-              typeof extractArgs.project_hint === "string" &&
-              (extractArgs.project_hint.startsWith("projects/") || extractArgs.project_hint.startsWith("clients/"))
-            ) {
-              const projectNamespaceCheck = validateNamespace(extractArgs.project_hint);
-              if (!projectNamespaceCheck.valid) {
-                return errResult("extract", "validation_error", projectNamespaceCheck.error!);
+              if (extractArgs.namespace_hint !== undefined) {
+                const namespaceCheck = validateNamespace(extractArgs.namespace_hint);
+                if (!namespaceCheck.valid) {
+                  return errResult("extract", "validation_error", namespaceCheck.error!);
+                }
               }
-            }
+              if (
+                typeof extractArgs.project_hint === "string" &&
+                (extractArgs.project_hint.startsWith("projects/") || extractArgs.project_hint.startsWith("clients/"))
+              ) {
+                const projectNamespaceCheck = validateNamespace(extractArgs.project_hint);
+                if (!projectNamespaceCheck.valid) {
+                  return errResult("extract", "validation_error", projectNamespaceCheck.error!);
+                }
+              }
 
-            const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_extract", sessionId);
-            const scope = resolveExtractNamespace(
-              extractArgs,
-              extractArgs.conversation_text,
-              visibleTrackedStatuses.allowed,
-              ctx,
-            );
-            const relatedEntries = buildExtractRelatedEntries(db, scope.primaryNamespace, ctx, sessionId);
-            const signals = extractConversationSignals(extractArgs.conversation_text);
-            const built = buildExtractSuggestions(signals, scope.primaryNamespace, relatedEntries.entries);
-            const extractRedactedSources = combineRedactedSources(
-              visibleTrackedStatuses.redacted,
-              relatedEntries.redacted,
-            );
+              const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_extract", sessionId);
+              const scope = resolveExtractNamespace(
+                extractArgs,
+                extractArgs.conversation_text,
+                visibleTrackedStatuses.allowed,
+                ctx,
+              );
+              const relatedEntries = buildExtractRelatedEntries(db, scope.primaryNamespace, ctx, sessionId);
+              const signals = extractConversationSignals(extractArgs.conversation_text);
+              const built = buildExtractSuggestions(signals, scope.primaryNamespace, relatedEntries.entries);
+              const extractRedactedSources = combineRedactedSources(
+                visibleTrackedStatuses.redacted,
+                relatedEntries.redacted,
+              );
 
-            const response: Record<string, unknown> = {
-              suggestions: built.suggestions.slice(0, maxSuggestions),
-              candidate_namespaces: scope.candidateNamespaces,
-              related_entries: relatedEntries.entries,
-              capture_warnings: [...new Set([
-                "Suggestions only — nothing has been written.",
-                ...scope.warnings,
-                ...built.warnings,
-              ])],
+              const response: Record<string, unknown> = {
+                suggestions: built.suggestions.slice(0, maxSuggestions),
+                candidate_namespaces: scope.candidateNamespaces,
+                related_entries: relatedEntries.entries,
+                capture_warnings: [...new Set([
+                  "Suggestions only — nothing has been written.",
+                  ...scope.warnings,
+                  ...built.warnings,
+                ])],
+              };
+              const redactedSourcesSummary = summarizeRedactedSources(ctx, extractRedactedSources);
+              if (redactedSourcesSummary) {
+                response.redacted_sources = redactedSourcesSummary;
+              }
+
+              return okResult("extract", response);
             };
-            const redactedSourcesSummary = summarizeRedactedSources(ctx, extractRedactedSources);
-            if (redactedSourcesSummary) {
-              response.redacted_sources = redactedSourcesSummary;
-            }
-
-            return okResult("extract", response);
+            return handleMemoryExtract();
           }
 
           case "memory_narrative": {
-            const narrativeArgs = (args ?? {}) as unknown as NarrativeParams;
-            const limit = clampOptionalLimit(narrativeArgs.limit, 20) ?? 8;
+            const handleMemoryNarrative = async () => {
+              const narrativeArgs = (args ?? {}) as unknown as NarrativeParams;
+              const limit = clampOptionalLimit(narrativeArgs.limit, 20) ?? 8;
 
-            const namespaceCheck = validateNamespace(narrativeArgs.namespace);
-            if (!namespaceCheck.valid) {
-              return errResult("narrative", "validation_error", namespaceCheck.error!);
-            }
-
-            let normalizedSince: string | undefined;
-            if (narrativeArgs.since !== undefined) {
-              const parsed = new Date(narrativeArgs.since);
-              if (Number.isNaN(parsed.getTime())) {
-                return errResult("narrative", "validation_error", '"since" must be a valid ISO 8601 timestamp.');
+              const namespaceCheck = validateNamespace(narrativeArgs.namespace);
+              if (!namespaceCheck.valid) {
+                return errResult("narrative", "validation_error", namespaceCheck.error!);
               }
-              normalizedSince = parsed.toISOString();
-            }
 
-            const historyAccessPrefix = narrativeArgs.namespace.endsWith("/")
-              ? narrativeArgs.namespace
-              : `${narrativeArgs.namespace}/`;
-            if (!canRead(ctx, narrativeArgs.namespace) && !canReadSubtree(ctx, historyAccessPrefix)) {
-              const response: Record<string, unknown> = {
+              let normalizedSince: string | undefined;
+              if (narrativeArgs.since !== undefined) {
+                const parsed = new Date(narrativeArgs.since);
+                if (Number.isNaN(parsed.getTime())) {
+                  return errResult("narrative", "validation_error", '"since" must be a valid ISO 8601 timestamp.');
+                }
+                normalizedSince = parsed.toISOString();
+              }
+
+              const historyAccessPrefix = narrativeArgs.namespace.endsWith("/")
+                ? narrativeArgs.namespace
+                : `${narrativeArgs.namespace}/`;
+              if (!canRead(ctx, narrativeArgs.namespace) && !canReadSubtree(ctx, historyAccessPrefix)) {
+                const response: Record<string, unknown> = {
+                  namespace: narrativeArgs.namespace,
+                  summary: "No narrative context found.",
+                  signals: [],
+                  timeline: [],
+                };
+                if (narrativeArgs.include_sources) response.sources = [];
+                return okResult("narrative", response);
+              }
+
+              const rawStatusEntry = resolveNarrativeStatusEntry(db, narrativeArgs.namespace);
+              const statusEntry = rawStatusEntry && canRead(ctx, rawStatusEntry.namespace)
+                ? rawStatusEntry
+                : null;
+              const filteredStatusEntry = statusEntry
+                ? filterDerivedSources(
+                  db,
+                  ctx,
+                  [statusEntry],
+                  "memory_narrative",
+                  (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
+                  sessionId,
+                )
+                : { allowed: [] as Entry[], redacted: [] as RedactableEntryMetadata[] };
+              const rawLogs = queryEntriesByFilter(db, {
                 namespace: narrativeArgs.namespace,
-                summary: "No narrative context found.",
-                signals: [],
-                timeline: [],
-              };
-              if (narrativeArgs.include_sources) response.sources = [];
-              return okResult("narrative", response);
-            }
-
-            const rawStatusEntry = resolveNarrativeStatusEntry(db, narrativeArgs.namespace);
-            const statusEntry = rawStatusEntry && canRead(ctx, rawStatusEntry.namespace)
-              ? rawStatusEntry
-              : null;
-            const filteredStatusEntry = statusEntry
-              ? filterDerivedSources(
+                entryType: "log",
+                limit: Math.max(limit, 12),
+                since: normalizedSince,
+              }).filter((entry) => canRead(ctx, entry.namespace));
+              const filteredLogs = filterDerivedSources(
                 db,
                 ctx,
-                [statusEntry],
+                rawLogs,
                 "memory_narrative",
                 (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
                 sessionId,
-              )
-              : { allowed: [] as Entry[], redacted: [] as RedactableEntryMetadata[] };
-            const rawLogs = queryEntriesByFilter(db, {
-              namespace: narrativeArgs.namespace,
-              entryType: "log",
-              limit: Math.max(limit, 12),
-              since: normalizedSince,
-            }).filter((entry) => canRead(ctx, entry.namespace));
-            const filteredLogs = filterDerivedSources(
-              db,
-              ctx,
-              rawLogs,
-              "memory_narrative",
-              (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
-              sessionId,
-            );
-            const rawHistory = getAuditHistoryPage(db, {
-              namespace: narrativeArgs.namespace,
-              since: normalizedSince,
-              limit: Math.max(limit * 2, 12),
-            }).entries.filter((entry) => canRead(ctx, entry.namespace));
-            const filteredHistory = filterDerivedSources(
-              db,
-              ctx,
-              rawHistory,
-              "memory_narrative",
-              (entry) => buildAuditHistoryMetadata(db, entry),
-              sessionId,
-            );
-            const narrativeRedactedSources = combineRedactedSources(
-              filteredStatusEntry.redacted,
-              filteredLogs.redacted,
-              filteredHistory.redacted,
-            );
-            const visibleStatusEntry = filteredStatusEntry.allowed[0] ?? null;
-            const logs = filteredLogs.allowed;
-            const history = filteredHistory.allowed;
+              );
+              const rawHistory = getAuditHistoryPage(db, {
+                namespace: narrativeArgs.namespace,
+                since: normalizedSince,
+                limit: Math.max(limit * 2, 12),
+              }).entries.filter((entry) => canRead(ctx, entry.namespace));
+              const filteredHistory = filterDerivedSources(
+                db,
+                ctx,
+                rawHistory,
+                "memory_narrative",
+                (entry) => buildAuditHistoryMetadata(db, entry),
+                sessionId,
+              );
+              const narrativeRedactedSources = combineRedactedSources(
+                filteredStatusEntry.redacted,
+                filteredLogs.redacted,
+                filteredHistory.redacted,
+              );
+              const visibleStatusEntry = filteredStatusEntry.allowed[0] ?? null;
+              const logs = filteredLogs.allowed;
+              const history = filteredHistory.allowed;
 
-            if (!visibleStatusEntry && logs.length === 0 && history.length === 0) {
+              if (!visibleStatusEntry && logs.length === 0 && history.length === 0) {
+                const response: Record<string, unknown> = {
+                  namespace: narrativeArgs.namespace,
+                  summary: "No narrative context found.",
+                  signals: [],
+                  timeline: [],
+                  data_requirements: "Narrative signals require a status entry or log entries in this namespace. Signals are derived from: phase duration (3+ days in a phase), blocker age (3+ days), decision churn (2+ similar decisions), long gaps between updates (14+ days), and reversal patterns (lifecycle toggling between active and blocked).",
+                  suggestion: "Use memory_history for a chronological view of this namespace instead.",
+                };
+                if (narrativeArgs.include_sources) response.sources = [];
+                const redactedSourcesSummary = summarizeRedactedSources(ctx, narrativeRedactedSources);
+                if (redactedSourcesSummary) response.redacted_sources = redactedSourcesSummary;
+                return okResult("narrative", response);
+              }
+
+              const signals = buildNarrativeSignals(narrativeArgs.namespace, visibleStatusEntry, logs, history);
+              const timeline = buildNarrativeTimeline(visibleStatusEntry, logs, history, limit);
+              const sources = buildNarrativeSources(narrativeArgs.include_sources === true, visibleStatusEntry, logs, history);
+
+              const recentActivity = timeline[0]?.timestamp;
+              const summary = recentActivity
+                ? `Narrative view for ${narrativeArgs.namespace}: ${signals.length} signal${signals.length === 1 ? "" : "s"} derived from current status, recent logs, and audit history. Most recent activity: ${recentActivity}.`
+                : `Narrative view for ${narrativeArgs.namespace}: ${signals.length} signal${signals.length === 1 ? "" : "s"} derived from available context.`;
+
               const response: Record<string, unknown> = {
                 namespace: narrativeArgs.namespace,
-                summary: "No narrative context found.",
-                signals: [],
-                timeline: [],
-                data_requirements: "Narrative signals require a status entry or log entries in this namespace. Signals are derived from: phase duration (3+ days in a phase), blocker age (3+ days), decision churn (2+ similar decisions), long gaps between updates (14+ days), and reversal patterns (lifecycle toggling between active and blocked).",
-                suggestion: "Use memory_history for a chronological view of this namespace instead.",
+                summary,
+                signals,
+                timeline,
               };
-              if (narrativeArgs.include_sources) response.sources = [];
+              if (signals.length === 0) {
+                const entryCount = (visibleStatusEntry ? 1 : 0) + logs.length;
+                const logCount = logs.length;
+                response.reason = `Scanned ${entryCount} entries (${logCount} logs). No signals exceeded detection thresholds. Narrative signals are derived from: phase duration (3+ days), blocker age (3+ days), decision churn (2+ similar decisions), long gaps between updates (14+ days), and reversal patterns.`;
+                response.data_requirements = "Signals need sustained conditions: a status entry with a blocker present for 3+ days, a phase lasting 3+ days, a gap of 14+ days between log entries, 2+ similar decisions logged with the decision tag, or at least 2 lifecycle transitions between active and blocked.";
+                response.suggestion = "Use memory_history for a chronological view of this namespace instead.";
+              }
+              if (sources) response.sources = sources;
               const redactedSourcesSummary = summarizeRedactedSources(ctx, narrativeRedactedSources);
               if (redactedSourcesSummary) response.redacted_sources = redactedSourcesSummary;
+
               return okResult("narrative", response);
-            }
-
-            const signals = buildNarrativeSignals(narrativeArgs.namespace, visibleStatusEntry, logs, history);
-            const timeline = buildNarrativeTimeline(visibleStatusEntry, logs, history, limit);
-            const sources = buildNarrativeSources(narrativeArgs.include_sources === true, visibleStatusEntry, logs, history);
-
-            const recentActivity = timeline[0]?.timestamp;
-            const summary = recentActivity
-              ? `Narrative view for ${narrativeArgs.namespace}: ${signals.length} signal${signals.length === 1 ? "" : "s"} derived from current status, recent logs, and audit history. Most recent activity: ${recentActivity}.`
-              : `Narrative view for ${narrativeArgs.namespace}: ${signals.length} signal${signals.length === 1 ? "" : "s"} derived from available context.`;
-
-            const response: Record<string, unknown> = {
-              namespace: narrativeArgs.namespace,
-              summary,
-              signals,
-              timeline,
             };
-            if (signals.length === 0) {
-              const entryCount = (visibleStatusEntry ? 1 : 0) + logs.length;
-              const logCount = logs.length;
-              response.reason = `Scanned ${entryCount} entries (${logCount} logs). No signals exceeded detection thresholds. Narrative signals are derived from: phase duration (3+ days), blocker age (3+ days), decision churn (2+ similar decisions), long gaps between updates (14+ days), and reversal patterns.`;
-              response.data_requirements = "Signals need sustained conditions: a status entry with a blocker present for 3+ days, a phase lasting 3+ days, a gap of 14+ days between log entries, 2+ similar decisions logged with the decision tag, or at least 2 lifecycle transitions between active and blocked.";
-              response.suggestion = "Use memory_history for a chronological view of this namespace instead.";
-            }
-            if (sources) response.sources = sources;
-            const redactedSourcesSummary = summarizeRedactedSources(ctx, narrativeRedactedSources);
-            if (redactedSourcesSummary) response.redacted_sources = redactedSourcesSummary;
-
-            return okResult("narrative", response);
+            return handleMemoryNarrative();
           }
 
           case "memory_commitments": {
-            const { namespace, since, limit: rawLimit } = args as unknown as CommitmentsParams;
-            const limit = clampOptionalLimit(rawLimit, 25) ?? 10;
+            const handleMemoryCommitments = async () => {
+              const { namespace, since, limit: rawLimit } = args as unknown as CommitmentsParams;
+              const limit = clampOptionalLimit(rawLimit, 25) ?? 10;
 
-            if (namespace) {
-              const nsCheck = validateNamespace(namespace);
-              if (!nsCheck.valid) {
-                return errResult("commitments", "validation_error", nsCheck.error!);
+              if (namespace) {
+                const nsCheck = validateNamespace(namespace);
+                if (!nsCheck.valid) {
+                  return errResult("commitments", "validation_error", nsCheck.error!);
+                }
               }
-            }
 
-            let normalizedSince: string | undefined;
-            if (since !== undefined) {
-              const sinceCheck = normalizeIsoTimestamp(since, "since");
-              if (!sinceCheck.ok) {
-                return errResult("commitments", "validation_error", sinceCheck.error);
+              let normalizedSince: string | undefined;
+              if (since !== undefined) {
+                const sinceCheck = normalizeIsoTimestamp(since, "since");
+                if (!sinceCheck.ok) {
+                  return errResult("commitments", "validation_error", sinceCheck.error);
+                }
+                normalizedSince = sinceCheck.value;
               }
-              normalizedSince = sinceCheck.value;
-            }
 
-            if (namespace) {
-              const subtreeScope = namespace.endsWith("/") ? namespace : `${namespace}/`;
-              if (!canRead(ctx, namespace) && !canReadSubtree(ctx, subtreeScope)) {
-                return okResult("commitments", {
-                  open: [],
-                  at_risk: [],
-                  overdue: [],
-                  completed_recently: [],
-                });
+              if (namespace) {
+                const subtreeScope = namespace.endsWith("/") ? namespace : `${namespace}/`;
+                if (!canRead(ctx, namespace) && !canReadSubtree(ctx, subtreeScope)) {
+                  return okResult("commitments", {
+                    open: [],
+                    at_risk: [],
+                    overdue: [],
+                    completed_recently: [],
+                  });
+                }
               }
-            }
 
-            const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_commitments", sessionId);
-            const trackedStatusByNamespace = mapTrackedStatusAssessmentsByNamespace(visibleTrackedStatuses.allowed);
-            const { rows, redacted } = listFreshCommitmentRows(db, ctx, "memory_commitments", {
-              namespace,
-              since: normalizedSince,
-              limit: Math.max(limit * 8, 80),
-              includeResolved: true,
-            }, sessionId);
+              const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_commitments", sessionId);
+              const trackedStatusByNamespace = mapTrackedStatusAssessmentsByNamespace(visibleTrackedStatuses.allowed);
+              const { rows, redacted } = listFreshCommitmentRows(db, ctx, "memory_commitments", {
+                namespace,
+                since: normalizedSince,
+                limit: Math.max(limit * 8, 80),
+                includeResolved: true,
+              }, sessionId);
 
-            const classified = classifyCommitments(rows, trackedStatusByNamespace, limit);
-            const response: Record<string, unknown> = { ...classified };
+              const classified = classifyCommitments(rows, trackedStatusByNamespace, limit);
+              const response: Record<string, unknown> = { ...classified };
 
-            const allBucketsEmpty =
-              classified.open.length === 0 &&
-              classified.at_risk.length === 0 &&
-              classified.overdue.length === 0 &&
-              classified.completed_recently.length === 0;
+              const allBucketsEmpty =
+                classified.open.length === 0 &&
+                classified.at_risk.length === 0 &&
+                classified.overdue.length === 0 &&
+                classified.completed_recently.length === 0;
 
-            if (allBucketsEmpty) {
-              const statusEntryCount = visibleTrackedStatuses.allowed.length;
-              if (statusEntryCount === 0) {
-                const scopeEntries = listEntriesForDerivation(db, {
-                  namespace,
-                  since: normalizedSince,
-                }).filter((entry) => canRead(ctx, entry.namespace));
-                const totalEntryCount = scopeEntries.length;
-                if (totalEntryCount === 0) {
-                  response.reason = `Namespace has no status or log entries to scan`;
-                  response.data_requirements = "Commitments are extracted from two sources: (1) status entries with a non-empty next_steps list, and (2) log entries containing commitment-like phrases such as 'I will...', 'We agreed to...', 'We will...', or 'Agreed: ...'. At least one status or log entry matching these patterns is required.";
-                  response.suggestion = "Use memory_read to check the status entry's next steps directly.";
+              if (allBucketsEmpty) {
+                const statusEntryCount = visibleTrackedStatuses.allowed.length;
+                if (statusEntryCount === 0) {
+                  const scopeEntries = listEntriesForDerivation(db, {
+                    namespace,
+                    since: normalizedSince,
+                  }).filter((entry) => canRead(ctx, entry.namespace));
+                  const totalEntryCount = scopeEntries.length;
+                  if (totalEntryCount === 0) {
+                    response.reason = `Namespace has no status or log entries to scan`;
+                    response.data_requirements = "Commitments are extracted from two sources: (1) status entries with a non-empty next_steps list, and (2) log entries containing commitment-like phrases such as 'I will...', 'We agreed to...', 'We will...', or 'Agreed: ...'. At least one status or log entry matching these patterns is required.";
+                    response.suggestion = "Use memory_read to check the status entry's next steps directly.";
+                  } else {
+                    response.reason = `No commitment-like phrases detected in ${totalEntryCount} scanned entries. Commitments are extracted from status next-steps and log entries containing phrases like 'I will...', 'We agreed to...'`;
+                    response.data_requirements = "Commitments are extracted from two sources: (1) status entries with a non-empty next_steps list, and (2) log entries containing commitment-like phrases such as 'I will...', 'We agreed to...', 'We will...', or 'Agreed: ...'. At least one status or log entry matching these patterns is required.";
+                    response.suggestion = "Use memory_read to check the status entry's next steps directly.";
+                  }
                 } else {
-                  response.reason = `No commitment-like phrases detected in ${totalEntryCount} scanned entries. Commitments are extracted from status next-steps and log entries containing phrases like 'I will...', 'We agreed to...'`;
+                  const scopeEntries = listEntriesForDerivation(db, {
+                    namespace,
+                    since: normalizedSince,
+                  }).filter((entry) => canRead(ctx, entry.namespace));
+                  const totalEntryCount = scopeEntries.length;
+                  response.reason =
+                    `No commitment-like phrases detected in ${totalEntryCount} scanned entries. Commitments are extracted from status next-steps and log entries containing phrases like 'I will...', 'We agreed to...'`;
                   response.data_requirements = "Commitments are extracted from two sources: (1) status entries with a non-empty next_steps list, and (2) log entries containing commitment-like phrases such as 'I will...', 'We agreed to...', 'We will...', or 'Agreed: ...'. At least one status or log entry matching these patterns is required.";
                   response.suggestion = "Use memory_read to check the status entry's next steps directly.";
                 }
-              } else {
-                const scopeEntries = listEntriesForDerivation(db, {
-                  namespace,
-                  since: normalizedSince,
-                }).filter((entry) => canRead(ctx, entry.namespace));
-                const totalEntryCount = scopeEntries.length;
-                response.reason =
-                  `No commitment-like phrases detected in ${totalEntryCount} scanned entries. Commitments are extracted from status next-steps and log entries containing phrases like 'I will...', 'We agreed to...'`;
-                response.data_requirements = "Commitments are extracted from two sources: (1) status entries with a non-empty next_steps list, and (2) log entries containing commitment-like phrases such as 'I will...', 'We agreed to...', 'We will...', or 'Agreed: ...'. At least one status or log entry matching these patterns is required.";
-                response.suggestion = "Use memory_read to check the status entry's next steps directly.";
               }
-            }
 
-            const redactedSourcesSummary = summarizeRedactedSources(
-              ctx,
-              combineRedactedSources(visibleTrackedStatuses.redacted, redacted),
-            );
-            if (redactedSourcesSummary) {
-              response.redacted_sources = redactedSourcesSummary;
-            }
+              const redactedSourcesSummary = summarizeRedactedSources(
+                ctx,
+                combineRedactedSources(visibleTrackedStatuses.redacted, redacted),
+              );
+              if (redactedSourcesSummary) {
+                response.redacted_sources = redactedSourcesSummary;
+              }
 
-            return okResult("commitments", response);
+              return okResult("commitments", response);
+            };
+            return handleMemoryCommitments();
           }
 
           case "memory_patterns": {
-            const { namespace, topic, since, limit: rawLimit } = args as unknown as PatternsParams;
-            const limit = clampOptionalLimit(rawLimit, 10) ?? 5;
+            const handleMemoryPatterns = async () => {
+              const { namespace, topic, since, limit: rawLimit } = args as unknown as PatternsParams;
+              const limit = clampOptionalLimit(rawLimit, 10) ?? 5;
 
-            if (namespace) {
-              const nsCheck = validateNamespace(namespace);
-              if (!nsCheck.valid) {
-                return errResult("patterns", "validation_error", nsCheck.error!);
+              if (namespace) {
+                const nsCheck = validateNamespace(namespace);
+                if (!nsCheck.valid) {
+                  return errResult("patterns", "validation_error", nsCheck.error!);
+                }
               }
-            }
 
-            let normalizedSince: string | undefined;
-            if (since !== undefined) {
-              const sinceCheck = normalizeIsoTimestamp(since, "since");
-              if (!sinceCheck.ok) {
-                return errResult("patterns", "validation_error", sinceCheck.error);
+              let normalizedSince: string | undefined;
+              if (since !== undefined) {
+                const sinceCheck = normalizeIsoTimestamp(since, "since");
+                if (!sinceCheck.ok) {
+                  return errResult("patterns", "validation_error", sinceCheck.error);
+                }
+                normalizedSince = sinceCheck.value;
               }
-              normalizedSince = sinceCheck.value;
-            }
 
-            if (namespace) {
-              const subtreeScope = namespace.endsWith("/") ? namespace : `${namespace}/`;
-              if (!canRead(ctx, namespace) && !canReadSubtree(ctx, subtreeScope)) {
-                return okResult("patterns", {
-                  patterns: [],
-                  heuristics: [],
-                  supporting_sources: [],
+              if (namespace) {
+                const subtreeScope = namespace.endsWith("/") ? namespace : `${namespace}/`;
+                if (!canRead(ctx, namespace) && !canReadSubtree(ctx, subtreeScope)) {
+                  return okResult("patterns", {
+                    patterns: [],
+                    heuristics: [],
+                    supporting_sources: [],
+                  });
+                }
+              }
+
+              const topicNeedle = normalizeCompareText(topic ?? "");
+              const rawEntries = listEntriesForDerivation(db, {
+                namespace,
+                since: normalizedSince,
+              }).filter((entry) => canRead(ctx, entry.namespace));
+              const filteredEntries = filterDerivedSources(
+                db,
+                ctx,
+                rawEntries,
+                "memory_patterns",
+                (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
+                sessionId,
+              );
+              const allEntries = filteredEntries.allowed;
+
+              const candidateEntries = topicNeedle
+                ? allEntries.filter((entry) => normalizeCompareText(`${entry.namespace} ${entry.key ?? ""} ${entry.content}`).includes(topicNeedle))
+                : allEntries;
+
+              const patterns: PatternItem[] = [];
+              const heuristics: HeuristicItem[] = [];
+              const sourceIds = new Set<string>();
+
+              const decisionLogs = candidateEntries.filter((entry) =>
+                isStrictDecisionLikeLog(entry) &&
+                !isNarrativeMetaDiscussion(entry.content) &&
+                !isOperationalReleaseDecisionLog(entry)
+              );
+              const termSources = new Map<string, Set<string>>();
+              for (const entry of decisionLogs) {
+                for (const term of extractPatternTerms(entry.content)) {
+                  const ids = termSources.get(term) ?? new Set<string>();
+                  ids.add(entry.id);
+                  termSources.set(term, ids);
+                }
+              }
+
+              const recurringTerms = [...termSources.entries()]
+                .filter(([, ids]) => ids.size >= 2)
+                .sort((a, b) => b[1].size - a[1].size || a[0].localeCompare(b[0]));
+              if (recurringTerms.length >= 2 && recurringTerms[0][1].size >= 3) {
+                const topTerms = recurringTerms.slice(0, 3);
+                const ids = [...new Set(topTerms.flatMap(([, ids]) => [...ids]))];
+                ids.forEach((id) => sourceIds.add(id));
+                patterns.push({
+                  kind: "decision_theme",
+                  summary: `Decision work repeatedly references: ${topTerms.map(([term]) => term).join(", ")}.`,
+                  confidence: Math.min(0.95, 0.55 + topTerms[0][1].size * 0.1),
+                  source_entry_ids: ids.slice(0, 6),
+                  source_namespaces: [...new Set(ids
+                    .map((id) => allEntries.find((entry) => entry.id === id)?.namespace)
+                    .filter((value): value is string => typeof value === "string"))],
+                });
+                heuristics.push({
+                  summary: `Review the recurring decision terms before reopening this line of work.`,
+                  rationale: "Multiple decision logs repeated the same concern terms, suggesting stable evaluation criteria rather than a one-off thought.",
+                  source_entry_ids: ids.slice(0, 6),
                 });
               }
-            }
 
-            const topicNeedle = normalizeCompareText(topic ?? "");
-            const rawEntries = listEntriesForDerivation(db, {
-              namespace,
-              since: normalizedSince,
-            }).filter((entry) => canRead(ctx, entry.namespace));
-            const filteredEntries = filterDerivedSources(
-              db,
-              ctx,
-              rawEntries,
-              "memory_patterns",
-              (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
-              sessionId,
-            );
-            const allEntries = filteredEntries.allowed;
+              const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_patterns", sessionId);
+              const trackedStatusByNamespace = mapTrackedStatusAssessmentsByNamespace(visibleTrackedStatuses.allowed);
+              const { rows: commitmentRows, redacted: redactedCommitmentSources } = listFreshCommitmentRows(db, ctx, "memory_patterns", {
+                namespace,
+                since: normalizedSince,
+                limit: 200,
+                includeResolved: true,
+              }, sessionId);
 
-            const candidateEntries = topicNeedle
-              ? allEntries.filter((entry) => normalizeCompareText(`${entry.namespace} ${entry.key ?? ""} ${entry.content}`).includes(topicNeedle))
-              : allEntries;
-
-            const patterns: PatternItem[] = [];
-            const heuristics: HeuristicItem[] = [];
-            const sourceIds = new Set<string>();
-
-            const decisionLogs = candidateEntries.filter((entry) =>
-              isStrictDecisionLikeLog(entry) &&
-              !isNarrativeMetaDiscussion(entry.content) &&
-              !isOperationalReleaseDecisionLog(entry)
-            );
-            const termSources = new Map<string, Set<string>>();
-            for (const entry of decisionLogs) {
-              for (const term of extractPatternTerms(entry.content)) {
-                const ids = termSources.get(term) ?? new Set<string>();
-                ids.add(entry.id);
-                termSources.set(term, ids);
+              const undatedOpen = commitmentRows.filter((row) => row.status === "open" && !row.due_at);
+              const undatedSources = new Set(undatedOpen.map((row) => row.source_entry_id));
+              if (undatedSources.size >= 2) {
+                undatedOpen.slice(0, 4).forEach((row) => sourceIds.add(row.source_entry_id));
+                patterns.push({
+                  kind: "undated_next_steps",
+                  summary: "Open commitments in this scope are frequently undated.",
+                  confidence: Math.min(0.9, 0.5 + undatedOpen.length * 0.08),
+                  source_entry_ids: undatedOpen.slice(0, 6).map((row) => row.source_entry_id),
+                  source_namespaces: [...new Set(undatedOpen.slice(0, 6).map((row) => row.namespace))],
+                });
+                heuristics.push({
+                  summary: "Add explicit dates to next steps when they should survive across sessions.",
+                  rationale: "Multiple open commitments had no due date, which weakens reviewability and makes drop-off harder to spot.",
+                  source_entry_ids: undatedOpen.slice(0, 6).map((row) => row.source_entry_id),
+                });
               }
-            }
 
-            const recurringTerms = [...termSources.entries()]
-              .filter(([, ids]) => ids.size >= 2)
-              .sort((a, b) => b[1].size - a[1].size || a[0].localeCompare(b[0]));
-            if (recurringTerms.length >= 2 && recurringTerms[0][1].size >= 3) {
-              const topTerms = recurringTerms.slice(0, 3);
-              const ids = [...new Set(topTerms.flatMap(([, ids]) => [...ids]))];
-              ids.forEach((id) => sourceIds.add(id));
-              patterns.push({
-                kind: "decision_theme",
-                summary: `Decision work repeatedly references: ${topTerms.map(([term]) => term).join(", ")}.`,
-                confidence: Math.min(0.95, 0.55 + topTerms[0][1].size * 0.1),
-                source_entry_ids: ids.slice(0, 6),
-                source_namespaces: [...new Set(ids
-                  .map((id) => allEntries.find((entry) => entry.id === id)?.namespace)
-                  .filter((value): value is string => typeof value === "string"))],
-              });
-              heuristics.push({
-                summary: `Review the recurring decision terms before reopening this line of work.`,
-                rationale: "Multiple decision logs repeated the same concern terms, suggesting stable evaluation criteria rather than a one-off thought.",
-                source_entry_ids: ids.slice(0, 6),
-              });
-            }
+              const overdueRows = commitmentRows.filter((row) => row.status === "open" && row.due_at && row.due_at < nowUTC());
+              const blockedRows = commitmentRows.filter((row) => trackedStatusByNamespace.get(row.namespace)?.lifecycle === "blocked");
+              const overdueSourceCount = new Set(overdueRows.map((row) => row.source_entry_id)).size;
+              const blockedSourceCount = new Set(blockedRows.map((row) => row.source_entry_id)).size;
+              if (overdueSourceCount >= 2 || blockedSourceCount >= 2) {
+                const supporting = (overdueSourceCount >= 2 ? overdueRows : blockedRows).slice(0, 6);
+                supporting.forEach((row) => sourceIds.add(row.source_entry_id));
+                patterns.push({
+                  kind: overdueRows.length >= 2 ? "commitment_slip" : "blocked_followthrough",
+                  summary: overdueRows.length >= 2
+                    ? "Explicit commitments are slipping past their written due dates."
+                    : "Blocked work is carrying unresolved commitments.",
+                  confidence: Math.min(0.92, 0.56 + supporting.length * 0.08),
+                  source_entry_ids: supporting.map((row) => row.source_entry_id),
+                  source_namespaces: [...new Set(supporting.map((row) => row.namespace))],
+                });
+                heuristics.push({
+                  summary: overdueRows.length >= 2
+                    ? "Review stale commitments before adding more follow-through items."
+                    : "Clear or rewrite blocker-side commitments before reopening the work.",
+                  rationale: overdueRows.length >= 2
+                    ? "Repeated overdue commitments suggest the current next-step layer is drifting from execution."
+                    : "Blocked namespaces with lingering commitments create noisy handoffs and false progress signals.",
+                  source_entry_ids: supporting.map((row) => row.source_entry_id),
+                });
+              }
 
-            const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_patterns", sessionId);
-            const trackedStatusByNamespace = mapTrackedStatusAssessmentsByNamespace(visibleTrackedStatuses.allowed);
-            const { rows: commitmentRows, redacted: redactedCommitmentSources } = listFreshCommitmentRows(db, ctx, "memory_patterns", {
-              namespace,
-              since: normalizedSince,
-              limit: 200,
-              includeResolved: true,
-            }, sessionId);
+              const sortedPatterns = patterns
+                .sort((a, b) => b.confidence - a.confidence || a.summary.localeCompare(b.summary))
+                .slice(0, limit);
+              const allowedPatternSourceIds = new Set(sortedPatterns.flatMap((pattern) => pattern.source_entry_ids));
+              const supportingSources = buildPatternSources(allEntries, allowedPatternSourceIds).slice(0, limit * 3);
 
-            const undatedOpen = commitmentRows.filter((row) => row.status === "open" && !row.due_at);
-            const undatedSources = new Set(undatedOpen.map((row) => row.source_entry_id));
-            if (undatedSources.size >= 2) {
-              undatedOpen.slice(0, 4).forEach((row) => sourceIds.add(row.source_entry_id));
-              patterns.push({
-                kind: "undated_next_steps",
-                summary: "Open commitments in this scope are frequently undated.",
-                confidence: Math.min(0.9, 0.5 + undatedOpen.length * 0.08),
-                source_entry_ids: undatedOpen.slice(0, 6).map((row) => row.source_entry_id),
-                source_namespaces: [...new Set(undatedOpen.slice(0, 6).map((row) => row.namespace))],
-              });
-              heuristics.push({
-                summary: "Add explicit dates to next steps when they should survive across sessions.",
-                rationale: "Multiple open commitments had no due date, which weakens reviewability and makes drop-off harder to spot.",
-                source_entry_ids: undatedOpen.slice(0, 6).map((row) => row.source_entry_id),
-              });
-            }
+              const response: Record<string, unknown> = {
+                patterns: sortedPatterns,
+                heuristics: heuristics
+                  .filter((heuristic) => heuristic.source_entry_ids.some((id) => allowedPatternSourceIds.has(id)))
+                  .slice(0, limit),
+                supporting_sources: supportingSources,
+              };
 
-            const overdueRows = commitmentRows.filter((row) => row.status === "open" && row.due_at && row.due_at < nowUTC());
-            const blockedRows = commitmentRows.filter((row) => trackedStatusByNamespace.get(row.namespace)?.lifecycle === "blocked");
-            const overdueSourceCount = new Set(overdueRows.map((row) => row.source_entry_id)).size;
-            const blockedSourceCount = new Set(blockedRows.map((row) => row.source_entry_id)).size;
-            if (overdueSourceCount >= 2 || blockedSourceCount >= 2) {
-              const supporting = (overdueSourceCount >= 2 ? overdueRows : blockedRows).slice(0, 6);
-              supporting.forEach((row) => sourceIds.add(row.source_entry_id));
-              patterns.push({
-                kind: overdueRows.length >= 2 ? "commitment_slip" : "blocked_followthrough",
-                summary: overdueRows.length >= 2
-                  ? "Explicit commitments are slipping past their written due dates."
-                  : "Blocked work is carrying unresolved commitments.",
-                confidence: Math.min(0.92, 0.56 + supporting.length * 0.08),
-                source_entry_ids: supporting.map((row) => row.source_entry_id),
-                source_namespaces: [...new Set(supporting.map((row) => row.namespace))],
-              });
-              heuristics.push({
-                summary: overdueRows.length >= 2
-                  ? "Review stale commitments before adding more follow-through items."
-                  : "Clear or rewrite blocker-side commitments before reopening the work.",
-                rationale: overdueRows.length >= 2
-                  ? "Repeated overdue commitments suggest the current next-step layer is drifting from execution."
-                  : "Blocked namespaces with lingering commitments create noisy handoffs and false progress signals.",
-                source_entry_ids: supporting.map((row) => row.source_entry_id),
-              });
-            }
+              if (sortedPatterns.length === 0) {
+                const entryCount = candidateEntries.length;
+                const logCount = decisionLogs.length;
+                if (entryCount === 0) {
+                  response.reason = `Namespace has ${logCount} log entries — minimum 5 required for pattern detection`;
+                  response.data_requirements = "Pattern detection requires decision-tagged log entries (tagged with 'decision'). A decision_theme pattern needs at least 3 entries sharing recurring terms, with 2+ terms appearing across 2+ entries. An undated_next_steps pattern needs 2+ open commitments without due dates. A commitment_slip or blocked_followthrough pattern needs 2+ overdue or blocked commitments.";
+                  response.suggestion = "Use memory_query with tags: [\"decision\"] to browse decision logs directly.";
+                } else {
+                  response.reason = `${entryCount} entries scanned, no recurring terms above frequency threshold`;
+                  response.data_requirements = "Pattern detection requires decision-tagged log entries (tagged with 'decision'). A decision_theme pattern needs at least 3 entries sharing recurring terms, with 2+ terms appearing across 2+ entries. An undated_next_steps pattern needs 2+ open commitments without due dates. A commitment_slip or blocked_followthrough pattern needs 2+ overdue or blocked commitments.";
+                  response.suggestion = "Use memory_query with tags: [\"decision\"] to browse decision logs directly.";
+                }
+              }
 
-            const sortedPatterns = patterns
-              .sort((a, b) => b.confidence - a.confidence || a.summary.localeCompare(b.summary))
-              .slice(0, limit);
-            const allowedPatternSourceIds = new Set(sortedPatterns.flatMap((pattern) => pattern.source_entry_ids));
-            const supportingSources = buildPatternSources(allEntries, allowedPatternSourceIds).slice(0, limit * 3);
+              const redactedSourcesSummary = summarizeRedactedSources(
+                ctx,
+                combineRedactedSources(
+                  filteredEntries.redacted,
+                  visibleTrackedStatuses.redacted,
+                  redactedCommitmentSources,
+                ),
+              );
+              if (redactedSourcesSummary) {
+                response.redacted_sources = redactedSourcesSummary;
+              }
 
-            const response: Record<string, unknown> = {
-              patterns: sortedPatterns,
-              heuristics: heuristics
-                .filter((heuristic) => heuristic.source_entry_ids.some((id) => allowedPatternSourceIds.has(id)))
-                .slice(0, limit),
-              supporting_sources: supportingSources,
+              return okResult("patterns", response);
             };
-
-            if (sortedPatterns.length === 0) {
-              const entryCount = candidateEntries.length;
-              const logCount = decisionLogs.length;
-              if (entryCount === 0) {
-                response.reason = `Namespace has ${logCount} log entries — minimum 5 required for pattern detection`;
-                response.data_requirements = "Pattern detection requires decision-tagged log entries (tagged with 'decision'). A decision_theme pattern needs at least 3 entries sharing recurring terms, with 2+ terms appearing across 2+ entries. An undated_next_steps pattern needs 2+ open commitments without due dates. A commitment_slip or blocked_followthrough pattern needs 2+ overdue or blocked commitments.";
-                response.suggestion = "Use memory_query with tags: [\"decision\"] to browse decision logs directly.";
-              } else {
-                response.reason = `${entryCount} entries scanned, no recurring terms above frequency threshold`;
-                response.data_requirements = "Pattern detection requires decision-tagged log entries (tagged with 'decision'). A decision_theme pattern needs at least 3 entries sharing recurring terms, with 2+ terms appearing across 2+ entries. An undated_next_steps pattern needs 2+ open commitments without due dates. A commitment_slip or blocked_followthrough pattern needs 2+ overdue or blocked commitments.";
-                response.suggestion = "Use memory_query with tags: [\"decision\"] to browse decision logs directly.";
-              }
-            }
-
-            const redactedSourcesSummary = summarizeRedactedSources(
-              ctx,
-              combineRedactedSources(
-                filteredEntries.redacted,
-                visibleTrackedStatuses.redacted,
-                redactedCommitmentSources,
-              ),
-            );
-            if (redactedSourcesSummary) {
-              response.redacted_sources = redactedSourcesSummary;
-            }
-
-            return okResult("patterns", response);
+            return handleMemoryPatterns();
           }
 
           case "memory_handoff": {
-            const { namespace, since, limit: rawLimit } = args as unknown as HandoffParams;
-            const limit = clampOptionalLimit(rawLimit, 10) ?? 5;
+            const handleMemoryHandoff = async () => {
+              const { namespace, since, limit: rawLimit } = args as unknown as HandoffParams;
+              const limit = clampOptionalLimit(rawLimit, 10) ?? 5;
 
-            const nsCheck = validateNamespace(namespace);
-            if (!nsCheck.valid) {
-              return errResult("handoff", "validation_error", nsCheck.error!);
-            }
-
-            let normalizedSince: string | undefined;
-            if (since !== undefined) {
-              const sinceCheck = normalizeIsoTimestamp(since, "since");
-              if (!sinceCheck.ok) {
-                return errResult("handoff", "validation_error", sinceCheck.error);
+              const nsCheck = validateNamespace(namespace);
+              if (!nsCheck.valid) {
+                return errResult("handoff", "validation_error", nsCheck.error!);
               }
-              normalizedSince = sinceCheck.value;
-            }
 
-            const subtreeScope = namespace.endsWith("/") ? namespace : `${namespace}/`;
-            if (!canRead(ctx, namespace) && !canReadSubtree(ctx, subtreeScope)) {
-              return okResult("handoff", {
-                found: false,
+              let normalizedSince: string | undefined;
+              if (since !== undefined) {
+                const sinceCheck = normalizeIsoTimestamp(since, "since");
+                if (!sinceCheck.ok) {
+                  return errResult("handoff", "validation_error", sinceCheck.error);
+                }
+                normalizedSince = sinceCheck.value;
+              }
+
+              const subtreeScope = namespace.endsWith("/") ? namespace : `${namespace}/`;
+              if (!canRead(ctx, namespace) && !canReadSubtree(ctx, subtreeScope)) {
+                return okResult("handoff", {
+                  found: false,
+                  namespace,
+                  current_state: null,
+                  recent_decisions: [],
+                  open_loops: [],
+                  recent_actors: [],
+                  recommended_next_actions: [],
+                });
+              }
+
+              const rawEntries = listEntriesForDerivation(db, {
                 namespace,
-                current_state: null,
-                recent_decisions: [],
-                open_loops: [],
-                recent_actors: [],
-                recommended_next_actions: [],
-              });
-            }
-
-            const rawEntries = listEntriesForDerivation(db, {
-              namespace,
-              since: normalizedSince,
-            }).filter((entry) => canRead(ctx, entry.namespace));
-            const filteredEntries = filterDerivedSources(
-              db,
-              ctx,
-              rawEntries,
-              "memory_handoff",
-              (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
-              sessionId,
-            );
-            const allEntries = filteredEntries.allowed;
-            const rawStatusEntry = resolveNarrativeStatusEntry(db, namespace);
-            const statusEntry = rawStatusEntry && canRead(ctx, rawStatusEntry.namespace)
-              ? rawStatusEntry
-              : null;
-            const filteredStatusEntry = statusEntry
-              ? filterDerivedSources(
+                since: normalizedSince,
+              }).filter((entry) => canRead(ctx, entry.namespace));
+              const filteredEntries = filterDerivedSources(
                 db,
                 ctx,
-                [statusEntry],
+                rawEntries,
                 "memory_handoff",
                 (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
                 sessionId,
-              )
-              : { allowed: [] as Entry[], redacted: [] as RedactableEntryMetadata[] };
-            const visibleStatusEntry = filteredStatusEntry.allowed[0] ?? null;
-            const logs = allEntries
-              .filter((entry) => entry.entry_type === "log")
-              .sort((a, b) => b.created_at.localeCompare(a.created_at));
-            const filteredHistory = filterDerivedSources(
-              db,
-              ctx,
-              getAuditHistoryPage(db, {
+              );
+              const allEntries = filteredEntries.allowed;
+              const rawStatusEntry = resolveNarrativeStatusEntry(db, namespace);
+              const statusEntry = rawStatusEntry && canRead(ctx, rawStatusEntry.namespace)
+                ? rawStatusEntry
+                : null;
+              const filteredStatusEntry = statusEntry
+                ? filterDerivedSources(
+                  db,
+                  ctx,
+                  [statusEntry],
+                  "memory_handoff",
+                  (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
+                  sessionId,
+                )
+                : { allowed: [] as Entry[], redacted: [] as RedactableEntryMetadata[] };
+              const visibleStatusEntry = filteredStatusEntry.allowed[0] ?? null;
+              const logs = allEntries
+                .filter((entry) => entry.entry_type === "log")
+                .sort((a, b) => b.created_at.localeCompare(a.created_at));
+              const filteredHistory = filterDerivedSources(
+                db,
+                ctx,
+                getAuditHistoryPage(db, {
+                  namespace,
+                  since: normalizedSince,
+                  limit: Math.max(limit * 4, 20),
+                }).entries.filter((entry) => canRead(ctx, entry.namespace)),
+                "memory_handoff",
+                (entry) => buildAuditHistoryMetadata(db, entry),
+                sessionId,
+              );
+              const history = filteredHistory.allowed;
+              const { rows: commitmentRows, redacted: redactedCommitmentSources } = listFreshCommitmentRows(db, ctx, "memory_handoff", {
                 namespace,
                 since: normalizedSince,
-                limit: Math.max(limit * 4, 20),
-              }).entries.filter((entry) => canRead(ctx, entry.namespace)),
-              "memory_handoff",
-              (entry) => buildAuditHistoryMetadata(db, entry),
-              sessionId,
-            );
-            const history = filteredHistory.allowed;
-            const { rows: commitmentRows, redacted: redactedCommitmentSources } = listFreshCommitmentRows(db, ctx, "memory_handoff", {
-              namespace,
-              since: normalizedSince,
-              limit: 200,
-              includeResolved: true,
-            }, sessionId);
-            const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_handoff", sessionId);
-            const trackedStatusByNamespace = mapTrackedStatusAssessmentsByNamespace(visibleTrackedStatuses.allowed);
-            const currentState = buildHandoffCurrentState(namespace, visibleStatusEntry, allEntries);
+                limit: 200,
+                includeResolved: true,
+              }, sessionId);
+              const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_handoff", sessionId);
+              const trackedStatusByNamespace = mapTrackedStatusAssessmentsByNamespace(visibleTrackedStatuses.allowed);
+              const currentState = buildHandoffCurrentState(namespace, visibleStatusEntry, allEntries);
 
-            const recentDecisions = logs
-              .filter((entry) => isDecisionLikeLog(entry))
-              .slice(0, limit)
-              .map((entry) => ({
-                timestamp: entry.created_at,
-                summary: contentPreview(entry.content, 200),
-                source_entry_id: entry.id,
-              }));
+              const recentDecisions = logs
+                .filter((entry) => isDecisionLikeLog(entry))
+                .slice(0, limit)
+                .map((entry) => ({
+                  timestamp: entry.created_at,
+                  summary: contentPreview(entry.content, 200),
+                  source_entry_id: entry.id,
+                }));
 
-            const openLoopSet = new Set<string>();
-            const recommendedActionSet = new Set<string>();
-            const statusAssessment = visibleStatusEntry ? trackedStatusByNamespace.get(visibleStatusEntry.namespace) : undefined;
-            if (statusAssessment) {
-              for (const loop of extractResumeOpenLoops(statusAssessment)) {
-                openLoopSet.add(loop.summary);
-                recommendedActionSet.add(loop.suggested_action);
+              const openLoopSet = new Set<string>();
+              const recommendedActionSet = new Set<string>();
+              const statusAssessment = visibleStatusEntry ? trackedStatusByNamespace.get(visibleStatusEntry.namespace) : undefined;
+              if (statusAssessment) {
+                for (const loop of extractResumeOpenLoops(statusAssessment)) {
+                  openLoopSet.add(loop.summary);
+                  recommendedActionSet.add(loop.suggested_action);
+                }
               }
-            }
 
-            for (const row of commitmentRows) {
-              if (row.status !== "open") continue;
-              if (row.due_at && row.due_at < nowUTC()) {
-                openLoopSet.add(`Overdue commitment: ${row.text}`);
-                recommendedActionSet.add(`Resolve or reschedule the overdue commitment written for ${row.due_at}.`);
-                continue;
+              for (const row of commitmentRows) {
+                if (row.status !== "open") continue;
+                if (row.due_at && row.due_at < nowUTC()) {
+                  openLoopSet.add(`Overdue commitment: ${row.text}`);
+                  recommendedActionSet.add(`Resolve or reschedule the overdue commitment written for ${row.due_at}.`);
+                  continue;
+                }
+                const namespaceAssessment = trackedStatusByNamespace.get(row.namespace);
+                if (namespaceAssessment?.lifecycle === "blocked") {
+                  openLoopSet.add(`Blocked commitment: ${row.text}`);
+                  recommendedActionSet.add("Unblock the namespace or clear the lingering commitment before handing work onward.");
+                  continue;
+                }
+                if (row.due_at && getDaysUntil(row.due_at) <= COMMITMENT_SOON_DAYS) {
+                  openLoopSet.add(`Due soon: ${row.text}`);
+                  recommendedActionSet.add(`Review the commitment due at ${row.due_at}.`);
+                }
               }
-              const namespaceAssessment = trackedStatusByNamespace.get(row.namespace);
-              if (namespaceAssessment?.lifecycle === "blocked") {
-                openLoopSet.add(`Blocked commitment: ${row.text}`);
-                recommendedActionSet.add("Unblock the namespace or clear the lingering commitment before handing work onward.");
-                continue;
-              }
-              if (row.due_at && getDaysUntil(row.due_at) <= COMMITMENT_SOON_DAYS) {
-                openLoopSet.add(`Due soon: ${row.text}`);
-                recommendedActionSet.add(`Review the commitment due at ${row.due_at}.`);
-              }
-            }
 
-            if (recommendedActionSet.size === 0 && recentDecisions.length > 0) {
-              recommendedActionSet.add("Read the most recent decision log before making the next change.");
-            }
-            if (recommendedActionSet.size === 0 && currentState) {
-              recommendedActionSet.add("Refresh the tracked status if the current state has drifted.");
-            }
+              if (recommendedActionSet.size === 0 && recentDecisions.length > 0) {
+                recommendedActionSet.add("Read the most recent decision log before making the next change.");
+              }
+              if (recommendedActionSet.size === 0 && currentState) {
+                recommendedActionSet.add("Refresh the tracked status if the current state has drifted.");
+              }
 
-            const found = Boolean(currentState) || recentDecisions.length > 0 || history.length > 0 || commitmentRows.length > 0;
-            const response: Record<string, unknown> = {
-              found,
-              namespace,
-              current_state: currentState,
-              recent_decisions: recentDecisions,
-              open_loops: [...openLoopSet].slice(0, limit),
-              recent_actors: buildHandoffRecentActors(history, limit),
-              recommended_next_actions: [...recommendedActionSet].slice(0, limit),
+              const found = Boolean(currentState) || recentDecisions.length > 0 || history.length > 0 || commitmentRows.length > 0;
+              const response: Record<string, unknown> = {
+                found,
+                namespace,
+                current_state: currentState,
+                recent_decisions: recentDecisions,
+                open_loops: [...openLoopSet].slice(0, limit),
+                recent_actors: buildHandoffRecentActors(history, limit),
+                recommended_next_actions: [...recommendedActionSet].slice(0, limit),
+              };
+              const redactedSourcesSummary = summarizeRedactedSources(
+                ctx,
+                combineRedactedSources(
+                  filteredEntries.redacted,
+                  filteredStatusEntry.redacted,
+                  filteredHistory.redacted,
+                  redactedCommitmentSources,
+                  visibleTrackedStatuses.redacted,
+                ),
+              );
+              if (redactedSourcesSummary) {
+                response.redacted_sources = redactedSourcesSummary;
+              }
+              return okResult("handoff", response);
             };
-            const redactedSourcesSummary = summarizeRedactedSources(
-              ctx,
-              combineRedactedSources(
-                filteredEntries.redacted,
-                filteredStatusEntry.redacted,
-                filteredHistory.redacted,
-                redactedCommitmentSources,
-                visibleTrackedStatuses.redacted,
-              ),
-            );
-            if (redactedSourcesSummary) {
-              response.redacted_sources = redactedSourcesSummary;
-            }
-            return okResult("handoff", response);
+            return handleMemoryHandoff();
           }
 
           case "memory_write": {
-            const {
-              namespace,
-              key,
-              content,
-              tags,
-              valid_until,
-              expected_updated_at,
-              patch,
-              classification,
-              classification_override,
-            } =
-              args as unknown as WriteParams & { expected_updated_at?: string; patch?: PatchParams };
+            const handleMemoryWrite = async () => {
+              const {
+                namespace,
+                key,
+                content,
+                tags,
+                valid_until,
+                expected_updated_at,
+                patch,
+                classification,
+                classification_override,
+              } =
+                args as unknown as WriteParams & { expected_updated_at?: string; patch?: PatchParams };
 
-            // Validate namespace and key (always required)
-            const nsCheck = validateNamespace(namespace);
-            if (!nsCheck.valid) {
-              return errResult("write", "validation_error", nsCheck.error!);
-            }
-            const keyCheck = validateKey(key);
-            if (!keyCheck.valid) {
-              return errResult("write", "validation_error", keyCheck.error!);
-            }
+              // Validate namespace and key (always required)
+              const nsCheck = validateNamespace(namespace);
+              if (!nsCheck.valid) {
+                return errResult("write", "validation_error", nsCheck.error!);
+              }
+              const keyCheck = validateKey(key);
+              if (!keyCheck.valid) {
+                return errResult("write", "validation_error", keyCheck.error!);
+              }
 
-            // Mutually exclusive: patch and content cannot both be provided
-            if (patch !== undefined && content !== undefined) {
-              return errResult("write", "validation_error", "patch and content are mutually exclusive. Use patch for partial updates or content for a full write.");
-            }
-            if (patch !== undefined && valid_until !== undefined) {
-              return errResult("write", "validation_error", "valid_until is only supported on full memory_write calls, not patch updates.");
-            }
-            const classificationInputError = validateClassificationInput(classification, classification_override);
-            if (classificationInputError) {
-              return errResult("write", "validation_error", classificationInputError);
-            }
-            if (classification_override === true && ctx.principalType !== "owner") {
-              return errResult("write", "access_denied", "classification_override is only available to the owner principal.");
-            }
+              // Mutually exclusive: patch and content cannot both be provided
+              if (patch !== undefined && content !== undefined) {
+                return errResult("write", "validation_error", "patch and content are mutually exclusive. Use patch for partial updates or content for a full write.");
+              }
+              if (patch !== undefined && valid_until !== undefined) {
+                return errResult("write", "validation_error", "valid_until is only supported on full memory_write calls, not patch updates.");
+              }
+              const classificationInputError = validateClassificationInput(classification, classification_override);
+              if (classificationInputError) {
+                return errResult("write", "validation_error", classificationInputError);
+              }
+              if (classification_override === true && ctx.principalType !== "owner") {
+                return errResult("write", "access_denied", "classification_override is only available to the owner principal.");
+              }
 
-            if (!canWrite(ctx, namespace)) {
-              return accessDeniedResponse(ctx, "write");
-            }
+              if (!canWrite(ctx, namespace)) {
+                return accessDeniedResponse(ctx, "write");
+              }
 
-            // --- Patch path ---
-            if (patch !== undefined) {
-              // Validate any new tags being added
-              let patchReservedRemoved: string[] = [];
-              if (patch.tags_add) {
-                const tagsCheck = validateTags(patch.tags_add);
-                if (!tagsCheck.valid) {
-                  return errResult("write", "validation_error", tagsCheck.error!);
+              // --- Patch path ---
+              if (patch !== undefined) {
+                // Validate any new tags being added
+                let patchReservedRemoved: string[] = [];
+                if (patch.tags_add) {
+                  const tagsCheck = validateTags(patch.tags_add);
+                  if (!tagsCheck.valid) {
+                    return errResult("write", "validation_error", tagsCheck.error!);
+                  }
+                  // Strip server-reserved tags (e.g. source:synthesis) so they can't
+                  // be spoofed onto owner content via a patch.
+                  const { kept, removed } = stripReservedTags(patch.tags_add);
+                  if (removed.length > 0) {
+                    patch.tags_add = kept;
+                    patchReservedRemoved = removed;
+                  }
                 }
-                // Strip server-reserved tags (e.g. source:synthesis) so they can't
-                // be spoofed onto owner content via a patch.
-                const { kept, removed } = stripReservedTags(patch.tags_add);
+
+                // Pre-flight: reject patches that would create Librarian-orphaned entries
+                {
+                  const existing = readState(db, namespace, key);
+                  const patchTags = existing
+                    ? [...parseTags(existing.tags), ...(patch.tags_add ?? [])].filter(t => !(patch.tags_remove ?? []).includes(t))
+                    : (patch.tags_add ?? []);
+                  const orphanError = preflightWriteClassification(
+                    db, ctx, namespace, patchTags,
+                    classification, classification_override,
+                    existing?.classification,
+                  );
+                  if (orphanError) {
+                    return errResult("write", "classification_error", orphanError, { namespace, key });
+                  }
+                }
+
+                let patchResult;
+                try {
+                  patchResult = patchState(
+                    db,
+                    namespace,
+                    key,
+                    patch,
+                    ctx.principalId,
+                    expected_updated_at,
+                    {
+                      classification,
+                      classificationOverride: classification_override,
+                    },
+                  );
+                } catch (error) {
+                  return errResult("write", "validation_error", (error as Error).message);
+                }
+
+                if (patchResult.status === "not_found") {
+                  return errResult("write", "not_found", `No entry found at ${namespace}/${key}. Use content (not patch) to create a new entry.`, { namespace, key });
+                }
+
+                if (patchResult.status === "conflict") {
+                  return errResult("write", "conflict", patchResult.message!, { namespace, key, current_updated_at: patchResult.current_updated_at });
+                }
+
+                if (patchResult.status === "secret_detected") {
+                  return errResult("write", "validation_error", patchResult.error!);
+                }
+
+                const hintPatch = buildWriteHint(db, ctx, namespace, key);
+
+                if (sessionId) {
+                  logRetrievalOutcome(db, sessionId, { outcomeType: "write_in_result_namespace", namespace });
+                }
+
+                const patchedEntry = readState(db, namespace, key);
+                if (patchedEntry) {
+                  syncCommitmentsForEntry(db, patchedEntry.id, extractCommitmentsFromEntry(patchedEntry, getResolvedNamespaces(db)));
+                }
+
+                const patchedResponse: Record<string, unknown> = { status: "patched", id: patchResult.id, namespace, key, hint: hintPatch };
+                const patchWarnings: string[] = [];
+                if (patchReservedRemoved.length > 0) {
+                  patchWarnings.push(`Removed reserved tag(s): ${patchReservedRemoved.join(", ")}`);
+                }
+                // Advisory injection scan on the merged result — a patch can introduce
+                // instruction-shaped content just like a full write.
+                if (patchedEntry) {
+                  const patchInjectionWarning = injectionWarning(patchedEntry.content);
+                  if (patchInjectionWarning) patchWarnings.push(patchInjectionWarning);
+                }
+                if (patchWarnings.length > 0) patchedResponse.warnings = patchWarnings;
+                return okResult("write", patchedResponse);
+              }
+
+              // --- Full write path ---
+              if (typeof content !== "string") {
+                return errResult("write", "validation_error", "Content is required and must be a non-empty string.");
+              }
+              const validation = validateWriteInput(namespace, key, content, tags, maxContentSize);
+              if (!validation.valid) {
+                return errResult("write", "validation_error", validation.error!);
+              }
+
+              let normalizedValidUntil: string | null = null;
+              if (valid_until !== undefined && valid_until !== null) {
+                const timestampCheck = normalizeIsoTimestamp(valid_until, "valid_until");
+                if (!timestampCheck.ok) {
+                  return errResult("write", "validation_error", timestampCheck.error);
+                }
+                normalizedValidUntil = timestampCheck.value;
+              }
+
+              const isTrackedStatus = key === "status" && isTrackedNamespace(namespace);
+              const warnings: string[] = [];
+
+              // Advisory: flag instruction-shaped content (prompt-injection / memory-poisoning).
+              // Non-blocking — the entry is still stored; we only warn.
+              const writeInjectionWarning = injectionWarning(content);
+              if (writeInjectionWarning) warnings.push(writeInjectionWarning);
+
+              // Strip server-reserved tags (e.g. source:synthesis) from client input
+              // so machine-provenance markers can't be spoofed onto owner content.
+              let effectiveTags = tags ?? [];
+              {
+                const { kept, removed } = stripReservedTags(effectiveTags);
                 if (removed.length > 0) {
-                  patch.tags_add = kept;
-                  patchReservedRemoved = removed;
+                  warnings.push(`Removed reserved tag(s): ${removed.join(", ")}`);
+                  effectiveTags = kept;
+                }
+              }
+              // Canonicalize tags for tracked status writes
+              if (isTrackedStatus && effectiveTags.length > 0) {
+                const { canonical, normalized } = canonicalizeTags(effectiveTags);
+                if (normalized.length > 0) {
+                  warnings.push(`Tags normalized: ${normalized.join(", ")}`);
+                }
+                effectiveTags = canonical;
+              }
+
+              // Lifecycle validation for tracked status writes
+              if (isTrackedStatus) {
+                const lifecycleTags = getLifecycleTags(effectiveTags);
+                if (lifecycleTags.length === 0) {
+                  warnings.push(`No lifecycle tag found. Consider adding one of: ${[...LIFECYCLE_TAGS].join(", ")}.`);
+                } else if (lifecycleTags.length > 1) {
+                  warnings.push(`Multiple lifecycle tags found: [${lifecycleTags.join(", ")}]. Use exactly one.`);
                 }
               }
 
-              // Pre-flight: reject patches that would create Librarian-orphaned entries
+              // Pre-flight: reject writes that would create Librarian-orphaned entries
               {
                 const existing = readState(db, namespace, key);
-                const patchTags = existing
-                  ? [...parseTags(existing.tags), ...(patch.tags_add ?? [])].filter(t => !(patch.tags_remove ?? []).includes(t))
-                  : (patch.tags_add ?? []);
                 const orphanError = preflightWriteClassification(
-                  db, ctx, namespace, patchTags,
+                  db, ctx, namespace, effectiveTags,
                   classification, classification_override,
                   existing?.classification,
                 );
@@ -4871,15 +5178,17 @@ export function registerTools(
                 }
               }
 
-              let patchResult;
+              let result;
               try {
-                patchResult = patchState(
+                result = writeState(
                   db,
                   namespace,
                   key,
-                  patch,
+                  content,
+                  effectiveTags,
                   ctx.principalId,
                   expected_updated_at,
+                  normalizedValidUntil,
                   {
                     classification,
                     classificationOverride: classification_override,
@@ -4889,694 +5198,515 @@ export function registerTools(
                 return errResult("write", "validation_error", (error as Error).message);
               }
 
-              if (patchResult.status === "not_found") {
-                return errResult("write", "not_found", `No entry found at ${namespace}/${key}. Use content (not patch) to create a new entry.`, { namespace, key });
+              if (result.status === "conflict") {
+                return errResult("write", "conflict", result.message!, {
+                  namespace,
+                  key,
+                  current_updated_at: result.current_updated_at,
+                });
               }
 
-              if (patchResult.status === "conflict") {
-                return errResult("write", "conflict", patchResult.message!, { namespace, key, current_updated_at: patchResult.current_updated_at });
+              const hint = buildWriteHint(db, ctx, namespace, key);
+
+              const response: Record<string, unknown> = {
+                status: result.status,
+                id: result.id,
+                namespace,
+                key,
+                updated_at: result.updated_at,
+                classification: result.classification,
+                hint,
+                provenance: buildProvenance(ctx.principalId, ctx.principalId),
+              };
+              const nsWarning = uppercaseNamespaceWarning(namespace);
+              if (nsWarning) response.warning = nsWarning;
+
+              // CAS hint for tracked status writes without expected_updated_at
+              if (isTrackedStatus && !expected_updated_at && result.status === "updated") {
+                warnings.push("Consider passing expected_updated_at for tracked status writes to prevent blind overwrites.");
               }
 
-              if (patchResult.status === "secret_detected") {
-                return errResult("write", "validation_error", patchResult.error!);
+              if (warnings.length > 0) {
+                response.warnings = warnings;
               }
 
-              const hintPatch = buildWriteHint(db, ctx, namespace, key);
-
+              // Analytics: log write outcome correlated to prior retrieval in this session
               if (sessionId) {
-                logRetrievalOutcome(db, sessionId, { outcomeType: "write_in_result_namespace", namespace });
+                logRetrievalOutcome(db, sessionId, {
+                  outcomeType: "write_in_result_namespace",
+                  namespace,
+                });
               }
 
-              const patchedEntry = readState(db, namespace, key);
-              if (patchedEntry) {
-                syncCommitmentsForEntry(db, patchedEntry.id, extractCommitmentsFromEntry(patchedEntry, getResolvedNamespaces(db)));
+              if (result.id) {
+                const writtenEntry = getById(db, result.id);
+                if (writtenEntry) {
+                  syncCommitmentsForEntry(db, writtenEntry.id, extractCommitmentsFromEntry(writtenEntry, getResolvedNamespaces(db)));
+                }
               }
 
-              const patchedResponse: Record<string, unknown> = { status: "patched", id: patchResult.id, namespace, key, hint: hintPatch };
-              const patchWarnings: string[] = [];
-              if (patchReservedRemoved.length > 0) {
-                patchWarnings.push(`Removed reserved tag(s): ${patchReservedRemoved.join(", ")}`);
-              }
-              // Advisory injection scan on the merged result — a patch can introduce
-              // instruction-shaped content just like a full write.
-              if (patchedEntry) {
-                const patchInjectionWarning = injectionWarning(patchedEntry.content);
-                if (patchInjectionWarning) patchWarnings.push(patchInjectionWarning);
-              }
-              if (patchWarnings.length > 0) patchedResponse.warnings = patchWarnings;
-              return okResult("write", patchedResponse);
-            }
-
-            // --- Full write path ---
-            if (typeof content !== "string") {
-              return errResult("write", "validation_error", "Content is required and must be a non-empty string.");
-            }
-            const validation = validateWriteInput(namespace, key, content, tags, maxContentSize);
-            if (!validation.valid) {
-              return errResult("write", "validation_error", validation.error!);
-            }
-
-            let normalizedValidUntil: string | null = null;
-            if (valid_until !== undefined && valid_until !== null) {
-              const timestampCheck = normalizeIsoTimestamp(valid_until, "valid_until");
-              if (!timestampCheck.ok) {
-                return errResult("write", "validation_error", timestampCheck.error);
-              }
-              normalizedValidUntil = timestampCheck.value;
-            }
-
-            const isTrackedStatus = key === "status" && isTrackedNamespace(namespace);
-            const warnings: string[] = [];
-
-            // Advisory: flag instruction-shaped content (prompt-injection / memory-poisoning).
-            // Non-blocking — the entry is still stored; we only warn.
-            const writeInjectionWarning = injectionWarning(content);
-            if (writeInjectionWarning) warnings.push(writeInjectionWarning);
-
-            // Strip server-reserved tags (e.g. source:synthesis) from client input
-            // so machine-provenance markers can't be spoofed onto owner content.
-            let effectiveTags = tags ?? [];
-            {
-              const { kept, removed } = stripReservedTags(effectiveTags);
-              if (removed.length > 0) {
-                warnings.push(`Removed reserved tag(s): ${removed.join(", ")}`);
-                effectiveTags = kept;
-              }
-            }
-            // Canonicalize tags for tracked status writes
-            if (isTrackedStatus && effectiveTags.length > 0) {
-              const { canonical, normalized } = canonicalizeTags(effectiveTags);
-              if (normalized.length > 0) {
-                warnings.push(`Tags normalized: ${normalized.join(", ")}`);
-              }
-              effectiveTags = canonical;
-            }
-
-            // Lifecycle validation for tracked status writes
-            if (isTrackedStatus) {
-              const lifecycleTags = getLifecycleTags(effectiveTags);
-              if (lifecycleTags.length === 0) {
-                warnings.push(`No lifecycle tag found. Consider adding one of: ${[...LIFECYCLE_TAGS].join(", ")}.`);
-              } else if (lifecycleTags.length > 1) {
-                warnings.push(`Multiple lifecycle tags found: [${lifecycleTags.join(", ")}]. Use exactly one.`);
-              }
-            }
-
-            // Pre-flight: reject writes that would create Librarian-orphaned entries
-            {
-              const existing = readState(db, namespace, key);
-              const orphanError = preflightWriteClassification(
-                db, ctx, namespace, effectiveTags,
-                classification, classification_override,
-                existing?.classification,
-              );
-              if (orphanError) {
-                return errResult("write", "classification_error", orphanError, { namespace, key });
-              }
-            }
-
-            let result;
-            try {
-              result = writeState(
-                db,
-                namespace,
-                key,
-                content,
-                effectiveTags,
-                ctx.principalId,
-                expected_updated_at,
-                normalizedValidUntil,
-                {
-                  classification,
-                  classificationOverride: classification_override,
-                },
-              );
-            } catch (error) {
-              return errResult("write", "validation_error", (error as Error).message);
-            }
-
-            if (result.status === "conflict") {
-              return errResult("write", "conflict", result.message!, {
-                namespace,
-                key,
-                current_updated_at: result.current_updated_at,
-              });
-            }
-
-            const hint = buildWriteHint(db, ctx, namespace, key);
-
-            const response: Record<string, unknown> = {
-              status: result.status,
-              id: result.id,
-              namespace,
-              key,
-              updated_at: result.updated_at,
-              classification: result.classification,
-              hint,
-              provenance: buildProvenance(ctx.principalId, ctx.principalId),
+              return okResult("write", response);
             };
-            const nsWarning = uppercaseNamespaceWarning(namespace);
-            if (nsWarning) response.warning = nsWarning;
-
-            // CAS hint for tracked status writes without expected_updated_at
-            if (isTrackedStatus && !expected_updated_at && result.status === "updated") {
-              warnings.push("Consider passing expected_updated_at for tracked status writes to prevent blind overwrites.");
-            }
-
-            if (warnings.length > 0) {
-              response.warnings = warnings;
-            }
-
-            // Analytics: log write outcome correlated to prior retrieval in this session
-            if (sessionId) {
-              logRetrievalOutcome(db, sessionId, {
-                outcomeType: "write_in_result_namespace",
-                namespace,
-              });
-            }
-
-            if (result.id) {
-              const writtenEntry = getById(db, result.id);
-              if (writtenEntry) {
-                syncCommitmentsForEntry(db, writtenEntry.id, extractCommitmentsFromEntry(writtenEntry, getResolvedNamespaces(db)));
-              }
-            }
-
-            return okResult("write", response);
+            return handleMemoryWrite();
           }
 
           case "memory_update_status": {
-            const {
-              namespace,
-              phase,
-              current_work,
-              blockers,
-              next_steps,
-              notes,
-              lifecycle,
-              expected_updated_at,
-              classification,
-              classification_override,
-            } = args as unknown as StatusUpdateParams;
-
-            const nsCheck = validateNamespace(namespace);
-            if (!nsCheck.valid) {
-              return errResult("update_status", "validation_error", nsCheck.error!);
-            }
-            if (!isTrackedNamespace(namespace)) {
-              return errResult("update_status", "validation_error", "memory_update_status only supports tracked namespaces under projects/* or clients/*.");
-            }
-            if (!canWrite(ctx, namespace)) {
-              return accessDeniedResponse(ctx, "update_status");
-            }
-            const classificationInputError = validateClassificationInput(classification, classification_override);
-            if (classificationInputError) {
-              return errResult("update_status", "validation_error", classificationInputError);
-            }
-            if (classification_override === true && ctx.principalType !== "owner") {
-              return errResult("update_status", "access_denied", "classification_override is only available to the owner principal.");
-            }
-            if (next_steps !== undefined && (!Array.isArray(next_steps) || next_steps.some((item) => typeof item !== "string"))) {
-              return errResult("update_status", "validation_error", "next_steps must be an array of strings.");
-            }
-
-            const existing = readState(db, namespace, "status");
-            const existingParsed = existing ? parseEntry(existing) : null;
-            const existingStructured = existingParsed ? parseStructuredStatus(existingParsed.content) : undefined;
-            const hasExistingStructure = existingStructured
-              ? Object.keys(existingStructured).length > 0
-              : false;
-
-            const hasRequestedUpdate = [
-              phase,
-              current_work,
-              blockers,
-              notes,
-              lifecycle,
-              next_steps,
-            ].some((value) => value !== undefined);
-
-            if (!existing && !hasRequestedUpdate) {
-              return errResult("update_status", "validation_error", "Provide at least one status field or lifecycle when creating a new tracked status.");
-            }
-            if (existing && !hasRequestedUpdate) {
-              return errResult("update_status", "validation_error", "No status fields were provided to update.");
-            }
-
-            const structured = buildStructuredStatus(
-              {
+            const handleMemoryUpdateStatus = async () => {
+              const {
+                namespace,
                 phase,
                 current_work,
                 blockers,
                 next_steps,
                 notes,
-              },
-              existingStructured,
-            );
-            const content = formatStructuredStatus(structured);
+                lifecycle,
+                expected_updated_at,
+                classification,
+                classification_override,
+              } = args as unknown as StatusUpdateParams;
 
-            const warnings: string[] = [];
-            if (existing && !hasExistingStructure) {
-              warnings.push("Existing status was not in the canonical structured format; missing sections were filled with defaults.");
-            }
-
-            const validation = validateWriteInput(namespace, "status", content, existingParsed?.tags, maxContentSize);
-            if (!validation.valid) {
-              return errResult("update_status", "validation_error", validation.error!);
-            }
-
-            const existingTags = existingParsed?.tags ?? [];
-            const retainedTags = stripClassificationTags(
-              existingTags.filter((tag) => !LIFECYCLE_TAGS.has(tag)),
-            );
-            const lifecycleTag = lifecycle ?? getLifecycleTags(existingTags)[0];
-            const effectiveTags = lifecycleTag ? [...retainedTags, lifecycleTag] : retainedTags;
-
-            if (!lifecycleTag) {
-              warnings.push(`No lifecycle tag set. Consider one of: ${[...LIFECYCLE_TAGS].join(", ")}.`);
-            }
-
-            // Pre-flight: reject writes that would create Librarian-orphaned entries
-            {
-              const orphanError = preflightWriteClassification(
-                db, ctx, namespace, effectiveTags,
-                classification, classification_override,
-                existing?.classification,
-              );
-              if (orphanError) {
-                return errResult("update_status", "classification_error", orphanError, { namespace, key: "status" });
+              const nsCheck = validateNamespace(namespace);
+              if (!nsCheck.valid) {
+                return errResult("update_status", "validation_error", nsCheck.error!);
               }
-            }
+              if (!isTrackedNamespace(namespace)) {
+                return errResult("update_status", "validation_error", "memory_update_status only supports tracked namespaces under projects/* or clients/*.");
+              }
+              if (!canWrite(ctx, namespace)) {
+                return accessDeniedResponse(ctx, "update_status");
+              }
+              const classificationInputError = validateClassificationInput(classification, classification_override);
+              if (classificationInputError) {
+                return errResult("update_status", "validation_error", classificationInputError);
+              }
+              if (classification_override === true && ctx.principalType !== "owner") {
+                return errResult("update_status", "access_denied", "classification_override is only available to the owner principal.");
+              }
+              if (next_steps !== undefined && (!Array.isArray(next_steps) || next_steps.some((item) => typeof item !== "string"))) {
+                return errResult("update_status", "validation_error", "next_steps must be an array of strings.");
+              }
 
-            let result;
-            try {
-              result = writeState(
-                db,
-                namespace,
-                "status",
-                content,
-                effectiveTags,
-                ctx.principalId,
-                expected_updated_at ?? existingParsed?.updated_at,
-                undefined,
+              const existing = readState(db, namespace, "status");
+              const existingParsed = existing ? parseEntry(existing) : null;
+              const existingStructured = existingParsed ? parseStructuredStatus(existingParsed.content) : undefined;
+              const hasExistingStructure = existingStructured
+                ? Object.keys(existingStructured).length > 0
+                : false;
+
+              const hasRequestedUpdate = [
+                phase,
+                current_work,
+                blockers,
+                notes,
+                lifecycle,
+                next_steps,
+              ].some((value) => value !== undefined);
+
+              if (!existing && !hasRequestedUpdate) {
+                return errResult("update_status", "validation_error", "Provide at least one status field or lifecycle when creating a new tracked status.");
+              }
+              if (existing && !hasRequestedUpdate) {
+                return errResult("update_status", "validation_error", "No status fields were provided to update.");
+              }
+
+              const structured = buildStructuredStatus(
                 {
-                  classification,
-                  classificationOverride: classification_override,
+                  phase,
+                  current_work,
+                  blockers,
+                  next_steps,
+                  notes,
                 },
+                existingStructured,
               );
-            } catch (error) {
-              return errResult("update_status", "validation_error", (error as Error).message);
-            }
+              const content = formatStructuredStatus(structured);
 
-            if (result.status === "conflict") {
-              return errResult("update_status", "conflict", result.message!, {
+              const warnings: string[] = [];
+              if (existing && !hasExistingStructure) {
+                warnings.push("Existing status was not in the canonical structured format; missing sections were filled with defaults.");
+              }
+
+              const validation = validateWriteInput(namespace, "status", content, existingParsed?.tags, maxContentSize);
+              if (!validation.valid) {
+                return errResult("update_status", "validation_error", validation.error!);
+              }
+
+              const existingTags = existingParsed?.tags ?? [];
+              const retainedTags = stripClassificationTags(
+                existingTags.filter((tag) => !LIFECYCLE_TAGS.has(tag)),
+              );
+              const lifecycleTag = lifecycle ?? getLifecycleTags(existingTags)[0];
+              const effectiveTags = lifecycleTag ? [...retainedTags, lifecycleTag] : retainedTags;
+
+              if (!lifecycleTag) {
+                warnings.push(`No lifecycle tag set. Consider one of: ${[...LIFECYCLE_TAGS].join(", ")}.`);
+              }
+
+              // Pre-flight: reject writes that would create Librarian-orphaned entries
+              {
+                const orphanError = preflightWriteClassification(
+                  db, ctx, namespace, effectiveTags,
+                  classification, classification_override,
+                  existing?.classification,
+                );
+                if (orphanError) {
+                  return errResult("update_status", "classification_error", orphanError, { namespace, key: "status" });
+                }
+              }
+
+              let result;
+              try {
+                result = writeState(
+                  db,
+                  namespace,
+                  "status",
+                  content,
+                  effectiveTags,
+                  ctx.principalId,
+                  expected_updated_at ?? existingParsed?.updated_at,
+                  undefined,
+                  {
+                    classification,
+                    classificationOverride: classification_override,
+                  },
+                );
+              } catch (error) {
+                return errResult("update_status", "validation_error", (error as Error).message);
+              }
+
+              if (result.status === "conflict") {
+                return errResult("update_status", "conflict", result.message!, {
+                  namespace,
+                  key: "status",
+                  current_updated_at: result.current_updated_at,
+                });
+              }
+
+              if (sessionId) {
+                logRetrievalOutcome(db, sessionId, {
+                  outcomeType: "write_in_result_namespace",
+                  namespace,
+                });
+              }
+
+              if (result.id) {
+                const statusEntry = getById(db, result.id);
+                if (statusEntry) {
+                  syncCommitmentsForEntry(db, statusEntry.id, extractCommitmentsFromEntry(statusEntry, getResolvedNamespaces(db)));
+                }
+              }
+
+              return okResult("update_status", {
+                status: result.status,
+                id: result.id,
                 namespace,
                 key: "status",
-                current_updated_at: result.current_updated_at,
+                updated_at: result.updated_at,
+                classification: result.classification,
+                content,
+                structured_status: structured,
+                warnings: warnings.length > 0 ? warnings : undefined,
+                provenance: buildProvenance(ctx.principalId, ctx.principalId),
               });
-            }
-
-            if (sessionId) {
-              logRetrievalOutcome(db, sessionId, {
-                outcomeType: "write_in_result_namespace",
-                namespace,
-              });
-            }
-
-            if (result.id) {
-              const statusEntry = getById(db, result.id);
-              if (statusEntry) {
-                syncCommitmentsForEntry(db, statusEntry.id, extractCommitmentsFromEntry(statusEntry, getResolvedNamespaces(db)));
-              }
-            }
-
-            return okResult("update_status", {
-              status: result.status,
-              id: result.id,
-              namespace,
-              key: "status",
-              updated_at: result.updated_at,
-              classification: result.classification,
-              content,
-              structured_status: structured,
-              warnings: warnings.length > 0 ? warnings : undefined,
-              provenance: buildProvenance(ctx.principalId, ctx.principalId),
-            });
+            };
+            return handleMemoryUpdateStatus();
           }
 
           case "memory_read": {
-            const { namespace, key } = args as unknown as ReadParams;
-            const nsCheck = validateNamespace(namespace);
-            if (!nsCheck.valid) {
-              return errResult("read", "validation_error", nsCheck.error!);
-            }
-            const keyCheck = validateKey(key);
-            if (!keyCheck.valid) {
-              return errResult("read", "validation_error", keyCheck.error!);
-            }
-            if (!canRead(ctx, namespace)) {
-              return accessDeniedReadResponse("read");
-            }
-            const entry = readState(db, namespace, key);
-            if (entry) {
-              const parsed = parseEntry(entry);
-              const redacted = maybeRedactDirectEntry(db, ctx, parsed, "memory_read", sessionId);
-              if (redacted) {
-                return okResult("read", { found: true, ...redacted });
+            const handleMemoryRead = async () => {
+              const { namespace, key } = args as unknown as ReadParams;
+              const nsCheck = validateNamespace(namespace);
+              if (!nsCheck.valid) {
+                return errResult("read", "validation_error", nsCheck.error!);
               }
-              const response: Record<string, unknown> = { found: true, ...serializeParsedEntry(parsed) };
-              if (isEntryExpired(parsed)) {
-                response.expired = true;
+              const keyCheck = validateKey(key);
+              if (!keyCheck.valid) {
+                return errResult("read", "validation_error", keyCheck.error!);
               }
-              if (isStale(parsed.updated_at)) {
-                response.stale = true;
+              if (!canRead(ctx, namespace)) {
+                return accessDeniedReadResponse("read");
               }
-              // Attach freshness metadata when reading a synthesis entry
-              if (key === "synthesis") {
-                const synthesisMeta = getConsolidationMetadata(db, namespace);
-                const synthesisAgeMs = Date.now() - new Date(parsed.updated_at).getTime();
-                response.synthesis_age_days = Math.floor(synthesisAgeMs / (1000 * 60 * 60 * 24));
-                response.logs_incorporated = countLogsIncorporated(db, namespace);
-                response.origin = synthesisMeta ? "auto" : "manual";
+              const entry = readState(db, namespace, key);
+              if (entry) {
+                const parsed = parseEntry(entry);
+                const redacted = maybeRedactDirectEntry(db, ctx, parsed, "memory_read", sessionId);
+                if (redacted) {
+                  return okResult("read", { found: true, ...redacted });
+                }
+                const response: Record<string, unknown> = { found: true, ...serializeParsedEntry(parsed) };
+                if (isEntryExpired(parsed)) {
+                  response.expired = true;
+                }
+                if (isStale(parsed.updated_at)) {
+                  response.stale = true;
+                }
+                // Attach freshness metadata when reading a synthesis entry
+                if (key === "synthesis") {
+                  const synthesisMeta = getConsolidationMetadata(db, namespace);
+                  const synthesisAgeMs = Date.now() - new Date(parsed.updated_at).getTime();
+                  response.synthesis_age_days = Math.floor(synthesisAgeMs / (1000 * 60 * 60 * 24));
+                  response.logs_incorporated = countLogsIncorporated(db, namespace);
+                  response.origin = synthesisMeta ? "auto" : "manual";
+                }
+                // Analytics: log opened_result outcome
+                if (sessionId) {
+                  logRetrievalOutcome(db, sessionId, {
+                    outcomeType: "opened_result",
+                    entryId: parsed.id,
+                    namespace: parsed.namespace,
+                  });
+                }
+                return okResult("read", response);
               }
-              // Analytics: log opened_result outcome
-              if (sessionId) {
-                logRetrievalOutcome(db, sessionId, {
-                  outcomeType: "opened_result",
-                  entryId: parsed.id,
-                  namespace: parsed.namespace,
-                });
-              }
-              return okResult("read", response);
-            }
-            const hint = buildReadMissHint(db, ctx, namespace);
-            return okResult("read", {
-              found: false,
-              namespace,
-              key,
-              message: `No state entry found in namespace "${namespace}" with key "${key}".`,
-              hint,
-            });
+              const hint = buildReadMissHint(db, ctx, namespace);
+              return okResult("read", {
+                found: false,
+                namespace,
+                key,
+                message: `No state entry found in namespace "${namespace}" with key "${key}".`,
+                hint,
+              });
+            };
+            return handleMemoryRead();
           }
 
           case "memory_read_batch": {
-            const { reads } = args as unknown as ReadBatchParams;
-            if (!Array.isArray(reads) || reads.length === 0) {
-              return errResult("read_batch", "validation_error", "reads must be a non-empty array of {namespace, key} pairs.");
-            }
-            if (reads.length > 20) {
-              return errResult("read_batch", "validation_error", "Maximum 20 reads per batch.");
-            }
-
-            const results = reads.map(({ namespace: ns, key: k }) => {
-              const nsCheck = validateNamespace(ns);
-              if (!nsCheck.valid) return { found: false, namespace: ns, key: k, error: nsCheck.error };
-              const keyCheck = validateKey(k);
-              if (!keyCheck.valid) return { found: false, namespace: ns, key: k, error: keyCheck.error };
-              if (!canRead(ctx, ns)) return { found: false, namespace: ns, key: k };
-
-              const entry = readState(db, ns, k);
-              if (entry) {
-                const parsed = parseEntry(entry);
-                const redacted = maybeRedactDirectEntry(db, ctx, parsed, "memory_read_batch", sessionId);
-                if (redacted) {
-                  return { found: true, ...redacted };
-                }
-                const result: Record<string, unknown> = { found: true, ...serializeParsedEntry(parsed) };
-                if (isEntryExpired(parsed)) {
-                  result.expired = true;
-                }
-                if (isStale(parsed.updated_at)) {
-                  result.stale = true;
-                }
-                return result;
+            const handleMemoryReadBatch = async () => {
+              const { reads } = args as unknown as ReadBatchParams;
+              if (!Array.isArray(reads) || reads.length === 0) {
+                return errResult("read_batch", "validation_error", "reads must be a non-empty array of {namespace, key} pairs.");
               }
-              return { found: false, namespace: ns, key: k };
-            });
+              if (reads.length > 20) {
+                return errResult("read_batch", "validation_error", "Maximum 20 reads per batch.");
+              }
 
-            return okResult("read_batch", { results });
+              const results = reads.map(({ namespace: ns, key: k }) => {
+                const nsCheck = validateNamespace(ns);
+                if (!nsCheck.valid) return { found: false, namespace: ns, key: k, error: nsCheck.error };
+                const keyCheck = validateKey(k);
+                if (!keyCheck.valid) return { found: false, namespace: ns, key: k, error: keyCheck.error };
+                if (!canRead(ctx, ns)) return { found: false, namespace: ns, key: k };
+
+                const entry = readState(db, ns, k);
+                if (entry) {
+                  const parsed = parseEntry(entry);
+                  const redacted = maybeRedactDirectEntry(db, ctx, parsed, "memory_read_batch", sessionId);
+                  if (redacted) {
+                    return { found: true, ...redacted };
+                  }
+                  const result: Record<string, unknown> = { found: true, ...serializeParsedEntry(parsed) };
+                  if (isEntryExpired(parsed)) {
+                    result.expired = true;
+                  }
+                  if (isStale(parsed.updated_at)) {
+                    result.stale = true;
+                  }
+                  return result;
+                }
+                return { found: false, namespace: ns, key: k };
+              });
+
+              return okResult("read_batch", { results });
+            };
+            return handleMemoryReadBatch();
           }
 
           case "memory_get": {
-            const { id } = args as unknown as GetParams;
-            if (!id || typeof id !== "string") {
-              return errResult("get", "validation_error", "ID is required.");
-            }
-            const entry = getById(db, id);
-            if (entry && !canRead(ctx, entry.namespace)) {
-              return accessDeniedReadResponse("get");
-            }
-            if (entry) {
-              const parsed = parseEntry(entry);
-              const redacted = maybeRedactDirectEntry(db, ctx, parsed, "memory_get", sessionId);
-              if (redacted) {
-                return okResult("get", { found: true, ...redacted });
+            const handleMemoryGet = async () => {
+              const { id } = args as unknown as GetParams;
+              if (!id || typeof id !== "string") {
+                return errResult("get", "validation_error", "ID is required.");
               }
-              const response: Record<string, unknown> = { found: true, ...serializeParsedEntry(parsed) };
-              if (isEntryExpired(parsed)) {
-                response.expired = true;
+              const entry = getById(db, id);
+              if (entry && !canRead(ctx, entry.namespace)) {
+                return accessDeniedReadResponse("get");
               }
-              if (isStale(parsed.updated_at)) {
-                response.stale = true;
+              if (entry) {
+                const parsed = parseEntry(entry);
+                const redacted = maybeRedactDirectEntry(db, ctx, parsed, "memory_get", sessionId);
+                if (redacted) {
+                  return okResult("get", { found: true, ...redacted });
+                }
+                const response: Record<string, unknown> = { found: true, ...serializeParsedEntry(parsed) };
+                if (isEntryExpired(parsed)) {
+                  response.expired = true;
+                }
+                if (isStale(parsed.updated_at)) {
+                  response.stale = true;
+                }
+                // Analytics: log opened_result outcome
+                if (sessionId) {
+                  logRetrievalOutcome(db, sessionId, {
+                    outcomeType: "opened_result",
+                    entryId: parsed.id,
+                    namespace: parsed.namespace,
+                  });
+                }
+                return okResult("get", response);
               }
-              // Analytics: log opened_result outcome
-              if (sessionId) {
-                logRetrievalOutcome(db, sessionId, {
-                  outcomeType: "opened_result",
-                  entryId: parsed.id,
-                  namespace: parsed.namespace,
-                });
-              }
-              return okResult("get", response);
-            }
-            return okResult("get", {
-              found: false,
-              message: `No entry found with ID "${id}".`,
-            });
+              return okResult("get", {
+                found: false,
+                message: `No entry found with ID "${id}".`,
+              });
+            };
+            return handleMemoryGet();
           }
 
           case "memory_query": {
-            const queryArgs = (args ?? {}) as unknown as QueryParams;
-            const { query, namespace, entry_type, tags, limit, search_mode, since, until } = queryArgs;
-            const explain = queryArgs.explain === true;
-            const includeExpired = queryArgs.include_expired === true;
-            const requireLexicalMatch = queryArgs.require_lexical_match === true;
-            // Validate serialization up front (parity with namespace/recency
-            // validation) so a typo like "boundry" fails loudly instead of being
-            // silently coerced to "linear". Applies to both the ranked and
-            // filter-only paths since it is read before the branch.
-            if (
-              queryArgs.serialization !== undefined &&
-              queryArgs.serialization !== "linear" &&
-              queryArgs.serialization !== "boundary"
-            ) {
-              return errResult("query", "validation_error", "serialization must be 'linear' or 'boundary'.");
-            }
-            const serialization = queryArgs.serialization ?? "linear";
-            const recencyWeightCheck = resolveSearchRecencyWeight(queryArgs);
-            if (!recencyWeightCheck.ok) {
-              return errResult("query", "validation_error", recencyWeightCheck.error);
-            }
-            const searchRecencyWeight = recencyWeightCheck.value;
-
-            // Validate the namespace filter (parity with write/read/log paths).
-            // A trailing slash is permitted for prefix filters (e.g. "projects/").
-            if (namespace !== undefined && namespace !== null) {
-              const nsCheck = validateNamespace(namespace as string);
-              if (!nsCheck.valid) {
-                return errResult("query", "validation_error", nsCheck.error!);
+            const handleMemoryQuery = async () => {
+              const queryArgs = (args ?? {}) as unknown as QueryParams;
+              const { query, namespace, entry_type, tags, limit, search_mode, since, until } = queryArgs;
+              const explain = queryArgs.explain === true;
+              const includeExpired = queryArgs.include_expired === true;
+              const requireLexicalMatch = queryArgs.require_lexical_match === true;
+              // Validate serialization up front (parity with namespace/recency
+              // validation) so a typo like "boundry" fails loudly instead of being
+              // silently coerced to "linear". Applies to both the ranked and
+              // filter-only paths since it is read before the branch.
+              if (
+                queryArgs.serialization !== undefined &&
+                queryArgs.serialization !== "linear" &&
+                queryArgs.serialization !== "boundary"
+              ) {
+                return errResult("query", "validation_error", "serialization must be 'linear' or 'boundary'.");
               }
-            }
-
-            // Filter-only mode: no query text, just browse by filters
-            if (!query || typeof query !== "string") {
-              // Must have at least one filter to avoid returning everything
-              if (!namespace && (!tags || tags.length === 0) && !since && !until && !entry_type) {
-                return errResult("query", "validation_error", "Provide either a 'query' string for search, or at least one filter (namespace, tags, entry_type, since, until) to browse.");
+              const serialization = queryArgs.serialization ?? "linear";
+              const recencyWeightCheck = resolveSearchRecencyWeight(queryArgs);
+              if (!recencyWeightCheck.ok) {
+                return errResult("query", "validation_error", recencyWeightCheck.error);
               }
-              const requestedLimit = Math.min(Math.max(limit ?? 10, 1), 50);
-              const internalFilterLimit = Math.min(requestedLimit * QUERY_RERANK_OVERFETCH_MULTIPLIER, 50);
-              let filterResults = queryEntriesByFilter(db, {
-                namespace,
-                entryType: entry_type,
-                tags,
-                limit: internalFilterLimit,
-                includeExpired: true,
-                since,
-                until,
-              });
-              const filteredExpired = filterExpiredEntries(filterResults, includeExpired);
-              filterResults = filterByAccess(ctx, filteredExpired.items).slice(0, requestedLimit);
-              const formatted = filterResults.map((entry) => formatQueryResult(
-                db,
-                ctx,
-                entry,
-                "memory_query",
-                sessionId,
-                false,
-                null,
-                undefined,
-                "lexical",
-                new Map(),
-                new Map(),
-                new Map(),
-              ));
-              const redactedCount = formatted.filter((entry) => entry.redacted === true).length;
+              const searchRecencyWeight = recencyWeightCheck.value;
 
-              // Analytics
-              if (sessionId) {
-                const resultIds = filterResults.map((entry) => entry.id);
-                const resultNamespaces = filterResults.map((entry) => entry.namespace);
-                const resultRanks = filterResults.map((_, i) => i + 1);
-                logRetrievalEvent(db, {
-                  sessionId,
-                  toolName: "memory_query",
-                  queryText: `[filter-only] ns=${namespace ?? "*"} tags=${tags?.join(",") ?? "*"} since=${since ?? "*"} until=${until ?? "*"}`,
-                  requestedMode: "lexical",
-                  actualMode: "lexical",
-                  resultIds,
-                  resultNamespaces,
-                  resultRanks,
-                });
+              // Validate the namespace filter (parity with write/read/log paths).
+              // A trailing slash is permitted for prefix filters (e.g. "projects/").
+              if (namespace !== undefined && namespace !== null) {
+                const nsCheck = validateNamespace(namespace as string);
+                if (!nsCheck.valid) {
+                  return errResult("query", "validation_error", nsCheck.error!);
+                }
               }
 
-              return okResult("query", {
-                results: formatted,
-                total: formatted.length,
-                redacted_count: redactedCount,
-                search_mode: "filter",
-                retrieval: {
-                  reranked: false,
-                  relaxed_lexical: false,
-                  fallback_reason: null,
-                  recency_applied: false,
-                  search_recency_weight: 0,
-                  expired_filtered_count: filteredExpired.expiredFilteredCount,
-                  // Browse results are not relevance-ranked, so boundary
-                  // placement never applies here — always report linear.
-                  serialization: "linear",
-                },
-              });
-            }
-
-            const requestedLimit = Math.min(Math.max(limit ?? 10, 1), 50);
-            const internalLimit = Math.min(requestedLimit * QUERY_RERANK_OVERFETCH_MULTIPLIER, 50);
-            const queryParams: QueryParams = {
-              query,
-              namespace,
-              entry_type,
-              tags,
-              limit: requestedLimit,
-              search_mode,
-              search_recency_weight: searchRecencyWeight,
-              include_expired: includeExpired,
-              explain,
-              since,
-              until,
-            };
-            const requestedMode: SearchMode = search_mode ?? "hybrid";
-            let actualMode: SearchMode = requestedMode;
-            let warning: string | undefined;
-            let fallbackReason: string | null = null;
-            let relaxedLexical = false;
-            let expiredFilteredCount = 0;
-            let results: Entry[] = [];
-            let lexicalResults: ReturnType<typeof queryEntriesLexicalScored> = [];
-            let semanticResults: ReturnType<typeof queryEntriesSemanticScored> = [];
-            let hybridResults: HybridQueryResult[] = [];
-
-            if (requestedMode === "semantic") {
-              if (!isSemanticEnabled() || !vecLoaded()) {
-                actualMode = "lexical";
-                warning = `Semantic search unavailable (${getSearchModeUnavailableReason("semantic")}). Falling back to lexical search.`;
-                fallbackReason = "semantic_unavailable";
-              }
-            } else if (requestedMode === "hybrid") {
-              if (!isHybridEnabled() || !vecLoaded()) {
-                actualMode = "lexical";
-                warning = `Hybrid search unavailable (${getSearchModeUnavailableReason("hybrid")}). Falling back to lexical search.`;
-                fallbackReason = "hybrid_unavailable";
-              }
-            }
-
-            if (actualMode === "semantic") {
-              const queryEmb = await generateEmbedding(query);
-              if (!queryEmb) {
-                actualMode = "lexical";
-                warning = "Failed to generate query embedding. Falling back to lexical search.";
-                fallbackReason = "embedding_generation_failed";
-              } else {
-                const buf = embeddingToBuffer(queryEmb);
-                semanticResults = queryEntriesSemanticScored(db, {
-                  queryEmbedding: buf,
+              // Filter-only mode: no query text, just browse by filters
+              if (!query || typeof query !== "string") {
+                // Must have at least one filter to avoid returning everything
+                if (!namespace && (!tags || tags.length === 0) && !since && !until && !entry_type) {
+                  return errResult("query", "validation_error", "Provide either a 'query' string for search, or at least one filter (namespace, tags, entry_type, since, until) to browse.");
+                }
+                const requestedLimit = Math.min(Math.max(limit ?? 10, 1), 50);
+                const internalFilterLimit = Math.min(requestedLimit * QUERY_RERANK_OVERFETCH_MULTIPLIER, 50);
+                let filterResults = queryEntriesByFilter(db, {
                   namespace,
                   entryType: entry_type,
                   tags,
-                  limit: internalLimit,
+                  limit: internalFilterLimit,
                   includeExpired: true,
                   since,
                   until,
-                  maxDistance: getSemanticMaxDistance(),
                 });
-                const filteredExpired = filterExpiredEntries(semanticResults, includeExpired);
-                semanticResults = filteredExpired.items;
-                expiredFilteredCount = filteredExpired.expiredFilteredCount;
-                results = semanticResults.map((result) => result.entry);
-              }
-            }
+                const filteredExpired = filterExpiredEntries(filterResults, includeExpired);
+                filterResults = filterByAccess(ctx, filteredExpired.items).slice(0, requestedLimit);
+                const formatted = filterResults.map((entry) => formatQueryResult(
+                  db,
+                  ctx,
+                  entry,
+                  "memory_query",
+                  sessionId,
+                  false,
+                  null,
+                  undefined,
+                  "lexical",
+                  new Map(),
+                  new Map(),
+                  new Map(),
+                ));
+                const redactedCount = formatted.filter((entry) => entry.redacted === true).length;
 
-            if (actualMode === "hybrid") {
-              const queryEmb = await generateEmbedding(query);
-              if (!queryEmb) {
-                actualMode = "lexical";
-                warning = "Failed to generate query embedding. Falling back to lexical search.";
-                fallbackReason = "embedding_generation_failed";
-              } else {
-                const buf = embeddingToBuffer(queryEmb);
-                const relaxedQuery = buildRelaxedLexicalQuery(query);
-                const hybridScored = queryEntriesHybridScored(db, {
-                  ftsOptions: { query, namespace, entryType: entry_type, tags, limit: internalLimit, includeExpired: true, since, until },
-                  semanticOptions: { queryEmbedding: buf, namespace, entryType: entry_type, tags, limit: internalLimit, includeExpired: true, since, until, maxDistance: getSemanticMaxDistance() },
-                  ftsFallbackOptions: relaxedQuery
-                    ? { query: relaxedQuery, namespace, entryType: entry_type, tags, limit: internalLimit, includeExpired: true, since, until, rawFts5: true }
-                    : undefined,
-                });
-                hybridResults = hybridScored.results;
-                if (hybridScored.ftsRelaxed) {
-                  relaxedLexical = true;
-                  if (!warning) {
-                    warning = "No exact lexical matches found. Used relaxed token matching for natural-language query.";
-                  }
+                // Analytics
+                if (sessionId) {
+                  const resultIds = filterResults.map((entry) => entry.id);
+                  const resultNamespaces = filterResults.map((entry) => entry.namespace);
+                  const resultRanks = filterResults.map((_, i) => i + 1);
+                  logRetrievalEvent(db, {
+                    sessionId,
+                    toolName: "memory_query",
+                    queryText: `[filter-only] ns=${namespace ?? "*"} tags=${tags?.join(",") ?? "*"} since=${since ?? "*"} until=${until ?? "*"}`,
+                    requestedMode: "lexical",
+                    actualMode: "lexical",
+                    resultIds,
+                    resultNamespaces,
+                    resultRanks,
+                  });
                 }
-                const filteredExpired = filterExpiredEntries(hybridResults, includeExpired);
-                hybridResults = filteredExpired.items;
-                expiredFilteredCount = filteredExpired.expiredFilteredCount;
-                results = hybridResults.map((result) => result.entry);
-              }
-            }
 
-            // Lexical fallback (or original mode)
-            if (actualMode === "lexical") {
-              lexicalResults = queryEntriesLexicalScored(db, {
+                return okResult("query", {
+                  results: formatted,
+                  total: formatted.length,
+                  redacted_count: redactedCount,
+                  search_mode: "filter",
+                  retrieval: {
+                    reranked: false,
+                    relaxed_lexical: false,
+                    fallback_reason: null,
+                    recency_applied: false,
+                    search_recency_weight: 0,
+                    expired_filtered_count: filteredExpired.expiredFilteredCount,
+                    // Browse results are not relevance-ranked, so boundary
+                    // placement never applies here — always report linear.
+                    serialization: "linear",
+                  },
+                });
+              }
+
+              const requestedLimit = Math.min(Math.max(limit ?? 10, 1), 50);
+              const internalLimit = Math.min(requestedLimit * QUERY_RERANK_OVERFETCH_MULTIPLIER, 50);
+              const queryParams: QueryParams = {
                 query,
                 namespace,
-                entryType: entry_type,
+                entry_type,
                 tags,
-                limit: internalLimit,
-                includeExpired: true,
+                limit: requestedLimit,
+                search_mode,
+                search_recency_weight: searchRecencyWeight,
+                include_expired: includeExpired,
+                explain,
                 since,
                 until,
-              });
-              let filteredExpired = filterExpiredEntries(lexicalResults, includeExpired);
-              lexicalResults = filteredExpired.items;
-              expiredFilteredCount = filteredExpired.expiredFilteredCount;
-              results = lexicalResults.map((result) => result.entry);
+              };
+              const requestedMode: SearchMode = search_mode ?? "hybrid";
+              let actualMode: SearchMode = requestedMode;
+              let warning: string | undefined;
+              let fallbackReason: string | null = null;
+              let relaxedLexical = false;
+              let expiredFilteredCount = 0;
+              let results: Entry[] = [];
+              let lexicalResults: ReturnType<typeof queryEntriesLexicalScored> = [];
+              let semanticResults: ReturnType<typeof queryEntriesSemanticScored> = [];
+              let hybridResults: HybridQueryResult[] = [];
 
-              if (results.length === 0) {
-                const relaxedQuery = buildRelaxedLexicalQuery(query);
-                if (relaxedQuery) {
-                  lexicalResults = queryEntriesLexicalScored(db, {
-                    query: relaxedQuery,
+              if (requestedMode === "semantic") {
+                if (!isSemanticEnabled() || !vecLoaded()) {
+                  actualMode = "lexical";
+                  warning = `Semantic search unavailable (${getSearchModeUnavailableReason("semantic")}). Falling back to lexical search.`;
+                  fallbackReason = "semantic_unavailable";
+                }
+              } else if (requestedMode === "hybrid") {
+                if (!isHybridEnabled() || !vecLoaded()) {
+                  actualMode = "lexical";
+                  warning = `Hybrid search unavailable (${getSearchModeUnavailableReason("hybrid")}). Falling back to lexical search.`;
+                  fallbackReason = "hybrid_unavailable";
+                }
+              }
+
+              if (actualMode === "semantic") {
+                const queryEmb = await generateEmbedding(query);
+                if (!queryEmb) {
+                  actualMode = "lexical";
+                  warning = "Failed to generate query embedding. Falling back to lexical search.";
+                  fallbackReason = "embedding_generation_failed";
+                } else {
+                  const buf = embeddingToBuffer(queryEmb);
+                  semanticResults = queryEntriesSemanticScored(db, {
+                    queryEmbedding: buf,
                     namespace,
                     entryType: entry_type,
                     tags,
@@ -5584,756 +5714,853 @@ export function registerTools(
                     includeExpired: true,
                     since,
                     until,
-                    rawFts5: true,
+                    maxDistance: getSemanticMaxDistance(),
                   });
-                  filteredExpired = filterExpiredEntries(lexicalResults, includeExpired);
-                  lexicalResults = filteredExpired.items;
+                  const filteredExpired = filterExpiredEntries(semanticResults, includeExpired);
+                  semanticResults = filteredExpired.items;
                   expiredFilteredCount = filteredExpired.expiredFilteredCount;
-                  results = lexicalResults.map((result) => result.entry);
-                  if (results.length > 0 && !warning) {
-                    warning = "No exact lexical matches found. Used relaxed token matching for natural-language query.";
+                  results = semanticResults.map((result) => result.entry);
+                }
+              }
+
+              if (actualMode === "hybrid") {
+                const queryEmb = await generateEmbedding(query);
+                if (!queryEmb) {
+                  actualMode = "lexical";
+                  warning = "Failed to generate query embedding. Falling back to lexical search.";
+                  fallbackReason = "embedding_generation_failed";
+                } else {
+                  const buf = embeddingToBuffer(queryEmb);
+                  const relaxedQuery = buildRelaxedLexicalQuery(query);
+                  const hybridScored = queryEntriesHybridScored(db, {
+                    ftsOptions: { query, namespace, entryType: entry_type, tags, limit: internalLimit, includeExpired: true, since, until },
+                    semanticOptions: { queryEmbedding: buf, namespace, entryType: entry_type, tags, limit: internalLimit, includeExpired: true, since, until, maxDistance: getSemanticMaxDistance() },
+                    ftsFallbackOptions: relaxedQuery
+                      ? { query: relaxedQuery, namespace, entryType: entry_type, tags, limit: internalLimit, includeExpired: true, since, until, rawFts5: true }
+                      : undefined,
+                  });
+                  hybridResults = hybridScored.results;
+                  if (hybridScored.ftsRelaxed) {
                     relaxedLexical = true;
+                    if (!warning) {
+                      warning = "No exact lexical matches found. Used relaxed token matching for natural-language query.";
+                    }
+                  }
+                  const filteredExpired = filterExpiredEntries(hybridResults, includeExpired);
+                  hybridResults = filteredExpired.items;
+                  expiredFilteredCount = filteredExpired.expiredFilteredCount;
+                  results = hybridResults.map((result) => result.entry);
+                }
+              }
+
+              // Lexical fallback (or original mode)
+              if (actualMode === "lexical") {
+                lexicalResults = queryEntriesLexicalScored(db, {
+                  query,
+                  namespace,
+                  entryType: entry_type,
+                  tags,
+                  limit: internalLimit,
+                  includeExpired: true,
+                  since,
+                  until,
+                });
+                let filteredExpired = filterExpiredEntries(lexicalResults, includeExpired);
+                lexicalResults = filteredExpired.items;
+                expiredFilteredCount = filteredExpired.expiredFilteredCount;
+                results = lexicalResults.map((result) => result.entry);
+
+                if (results.length === 0) {
+                  const relaxedQuery = buildRelaxedLexicalQuery(query);
+                  if (relaxedQuery) {
+                    lexicalResults = queryEntriesLexicalScored(db, {
+                      query: relaxedQuery,
+                      namespace,
+                      entryType: entry_type,
+                      tags,
+                      limit: internalLimit,
+                      includeExpired: true,
+                      since,
+                      until,
+                      rawFts5: true,
+                    });
+                    filteredExpired = filterExpiredEntries(lexicalResults, includeExpired);
+                    lexicalResults = filteredExpired.items;
+                    expiredFilteredCount = filteredExpired.expiredFilteredCount;
+                    results = lexicalResults.map((result) => result.entry);
+                    if (results.length > 0 && !warning) {
+                      warning = "No exact lexical matches found. Used relaxed token matching for natural-language query.";
+                      relaxedLexical = true;
+                    }
                   }
                 }
               }
-            }
 
-            // #77: surface and optionally suppress purely-semantic recall.
-            // A semantic/hybrid query can return vector "nearest neighbours"
-            // that have no lexical anchor at all — useful for paraphrase recall,
-            // misleading for made-up identifiers. Determine which *vector-
-            // derived* results lack a lexical (FTS5) anchor. We always warn when
-            // a hybrid query degraded to semantic-only, and (when
-            // require_lexical_match) drop the anchorless vector results below —
-            // after canonical/attention injection, so intentionally-injected
-            // entries are never dropped by this flag.
-            const anchorlessVectorIds = new Set<string>();
-            if (actualMode === "hybrid" || actualMode === "semantic") {
-              const vectorIds = actualMode === "hybrid"
-                ? hybridResults.map((r) => r.entry.id)
-                : semanticResults.map((r) => r.entry.id);
-              // Anchor set = union of two signals (#77):
-              //  1. A scoped FTS existence check on the exact query. The hybrid
-              //     RRF result only carries `lexicalRank` for entries inside the
-              //     limited FTS over-fetch window, so a genuine exact match whose
-              //     rank falls below that window would otherwise be misclassified
-              //     as anchorless. The scoped check is authoritative for exact
-              //     matches and avoids that rank-depth false negative.
-              //  2. Any hybrid-leg result that already carries a `lexicalRank`.
-              //     This preserves relaxed-fallback anchors: when the hybrid leg
-              //     found matches only via the relaxed lexical query (e.g. a
-              //     natural-language query with stopwords), those entries are
-              //     legitimately lexically anchored even though the exact-query
-              //     scoped check above would not match them.
-              const anchored = filterIdsMatchingFts(db, query, vectorIds);
-              if (actualMode === "hybrid") {
-                for (const r of hybridResults) {
-                  if (r.lexicalRank !== undefined) anchored.add(r.entry.id);
+              // #77: surface and optionally suppress purely-semantic recall.
+              // A semantic/hybrid query can return vector "nearest neighbours"
+              // that have no lexical anchor at all — useful for paraphrase recall,
+              // misleading for made-up identifiers. Determine which *vector-
+              // derived* results lack a lexical (FTS5) anchor. We always warn when
+              // a hybrid query degraded to semantic-only, and (when
+              // require_lexical_match) drop the anchorless vector results below —
+              // after canonical/attention injection, so intentionally-injected
+              // entries are never dropped by this flag.
+              const anchorlessVectorIds = new Set<string>();
+              if (actualMode === "hybrid" || actualMode === "semantic") {
+                const vectorIds = actualMode === "hybrid"
+                  ? hybridResults.map((r) => r.entry.id)
+                  : semanticResults.map((r) => r.entry.id);
+                // Anchor set = union of two signals (#77):
+                //  1. A scoped FTS existence check on the exact query. The hybrid
+                //     RRF result only carries `lexicalRank` for entries inside the
+                //     limited FTS over-fetch window, so a genuine exact match whose
+                //     rank falls below that window would otherwise be misclassified
+                //     as anchorless. The scoped check is authoritative for exact
+                //     matches and avoids that rank-depth false negative.
+                //  2. Any hybrid-leg result that already carries a `lexicalRank`.
+                //     This preserves relaxed-fallback anchors: when the hybrid leg
+                //     found matches only via the relaxed lexical query (e.g. a
+                //     natural-language query with stopwords), those entries are
+                //     legitimately lexically anchored even though the exact-query
+                //     scoped check above would not match them.
+                const anchored = filterIdsMatchingFts(db, query, vectorIds);
+                if (actualMode === "hybrid") {
+                  for (const r of hybridResults) {
+                    if (r.lexicalRank !== undefined) anchored.add(r.entry.id);
+                  }
+                }
+                for (const id of vectorIds) {
+                  if (!anchored.has(id)) anchorlessVectorIds.add(id);
+                }
+                // Warn when a hybrid query produced results but none were lexically
+                // anchored (recall came purely from vectors).
+                if (actualMode === "hybrid" && results.length > 0 && anchored.size === 0 && !warning) {
+                  warning = "Hybrid query had zero lexical (FTS5) matches; all results came from vector similarity only. Recall may be loosely related — pass require_lexical_match: true to require a lexical anchor.";
                 }
               }
-              for (const id of vectorIds) {
-                if (!anchored.has(id)) anchorlessVectorIds.add(id);
+
+              const trackedStatuses = (shouldApplyDefaultQuerySuppression(queryParams) || explain)
+                ? getTrackedStatusAssessments(db)
+                : undefined;
+
+              results = injectCanonicalQueryEntries(db, results, queryParams);
+              if (trackedStatuses) {
+                results = injectAttentionQueryEntries(results, queryParams, trackedStatuses);
               }
-              // Warn when a hybrid query produced results but none were lexically
-              // anchored (recall came purely from vectors).
-              if (actualMode === "hybrid" && results.length > 0 && anchored.size === 0 && !warning) {
-                warning = "Hybrid query had zero lexical (FTS5) matches; all results came from vector similarity only. Recall may be loosely related — pass require_lexical_match: true to require a lexical anchor.";
+
+              // Apply require_lexical_match after injection so injected
+              // canonical/attention entries survive; only drop anchorless
+              // vector-derived results.
+              if (requireLexicalMatch && anchorlessVectorIds.size > 0) {
+                const before = results.length;
+                results = results.filter((entry) => !anchorlessVectorIds.has(entry.id));
+                if (results.length < before && !warning) {
+                  warning = `require_lexical_match dropped ${before - results.length} result(s) with no lexical (FTS5) anchor.`;
+                }
               }
-            }
 
-            const trackedStatuses = (shouldApplyDefaultQuerySuppression(queryParams) || explain)
-              ? getTrackedStatusAssessments(db)
-              : undefined;
+              results = filterByAccess(ctx, results);
+              const completedTasks = shouldApplyDefaultQuerySuppression(queryParams)
+                ? getCompletedTaskNamespaces(db)
+                : new Set<string>();
+              results = rerankQueryResults(results, queryParams, completedTasks, trackedStatuses).slice(0, requestedLimit);
 
-            results = injectCanonicalQueryEntries(db, results, queryParams);
-            if (trackedStatuses) {
-              results = injectAttentionQueryEntries(results, queryParams, trackedStatuses);
-            }
+              const lexicalById = new Map(lexicalResults.map((result) => [result.entry.id, result] as const));
+              const semanticById = new Map(semanticResults.map((result) => [result.entry.id, result] as const));
+              const hybridById = new Map(hybridResults.map((result) => [result.entry.id, result] as const));
 
-            // Apply require_lexical_match after injection so injected
-            // canonical/attention entries survive; only drop anchorless
-            // vector-derived results.
-            if (requireLexicalMatch && anchorlessVectorIds.size > 0) {
-              const before = results.length;
-              results = results.filter((entry) => !anchorlessVectorIds.has(entry.id));
-              if (results.length < before && !warning) {
-                warning = `require_lexical_match dropped ${before - results.length} result(s) with no lexical (FTS5) anchor.`;
-              }
-            }
-
-            results = filterByAccess(ctx, results);
-            const completedTasks = shouldApplyDefaultQuerySuppression(queryParams)
-              ? getCompletedTaskNamespaces(db)
-              : new Set<string>();
-            results = rerankQueryResults(results, queryParams, completedTasks, trackedStatuses).slice(0, requestedLimit);
-
-            const lexicalById = new Map(lexicalResults.map((result) => [result.entry.id, result] as const));
-            const semanticById = new Map(semanticResults.map((result) => [result.entry.id, result] as const));
-            const hybridById = new Map(hybridResults.map((result) => [result.entry.id, result] as const));
-
-            const queryLower = query.toLowerCase();
-            const formatted = results.map((entry) => formatQueryResult(
-              db,
-              ctx,
-              entry,
-              "memory_query",
-              sessionId,
-              explain,
-              queryLower,
-              trackedStatuses,
-              actualMode,
-              lexicalById,
-              semanticById,
-              hybridById,
-            ));
-            const redactedCount = formatted.filter((entry) => entry.redacted === true).length;
-
-            const response: Record<string, unknown> = {
-              results: formatted,
-              total: formatted.length,
-              redacted_count: redactedCount,
-              query,
-              search_mode: requestedMode,
-            };
-            if (actualMode !== requestedMode) {
-              response.search_mode_actual = actualMode;
-            }
-            if (warning) {
-              response.warning = warning;
-            }
-            response.retrieval = {
-              reranked: true,
-              relaxed_lexical: relaxedLexical,
-              fallback_reason: fallbackReason,
-              recency_applied: searchRecencyWeight > 0,
-              search_recency_weight: searchRecencyWeight,
-              expired_filtered_count: expiredFilteredCount,
-              serialization,
-            };
-            if (actualMode === "hybrid" && hybridResults.length > 0) {
-              const inFts = hybridResults.filter((r) => r.lexicalRank !== undefined).length;
-              const inSemantic = hybridResults.filter((r) => r.semanticRank !== undefined).length;
-              const inBoth = hybridResults.filter((r) => r.lexicalRank !== undefined && r.semanticRank !== undefined).length;
-              response.search_meta = {
-                fts5_matches: inFts,
-                semantic_matches: inSemantic,
-                both_matches: inBoth,
-                mode_effective: inFts === 0 ? "semantic_only" : inSemantic === 0 ? "lexical_only" : "hybrid",
-              };
-            }
-
-            // Analytics: log retrieval event with result IDs and ranks
-            if (sessionId) {
-              const resultIds = results.map((entry) => entry.id);
-              const resultNamespaces = results.map((entry) => entry.namespace);
-              const resultRanks = results.map((_, i) => i + 1);
-              logRetrievalEvent(db, {
+              const queryLower = query.toLowerCase();
+              const formatted = results.map((entry) => formatQueryResult(
+                db,
+                ctx,
+                entry,
+                "memory_query",
                 sessionId,
-                toolName: "memory_query",
-                queryText: query,
-                requestedMode: requestedMode,
+                explain,
+                queryLower,
+                trackedStatuses,
                 actualMode,
-                resultIds,
-                resultNamespaces,
-                resultRanks,
-              });
-            }
+                lexicalById,
+                semanticById,
+                hybridById,
+              ));
+              const redactedCount = formatted.filter((entry) => entry.redacted === true).length;
 
-            // Boundary serialization is purely a display-order transform, applied
-            // AFTER analytics so retrieval_events keep the true linear rank order
-            // (outcome correlation must not see the reordered list).
-            if (serialization === "boundary") {
-              response.results = boundarySerialize(formatted);
-            }
+              const response: Record<string, unknown> = {
+                results: formatted,
+                total: formatted.length,
+                redacted_count: redactedCount,
+                query,
+                search_mode: requestedMode,
+              };
+              if (actualMode !== requestedMode) {
+                response.search_mode_actual = actualMode;
+              }
+              if (warning) {
+                response.warning = warning;
+              }
+              response.retrieval = {
+                reranked: true,
+                relaxed_lexical: relaxedLexical,
+                fallback_reason: fallbackReason,
+                recency_applied: searchRecencyWeight > 0,
+                search_recency_weight: searchRecencyWeight,
+                expired_filtered_count: expiredFilteredCount,
+                serialization,
+              };
+              if (actualMode === "hybrid" && hybridResults.length > 0) {
+                const inFts = hybridResults.filter((r) => r.lexicalRank !== undefined).length;
+                const inSemantic = hybridResults.filter((r) => r.semanticRank !== undefined).length;
+                const inBoth = hybridResults.filter((r) => r.lexicalRank !== undefined && r.semanticRank !== undefined).length;
+                response.search_meta = {
+                  fts5_matches: inFts,
+                  semantic_matches: inSemantic,
+                  both_matches: inBoth,
+                  mode_effective: inFts === 0 ? "semantic_only" : inSemantic === 0 ? "lexical_only" : "hybrid",
+                };
+              }
 
-            return okResult("query", response);
+              // Analytics: log retrieval event with result IDs and ranks
+              if (sessionId) {
+                const resultIds = results.map((entry) => entry.id);
+                const resultNamespaces = results.map((entry) => entry.namespace);
+                const resultRanks = results.map((_, i) => i + 1);
+                logRetrievalEvent(db, {
+                  sessionId,
+                  toolName: "memory_query",
+                  queryText: query,
+                  requestedMode: requestedMode,
+                  actualMode,
+                  resultIds,
+                  resultNamespaces,
+                  resultRanks,
+                });
+              }
+
+              // Boundary serialization is purely a display-order transform, applied
+              // AFTER analytics so retrieval_events keep the true linear rank order
+              // (outcome correlation must not see the reordered list).
+              if (serialization === "boundary") {
+                response.results = boundarySerialize(formatted);
+              }
+
+              return okResult("query", response);
+            };
+            return handleMemoryQuery();
           }
 
           case "memory_attention": {
-            const attentionArgs = (args ?? {}) as AttentionParams;
-            const includeBlocked = attentionArgs.include_blocked !== false;
-            const includeStale = attentionArgs.include_stale !== false;
-            const includeUpcomingEvents = attentionArgs.include_upcoming_events !== false;
-            const includeExpiring = attentionArgs.include_expiring !== false;
-            const includeMissingStatus = attentionArgs.include_missing_status !== false;
-            const includeConflictingLifecycle = attentionArgs.include_conflicting_lifecycle !== false;
-            const includeMissingLifecycle = attentionArgs.include_missing_lifecycle !== false;
-            const limit = clampOptionalLimit(attentionArgs.limit, 50) ?? 20;
+            const handleMemoryAttention = async () => {
+              const attentionArgs = (args ?? {}) as AttentionParams;
+              const includeBlocked = attentionArgs.include_blocked !== false;
+              const includeStale = attentionArgs.include_stale !== false;
+              const includeUpcomingEvents = attentionArgs.include_upcoming_events !== false;
+              const includeExpiring = attentionArgs.include_expiring !== false;
+              const includeMissingStatus = attentionArgs.include_missing_status !== false;
+              const includeConflictingLifecycle = attentionArgs.include_conflicting_lifecycle !== false;
+              const includeMissingLifecycle = attentionArgs.include_missing_lifecycle !== false;
+              const limit = clampOptionalLimit(attentionArgs.limit, 50) ?? 20;
 
-            const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_attention", sessionId);
-            const trackedStatusAssessments = visibleTrackedStatuses.allowed;
-            const namespaces = listVisibleNamespaces(db, ctx).filter(ns => canRead(ctx, ns.namespace));
-            const attentionItems: AttentionItem[] = [];
+              const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_attention", sessionId);
+              const trackedStatusAssessments = visibleTrackedStatuses.allowed;
+              const namespaces = listVisibleNamespaces(db, ctx).filter(ns => canRead(ctx, ns.namespace));
+              const attentionItems: AttentionItem[] = [];
 
-            for (const assessment of trackedStatusAssessments) {
-              if (!matchesNamespacePrefix(assessment.row.namespace, attentionArgs.namespace_prefix)) continue;
+              for (const assessment of trackedStatusAssessments) {
+                if (!matchesNamespacePrefix(assessment.row.namespace, attentionArgs.namespace_prefix)) continue;
 
-              if (includeBlocked && assessment.lifecycle === "blocked") {
-                attentionItems.push(buildAttentionItem(
-                  assessment.row.namespace,
-                  "blocked",
-                  assessment.row.updated_at,
-                  assessment.row.content_preview.slice(0, 150),
-                  "Review blocker and update status.",
-                ));
+                if (includeBlocked && assessment.lifecycle === "blocked") {
+                  attentionItems.push(buildAttentionItem(
+                    assessment.row.namespace,
+                    "blocked",
+                    assessment.row.updated_at,
+                    assessment.row.content_preview.slice(0, 150),
+                    "Review blocker and update status.",
+                  ));
+                }
+
+                for (const item of assessment.maintenanceItems) {
+                  if (item.issue === "active_but_stale" && !includeStale) continue;
+                  if (item.issue === "upcoming_event_stale" && !includeUpcomingEvents) continue;
+                  if ((item.issue === "expiring_soon" || item.issue === "expired") && !includeExpiring) continue;
+                  if (item.issue === "conflicting_lifecycle" && !includeConflictingLifecycle) continue;
+                  if (item.issue === "missing_lifecycle" && !includeMissingLifecycle) continue;
+                  if (item.issue === "missing_status") continue;
+
+                  attentionItems.push(buildAttentionItem(
+                    item.namespace,
+                    item.issue,
+                    assessment.row.updated_at,
+                    assessment.row.content_preview.slice(0, 150),
+                    item.suggestion,
+                  ));
+                }
               }
 
-              for (const item of assessment.maintenanceItems) {
-                if (item.issue === "active_but_stale" && !includeStale) continue;
-                if (item.issue === "upcoming_event_stale" && !includeUpcomingEvents) continue;
-                if ((item.issue === "expiring_soon" || item.issue === "expired") && !includeExpiring) continue;
-                if (item.issue === "conflicting_lifecycle" && !includeConflictingLifecycle) continue;
-                if (item.issue === "missing_lifecycle" && !includeMissingLifecycle) continue;
-                if (item.issue === "missing_status") continue;
+              if (includeMissingStatus) {
+                const trackedNsWithStatus = new Set([
+                  ...trackedStatusAssessments.map((assessment) => assessment.row.namespace),
+                  ...visibleTrackedStatuses.redacted.map((entry) => entry.namespace),
+                ]);
+                for (const ns of namespaces) {
+                  if (!isTrackedNamespace(ns.namespace)) continue;
+                  if (trackedNsWithStatus.has(ns.namespace)) continue;
+                  if (!matchesNamespacePrefix(ns.namespace, attentionArgs.namespace_prefix)) continue;
 
-                attentionItems.push(buildAttentionItem(
-                  item.namespace,
-                  item.issue,
-                  assessment.row.updated_at,
-                  assessment.row.content_preview.slice(0, 150),
-                  item.suggestion,
-                ));
+                  attentionItems.push(buildAttentionItem(
+                    ns.namespace,
+                    "missing_status",
+                    ns.last_activity_at,
+                    "Tracked namespace has entries but no status key.",
+                    "Has entries but no 'status' key. Write a status entry with a lifecycle tag.",
+                  ));
+                }
               }
-            }
 
-            if (includeMissingStatus) {
-              const trackedNsWithStatus = new Set([
-                ...trackedStatusAssessments.map((assessment) => assessment.row.namespace),
-                ...visibleTrackedStatuses.redacted.map((entry) => entry.namespace),
-              ]);
-              for (const ns of namespaces) {
-                if (!isTrackedNamespace(ns.namespace)) continue;
-                if (trackedNsWithStatus.has(ns.namespace)) continue;
-                if (!matchesNamespacePrefix(ns.namespace, attentionArgs.namespace_prefix)) continue;
+              attentionItems.sort(compareAttentionItems);
+              const limitedItems = attentionItems.slice(0, limit);
+              const summary = {
+                high: limitedItems.filter((item) => item.severity === "high").length,
+                medium: limitedItems.filter((item) => item.severity === "medium").length,
+                low: limitedItems.filter((item) => item.severity === "low").length,
+                total: limitedItems.length,
+              };
 
-                attentionItems.push(buildAttentionItem(
-                  ns.namespace,
-                  "missing_status",
-                  ns.last_activity_at,
-                  "Tracked namespace has entries but no status key.",
-                  "Has entries but no 'status' key. Write a status entry with a lifecycle tag.",
-                ));
+              // Analytics: log attention event — use namespace IDs of returned items as result_ids
+              if (sessionId) {
+                const resultNamespaces = [...new Set(limitedItems.map((item) => item.namespace))];
+                logRetrievalEvent(db, {
+                  sessionId,
+                  toolName: "memory_attention",
+                  resultIds: [],
+                  resultNamespaces,
+                  resultRanks: resultNamespaces.map((_, i) => i + 1),
+                });
               }
-            }
 
-            attentionItems.sort(compareAttentionItems);
-            const limitedItems = attentionItems.slice(0, limit);
-            const summary = {
-              high: limitedItems.filter((item) => item.severity === "high").length,
-              medium: limitedItems.filter((item) => item.severity === "medium").length,
-              low: limitedItems.filter((item) => item.severity === "low").length,
-              total: limitedItems.length,
+              const attentionResult: Record<string, unknown> = {
+                generated_at: new Date().toISOString(),
+                summary,
+                items: limitedItems,
+              };
+              const redactedSourcesSummary = summarizeRedactedSources(ctx, visibleTrackedStatuses.redacted);
+              if (redactedSourcesSummary) {
+                attentionResult.redacted_sources = redactedSourcesSummary;
+              }
+              if (limitedItems.length === 0 && !redactedSourcesSummary) {
+                attentionResult.message = "All tracked projects appear healthy. No items need attention.";
+              } else if (limitedItems.length === 0 && redactedSourcesSummary) {
+                attentionResult.message = "No attention items are visible on this connection.";
+              }
+
+              return okResult("attention", attentionResult);
             };
-
-            // Analytics: log attention event — use namespace IDs of returned items as result_ids
-            if (sessionId) {
-              const resultNamespaces = [...new Set(limitedItems.map((item) => item.namespace))];
-              logRetrievalEvent(db, {
-                sessionId,
-                toolName: "memory_attention",
-                resultIds: [],
-                resultNamespaces,
-                resultRanks: resultNamespaces.map((_, i) => i + 1),
-              });
-            }
-
-            const attentionResult: Record<string, unknown> = {
-              generated_at: new Date().toISOString(),
-              summary,
-              items: limitedItems,
-            };
-            const redactedSourcesSummary = summarizeRedactedSources(ctx, visibleTrackedStatuses.redacted);
-            if (redactedSourcesSummary) {
-              attentionResult.redacted_sources = redactedSourcesSummary;
-            }
-            if (limitedItems.length === 0 && !redactedSourcesSummary) {
-              attentionResult.message = "All tracked projects appear healthy. No items need attention.";
-            } else if (limitedItems.length === 0 && redactedSourcesSummary) {
-              attentionResult.message = "No attention items are visible on this connection.";
-            }
-
-            return okResult("attention", attentionResult);
+            return handleMemoryAttention();
           }
 
           case "memory_log": {
-            const { namespace, content, tags, classification, classification_override } = args as unknown as LogParams;
-            const validation = validateLogInput(namespace, content, tags, maxContentSize);
-            if (!validation.valid) {
-              return errResult("log", "validation_error", validation.error!);
-            }
-            const classificationInputError = validateClassificationInput(classification, classification_override);
-            if (classificationInputError) {
-              return errResult("log", "validation_error", classificationInputError);
-            }
-            if (classification_override === true && ctx.principalType !== "owner") {
-              return errResult("log", "access_denied", "classification_override is only available to the owner principal.");
-            }
-            if (!canWrite(ctx, namespace)) {
-              return accessDeniedResponse(ctx, "log");
-            }
-            // Strip server-reserved tags (e.g. source:synthesis) from client input.
-            const { kept: logTags, removed: logReservedRemoved } = stripReservedTags(tags ?? []);
-            // Pre-flight: reject logs that would create Librarian-orphaned entries
-            {
-              const orphanError = preflightWriteClassification(
-                db, ctx, namespace, logTags,
-                classification, classification_override,
-              );
-              if (orphanError) {
-                return errResult("log", "classification_error", orphanError, { namespace });
+            const handleMemoryLog = async () => {
+              const { namespace, content, tags, classification, classification_override } = args as unknown as LogParams;
+              const validation = validateLogInput(namespace, content, tags, maxContentSize);
+              if (!validation.valid) {
+                return errResult("log", "validation_error", validation.error!);
               }
-            }
-            let result;
-            try {
-              result = appendLog(db, namespace, content, logTags, ctx.principalId, {
-                classification,
-                classificationOverride: classification_override,
-              });
-            } catch (error) {
-              return errResult("log", "validation_error", (error as Error).message);
-            }
-            const logEntry = getById(db, result.id);
-            if (logEntry) {
-              syncCommitmentsForEntry(db, logEntry.id, extractCommitmentsFromEntry(logEntry, getResolvedNamespaces(db)));
-            }
-            // Analytics: log log outcome correlated to prior retrieval in this session
-            if (sessionId) {
-              logRetrievalOutcome(db, sessionId, {
-                outcomeType: "log_in_result_namespace",
+              const classificationInputError = validateClassificationInput(classification, classification_override);
+              if (classificationInputError) {
+                return errResult("log", "validation_error", classificationInputError);
+              }
+              if (classification_override === true && ctx.principalType !== "owner") {
+                return errResult("log", "access_denied", "classification_override is only available to the owner principal.");
+              }
+              if (!canWrite(ctx, namespace)) {
+                return accessDeniedResponse(ctx, "log");
+              }
+              // Strip server-reserved tags (e.g. source:synthesis) from client input.
+              const { kept: logTags, removed: logReservedRemoved } = stripReservedTags(tags ?? []);
+              // Pre-flight: reject logs that would create Librarian-orphaned entries
+              {
+                const orphanError = preflightWriteClassification(
+                  db, ctx, namespace, logTags,
+                  classification, classification_override,
+                );
+                if (orphanError) {
+                  return errResult("log", "classification_error", orphanError, { namespace });
+                }
+              }
+              let result;
+              try {
+                result = appendLog(db, namespace, content, logTags, ctx.principalId, {
+                  classification,
+                  classificationOverride: classification_override,
+                });
+              } catch (error) {
+                return errResult("log", "validation_error", (error as Error).message);
+              }
+              const logEntry = getById(db, result.id);
+              if (logEntry) {
+                syncCommitmentsForEntry(db, logEntry.id, extractCommitmentsFromEntry(logEntry, getResolvedNamespaces(db)));
+              }
+              // Analytics: log log outcome correlated to prior retrieval in this session
+              if (sessionId) {
+                logRetrievalOutcome(db, sessionId, {
+                  outcomeType: "log_in_result_namespace",
+                  namespace,
+                });
+              }
+              const logResponse: Record<string, unknown> = {
+                status: "logged",
+                id: result.id,
                 namespace,
-              });
-            }
-            const logResponse: Record<string, unknown> = {
-              status: "logged",
-              id: result.id,
-              namespace,
-              timestamp: result.timestamp,
-              timestamp_local: toLocalDisplay(result.timestamp),
-              classification: result.classification,
-              provenance: buildProvenance(ctx.principalId, ctx.principalId),
+                timestamp: result.timestamp,
+                timestamp_local: toLocalDisplay(result.timestamp),
+                classification: result.classification,
+                provenance: buildProvenance(ctx.principalId, ctx.principalId),
+              };
+              const logNsWarning = uppercaseNamespaceWarning(namespace);
+              if (logNsWarning) logResponse.warning = logNsWarning;
+              const logWarnings: string[] = [];
+              if (logReservedRemoved.length > 0) {
+                logWarnings.push(`Removed reserved tag(s): ${logReservedRemoved.join(", ")}`);
+              }
+              // Advisory: flag instruction-shaped content (prompt-injection / memory-poisoning).
+              const logInjectionWarning = injectionWarning(content);
+              if (logInjectionWarning) logWarnings.push(logInjectionWarning);
+              if (logWarnings.length > 0) logResponse.warnings = logWarnings;
+              return okResult("log", logResponse);
             };
-            const logNsWarning = uppercaseNamespaceWarning(namespace);
-            if (logNsWarning) logResponse.warning = logNsWarning;
-            const logWarnings: string[] = [];
-            if (logReservedRemoved.length > 0) {
-              logWarnings.push(`Removed reserved tag(s): ${logReservedRemoved.join(", ")}`);
-            }
-            // Advisory: flag instruction-shaped content (prompt-injection / memory-poisoning).
-            const logInjectionWarning = injectionWarning(content);
-            if (logInjectionWarning) logWarnings.push(logInjectionWarning);
-            if (logWarnings.length > 0) logResponse.warnings = logWarnings;
-            return okResult("log", logResponse);
+            return handleMemoryLog();
           }
 
           case "memory_list": {
-            const { namespace, include_demo, include_completed_tasks, limit: rawLimit, offset: rawOffset } = (args ?? {}) as ListParams;
-            if (!namespace) {
-              const resolvedLimit = Math.min(Math.max(1, typeof rawLimit === "number" ? rawLimit : 20), 200);
-              const resolvedOffset = Math.max(0, typeof rawOffset === "number" ? rawOffset : 0);
-              const allNamespaces = listVisibleNamespaces(db, ctx);
-              const completedTasks = include_completed_tasks ? new Set<string>() : getCompletedTaskNamespaces(db);
-              const filtered = allNamespaces.filter((ns) => {
-                if (!canRead(ctx, ns.namespace)) return false;
-                if (!include_demo && (ns.namespace.startsWith("demo/") || ns.namespace === "demo")) return false;
-                if (!include_completed_tasks && completedTasks.has(ns.namespace)) return false;
-                return true;
-              });
-              const { namespaces, total, has_more } = listNamespacesPaged(filtered, resolvedLimit, resolvedOffset);
-              const namespacesWithLocal = namespaces.map((ns) => ({
-                ...ns,
-                last_activity_at_local: toLocalDisplay(ns.last_activity_at),
-              }));
-              return okResult("list", { namespaces: namespacesWithLocal, total, returned: namespacesWithLocal.length, has_more });
-            }
-            const nsCheck = validateNamespace(namespace);
-            if (!nsCheck.valid) {
-              return errResult("list", "validation_error", nsCheck.error!);
-            }
-            if (!canRead(ctx, namespace)) {
-              return okResult("list", { namespace, state_entries: [], log_summary: { log_count: 0, earliest: null, latest: null, recent: [] } });
-            }
-            const { stateEntries, logSummary } = listNamespaceContents(db, namespace);
-            const visibleLogSummary = isLibrarianEnabled()
-              ? summarizeNamespaceLogsByClassification(db, namespace, getContextMaxClassification(ctx))
-              : {
-                  log_count: logSummary.log_count,
-                  earliest: logSummary.earliest,
-                  latest: logSummary.latest,
+            const handleMemoryList = async () => {
+              const { namespace, include_demo, include_completed_tasks, limit: rawLimit, offset: rawOffset } = (args ?? {}) as ListParams;
+              if (!namespace) {
+                const resolvedLimit = Math.min(Math.max(1, typeof rawLimit === "number" ? rawLimit : 20), 200);
+                const resolvedOffset = Math.max(0, typeof rawOffset === "number" ? rawOffset : 0);
+                const allNamespaces = listVisibleNamespaces(db, ctx);
+                const completedTasks = include_completed_tasks ? new Set<string>() : getCompletedTaskNamespaces(db);
+                const filtered = allNamespaces.filter((ns) => {
+                  if (!canRead(ctx, ns.namespace)) return false;
+                  if (!include_demo && (ns.namespace.startsWith("demo/") || ns.namespace === "demo")) return false;
+                  if (!include_completed_tasks && completedTasks.has(ns.namespace)) return false;
+                  return true;
+                });
+                const { namespaces, total, has_more } = listNamespacesPaged(filtered, resolvedLimit, resolvedOffset);
+                const namespacesWithLocal = namespaces.map((ns) => ({
+                  ...ns,
+                  last_activity_at_local: toLocalDisplay(ns.last_activity_at),
+                }));
+                return okResult("list", { namespaces: namespacesWithLocal, total, returned: namespacesWithLocal.length, has_more });
+              }
+              const nsCheck = validateNamespace(namespace);
+              if (!nsCheck.valid) {
+                return errResult("list", "validation_error", nsCheck.error!);
+              }
+              if (!canRead(ctx, namespace)) {
+                return okResult("list", { namespace, state_entries: [], log_summary: { log_count: 0, earliest: null, latest: null, recent: [] } });
+              }
+              const { stateEntries, logSummary } = listNamespaceContents(db, namespace);
+              const visibleLogSummary = isLibrarianEnabled()
+                ? summarizeNamespaceLogsByClassification(db, namespace, getContextMaxClassification(ctx))
+                : {
+                    log_count: logSummary.log_count,
+                    earliest: logSummary.earliest,
+                    latest: logSummary.latest,
+                  };
+              const serializedStateEntries = stateEntries.map((e) => {
+                const tags = JSON.parse(e.tags) as string[];
+                const redacted = maybeRedactEntryMetadata(db, ctx, {
+                  id: e.id,
+                  namespace,
+                  key: e.key,
+                  entry_type: "state",
+                  classification: e.classification,
+                  tags,
+                  updated_at: e.updated_at,
+                }, "memory_list", sessionId);
+                if (redacted) {
+                  return redacted;
+                }
+                return {
+                  id: e.id,
+                  key: e.key,
+                  preview: e.preview,
+                  tags,
+                  updated_at: e.updated_at,
+                  updated_at_local: toLocalDisplay(e.updated_at),
+                  classification: e.classification,
+                  provenance: buildProvenance(e.agent_id, e.owner_principal_id),
                 };
-            const serializedStateEntries = stateEntries.map((e) => {
-              const tags = JSON.parse(e.tags) as string[];
-              const redacted = maybeRedactEntryMetadata(db, ctx, {
-                id: e.id,
+              });
+              const serializedRecentLogs = logSummary.recent.map((l) => {
+                const tags = JSON.parse(l.tags) as string[];
+                const redacted = maybeRedactEntryMetadata(db, ctx, {
+                  id: l.id,
+                  namespace,
+                  key: null,
+                  entry_type: "log",
+                  classification: l.classification,
+                  tags,
+                  created_at: l.created_at,
+                }, "memory_list", sessionId);
+                if (redacted) {
+                  return redacted;
+                }
+                return {
+                  id: l.id,
+                  content_preview: l.content_preview,
+                  tags,
+                  created_at: l.created_at,
+                  created_at_local: toLocalDisplay(l.created_at),
+                  classification: l.classification,
+                  provenance: buildProvenance(l.agent_id, l.owner_principal_id),
+                };
+              });
+              return okResult("list", {
                 namespace,
-                key: e.key,
-                entry_type: "state",
-                classification: e.classification,
-                tags,
-                updated_at: e.updated_at,
-              }, "memory_list", sessionId);
-              if (redacted) {
-                return redacted;
-              }
-              return {
-                id: e.id,
-                key: e.key,
-                preview: e.preview,
-                tags,
-                updated_at: e.updated_at,
-                updated_at_local: toLocalDisplay(e.updated_at),
-                classification: e.classification,
-                provenance: buildProvenance(e.agent_id, e.owner_principal_id),
-              };
-            });
-            const serializedRecentLogs = logSummary.recent.map((l) => {
-              const tags = JSON.parse(l.tags) as string[];
-              const redacted = maybeRedactEntryMetadata(db, ctx, {
-                id: l.id,
-                namespace,
-                key: null,
-                entry_type: "log",
-                classification: l.classification,
-                tags,
-                created_at: l.created_at,
-              }, "memory_list", sessionId);
-              if (redacted) {
-                return redacted;
-              }
-              return {
-                id: l.id,
-                content_preview: l.content_preview,
-                tags,
-                created_at: l.created_at,
-                created_at_local: toLocalDisplay(l.created_at),
-                classification: l.classification,
-                provenance: buildProvenance(l.agent_id, l.owner_principal_id),
-              };
-            });
-            return okResult("list", {
-              namespace,
-              state_entries: serializedStateEntries,
-              log_summary: {
-                log_count: visibleLogSummary.log_count,
-                earliest: visibleLogSummary.earliest,
-                latest: visibleLogSummary.latest,
-                recent: serializedRecentLogs,
-              },
-            });
+                state_entries: serializedStateEntries,
+                log_summary: {
+                  log_count: visibleLogSummary.log_count,
+                  earliest: visibleLogSummary.earliest,
+                  latest: visibleLogSummary.latest,
+                  recent: serializedRecentLogs,
+                },
+              });
+            };
+            return handleMemoryList();
           }
 
           case "memory_delete": {
-            const { namespace, key, delete_token } =
-              args as unknown as DeleteParams;
-            const nsCheck = validateNamespace(namespace);
-            if (!nsCheck.valid) {
-              return errResult("delete", "validation_error", nsCheck.error!);
-            }
-            if (key) {
-              const keyCheck = validateKey(key);
-              if (!keyCheck.valid) {
-                return errResult("delete", "validation_error", keyCheck.error!);
+            const handleMemoryDelete = async () => {
+              const { namespace, key, delete_token } =
+                args as unknown as DeleteParams;
+              const nsCheck = validateNamespace(namespace);
+              if (!nsCheck.valid) {
+                return errResult("delete", "validation_error", nsCheck.error!);
               }
-            }
-
-            if (!canWrite(ctx, namespace)) {
-              return accessDeniedResponse(ctx, "delete");
-            }
-            const allowGlobalNamespaceDelete = ctx.principalType === "owner";
-
-            // Execute with token
-            if (delete_token) {
-              if (!consumeDeleteToken(delete_token, namespace, key)) {
-                return errResult("delete", "invalid_token", "Delete token is invalid, expired, or doesn't match the requested namespace/key. Request a new preview first.");
+              if (key) {
+                const keyCheck = validateKey(key);
+                if (!keyCheck.valid) {
+                  return errResult("delete", "validation_error", keyCheck.error!);
+                }
               }
-              const deletedCount = isLibrarianEnabled()
-                ? executeDeleteByClassification(db, namespace, getContextMaxClassification(ctx), key, ctx.principalId, allowGlobalNamespaceDelete)
-                : executeDelete(db, namespace, key, ctx.principalId, allowGlobalNamespaceDelete);
+
+              if (!canWrite(ctx, namespace)) {
+                return accessDeniedResponse(ctx, "delete");
+              }
+              const allowGlobalNamespaceDelete = ctx.principalType === "owner";
+
+              // Execute with token
+              if (delete_token) {
+                if (!consumeDeleteToken(delete_token, namespace, key)) {
+                  return errResult("delete", "invalid_token", "Delete token is invalid, expired, or doesn't match the requested namespace/key. Request a new preview first.");
+                }
+                const deletedCount = isLibrarianEnabled()
+                  ? executeDeleteByClassification(db, namespace, getContextMaxClassification(ctx), key, ctx.principalId, allowGlobalNamespaceDelete)
+                  : executeDelete(db, namespace, key, ctx.principalId, allowGlobalNamespaceDelete);
+                const target = key ? `entry "${key}" in "${namespace}"` : `all entries in "${namespace}"`;
+                return okResult("delete", {
+                  phase: "confirmed",
+                  namespace,
+                  key: key ?? undefined,
+                  deleted_count: deletedCount,
+                  message: `Deleted ${deletedCount} entries (${target}).`,
+                });
+              }
+
+              // Preview
+              const info = isLibrarianEnabled()
+                ? previewDeleteByClassification(
+                    db,
+                    namespace,
+                    getContextMaxClassification(ctx),
+                    key,
+                    ctx.principalId,
+                    allowGlobalNamespaceDelete,
+                  )
+                : previewDelete(db, namespace, key, ctx.principalId, allowGlobalNamespaceDelete);
+              const token = generateDeleteToken(namespace, key);
               const target = key ? `entry "${key}" in "${namespace}"` : `all entries in "${namespace}"`;
               return okResult("delete", {
-                phase: "confirmed",
+                phase: "preview",
                 namespace,
                 key: key ?? undefined,
-                deleted_count: deletedCount,
-                message: `Deleted ${deletedCount} entries (${target}).`,
+                will_delete: {
+                  state_count: info.stateCount,
+                  log_count: info.logCount,
+                  keys: info.keys.length > 0 ? info.keys : undefined,
+                },
+                delete_token: token,
+                message: isLibrarianEnabled()
+                  ? `Delete preview generated for visible entries on this connection (${target}). Call again with delete_token to confirm.`
+                  : `Will delete ${info.stateCount} state entries and ${info.logCount} log entries (${target}). Call again with delete_token to confirm.`,
               });
-            }
-
-            // Preview
-            const info = isLibrarianEnabled()
-              ? previewDeleteByClassification(
-                  db,
-                  namespace,
-                  getContextMaxClassification(ctx),
-                  key,
-                  ctx.principalId,
-                  allowGlobalNamespaceDelete,
-                )
-              : previewDelete(db, namespace, key, ctx.principalId, allowGlobalNamespaceDelete);
-            const token = generateDeleteToken(namespace, key);
-            const target = key ? `entry "${key}" in "${namespace}"` : `all entries in "${namespace}"`;
-            return okResult("delete", {
-              phase: "preview",
-              namespace,
-              key: key ?? undefined,
-              will_delete: {
-                state_count: info.stateCount,
-                log_count: info.logCount,
-                keys: info.keys.length > 0 ? info.keys : undefined,
-              },
-              delete_token: token,
-              message: isLibrarianEnabled()
-                ? `Delete preview generated for visible entries on this connection (${target}). Call again with delete_token to confirm.`
-                : `Will delete ${info.stateCount} state entries and ${info.logCount} log entries (${target}). Call again with delete_token to confirm.`,
-            });
+            };
+            return handleMemoryDelete();
           }
 
           case "memory_insights": {
-            if (ctx.principalType !== "owner") {
-              return okResult("insights", { entries: [], total: 0, min_impressions: 3 });
-            }
-            const insightsArgs = (args ?? {}) as InsightsParams;
-            const minImpressions = typeof insightsArgs.min_impressions === "number"
-              ? Math.max(1, Math.floor(insightsArgs.min_impressions))
-              : 3;
-            const insightsLimit = clampOptionalLimit(insightsArgs.limit, 50) ?? 20;
+            const handleMemoryInsights = async () => {
+              if (ctx.principalType !== "owner") {
+                return okResult("insights", { entries: [], total: 0, min_impressions: 3 });
+              }
+              const insightsArgs = (args ?? {}) as InsightsParams;
+              const minImpressions = typeof insightsArgs.min_impressions === "number"
+                ? Math.max(1, Math.floor(insightsArgs.min_impressions))
+                : 3;
+              const insightsLimit = clampOptionalLimit(insightsArgs.limit, 50) ?? 20;
 
-            const rows = getInsightsByEntry(db, insightsArgs.namespace, minImpressions, insightsLimit);
-            const entries: EntryInsight[] = rows.map(computeEntryInsight);
+              const rows = getInsightsByEntry(db, insightsArgs.namespace, minImpressions, insightsLimit);
+              const entries: EntryInsight[] = rows.map(computeEntryInsight);
 
-            // Include aggregate retrieval health metrics
-            const rawAgg = getRetrievalAggregates(db);
-            const rawRate = rawAgg.total_events > 0
-              ? rawAgg.reformulation_count / rawAgg.total_events
-              : 0;
-            const adjustedRate = rawAgg.multi_event_events > 0
-              ? rawAgg.reformulation_count / rawAgg.multi_event_events
-              : 0;
-            const singleEventSessions = rawAgg.total_sessions - rawAgg.multi_event_sessions;
-            const explanation = singleEventSessions > 0
-              ? `reformulation_rate uses all ${rawAgg.total_events} events as denominator. ` +
-                `${singleEventSessions} of ${rawAgg.total_sessions} sessions had only 1 event ` +
-                `(typically HTTP clients with per-request session IDs) — these inflate the ` +
-                `denominator without contributing signal. reformulation_rate_adjusted excludes ` +
-                `single-event sessions (${rawAgg.multi_event_events} events from ` +
-                `${rawAgg.multi_event_sessions} multi-event sessions).`
-              : "All sessions had multiple events; raw and adjusted rates are equivalent.";
-            const aggregates: RetrievalAggregates = {
-              period_start: rawAgg.period_start,
-              period_end: rawAgg.period_end,
-              total_events: rawAgg.total_events,
-              total_outcomes: rawAgg.total_outcomes,
-              reformulation_rate: rawRate,
-              reformulation_rate_adjusted: adjustedRate,
-              reformulation_explanation: explanation,
-              positive_outcome_rate: rawAgg.total_events > 0
-                ? rawAgg.positive_outcome_count / rawAgg.total_events
-                : 0,
-              feedback_counts: rawAgg.feedback_counts as Record<RetrievalFeedbackParams["feedback_type"], number>,
-              total_feedback: rawAgg.total_feedback,
-              total_sessions: rawAgg.total_sessions,
-              multi_event_sessions: rawAgg.multi_event_sessions,
+              // Include aggregate retrieval health metrics
+              const rawAgg = getRetrievalAggregates(db);
+              const rawRate = rawAgg.total_events > 0
+                ? rawAgg.reformulation_count / rawAgg.total_events
+                : 0;
+              const adjustedRate = rawAgg.multi_event_events > 0
+                ? rawAgg.reformulation_count / rawAgg.multi_event_events
+                : 0;
+              const singleEventSessions = rawAgg.total_sessions - rawAgg.multi_event_sessions;
+              const explanation = singleEventSessions > 0
+                ? `reformulation_rate uses all ${rawAgg.total_events} events as denominator. ` +
+                  `${singleEventSessions} of ${rawAgg.total_sessions} sessions had only 1 event ` +
+                  `(typically HTTP clients with per-request session IDs) — these inflate the ` +
+                  `denominator without contributing signal. reformulation_rate_adjusted excludes ` +
+                  `single-event sessions (${rawAgg.multi_event_events} events from ` +
+                  `${rawAgg.multi_event_sessions} multi-event sessions).`
+                : "All sessions had multiple events; raw and adjusted rates are equivalent.";
+              const aggregates: RetrievalAggregates = {
+                period_start: rawAgg.period_start,
+                period_end: rawAgg.period_end,
+                total_events: rawAgg.total_events,
+                total_outcomes: rawAgg.total_outcomes,
+                reformulation_rate: rawRate,
+                reformulation_rate_adjusted: adjustedRate,
+                reformulation_explanation: explanation,
+                positive_outcome_rate: rawAgg.total_events > 0
+                  ? rawAgg.positive_outcome_count / rawAgg.total_events
+                  : 0,
+                feedback_counts: rawAgg.feedback_counts as Record<RetrievalFeedbackParams["feedback_type"], number>,
+                total_feedback: rawAgg.total_feedback,
+                total_sessions: rawAgg.total_sessions,
+                multi_event_sessions: rawAgg.multi_event_sessions,
+              };
+
+              const insightsMessage = entries.length === 0
+                ? `No retrieval data yet: no entries have reached the min_impressions threshold (${minImpressions}). Entries appear here only after they have been shown in memory_query results at least ${minImpressions} time(s) (orient/attention do not count toward per-entry impressions). Lower min_impressions to surface entries with fewer impressions.`
+                : undefined;
+
+              return okResult("insights", {
+                entries,
+                total: entries.length,
+                min_impressions: minImpressions,
+                ...(insightsMessage ? { message: insightsMessage } : {}),
+                aggregates,
+              });
             };
-
-            const insightsMessage = entries.length === 0
-              ? `No retrieval data yet: no entries have reached the min_impressions threshold (${minImpressions}). Entries appear here only after they have been shown in memory_query results at least ${minImpressions} time(s) (orient/attention do not count toward per-entry impressions). Lower min_impressions to surface entries with fewer impressions.`
-              : undefined;
-
-            return okResult("insights", {
-              entries,
-              total: entries.length,
-              min_impressions: minImpressions,
-              ...(insightsMessage ? { message: insightsMessage } : {}),
-              aggregates,
-            });
+            return handleMemoryInsights();
           }
 
           case "memory_retrieval_feedback": {
-            if (ctx.principalType !== "owner") {
-              return accessDeniedResponse(ctx, "retrieval_feedback");
-            }
+            const handleMemoryRetrievalFeedback = async () => {
+              if (ctx.principalType !== "owner") {
+                return accessDeniedResponse(ctx, "retrieval_feedback");
+              }
 
-            const fbArgs = (args ?? {}) as unknown as RetrievalFeedbackParams;
-            if (!fbArgs.feedback_type) {
-              return errResult("retrieval_feedback", "validation_error", "feedback_type is required.");
-            }
+              const fbArgs = (args ?? {}) as unknown as RetrievalFeedbackParams;
+              if (!fbArgs.feedback_type) {
+                return errResult("retrieval_feedback", "validation_error", "feedback_type is required.");
+              }
 
-            const validTypes = ["bad_results", "missing_result", "wrong_order", "stale_results", "good_results"];
-            if (!validTypes.includes(fbArgs.feedback_type)) {
-              return errResult(
-                "retrieval_feedback",
-                "validation_error",
-                `Invalid feedback_type "${fbArgs.feedback_type}". Must be one of: ${validTypes.join(", ")}`,
-              );
-            }
+              const validTypes = ["bad_results", "missing_result", "wrong_order", "stale_results", "good_results"];
+              if (!validTypes.includes(fbArgs.feedback_type)) {
+                return errResult(
+                  "retrieval_feedback",
+                  "validation_error",
+                  `Invalid feedback_type "${fbArgs.feedback_type}". Must be one of: ${validTypes.join(", ")}`,
+                );
+              }
 
-            const feedbackId = logRetrievalFeedback(db, {
-              sessionId: sessionId ?? "unknown",
-              feedbackType: fbArgs.feedback_type,
-              queryText: fbArgs.query,
-              expectedNamespace: fbArgs.expected_namespace,
-              expectedKey: fbArgs.expected_key,
-              expectedEntryId: fbArgs.expected_entry_id,
-              detail: fbArgs.detail,
-            });
+              const feedbackId = logRetrievalFeedback(db, {
+                sessionId: sessionId ?? "unknown",
+                feedbackType: fbArgs.feedback_type,
+                queryText: fbArgs.query,
+                expectedNamespace: fbArgs.expected_namespace,
+                expectedKey: fbArgs.expected_key,
+                expectedEntryId: fbArgs.expected_entry_id,
+                detail: fbArgs.detail,
+              });
 
-            if (!feedbackId) {
-              return errResult("retrieval_feedback", "internal_error", "Failed to record feedback.");
-            }
+              if (!feedbackId) {
+                return errResult("retrieval_feedback", "internal_error", "Failed to record feedback.");
+              }
 
-            return okResult("retrieval_feedback", {
-              id: feedbackId,
-              feedback_type: fbArgs.feedback_type,
-              linked_to_event: true, // logRetrievalFeedback auto-links when possible
-              message: "Feedback recorded. Thank you — this helps improve retrieval quality.",
-            });
+              return okResult("retrieval_feedback", {
+                id: feedbackId,
+                feedback_type: fbArgs.feedback_type,
+                linked_to_event: true, // logRetrievalFeedback auto-links when possible
+                message: "Feedback recorded. Thank you — this helps improve retrieval quality.",
+              });
+            };
+            return handleMemoryRetrievalFeedback();
           }
 
           case "memory_history": {
-            const { namespace, since, action, limit, cursor } = (args ?? {}) as AuditHistoryParams;
+            const handleMemoryHistory = async () => {
+              const { namespace, since, action, limit, cursor } = (args ?? {}) as AuditHistoryParams;
 
-            // Namespace subtree access check
-            if (namespace) {
-              const prefix = namespace.endsWith("/") ? namespace : namespace + "/";
-              if (!canReadSubtree(ctx, prefix) && !canRead(ctx, namespace)) {
-                return okResult("history", {
-                  generated_at: new Date().toISOString(),
-                  count: 0,
-                  entries: [],
-                  next_cursor: cursor ?? null,
-                  has_more: false,
-                });
+              // Namespace subtree access check
+              if (namespace) {
+                const prefix = namespace.endsWith("/") ? namespace : namespace + "/";
+                if (!canReadSubtree(ctx, prefix) && !canRead(ctx, namespace)) {
+                  return okResult("history", {
+                    generated_at: new Date().toISOString(),
+                    count: 0,
+                    entries: [],
+                    next_cursor: cursor ?? null,
+                    has_more: false,
+                  });
+                }
               }
-            }
 
-            // Validate action enum if provided
-            if (action !== undefined && !VALID_AUDIT_ACTIONS.includes(action as AuditAction | "delete_namespace" | "log")) {
-              return errResult(
-                "history",
-                "validation_error",
-                `Invalid action "${action}". Must be one of: write, update, delete, delete_namespace, log, cross_zone_block. Legacy aliases namespace_delete and log_append are also accepted.`,
-              );
-            }
+              // Validate action enum if provided
+              if (action !== undefined && !VALID_AUDIT_ACTIONS.includes(action as AuditAction | "delete_namespace" | "log")) {
+                return errResult(
+                  "history",
+                  "validation_error",
+                  `Invalid action "${action}". Must be one of: write, update, delete, delete_namespace, log, cross_zone_block. Legacy aliases namespace_delete and log_append are also accepted.`,
+                );
+              }
 
-            const historyPage = getAuditHistoryPage(db, {
-              namespace,
-              since,
-              action,
-              limit,
-              cursor,
-            });
+              const historyPage = getAuditHistoryPage(db, {
+                namespace,
+                since,
+                action,
+                limit,
+                cursor,
+              });
 
-            const accessFiltered = historyPage.entries.filter(e => canRead(ctx, e.namespace));
-            const filteredEntries = accessFiltered.map((entry) => formatHistoryEntry(db, ctx, entry, sessionId));
-            const entriesWereFiltered = accessFiltered.length < historyPage.entries.length;
+              const accessFiltered = historyPage.entries.filter(e => canRead(ctx, e.namespace));
+              const filteredEntries = accessFiltered.map((entry) => formatHistoryEntry(db, ctx, entry, sessionId));
+              const entriesWereFiltered = accessFiltered.length < historyPage.entries.length;
 
-            return okResult("history", {
-              generated_at: new Date().toISOString(),
-              count: filteredEntries.length,
-              entries: filteredEntries,
-              next_cursor: historyPage.nextCursor,
-              has_more: historyPage.hasMore || entriesWereFiltered,
-            });
+              return okResult("history", {
+                generated_at: new Date().toISOString(),
+                count: filteredEntries.length,
+                entries: filteredEntries,
+                next_cursor: historyPage.nextCursor,
+                has_more: historyPage.hasMore || entriesWereFiltered,
+              });
+            };
+            return handleMemoryHistory();
           }
 
           case "memory_consolidate": {
-            if (ctx.principalType !== "owner") {
-              return accessDeniedResponse(ctx, "consolidate");
-            }
-
-            if (!isConsolidationAvailable()) {
-              return errResult("consolidate", "unavailable",
-                "Consolidation is not available. Ensure the feature is enabled and an API key is configured.");
-            }
-
-            const { namespace: consolidateNs } = (args ?? {}) as { namespace?: string };
-
-            if (consolidateNs) {
-              const nsCheck = validateNamespace(consolidateNs);
-              if (!nsCheck.valid) {
-                return errResult("consolidate", "validation_error", nsCheck.error!);
+            const handleMemoryConsolidate = async () => {
+              if (ctx.principalType !== "owner") {
+                return accessDeniedResponse(ctx, "consolidate");
               }
 
-              const result = await consolidateNamespace(db, consolidateNs, undefined, ctx);
-              if (result.error) {
-                return errResult("consolidate", "synthesis_error", result.error);
+              if (!isConsolidationAvailable()) {
+                return errResult("consolidate", "unavailable",
+                  "Consolidation is not available. Ensure the feature is enabled and an API key is configured.");
               }
+
+              const { namespace: consolidateNs } = (args ?? {}) as { namespace?: string };
+
+              if (consolidateNs) {
+                const nsCheck = validateNamespace(consolidateNs);
+                if (!nsCheck.valid) {
+                  return errResult("consolidate", "validation_error", nsCheck.error!);
+                }
+
+                const result = await consolidateNamespace(db, consolidateNs, undefined, ctx);
+                if (result.error) {
+                  return errResult("consolidate", "synthesis_error", result.error);
+                }
+                return okResult("consolidate", {
+                  status: "completed",
+                  results: [result],
+                });
+              }
+
+              const candidates = getNamespacesNeedingConsolidation(db);
+              if (candidates.length === 0) {
+                return okResult("consolidate", {
+                  status: "no_candidates",
+                  message: "No namespaces have enough unincorporated logs to consolidate.",
+                  results: [],
+                });
+              }
+
+              const consolidateResults: ConsolidationRunResult[] = [];
+              for (const candidate of candidates) {
+                const result = await consolidateNamespace(db, candidate.namespace, undefined, ctx);
+                consolidateResults.push(result);
+              }
+
+              const succeeded = consolidateResults.filter((r) => !r.error).length;
+              const failed = consolidateResults.filter((r) => r.error).length;
+
               return okResult("consolidate", {
-                status: "completed",
-                results: [result],
+                status: failed === 0 ? "completed" : "partial",
+                summary: {
+                  candidates: candidates.length,
+                  succeeded,
+                  failed,
+                  total_logs_processed: consolidateResults.reduce((sum, r) => sum + r.logs_processed, 0),
+                  total_cross_references: consolidateResults.reduce((sum, r) => sum + r.cross_references_found, 0),
+                },
+                results: consolidateResults,
               });
-            }
-
-            const candidates = getNamespacesNeedingConsolidation(db);
-            if (candidates.length === 0) {
-              return okResult("consolidate", {
-                status: "no_candidates",
-                message: "No namespaces have enough unincorporated logs to consolidate.",
-                results: [],
-              });
-            }
-
-            const consolidateResults: ConsolidationRunResult[] = [];
-            for (const candidate of candidates) {
-              const result = await consolidateNamespace(db, candidate.namespace, undefined, ctx);
-              consolidateResults.push(result);
-            }
-
-            const succeeded = consolidateResults.filter((r) => !r.error).length;
-            const failed = consolidateResults.filter((r) => r.error).length;
-
-            return okResult("consolidate", {
-              status: failed === 0 ? "completed" : "partial",
-              summary: {
-                candidates: candidates.length,
-                succeeded,
-                failed,
-                total_logs_processed: consolidateResults.reduce((sum, r) => sum + r.logs_processed, 0),
-                total_cross_references: consolidateResults.reduce((sum, r) => sum + r.cross_references_found, 0),
-              },
-              results: consolidateResults,
-            });
+            };
+            return handleMemoryConsolidate();
           }
 
           case "memory_status": {
-            const schemaVersion = getSchemaVersion(db);
-            const librarian = {
-              enabled: isLibrarianEnabled(),
-              redaction_logging: isRedactionLogEnabled(),
-              transport_type: getContextTransportType(ctx),
-              max_classification: getContextMaxClassification(ctx),
-            } as Record<string, unknown>;
-            const configWarnings = ctx.principalType === "owner"
-              ? getLibrarianConfigWarnings(runtimeConfig)
-              : [];
-            if (configWarnings.length > 0) {
-              librarian.config_warnings = configWarnings;
-            }
-            const statusResponse: Record<string, unknown> = {
-              server: {
-                name: "munin-memory",
-                version: "0.1.0",
-              },
-              schema_version: schemaVersion,
-              features: {
-                embeddings: isEmbeddingAvailable(),
-                semantic_search: isSemanticEnabled(),
-                hybrid_search: isHybridEnabled(),
-                consolidation: isConsolidationAvailable(),
-              },
-              tools: {
-                count: TOOL_DEFINITIONS.length,
-                names: TOOL_DEFINITIONS.map((t) => t.name),
-              },
-              principal: {
-                id: ctx.principalId,
-                type: ctx.principalType,
-              },
-              librarian,
+            const handleMemoryStatus = async () => {
+              const schemaVersion = getSchemaVersion(db);
+              const librarian = {
+                enabled: isLibrarianEnabled(),
+                redaction_logging: isRedactionLogEnabled(),
+                transport_type: getContextTransportType(ctx),
+                max_classification: getContextMaxClassification(ctx),
+              } as Record<string, unknown>;
+              const configWarnings = ctx.principalType === "owner"
+                ? getLibrarianConfigWarnings(runtimeConfig)
+                : [];
+              if (configWarnings.length > 0) {
+                librarian.config_warnings = configWarnings;
+              }
+              const statusResponse: Record<string, unknown> = {
+                server: {
+                  name: "munin-memory",
+                  version: "0.1.0",
+                },
+                schema_version: schemaVersion,
+                features: {
+                  embeddings: isEmbeddingAvailable(),
+                  semantic_search: isSemanticEnabled(),
+                  hybrid_search: isHybridEnabled(),
+                  consolidation: isConsolidationAvailable(),
+                },
+                tools: {
+                  count: TOOL_DEFINITIONS.length,
+                  names: TOOL_DEFINITIONS.map((t) => t.name),
+                },
+                principal: {
+                  id: ctx.principalId,
+                  type: ctx.principalType,
+                },
+                librarian,
+              };
+              if (ctx.principalType === "owner") {
+                statusResponse.telemetry = getToolCallAggregates(db, 7);
+              }
+              return okResult("status", statusResponse);
             };
-            if (ctx.principalType === "owner") {
-              statusResponse.telemetry = getToolCallAggregates(db, 7);
-            }
-            return okResult("status", statusResponse);
+            return handleMemoryStatus();
           }
 
           default:

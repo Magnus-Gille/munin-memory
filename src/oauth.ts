@@ -505,99 +505,21 @@ export class MuninOAuthProvider implements OAuthServerProvider {
   async verifyAccessToken(token: string): Promise<AuthInfo> {
     const farFuture = Math.floor(Date.now() / 1000) + 365 * 24 * 3600;
 
-    if (matchesBearerToken(token, this.dpaApiKeyBuf)) {
-      return {
-        token,
-        clientId: "bearer-dpa",
-        scopes: [],
-        expiresAt: farFuture,
-        authMethod: "bearer",
-        transportTypeHint: "dpa_covered",
-      } as ExtendedAuthInfo;
-    }
-
-    if (matchesBearerToken(token, this.consumerApiKeyBuf)) {
-      return {
-        token,
-        clientId: "bearer-consumer",
-        scopes: [],
-        expiresAt: farFuture,
-        authMethod: "bearer",
-        transportTypeHint: "consumer",
-      } as ExtendedAuthInfo;
-    }
-
-    if (matchesBearerToken(token, this.legacyApiKeyBuf)) {
-      return {
-        token,
-        clientId: "legacy-bearer",
-        scopes: [],
-        expiresAt: farFuture,
-        authMethod: "legacy_bearer",
-      } as ExtendedAuthInfo;
+    const staticBearerAuth = this.verifyStaticBearerToken(token, farFuture);
+    if (staticBearerAuth) {
+      return staticBearerAuth;
     }
 
     // Check DB-managed bearer tokens
-    const bearerHash = createHash("sha256").update(token).digest("hex");
-    const dbBearerRow = this.db
-      .prepare(
-        `SELECT id, scope FROM bearer_tokens
-         WHERE token_hash = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)`,
-      )
-      .get(bearerHash, new Date().toISOString()) as { id: string; scope: string } | undefined;
-
-    if (dbBearerRow) {
-      const scopeClientId =
-        dbBearerRow.scope === "owner" ? "legacy-bearer"
-        : dbBearerRow.scope === "dpa" ? "bearer-dpa"
-        : "bearer-consumer";
-      const transportHint: TransportType | undefined =
-        dbBearerRow.scope === "dpa" ? "dpa_covered"
-        : dbBearerRow.scope === "consumer" ? "consumer"
-        : undefined;
-      // Owner-scope DB tokens use authMethod="legacy_bearer" so
-      // normalizeTransportType() picks up the configured legacy bearer
-      // transport (e.g. dpa_covered), matching the env-var owner path.
-      const authMethodForScope: AuthMethod =
-        dbBearerRow.scope === "owner" ? "legacy_bearer" : "bearer";
-      return {
-        token,
-        clientId: scopeClientId,
-        scopes: [],
-        expiresAt: farFuture,
-        authMethod: authMethodForScope,
-        ...(transportHint ? { transportTypeHint: transportHint } : {}),
-      } as ExtendedAuthInfo;
+    const dbBearerAuth = this.verifyDbBearerToken(token, farFuture);
+    if (dbBearerAuth) {
+      return dbBearerAuth;
     }
 
     // Check agent service tokens (principals.token_hash)
-    const serviceTokenHash = createHash("sha256").update(token).digest("hex");
-    const principalRow = this.db
-      .prepare(
-        `SELECT principal_id, principal_type, revoked_at, expires_at, transport_type
-         FROM principals
-         WHERE token_hash = ?`,
-      )
-      .get(serviceTokenHash) as
-      | { principal_id: string; principal_type: string; revoked_at: string | null; expires_at: string | null; transport_type: string | null }
-      | undefined;
-
-    if (principalRow) {
-      if (principalRow.revoked_at !== null) {
-        throw new InvalidTokenError("Agent token has been revoked");
-      }
-      if (principalRow.expires_at !== null && principalRow.expires_at < new Date().toISOString()) {
-        throw new InvalidTokenError("Agent token has expired");
-      }
-      return {
-        token,
-        clientId: `principal:${principalRow.principal_id}`,
-        scopes: [],
-        expiresAt: farFuture,
-        principalId: principalRow.principal_id,
-        authMethod: "agent_token",
-        transportTypeHint: (principalRow.transport_type as TransportType | null) ?? undefined,
-      } as ExtendedAuthInfo;
+    const agentTokenAuth = this.verifyAgentServiceToken(token, farFuture);
+    if (agentTokenAuth) {
+      return agentTokenAuth;
     }
 
     // Check OAuth tokens
@@ -633,6 +555,111 @@ export class MuninOAuthProvider implements OAuthServerProvider {
     }
 
     return authInfo;
+  }
+
+  private verifyStaticBearerToken(token: string, farFuture: number): ExtendedAuthInfo | undefined {
+    if (matchesBearerToken(token, this.dpaApiKeyBuf)) {
+      return {
+        token,
+        clientId: "bearer-dpa",
+        scopes: [],
+        expiresAt: farFuture,
+        authMethod: "bearer",
+        transportTypeHint: "dpa_covered",
+      } as ExtendedAuthInfo;
+    }
+
+    if (matchesBearerToken(token, this.consumerApiKeyBuf)) {
+      return {
+        token,
+        clientId: "bearer-consumer",
+        scopes: [],
+        expiresAt: farFuture,
+        authMethod: "bearer",
+        transportTypeHint: "consumer",
+      } as ExtendedAuthInfo;
+    }
+
+    if (matchesBearerToken(token, this.legacyApiKeyBuf)) {
+      return {
+        token,
+        clientId: "legacy-bearer",
+        scopes: [],
+        expiresAt: farFuture,
+        authMethod: "legacy_bearer",
+      } as ExtendedAuthInfo;
+    }
+
+    return undefined;
+  }
+
+  private verifyDbBearerToken(token: string, farFuture: number): ExtendedAuthInfo | undefined {
+    const bearerHash = createHash("sha256").update(token).digest("hex");
+    const dbBearerRow = this.db
+      .prepare(
+        `SELECT id, scope FROM bearer_tokens
+         WHERE token_hash = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)`,
+      )
+      .get(bearerHash, new Date().toISOString()) as { id: string; scope: string } | undefined;
+
+    if (!dbBearerRow) {
+      return undefined;
+    }
+
+    const scopeClientId =
+      dbBearerRow.scope === "owner" ? "legacy-bearer"
+      : dbBearerRow.scope === "dpa" ? "bearer-dpa"
+      : "bearer-consumer";
+    const transportHint: TransportType | undefined =
+      dbBearerRow.scope === "dpa" ? "dpa_covered"
+      : dbBearerRow.scope === "consumer" ? "consumer"
+      : undefined;
+    // Owner-scope DB tokens use authMethod="legacy_bearer" so
+    // normalizeTransportType() picks up the configured legacy bearer
+    // transport (e.g. dpa_covered), matching the env-var owner path.
+    const authMethodForScope: AuthMethod =
+      dbBearerRow.scope === "owner" ? "legacy_bearer" : "bearer";
+    return {
+      token,
+      clientId: scopeClientId,
+      scopes: [],
+      expiresAt: farFuture,
+      authMethod: authMethodForScope,
+      ...(transportHint ? { transportTypeHint: transportHint } : {}),
+    } as ExtendedAuthInfo;
+  }
+
+  private verifyAgentServiceToken(token: string, farFuture: number): ExtendedAuthInfo | undefined {
+    const serviceTokenHash = createHash("sha256").update(token).digest("hex");
+    const principalRow = this.db
+      .prepare(
+        `SELECT principal_id, principal_type, revoked_at, expires_at, transport_type
+         FROM principals
+         WHERE token_hash = ?`,
+      )
+      .get(serviceTokenHash) as
+      | { principal_id: string; principal_type: string; revoked_at: string | null; expires_at: string | null; transport_type: string | null }
+      | undefined;
+
+    if (!principalRow) {
+      return undefined;
+    }
+
+    if (principalRow.revoked_at !== null) {
+      throw new InvalidTokenError("Agent token has been revoked");
+    }
+    if (principalRow.expires_at !== null && principalRow.expires_at < new Date().toISOString()) {
+      throw new InvalidTokenError("Agent token has expired");
+    }
+    return {
+      token,
+      clientId: `principal:${principalRow.principal_id}`,
+      scopes: [],
+      expiresAt: farFuture,
+      principalId: principalRow.principal_id,
+      authMethod: "agent_token",
+      transportTypeHint: (principalRow.transport_type as TransportType | null) ?? undefined,
+    } as ExtendedAuthInfo;
   }
 
   async revokeToken(

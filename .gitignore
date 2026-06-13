@@ -54,3 +54,9 @@ benchmark/generated/*
 
 # Antigravity (agy) CLI per-conversation state, created when run inside the repo
 .antigravitycli/
+
+# Vitest coverage output
+coverage/
+
+# Local-only security/working notes — never commit (esp. on a public repo)
+*.local.md

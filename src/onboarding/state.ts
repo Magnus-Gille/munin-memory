@@ -69,32 +69,39 @@ export class DeviceState {
     const data = this.load();
 
     if (!data || !data.state || !data.deviceId || !data.claimCodeHash || !data.wifiPasswordHash) {
-      // Corrupt or missing — can't recover without secrets.
-      // If file existed but was corrupt, we still have the hashes in it potentially.
-      // If truly missing, caller must handle (first-boot init hasn't run).
-      if (data && data.claimCodeHash && data.wifiPasswordHash && data.deviceId) {
-        // Partial corruption — reset to UNCONFIGURED but preserve identity
-        const reset: DeviceStateData = {
-          state: "UNCONFIGURED",
-          deviceId: data.deviceId,
-          claimCodeHash: data.claimCodeHash,
-          wifiPasswordHash: data.wifiPasswordHash,
-        };
-        this.save(reset);
-        return reset;
-      }
-      // Truly missing — return null-like sentinel that caller must handle
-      // For safety, return a minimal UNCONFIGURED with empty hashes
-      // The caller (first-boot script) is responsible for initializing properly
-      const empty: DeviceStateData = {
-        state: "UNCONFIGURED",
-        deviceId: "0000",
-        claimCodeHash: "",
-        wifiPasswordHash: "",
-      };
-      return empty;
+      return this.reconcileCorrupt(data);
     }
 
+    return this.reconcileByState(data, envFilePath);
+  }
+
+  private reconcileCorrupt(data: DeviceStateData | null): DeviceStateData {
+    // Corrupt or missing — can't recover without secrets.
+    // If file existed but was corrupt, we still have the hashes in it potentially.
+    // If truly missing, caller must handle (first-boot init hasn't run).
+    if (data && data.claimCodeHash && data.wifiPasswordHash && data.deviceId) {
+      // Partial corruption — reset to UNCONFIGURED but preserve identity
+      const reset: DeviceStateData = {
+        state: "UNCONFIGURED",
+        deviceId: data.deviceId,
+        claimCodeHash: data.claimCodeHash,
+        wifiPasswordHash: data.wifiPasswordHash,
+      };
+      this.save(reset);
+      return reset;
+    }
+    // Truly missing — return null-like sentinel that caller must handle
+    // For safety, return a minimal UNCONFIGURED with empty hashes
+    // The caller (first-boot script) is responsible for initializing properly
+    return {
+      state: "UNCONFIGURED",
+      deviceId: "0000",
+      claimCodeHash: "",
+      wifiPasswordHash: "",
+    };
+  }
+
+  private reconcileByState(data: DeviceStateData, envFilePath: string): DeviceStateData {
     // Reconciliation rules
     switch (data.state) {
       case "CONNECTING":
@@ -104,7 +111,7 @@ export class DeviceState {
         this.save(data);
         return data;
 
-      case "FACTORY_RESET":
+      case "FACTORY_RESET": {
         // Complete the reset
         const reset: DeviceStateData = {
           state: "UNCONFIGURED",
@@ -114,39 +121,44 @@ export class DeviceState {
         };
         this.save(reset);
         return reset;
+      }
 
       case "CLAIMED":
-        // Verify .env exists and has API key
-        if (!envFilePath || !existsSync(envFilePath)) {
-          data.state = "RUNNING_UNCLAIMED";
-          data.apiKeyHash = undefined;
-          data.claimedAt = undefined;
-          data.lastError = "Configuration file missing — please re-claim";
-          this.save(data);
-          return data;
-        }
-        try {
-          const envContent = readFileSync(envFilePath, "utf-8");
-          if (!envContent.includes("MUNIN_API_KEY=")) {
-            data.state = "RUNNING_UNCLAIMED";
-            data.apiKeyHash = undefined;
-            data.claimedAt = undefined;
-            data.lastError = "API key missing — please re-claim";
-            this.save(data);
-            return data;
-          }
-        } catch {
-          data.state = "RUNNING_UNCLAIMED";
-          data.apiKeyHash = undefined;
-          data.claimedAt = undefined;
-          this.save(data);
-          return data;
-        }
-        return data;
+        return this.reconcileClaimed(data, envFilePath);
 
       default:
         return data;
     }
+  }
+
+  private reconcileClaimed(data: DeviceStateData, envFilePath: string): DeviceStateData {
+    // Verify .env exists and has API key
+    if (!envFilePath || !existsSync(envFilePath)) {
+      data.state = "RUNNING_UNCLAIMED";
+      data.apiKeyHash = undefined;
+      data.claimedAt = undefined;
+      data.lastError = "Configuration file missing — please re-claim";
+      this.save(data);
+      return data;
+    }
+    try {
+      const envContent = readFileSync(envFilePath, "utf-8");
+      if (!envContent.includes("MUNIN_API_KEY=")) {
+        data.state = "RUNNING_UNCLAIMED";
+        data.apiKeyHash = undefined;
+        data.claimedAt = undefined;
+        data.lastError = "API key missing — please re-claim";
+        this.save(data);
+        return data;
+      }
+    } catch {
+      data.state = "RUNNING_UNCLAIMED";
+      data.apiKeyHash = undefined;
+      data.claimedAt = undefined;
+      this.save(data);
+      return data;
+    }
+    return data;
   }
 
   /**

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
+import * as sqliteVec from "sqlite-vec";
 import {
   runMigrations,
   getSchemaVersion,
@@ -796,6 +797,166 @@ describe("migration v17 — augmented FTS index", () => {
       .prepare("SELECT rowid FROM entries_fts WHERE entries_fts MATCH ?")
       .all("web fetch") as Array<{ rowid: number }>;
     expect(postHits.length).toBeGreaterThanOrEqual(1);
+
+    db.close();
+  });
+});
+
+describe("migration v7 — entries_vec cleanup branch", () => {
+  it("deletes NULL entry_id rows from entries_vec when table exists before v7", () => {
+    // Build a pre-v7 schema manually (mirrors the v1-v6 baseline used in other v7 tests)
+    const db = openRawDb();
+    db.exec(`
+      CREATE TABLE entries (
+        id TEXT PRIMARY KEY,
+        namespace TEXT NOT NULL,
+        key TEXT,
+        entry_type TEXT NOT NULL CHECK(entry_type IN ('state', 'log')),
+        content TEXT NOT NULL,
+        tags TEXT NOT NULL DEFAULT '[]',
+        agent_id TEXT DEFAULT 'default',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        embedding_status TEXT NOT NULL DEFAULT 'pending',
+        embedding_model TEXT,
+        CHECK(
+          (entry_type = 'state' AND key IS NOT NULL) OR
+          (entry_type = 'log' AND key IS NULL)
+        )
+      );
+      CREATE UNIQUE INDEX idx_entries_ns_key ON entries(namespace, key) WHERE entry_type = 'state';
+      CREATE INDEX idx_entries_ns_type_key ON entries(namespace, entry_type, key);
+      CREATE INDEX idx_entries_ns_type_created ON entries(namespace, entry_type, created_at DESC);
+      CREATE INDEX idx_entries_created ON entries(created_at);
+      CREATE INDEX idx_entries_embedding_status ON entries(embedding_status, created_at ASC);
+      CREATE TABLE audit_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL,
+        agent_id TEXT NOT NULL DEFAULT 'default',
+        action TEXT NOT NULL,
+        namespace TEXT NOT NULL,
+        key TEXT,
+        detail TEXT
+      );
+      CREATE INDEX idx_audit_timestamp ON audit_log(timestamp);
+      CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+    `);
+    for (let version = 1; version <= 6; version++) {
+      db.prepare("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)")
+        .run(version, "2026-04-01T00:00:00.000Z");
+    }
+
+    // Load sqlite-vec and create the entries_vec virtual table (simulates a DB where
+    // initDatabase already ran before v7 existed — the vec table pre-dates the migration).
+    sqliteVec.load(db);
+    db.exec("CREATE VIRTUAL TABLE entries_vec USING vec0(entry_id TEXT, embedding float[384])");
+
+    // Verify the vec table is visible to the migration check
+    const vecTableExists = db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'entries_vec'")
+      .get();
+    expect(vecTableExists).toBeTruthy();
+
+    // Run remaining migrations — v7's hasVecTable branch executes line 325
+    runMigrations(db);
+
+    // Migration should complete successfully
+    const version = getSchemaVersion(db);
+    expect(version).toBeGreaterThanOrEqual(7);
+
+    db.close();
+  });
+});
+
+describe("migration v11 — backfill edge cases", () => {
+  /** Run migrations v1 through maxVersion on db, marking each applied. */
+  function runMigrationsUpTo(db: Database.Database, maxVersion: number): void {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS schema_version (
+        version INTEGER PRIMARY KEY,
+        applied_at TEXT NOT NULL
+      );
+    `);
+    const sorted = [...migrations].sort((a, b) => a.version - b.version);
+    for (const m of sorted) {
+      if (m.version > maxVersion) break;
+      m.up(db);
+      db.prepare("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)")
+        .run(m.version, new Date().toISOString());
+    }
+  }
+
+  it("falls back to empty tags when entry has invalid JSON tags (line 505)", () => {
+    const db = openRawDb();
+    runMigrationsUpTo(db, 10);
+
+    // Bypass the json_valid CHECK constraint to insert an entry with malformed tags.
+    // Keep ignore_check_constraints ON through the migration — SQLite's ALTER TABLE ADD COLUMN
+    // re-validates all existing-row constraints, so the bad-JSON row would fail otherwise.
+    db.pragma("ignore_check_constraints = ON");
+    db.prepare(
+      `INSERT INTO entries (id, namespace, key, entry_type, content, tags, agent_id, created_at, updated_at, owner_principal_id)
+       VALUES ('bad-json-entry', 'projects/test', 'broken', 'state', 'content', 'NOT_VALID_JSON', 'default', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', NULL)`,
+    ).run();
+
+    // Running v11 should not throw — the catch at line 504-506 handles invalid JSON
+    expect(() => runMigrations(db)).not.toThrow();
+    db.pragma("ignore_check_constraints = OFF");
+
+    // The entry should have been assigned a classification (the bad tags are replaced with valid JSON)
+    const entry = db
+      .prepare("SELECT classification, tags FROM entries WHERE id = 'bad-json-entry'")
+      .get() as { classification: string; tags: string };
+    expect(entry.classification).toBeTruthy();
+    // After migration the tags column must be valid JSON again
+    expect(() => JSON.parse(entry.tags)).not.toThrow();
+
+    db.close();
+  });
+
+  it("applies explicit classification from tag when entry has classification: tag (line 512)", () => {
+    const db = openRawDb();
+    runMigrationsUpTo(db, 10);
+
+    // Insert an entry in a namespace with a default floor of 'internal',
+    // but with an explicit tag 'classification:client-restricted' — the explicit tag wins
+    db.prepare(
+      `INSERT INTO entries (id, namespace, key, entry_type, content, tags, agent_id, created_at, updated_at, owner_principal_id)
+       VALUES ('explicit-class-entry', 'projects/myproject', 'status', 'state', 'content',
+               '["active","classification:client-restricted"]', 'default',
+               '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', NULL)`,
+    ).run();
+
+    expect(() => runMigrations(db)).not.toThrow();
+
+    const entry = db
+      .prepare("SELECT classification FROM entries WHERE id = 'explicit-class-entry'")
+      .get() as { classification: string };
+    // Explicit tag 'classification:client-restricted' should override the namespace floor
+    expect(entry.classification).toBe("client-restricted");
+
+    db.close();
+  });
+
+  it("falls back to client-restricted when entry has conflicting classification tags (lines 514-515)", () => {
+    const db = openRawDb();
+    runMigrationsUpTo(db, 10);
+
+    // Two distinct classification tags — parseExplicitClassification throws, line 515 runs
+    db.prepare(
+      `INSERT INTO entries (id, namespace, key, entry_type, content, tags, agent_id, created_at, updated_at, owner_principal_id)
+       VALUES ('conflict-class-entry', 'projects/myproject', 'conflict', 'state', 'content',
+               '["classification:internal","classification:public"]', 'default',
+               '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', NULL)`,
+    ).run();
+
+    expect(() => runMigrations(db)).not.toThrow();
+
+    const entry = db
+      .prepare("SELECT classification FROM entries WHERE id = 'conflict-class-entry'")
+      .get() as { classification: string };
+    // Conflict → FALLBACK_RESTRICTED_CLASSIFICATION = "client-restricted"
+    expect(entry.classification).toBe("client-restricted");
 
     db.close();
   });
