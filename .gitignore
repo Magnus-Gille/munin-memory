@@ -57,3 +57,6 @@ benchmark/generated/*
 
 # Vitest coverage output
 coverage/
+
+# Local-only security/working notes — never commit (esp. on a public repo)
+*.local.md
