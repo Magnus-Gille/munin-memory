@@ -433,25 +433,6 @@ function buildReadMissHint(
     : `No entries found in namespace "${namespace}".`;
 }
 
-/**
- * Reorder a rank-sorted array so the strongest items sit at the two edges and
- * the weakest in the middle — countering the "Lost in the Middle" attention dip
- * (arXiv 2307.03172) when a long result list is dropped straight into context.
- * Given best-first input [r1, r2, r3, r4, r5] it returns [r1, r3, r5, r4, r2]:
- * rank 1 at the start, rank 2 at the end. Pure and order-only — the same items
- * come back, so callers must not derive ranks from the returned order. A no-op
- * for 0–2 items.
- */
-function boundarySerialize<T>(items: T[]): T[] {
-  const front: T[] = [];
-  const back: T[] = [];
-  items.forEach((item, i) => {
-    if (i % 2 === 0) front.push(item);
-    else back.push(item);
-  });
-  back.reverse();
-  return [...front, ...back];
-}
 
 function formatQueryResult(
   db: Database.Database,
@@ -915,6 +896,7 @@ import {
   canonicalizeTags,
   stripReservedTags,
   getLifecycleTags,
+  boundarySerialize,
 } from "./internal/retrieval-shared.js";
 // The reranker pipeline lives in ./internal/reranker.js (issue #59).
 // tools.ts imports only the names it uses internally; the dedicated module

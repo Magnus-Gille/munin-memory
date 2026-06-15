@@ -97,6 +97,22 @@ describe("LoCoMo adapter", () => {
     expect(adversarial).toBeDefined();
   });
 
+  it("preserves an empty reference_answer for adversarial questions (does not drop to undefined)", () => {
+    const fixture = loadFixture();
+    // Force the adversarial (cat 5) QA to have an empty answer — the
+    // unanswerable case. A truthiness drop (`answer || undefined`) would make
+    // the runner skip it; it must instead be judged for abstention.
+    for (const sample of fixture) {
+      for (const qa of sample.qa) {
+        if (qa.category === 5) qa.answer = "";
+      }
+    }
+    const result = convertLocomoDataset(fixture, "session", "lexical", undefined, true);
+    const adversarial = result.queries.find((q) => q.category === "locomo/adversarial");
+    expect(adversarial).toBeDefined();
+    expect(adversarial!.reference_answer).toBe("");
+  });
+
   it("builds a synthetic session-level DB that lexical retrieval can query", () => {
     const dir = mkdtempSync(join(tmpdir(), "munin-locomo-"));
     tempDirs.push(dir);

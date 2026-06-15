@@ -378,7 +378,7 @@ function scoreByNamespace(
  *   (clamped to 50 by `queryEntriesLexicalScored` internally) so the
  *   reranker has room to reorder.
  */
-async function executeQuery(
+export async function executeQuery(
   db: Database.Database,
   query: string,
   mode: SearchMode,
@@ -481,7 +481,7 @@ function runLexical(
  * Any divergence from this order is a parity bug — the parity test in
  * `tests/runner-parity.test.ts` is the safety net.
  */
-function applyProductionReranker(
+export function applyProductionReranker(
   db: Database.Database,
   rawResults: Entry[],
   queryParams: QueryParams,
@@ -517,7 +517,7 @@ function applyProductionReranker(
  * something is missing we either throw (default) or downgrade to raw
  * mode with a `warnings[]` entry (opt-in via `fallbackRunnerMode: "raw"`).
  */
-function checkProductionRankerPrereqs(
+export function checkProductionRankerPrereqs(
   db: Database.Database,
   snapshotSchemaVersion: number,
 ): { ok: true } | { ok: false; reason: string } {
