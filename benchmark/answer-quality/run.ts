@@ -30,13 +30,14 @@ import type { SerializationMode } from "./types.js";
 import type { RunnerMode } from "../types.js";
 import type { SearchMode } from "../../src/types.js";
 
-function parseArgs(argv: string[]): {
+export function parseArgs(argv: string[]): {
   queriesPath: string | null;
   snapshotPath: string | null;
   serialization: SerializationMode;
   runnerMode: RunnerMode;
   searchMode: SearchMode;
-  topK: number;
+  /** Raw --top-k string as given on the CLI, or null when absent. Validated by validateParsedArgs. */
+  topKRaw: string | null;
   answerModel: string;
   judgeModel: string;
   outputDir: string;
@@ -63,13 +64,25 @@ function parseArgs(argv: string[]): {
   const defaultJudgeModel =
     process.env.MUNIN_JUDGE_MODEL ?? "anthropic/claude-sonnet-4-5";
 
+  // Preserve raw --top-k string so validateParsedArgs can apply strict validation.
+  // When --top-k is present but its value was consumed as the next arg, args.get("top-k")
+  // holds the string. When --top-k appears as a bare flag (no following value), it lands in
+  // flags — treat that as an empty string (invalid, caught by validateParsedArgs).
+  let topKRaw: string | null = null;
+  if (args.has("top-k")) {
+    topKRaw = args.get("top-k")!;
+  } else if (flags.has("top-k")) {
+    topKRaw = "";  // --top-k present but no value — invalid
+  }
+  // topKRaw === null means --top-k was absent entirely → default 10 applied after validation
+
   return {
     queriesPath: args.get("queries") ? resolve(args.get("queries")!) : null,
     snapshotPath: args.get("snapshot") ? resolve(args.get("snapshot")!) : null,
     serialization: (args.get("serialization") ?? "linear") as SerializationMode,
     runnerMode: (args.get("runner-mode") ?? "production_ranker") as RunnerMode,
     searchMode: (args.get("search-mode") ?? "hybrid") as SearchMode,
-    topK: args.has("top-k") ? parseInt(args.get("top-k")!, 10) || 10 : 10,
+    topKRaw,
     answerModel: args.get("answer-model") ?? defaultAnswerModel,
     judgeModel: args.get("judge-model") ?? defaultJudgeModel,
     outputDir: resolve(
@@ -81,21 +94,27 @@ function parseArgs(argv: string[]): {
 
 // --- Argument validation ---
 
-interface ParsedArgsSubset {
+export interface ParsedArgsSubset {
   serialization: SerializationMode;
   runnerMode: RunnerMode;
   searchMode: SearchMode;
-  topK: number;
+  /**
+   * Raw --top-k string from the CLI, or null when the flag was absent.
+   * null → validated as "absent, default to 10".
+   * "" or non-positive-integer string → validation error.
+   */
+  topKRaw: string | null;
 }
 
 /**
  * Validate the parsed CLI arguments for enum membership and numeric bounds.
- * Returns { ok: true } on success, or { ok: false; error: string } on failure.
+ * Returns { ok: true; topK: number } on success (topK is the coerced value),
+ * or { ok: false; error: string } on failure.
  * Exported for unit testing.
  */
 export function validateParsedArgs(
   parsed: ParsedArgsSubset,
-): { ok: true } | { ok: false; error: string } {
+): { ok: true; topK: number } | { ok: false; error: string } {
   const validSerializations: SerializationMode[] = ["linear", "boundary"];
   if (!validSerializations.includes(parsed.serialization)) {
     return {
@@ -117,13 +136,29 @@ export function validateParsedArgs(
       error: `Invalid --search-mode value "${String(parsed.searchMode)}". Must be one of: ${validSearchModes.join(", ")}.`,
     };
   }
-  if (!Number.isInteger(parsed.topK) || parsed.topK <= 0) {
-    return {
-      ok: false,
-      error: `Invalid --top-k value "${String(parsed.topK)}". Must be a finite positive integer.`,
-    };
+  // topKRaw validation: null = absent (default 10); any other value must be a strict
+  // positive integer string (/^[1-9]\d*$/) that is a safe integer.
+  let topK: number;
+  if (parsed.topKRaw === null) {
+    topK = 10;
+  } else {
+    const raw = parsed.topKRaw;
+    if (!/^[1-9]\d*$/.test(raw)) {
+      return {
+        ok: false,
+        error: `Invalid --top-k value "${raw}". Must be a finite positive integer (e.g. 10).`,
+      };
+    }
+    const parsed_n = Number(raw);
+    if (!Number.isSafeInteger(parsed_n)) {
+      return {
+        ok: false,
+        error: `Invalid --top-k value "${raw}". Must be a finite positive integer (e.g. 10).`,
+      };
+    }
+    topK = parsed_n;
   }
-  return { ok: true };
+  return { ok: true, topK };
 }
 
 async function main() {
@@ -139,6 +174,8 @@ async function main() {
     console.error(`Argument error: ${validation.error}`);
     process.exit(1);
   }
+  // topK is coerced from topKRaw only after validation passes
+  const topK = validation.topK;
 
   // Check for missing API key — clean exit (not an error)
   const skipReason = shouldSkipForMissingKey(null, undefined);
@@ -159,7 +196,7 @@ async function main() {
       queries,
       runnerMode: parsed.runnerMode,
       searchMode: parsed.searchMode,
-      topK: parsed.topK,
+      topK,
       answerModel: parsed.answerModel,
       judgeModel: parsed.judgeModel,
       querySetSources: [source],
@@ -177,7 +214,7 @@ async function main() {
       serialization: parsed.serialization,
       runnerMode: parsed.runnerMode,
       searchMode: parsed.searchMode,
-      topK: parsed.topK,
+      topK,
       answerModel: parsed.answerModel,
       judgeModel: parsed.judgeModel,
       querySetSources: [source],

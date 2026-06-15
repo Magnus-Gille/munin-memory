@@ -216,6 +216,23 @@ export async function runAnswerQualityInner(
 ): Promise<AnswerQualityReport> {
   const warnings: string[] = [];
 
+  // Partition queries: those with a reference_answer field participate; others are skipped.
+  // Note: empty-string reference_answer is allowed (e.g. adversarial/unanswerable questions
+  // where the correct response is abstention — the judge rubric handles them appropriately).
+  // Computed BEFORE the embeddings init block so we can inspect per-query effective modes.
+  const eligible = opts.queries.filter((q) => q.reference_answer !== undefined);
+  const skippedNoReference = opts.queries.length - eligible.length;
+
+  // Determine whether ANY eligible query needs embeddings (semantic or hybrid effective mode).
+  // A query's effective mode is its own search_mode unless it is "all", in which case the
+  // global searchMode is used. This fixes a bug where the embeddings init was gated only on
+  // the global searchMode: when global=lexical but a per-query search_mode="semantic|hybrid",
+  // embeddings were never initialized, silently degrading those queries to lexical.
+  const requiresEmbeddings = eligible.some((q) => {
+    const effectiveMode = q.search_mode === "all" ? searchMode : q.search_mode;
+    return effectiveMode !== "lexical";
+  });
+
   // Load sqlite-vec (soft dependency — lexical still works without it)
   try {
     sqliteVec.load(db);
@@ -223,13 +240,13 @@ export async function runAnswerQualityInner(
   } catch (err) {
     setVecLoaded(false);
     const msg = err instanceof Error ? err.message : String(err);
-    if (searchMode !== "lexical") {
+    if (requiresEmbeddings) {
       warnings.push(`sqlite-vec unavailable — search degraded to lexical. (${msg})`);
     }
   }
 
-  // Init embeddings (needed for semantic/hybrid)
-  if (searchMode !== "lexical") {
+  // Init embeddings (needed for semantic/hybrid — gated on per-query effective modes)
+  if (requiresEmbeddings) {
     try {
       const embeddingsReady = await initEmbeddings();
       if (!embeddingsReady) {
@@ -263,12 +280,6 @@ export async function runAnswerQualityInner(
     warnings.push("query_set_sources not tracked — lineage unavailable for reproducibility");
   }
   const querySetChecksum = computeQuerySetChecksum(querySetSources);
-
-  // Partition queries: those with a reference_answer field participate; others are skipped.
-  // Note: empty-string reference_answer is allowed (e.g. adversarial/unanswerable questions
-  // where the correct response is abstention — the judge rubric handles them appropriately).
-  const eligible = opts.queries.filter((q) => q.reference_answer !== undefined);
-  const skippedNoReference = opts.queries.length - eligible.length;
 
   // Per-query eval
   const results: AnswerQualityResult[] = [];
