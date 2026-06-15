@@ -1,6 +1,7 @@
 import type { SecurityResult } from "./types.js";
 
 const SECRET_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
+  { pattern: /sk-or-v1-[a-zA-Z0-9_-]{20,}/, label: "OpenRouter API key" },
   { pattern: /sk-[a-zA-Z0-9]{20,}/, label: "API key (sk-...)" },
   { pattern: /sk-proj-[a-zA-Z0-9]{20,}/, label: "OpenAI project API key (sk-proj-...)" },
   { pattern: /ghp_[a-zA-Z0-9]{36,}/, label: "GitHub personal access token" },
@@ -70,6 +71,24 @@ export function scanForSecrets(content: string): SecurityResult {
     }
   }
   return { valid: true };
+}
+
+/**
+ * Replace all secret-pattern matches in `message` with "[REDACTED]".
+ * Used to sanitize error strings before storing or exposing them.
+ * Unlike {@link scanForSecrets} (which rejects on first match), this
+ * applies every pattern as a global replacement so multi-secret strings
+ * are fully scrubbed.
+ */
+export function redactSecrets(message: string): string {
+  let result = message;
+  for (const { pattern } of SECRET_PATTERNS) {
+    // Build a global-flagged copy so replaceAll behaviour works regardless
+    // of whether the pattern already has the /g flag.
+    const global = new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : pattern.flags + "g");
+    result = result.replace(global, "[REDACTED]");
+  }
+  return result;
 }
 
 /**

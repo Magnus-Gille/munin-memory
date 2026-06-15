@@ -6,7 +6,7 @@ import { initDatabase, upsertConsolidationMetadata, writeState } from "../src/db
 import { registerTools, computeCommitmentConfidence } from "../src/tools.js";
 import { ownerContext } from "../src/access.js";
 import type { AccessContext } from "../src/access.js";
-import { _setApiKey, _consolidationConfig, resetConsolidationCircuitBreaker } from "../src/consolidation.js";
+import { _setApiKey, _consolidationConfig, resetConsolidationCircuitBreaker, getConsolidationHealth, _resetHealthState } from "../src/consolidation.js";
 import type { LibrarianRuntimeConfig } from "../src/librarian.js";
 
 const TEST_DB_PATH = "/tmp/munin-memory-tools-test.db";
@@ -2721,6 +2721,118 @@ describe("memory_orient", () => {
       const raw = await familyCall("memory_orient", {});
       const result = parseToolResponse(raw) as { maintenance_needed?: Array<{ issue: string }> };
       expect(result.maintenance_needed?.some((m) => m.issue === "consolidation_backlog") ?? false).toBe(false);
+    });
+
+    it("surfaces consolidation_circuit_breaker maintenance item when the breaker is tripped (regression guard for disappearing-warning bug)", async () => {
+      // This test is the regression guard: previously the orient code was gated on
+      // isConsolidationAvailable(), so a tripped breaker silently suppressed the warning.
+      _consolidationConfig.enabled = true;
+      _setApiKey("test-key");
+      // Manually trip the breaker (don't reset it)
+      // Simulate by setting the state via the module-level config
+      // Force the circuit breaker to tripped via repeated failures
+      // We use _consolidationConfig directly since we can't easily inject into processConsolidationBatch here
+      // Instead: set apiKey, mark breaker as tripped via _setApiKey + manual state change
+      // The test seam: we'll drive the state by calling _resetHealthState and then directly
+      // manipulating via _consolidationConfig. Since circuitBreakerTripped is not exported,
+      // we need processConsolidationBatch to trip it — use the stub fetch approach.
+
+      // Reset to clean state
+      resetConsolidationCircuitBreaker();
+      _resetHealthState();
+
+      const failCount = _consolidationConfig.maxFailures;
+      for (let ns = 0; ns < failCount; ns++) {
+        for (let i = 0; i < _consolidationConfig.minLogs; i++) {
+          await callTool("memory_log", {
+            namespace: `projects/cbtest${ns}`,
+            content: `Log entry ${i}`,
+            tags: ["test"],
+          });
+        }
+      }
+
+      // Trip the breaker via processConsolidationBatch with stubbed failing fetch
+      const { processConsolidationBatch: runBatch } = await import("../src/consolidation.js");
+      const origFetch = globalThis.fetch;
+      globalThis.fetch = async () => ({
+        ok: false,
+        status: 401,
+        text: async () => "Unauthorized: bad key",
+      } as unknown as Response);
+
+      const { _setWorkerDb } = await import("../src/consolidation.js");
+      _setWorkerDb(db);
+      await runBatch();
+      globalThis.fetch = origFetch;
+      _setWorkerDb(null);
+
+      // Now call memory_orient — the circuit breaker is tripped, so isConsolidationAvailable()
+      // returns false, but we MUST still see a maintenance item.
+      const raw = await callTool("memory_orient", {});
+      const result = parseToolResponse(raw) as {
+        maintenance_needed?: Array<{ issue: string; suggestion: string }>;
+      };
+
+      const cbItem = result.maintenance_needed?.find((m) => m.issue === "consolidation_circuit_breaker");
+      expect(cbItem).toBeDefined();
+      expect(cbItem!.suggestion).toContain("failing");
+
+      // Clean up
+      resetConsolidationCircuitBreaker();
+      _resetHealthState();
+      _consolidationConfig.enabled = false;
+      _setApiKey(null);
+    });
+
+    it("surfaces consolidation_circuit_breaker when failures > 0 but breaker not yet tripped (pre-trip warning)", async () => {
+      _consolidationConfig.enabled = true;
+      _setApiKey("test-key");
+      resetConsolidationCircuitBreaker();
+      _resetHealthState();
+
+      // Seed enough logs for ONE namespace only (causes 1 failure, breaker at 1/3)
+      const { _setWorkerDb } = await import("../src/consolidation.js");
+      for (let i = 0; i < _consolidationConfig.minLogs; i++) {
+        await callTool("memory_log", {
+          namespace: "projects/pretrip0",
+          content: `Log entry ${i}`,
+          tags: ["test"],
+        });
+      }
+
+      const { processConsolidationBatch: runBatch } = await import("../src/consolidation.js");
+      const origFetch = globalThis.fetch;
+      globalThis.fetch = async () => ({
+        ok: false,
+        status: 401,
+        text: async () => "Unauthorized: bad key",
+      } as unknown as Response);
+
+      _setWorkerDb(db);
+      await runBatch(); // causes failures === 1, breaker NOT tripped (maxFailures is 3)
+      globalThis.fetch = origFetch;
+      _setWorkerDb(null);
+
+      // memory_orient must show BOTH consolidation_circuit_breaker AND consolidation_backlog
+      // (worker is still available since breaker not tripped)
+      const raw = await callTool("memory_orient", {});
+      const result = parseToolResponse(raw) as {
+        maintenance_needed?: Array<{ issue: string; suggestion: string }>;
+      };
+
+      const cbItem = result.maintenance_needed?.find((m) => m.issue === "consolidation_circuit_breaker");
+      expect(cbItem).toBeDefined();
+      expect(cbItem!.suggestion).toContain("failing");
+
+      const backlogItem = result.maintenance_needed?.find((m) => m.issue === "consolidation_backlog");
+      expect(backlogItem).toBeDefined();
+
+      // Clean up
+      resetConsolidationCircuitBreaker();
+      _resetHealthState();
+      _consolidationConfig.enabled = false;
+      _setApiKey(null);
     });
   });
 
@@ -6053,6 +6165,105 @@ describe("memory_status", () => {
     const writeRow = result.telemetry.find((r) => r.tool_name === "memory_write");
     expect(writeRow).toBeDefined();
     expect(writeRow!.error_count).toBeGreaterThanOrEqual(1);
+  });
+
+  it("features.consolidation remains a boolean (backward compat)", async () => {
+    const raw = await callTool("memory_status", {});
+    const result = parseToolResponse(raw) as {
+      features: { consolidation: boolean };
+    };
+    expect(typeof result.features.consolidation).toBe("boolean");
+  });
+
+  it("includes consolidation_health for owner with all expected fields", async () => {
+    _setApiKey("test-key");
+    resetConsolidationCircuitBreaker();
+    _resetHealthState();
+
+    const raw = await callTool("memory_status", {});
+    const result = parseToolResponse(raw) as {
+      consolidation_health: {
+        enabled: boolean;
+        api_key_present: boolean;
+        available: boolean;
+        circuit_breaker_tripped: boolean;
+        failures: number;
+        max_failures: number;
+        last_error: string | null;
+        last_error_at: string | null;
+      };
+    };
+
+    expect(result.consolidation_health).toBeDefined();
+    expect(typeof result.consolidation_health.enabled).toBe("boolean");
+    expect(result.consolidation_health.api_key_present).toBe(true);
+    expect(typeof result.consolidation_health.available).toBe("boolean");
+    expect(result.consolidation_health.circuit_breaker_tripped).toBe(false);
+    expect(typeof result.consolidation_health.failures).toBe("number");
+    expect(typeof result.consolidation_health.max_failures).toBe("number");
+    expect(result.consolidation_health.last_error).toBeNull();
+    expect(result.consolidation_health.last_error_at).toBeNull();
+
+    _setApiKey(null);
+    _resetHealthState();
+  });
+
+  it("sanitizes last_error in consolidation_health exposed by memory_status", async () => {
+    const fakeKey = "sk-or-v1-supersecretkey12345678";
+    _setApiKey(fakeKey);
+    _consolidationConfig.enabled = true;
+    resetConsolidationCircuitBreaker();
+    _resetHealthState();
+
+    const { _setWorkerDb, processConsolidationBatch: runBatch } = await import("../src/consolidation.js");
+
+    for (let i = 0; i < _consolidationConfig.minLogs; i++) {
+      await callTool("memory_log", {
+        namespace: "projects/statusapikey",
+        content: `Log entry ${i}`,
+        tags: ["test"],
+      });
+    }
+
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async () => ({
+      ok: false,
+      status: 401,
+      text: async () => `Error: Bearer ${fakeKey} is invalid`,
+    } as unknown as Response);
+
+    _setWorkerDb(db);
+    await runBatch();
+    globalThis.fetch = origFetch;
+    _setWorkerDb(null);
+
+    const raw = await callTool("memory_status", {});
+    const result = parseToolResponse(raw) as {
+      consolidation_health: { last_error: string | null };
+    };
+
+    expect(result.consolidation_health.last_error).not.toBeNull();
+    expect(result.consolidation_health.last_error).toContain("[REDACTED]");
+    expect(result.consolidation_health.last_error).not.toContain(fakeKey);
+
+    // Clean up
+    _consolidationConfig.enabled = false;
+    _setApiKey(null);
+    resetConsolidationCircuitBreaker();
+    _resetHealthState();
+  });
+
+  it("does not expose consolidation_health to non-owner callers", async () => {
+    const agentCtx: AccessContext = {
+      principalId: "agent:test",
+      principalType: "agent",
+      namespaceRules: [],
+    };
+    const agentCall = makeContextCallTool(agentCtx);
+
+    const raw = await agentCall("memory_status", {});
+    const result = parseToolResponse(raw) as { consolidation_health?: unknown };
+    expect(result.consolidation_health).toBeUndefined();
   });
 });
 
