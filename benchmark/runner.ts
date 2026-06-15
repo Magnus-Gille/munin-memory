@@ -517,7 +517,7 @@ export function applyProductionReranker(
  * something is missing we either throw (default) or downgrade to raw
  * mode with a `warnings[]` entry (opt-in via `fallbackRunnerMode: "raw"`).
  */
-function checkProductionRankerPrereqs(
+export function checkProductionRankerPrereqs(
   db: Database.Database,
   snapshotSchemaVersion: number,
 ): { ok: true } | { ok: false; reason: string } {

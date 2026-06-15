@@ -53,6 +53,8 @@ export interface AnswerQualityResult {
   /** IDs in the display order that was fed to the answer model. */
   serialized_order_ids: string[];
   serialization: SerializationMode;
+  /** Actual search mode used for retrieval (may differ from global searchMode when query overrides it). */
+  effective_search_mode: string;
   verdict: JudgeVerdict;
   /** End-to-end wall time (retrieve + answer + judge) in milliseconds. */
   duration_ms: number;

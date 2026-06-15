@@ -79,11 +79,64 @@ function parseArgs(argv: string[]): {
   };
 }
 
+// --- Argument validation ---
+
+interface ParsedArgsSubset {
+  serialization: SerializationMode;
+  runnerMode: RunnerMode;
+  searchMode: SearchMode;
+  topK: number;
+}
+
+/**
+ * Validate the parsed CLI arguments for enum membership and numeric bounds.
+ * Returns { ok: true } on success, or { ok: false; error: string } on failure.
+ * Exported for unit testing.
+ */
+export function validateParsedArgs(
+  parsed: ParsedArgsSubset,
+): { ok: true } | { ok: false; error: string } {
+  const validSerializations: SerializationMode[] = ["linear", "boundary"];
+  if (!validSerializations.includes(parsed.serialization)) {
+    return {
+      ok: false,
+      error: `Invalid --serialization value "${String(parsed.serialization)}". Must be one of: ${validSerializations.join(", ")}.`,
+    };
+  }
+  const validRunnerModes: RunnerMode[] = ["raw", "production_ranker"];
+  if (!validRunnerModes.includes(parsed.runnerMode)) {
+    return {
+      ok: false,
+      error: `Invalid --runner-mode value "${String(parsed.runnerMode)}". Must be one of: ${validRunnerModes.join(", ")}.`,
+    };
+  }
+  const validSearchModes: SearchMode[] = ["lexical", "semantic", "hybrid"];
+  if (!validSearchModes.includes(parsed.searchMode)) {
+    return {
+      ok: false,
+      error: `Invalid --search-mode value "${String(parsed.searchMode)}". Must be one of: ${validSearchModes.join(", ")}.`,
+    };
+  }
+  if (!Number.isInteger(parsed.topK) || parsed.topK <= 0) {
+    return {
+      ok: false,
+      error: `Invalid --top-k value "${String(parsed.topK)}". Must be a finite positive integer.`,
+    };
+  }
+  return { ok: true };
+}
+
 async function main() {
   const parsed = parseArgs(process.argv.slice(2));
 
   if (!parsed.queriesPath || !parsed.snapshotPath) {
     console.error("Usage: tsx benchmark/answer-quality/run.ts --queries <path> --snapshot <path> [options]");
+    process.exit(1);
+  }
+
+  const validation = validateParsedArgs(parsed);
+  if (!validation.ok) {
+    console.error(`Argument error: ${validation.error}`);
     process.exit(1);
   }
 
@@ -141,7 +194,18 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error("Answer-quality eval failed:", err instanceof Error ? err.message : String(err));
-  process.exit(1);
-});
+// Guard: only invoke main() when this file is run directly (not imported as a module).
+// This allows test files to import exported helpers (e.g. validateParsedArgs)
+// without triggering the CLI entry point.
+const isEntryPoint =
+  typeof process !== "undefined" &&
+  process.argv[1] &&
+  (process.argv[1].endsWith("/run.ts") ||
+    process.argv[1].endsWith("/run.js") ||
+    process.argv[1].includes("answer-quality/run"));
+if (isEntryPoint) {
+  main().catch((err) => {
+    console.error("Answer-quality eval failed:", err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  });
+}

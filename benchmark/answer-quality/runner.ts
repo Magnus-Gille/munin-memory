@@ -30,7 +30,7 @@ import {
 } from "../../src/internal/openrouter.js";
 import type { QueryParams } from "../../src/types.js";
 import type { SearchMode } from "../../src/types.js";
-import { executeQuery, applyProductionReranker } from "../runner.js";
+import { executeQuery, applyProductionReranker, checkProductionRankerPrereqs } from "../runner.js";
 import type { BenchmarkQuery, QuerySetSource, DurationSummary, RunnerMode } from "../types.js";
 import { serializeContext } from "./serialize.js";
 import { generateAnswer, judgeAnswer, type ChatFn } from "./judge.js";
@@ -202,7 +202,7 @@ export async function runAnswerQuality(
   }
 }
 
-async function runAnswerQualityInner(
+export async function runAnswerQualityInner(
   db: Database.Database,
   opts: AnswerQualityOptions,
   runAt: string,
@@ -231,7 +231,12 @@ async function runAnswerQualityInner(
   // Init embeddings (needed for semantic/hybrid)
   if (searchMode !== "lexical") {
     try {
-      await initEmbeddings();
+      const embeddingsReady = await initEmbeddings();
+      if (!embeddingsReady) {
+        warnings.push(
+          `initEmbeddings() returned false — embedding model did not load. Search will degrade to lexical.`,
+        );
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       warnings.push(`Embedding init failed — search may degrade to lexical. (${msg})`);
@@ -243,6 +248,14 @@ async function runAnswerQualityInner(
   const snapshotSchemaVersion = schemaRow?.v ?? 0;
   const countRow = db.prepare("SELECT COUNT(*) as c FROM entries").get() as { c: number };
   const entryCount = countRow.c;
+
+  // Fail loud before any LLM calls when production_ranker prereqs are not met
+  if (runnerMode === "production_ranker") {
+    const prereq = checkProductionRankerPrereqs(db, snapshotSchemaVersion);
+    if (!prereq.ok) {
+      throw new Error(`production_ranker prereq check failed: ${prereq.reason}`);
+    }
+  }
 
   // Query set lineage
   const querySetSources = opts.querySetSources ?? [];
@@ -269,11 +282,12 @@ async function runAnswerQualityInner(
   for (const query of eligible) {
     const queryStart = performance.now();
 
-    // Retrieve
+    // Retrieve — honor per-query search_mode override (skip when "all", use global then)
+    const querySearchMode = query.search_mode === "all" ? searchMode : query.search_mode;
     const { entries: rawEntries, effectiveMode } = await executeQuery(
       db,
       query.query,
-      searchMode,
+      querySearchMode,
       internalLimit,
     );
 
@@ -359,6 +373,7 @@ async function runAnswerQualityInner(
       retrieved_ids: retrievedIds,
       serialized_order_ids: serializedOrderIds,
       serialization,
+      effective_search_mode: effectiveMode,
       verdict,
       duration_ms: durationMs,
       answer_usage: answerUsage,
