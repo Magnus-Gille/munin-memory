@@ -73,6 +73,24 @@ export function scanForSecrets(content: string): SecurityResult {
 }
 
 /**
+ * Replace all secret-pattern matches in `message` with "[REDACTED]".
+ * Used to sanitize error strings before storing or exposing them.
+ * Unlike {@link scanForSecrets} (which rejects on first match), this
+ * applies every pattern as a global replacement so multi-secret strings
+ * are fully scrubbed.
+ */
+export function redactSecrets(message: string): string {
+  let result = message;
+  for (const { pattern } of SECRET_PATTERNS) {
+    // Build a global-flagged copy so replaceAll behaviour works regardless
+    // of whether the pattern already has the /g flag.
+    const global = new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : pattern.flags + "g");
+    result = result.replace(global, "[REDACTED]");
+  }
+  return result;
+}
+
+/**
  * Scan content for instruction-shaped phrasing (see {@link INJECTION_PATTERNS}).
  * Returns the de-duplicated labels of every matched signature, or an empty array.
  * Advisory only — callers surface this as a warning and still store the entry.

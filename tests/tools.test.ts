@@ -2784,6 +2784,56 @@ describe("memory_orient", () => {
       _consolidationConfig.enabled = false;
       _setApiKey(null);
     });
+
+    it("surfaces consolidation_circuit_breaker when failures > 0 but breaker not yet tripped (pre-trip warning)", async () => {
+      _consolidationConfig.enabled = true;
+      _setApiKey("test-key");
+      resetConsolidationCircuitBreaker();
+      _resetHealthState();
+
+      // Seed enough logs for ONE namespace only (causes 1 failure, breaker at 1/3)
+      const { _setWorkerDb } = await import("../src/consolidation.js");
+      for (let i = 0; i < _consolidationConfig.minLogs; i++) {
+        await callTool("memory_log", {
+          namespace: "projects/pretrip0",
+          content: `Log entry ${i}`,
+          tags: ["test"],
+        });
+      }
+
+      const { processConsolidationBatch: runBatch } = await import("../src/consolidation.js");
+      const origFetch = globalThis.fetch;
+      globalThis.fetch = async () => ({
+        ok: false,
+        status: 401,
+        text: async () => "Unauthorized: bad key",
+      } as unknown as Response);
+
+      _setWorkerDb(db);
+      await runBatch(); // causes failures === 1, breaker NOT tripped (maxFailures is 3)
+      globalThis.fetch = origFetch;
+      _setWorkerDb(null);
+
+      // memory_orient must show BOTH consolidation_circuit_breaker AND consolidation_backlog
+      // (worker is still available since breaker not tripped)
+      const raw = await callTool("memory_orient", {});
+      const result = parseToolResponse(raw) as {
+        maintenance_needed?: Array<{ issue: string; suggestion: string }>;
+      };
+
+      const cbItem = result.maintenance_needed?.find((m) => m.issue === "consolidation_circuit_breaker");
+      expect(cbItem).toBeDefined();
+      expect(cbItem!.suggestion).toContain("failing");
+
+      const backlogItem = result.maintenance_needed?.find((m) => m.issue === "consolidation_backlog");
+      expect(backlogItem).toBeDefined();
+
+      // Clean up
+      resetConsolidationCircuitBreaker();
+      _resetHealthState();
+      _consolidationConfig.enabled = false;
+      _setApiKey(null);
+    });
   });
 
   it("excludes demo namespaces by default", async () => {
@@ -6155,6 +6205,51 @@ describe("memory_status", () => {
     expect(result.consolidation_health.last_error_at).toBeNull();
 
     _setApiKey(null);
+    _resetHealthState();
+  });
+
+  it("sanitizes last_error in consolidation_health exposed by memory_status", async () => {
+    const fakeKey = "sk-or-v1-supersecretkey12345678";
+    _setApiKey(fakeKey);
+    _consolidationConfig.enabled = true;
+    resetConsolidationCircuitBreaker();
+    _resetHealthState();
+
+    const { _setWorkerDb, processConsolidationBatch: runBatch } = await import("../src/consolidation.js");
+
+    for (let i = 0; i < _consolidationConfig.minLogs; i++) {
+      await callTool("memory_log", {
+        namespace: "projects/statusapikey",
+        content: `Log entry ${i}`,
+        tags: ["test"],
+      });
+    }
+
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async () => ({
+      ok: false,
+      status: 401,
+      text: async () => `Error: Bearer ${fakeKey} is invalid`,
+    } as unknown as Response);
+
+    _setWorkerDb(db);
+    await runBatch();
+    globalThis.fetch = origFetch;
+    _setWorkerDb(null);
+
+    const raw = await callTool("memory_status", {});
+    const result = parseToolResponse(raw) as {
+      consolidation_health: { last_error: string | null };
+    };
+
+    expect(result.consolidation_health.last_error).not.toBeNull();
+    expect(result.consolidation_health.last_error).toContain("[REDACTED]");
+    expect(result.consolidation_health.last_error).not.toContain(fakeKey);
+
+    // Clean up
+    _consolidationConfig.enabled = false;
+    _setApiKey(null);
+    resetConsolidationCircuitBreaker();
     _resetHealthState();
   });
 

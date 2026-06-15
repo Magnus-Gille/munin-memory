@@ -8,6 +8,7 @@ import {
   addCrossReferences,
   hasMoreLogsAfter,
   writeState,
+  readState,
   recordCrossZoneBlock,
   nowUTC,
 } from "./db.js";
@@ -18,7 +19,7 @@ import {
 } from "./librarian.js";
 import { canRead, getContextMaxClassification } from "./access.js";
 import type { AccessContext } from "./access.js";
-import { validateNamespace, scanForSecrets } from "./security.js";
+import { validateNamespace, scanForSecrets, redactSecrets } from "./security.js";
 import type { ClassificationLevel } from "./types.js";
 import type { Entry, SynthesisResult, ConsolidationRunResult, CrossReferenceType, ConsolidationCandidate } from "./types.js";
 
@@ -253,6 +254,34 @@ export function initConsolidation(): boolean {
 export function startConsolidationWorker(db: Database.Database): void {
   if (apiKey === null) return;
   workerDb = db;
+
+  // Reconcile stale persisted alert on startup. If a previous run tripped or
+  // failed but the server restarted (clearing in-memory state) without being
+  // able to persist the healthy transition (no-db reset path), the stored entry
+  // still says "tripped" or "failing" while in-memory health is already healthy.
+  // Detect that mismatch and write the healthy entry now before the first run.
+  if (circuitBreakerFailures === 0 && !circuitBreakerTripped) {
+    try {
+      const existing = readState(db, "meta/system-health", "consolidation");
+      if (existing) {
+        let persistedStatus: string | undefined;
+        try {
+          persistedStatus = (JSON.parse(existing.content) as { status?: string }).status;
+        } catch {
+          // malformed entry — skip reconciliation
+        }
+        if (persistedStatus && persistedStatus !== "healthy") {
+          // Force a write: clear lastWrittenStatus so maybeWriteHealthAlert
+          // sees a transition from the stale status to healthy.
+          lastWrittenStatus = null;
+          maybeWriteHealthAlert(db);
+        }
+      }
+    } catch (err) {
+      console.warn("consolidation: startup reconciliation failed:", err instanceof Error ? err.message : String(err));
+    }
+  }
+
   scheduleNextRun();
 }
 
@@ -289,13 +318,15 @@ export function resetConsolidationCircuitBreaker(): void {
   circuitBreakerTripped = false;
   lastError = null;
   lastErrorAt = null;
-  // Write the healthy-transition alert if we have a db and the status changed
+  // Write the healthy-transition alert if we have a db and the status changed.
   if (workerDb) {
     maybeWriteHealthAlert(workerDb);
   } else {
-    // Without a db (e.g. after stopConsolidationWorker), just update the tracked
-    // status so the next batch run will write on its first real transition.
-    lastWrittenStatus = "healthy";
+    // Without a db (e.g. after stopConsolidationWorker), we cannot persist the
+    // healthy transition. Do NOT advance lastWrittenStatus here — the persisted
+    // entry still reflects the old (tripped/failing) status. The next call to
+    // startConsolidationWorker will reconcile the stale persisted entry.
+    console.warn("consolidation: resetConsolidationCircuitBreaker called without a workerDb — healthy transition cannot be persisted");
   }
 }
 
@@ -325,8 +356,9 @@ export async function processConsolidationBatch(): Promise<void> {
 
       if (result.error) {
         circuitBreakerFailures++;
-        // Truncate error to 300 chars to avoid storing large blobs in the health entry
-        lastError = result.error.slice(0, 300);
+        // Sanitize then truncate: redact secrets (API key literal + known patterns)
+        // before storing so the health entry and memory_status never leak credentials.
+        lastError = redactSecrets(apiKey ? result.error.replace(apiKey, "[REDACTED]") : result.error).slice(0, 300);
         lastErrorAt = new Date().toISOString();
         console.error(`Consolidation failed for ${candidate.namespace} (${circuitBreakerFailures}/${config.maxFailures}): ${result.error}`);
 

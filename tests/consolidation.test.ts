@@ -1490,28 +1490,37 @@ describe("getConsolidationHealth — reflects circuit breaker state", () => {
     expect(health.last_error_at).toBeNull();
   });
 
-  it("reflects failure count and last_error after simulated failures via consolidateNamespace", async () => {
-    _setApiKey("test-key");
-    // Seed enough logs
+  it("reflects failure count and last_error after one processConsolidationBatch failure (pre-trip)", async () => {
+    _setApiKey("fake-key-for-test");
+    _setWorkerDb(db);
+
     for (let i = 0; i < _consolidationConfig.minLogs; i++) {
       appendLog(db, "projects/healthtest", `Log ${i}`, []);
     }
-    const failingApi = vi.fn().mockRejectedValue(new Error("OpenRouter API error 401: invalid key"));
 
-    // Run one failure through processConsolidationBatch internals (via consolidateNamespace)
-    _setWorkerDb(db);
-    // Inject failure directly via consolidateNamespace to increment the counter
-    // (processConsolidationBatch reads circuitBreakerFailures via its internal path)
-    const result = await consolidateNamespace(db, "projects/healthtest", failingApi);
-    expect(result.error).toContain("invalid key");
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      text: () => Promise.resolve("Unauthorized: fake error"),
+    } as unknown as Response);
 
-    // Now drive processConsolidationBatch to pick it up — but that would need real fetch.
-    // Instead, test the health state after we simulate the counter increments directly.
-    // Use the batch path with workerDb set so the counter is incremented.
-    // Because consolidateNamespace only returns an error (doesn't increment cb itself),
-    // processConsolidationBatch is the one incrementing. Let's test that path via a
-    // stub fetch approach.
+    await processConsolidationBatch();
+    globalThis.fetch = originalFetch;
     _setWorkerDb(null);
+
+    const health = getConsolidationHealth();
+    // One failure: failures === 1, breaker NOT tripped (maxFailures is 3)
+    expect(health.failures).toBe(1);
+    expect(health.last_error).not.toBeNull();
+    expect(health.last_error).toContain("401");
+    expect(health.circuit_breaker_tripped).toBe(false);
+
+    // Persisted entry should have status "failing" (not "tripped", not "healthy")
+    const alertEntry = readState(db, "meta/system-health", "consolidation");
+    expect(alertEntry).not.toBeNull();
+    const parsed = JSON.parse(alertEntry!.content) as { status: string };
+    expect(parsed.status).toBe("failing");
   });
 
   it("reflects circuit_breaker_tripped: true and last_error after batch failures", async () => {
@@ -1680,6 +1689,147 @@ describe("meta/system-health alert entry — transition-only writes", () => {
     const healthyEntry = readState(db, "meta/system-health", "consolidation");
     expect(healthyEntry).not.toBeNull();
     expect(JSON.parse(healthyEntry!.content).status).toBe("healthy");
+  });
+
+  it("reset without workerDb does NOT advance lastWrittenStatus to healthy", async () => {
+    // Trip the breaker first with a workerDb present so the tripped status is persisted.
+    const failCount = _consolidationConfig.maxFailures;
+    for (let ns = 0; ns < failCount; ns++) {
+      for (let i = 0; i < _consolidationConfig.minLogs; i++) {
+        appendLog(db, `projects/resetnodbtest${ns}`, `Log ${i}`, []);
+      }
+    }
+
+    _setApiKey("fake-key");
+    _setWorkerDb(db);
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      text: () => Promise.resolve("Unauthorized"),
+    } as unknown as Response);
+
+    await processConsolidationBatch();
+    globalThis.fetch = originalFetch;
+
+    // Verify the persisted entry says tripped
+    const trippedEntry = readState(db, "meta/system-health", "consolidation");
+    expect(JSON.parse(trippedEntry!.content).status).toBe("tripped");
+
+    // Now stop the worker (sets workerDb = null) and reset the breaker WITHOUT a db.
+    await stopConsolidationWorker();
+    resetConsolidationCircuitBreaker();
+
+    // The persisted entry MUST still say tripped (we couldn't write healthy without a db).
+    const afterNoDbReset = readState(db, "meta/system-health", "consolidation");
+    expect(JSON.parse(afterNoDbReset!.content).status).toBe("tripped");
+
+    // Now set workerDb back and reset again — this time it SHOULD write healthy.
+    _setWorkerDb(db);
+    resetConsolidationCircuitBreaker();
+    const afterWithDbReset = readState(db, "meta/system-health", "consolidation");
+    expect(JSON.parse(afterWithDbReset!.content).status).toBe("healthy");
+  });
+
+  it("sanitizes API key and Bearer token from last_error before storing", async () => {
+    const fakeKey = "sk-or-v1-supersecretkey12345678";
+    _setApiKey(fakeKey);
+    _setWorkerDb(db);
+
+    for (let i = 0; i < _consolidationConfig.minLogs; i++) {
+      appendLog(db, "projects/sanitizetest", `Log ${i}`, []);
+    }
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      text: () => Promise.resolve(`Error: Bearer ${fakeKey} is invalid`),
+    } as unknown as Response);
+
+    await processConsolidationBatch();
+    globalThis.fetch = originalFetch;
+
+    // In-memory health must not contain the raw key
+    const health = getConsolidationHealth();
+    expect(health.last_error).not.toBeNull();
+    expect(health.last_error).toContain("[REDACTED]");
+    expect(health.last_error).not.toContain(fakeKey);
+
+    // Persisted entry must also be sanitized
+    const alertEntry = readState(db, "meta/system-health", "consolidation");
+    expect(alertEntry).not.toBeNull();
+    const parsed = JSON.parse(alertEntry!.content) as { last_error: string };
+    expect(parsed.last_error).toContain("[REDACTED]");
+    expect(parsed.last_error).not.toContain(fakeKey);
+  });
+});
+
+describe("startConsolidationWorker reconciliation on startup", () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    resetConsolidationCircuitBreaker();
+    _resetHealthState();
+    _setApiKey(null);
+    _setWorkerDb(null);
+  });
+
+  afterEach(async () => {
+    errorSpy.mockRestore();
+    warnSpy.mockRestore();
+    _setApiKey(null);
+    await stopConsolidationWorker();
+    resetConsolidationCircuitBreaker();
+    _resetHealthState();
+  });
+
+  it("startConsolidationWorker reconciles stale tripped alert on startup when health is already healthy", async () => {
+    // Step 1: Trip the breaker with a workerDb present.
+    const failCount = _consolidationConfig.maxFailures;
+    for (let ns = 0; ns < failCount; ns++) {
+      for (let i = 0; i < _consolidationConfig.minLogs; i++) {
+        appendLog(db, `projects/reconcile${ns}`, `Log ${i}`, []);
+      }
+    }
+
+    _setApiKey("fake-key");
+    _setWorkerDb(db);
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      text: () => Promise.resolve("Unauthorized"),
+    } as unknown as Response);
+
+    await processConsolidationBatch();
+    globalThis.fetch = originalFetch;
+
+    // Verify persisted entry says tripped
+    const trippedEntry = readState(db, "meta/system-health", "consolidation");
+    expect(JSON.parse(trippedEntry!.content).status).toBe("tripped");
+
+    // Step 2: Stop worker (sets workerDb = null) then reset WITHOUT db.
+    await stopConsolidationWorker();
+    resetConsolidationCircuitBreaker(); // in-memory: healthy; persisted: still tripped (Fix A)
+
+    // Verify persisted entry is still tripped after no-db reset (Fix A must be in place)
+    const afterNoDbReset = readState(db, "meta/system-health", "consolidation");
+    expect(JSON.parse(afterNoDbReset!.content).status).toBe("tripped");
+
+    // Step 3: Start the worker again with the db — reconciliation should write healthy.
+    startConsolidationWorker(db);
+    await stopConsolidationWorker();
+
+    // Persisted entry should now be healthy (Fix B reconciliation).
+    const reconciledEntry = readState(db, "meta/system-health", "consolidation");
+    expect(reconciledEntry).not.toBeNull();
+    expect(JSON.parse(reconciledEntry!.content).status).toBe("healthy");
   });
 });
 

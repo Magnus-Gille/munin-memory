@@ -3913,7 +3913,12 @@ export function registerTools(
               // Distilled from the Letta memory-design harvest (see decisions/letta-harvest).
               if (ctx.principalType === "owner") {
                 const health = getConsolidationHealth();
-                if (health.enabled && isConsolidationAvailable()) {
+                // Block 1: Worker available + backlog → surface consolidation_backlog items.
+                // When the breaker is tripped, isConsolidationAvailable() returns false so
+                // no backlog is shown (nothing will drain it). When failures > 0 but the
+                // breaker is not yet tripped, the worker IS still available — show both
+                // the backlog AND the circuit_breaker warning (Block 2 below).
+                if (health.enabled && health.available) {
                   for (const candidate of getConsolidationBacklog(db)) {
                     const backlogItem: MaintenanceItem = {
                       namespace: candidate.namespace,
@@ -3925,7 +3930,12 @@ export function registerTools(
                     maintenanceSortKey.set(backlogItem, candidate.last_consolidated_at ?? "");
                     maintenanceNeeded.push(backlogItem);
                   }
-                } else if (health.enabled && (health.circuit_breaker_tripped || health.failures > 0)) {
+                }
+                // Block 2: Circuit breaker tripped OR accumulating failures → surface warning.
+                // INDEPENDENT of Block 1: fires whenever failures > 0, even when the breaker
+                // is not yet tripped and the worker is still available. This is the pre-trip
+                // warning that was previously suppressed by the else-if relationship.
+                if (health.enabled && (health.circuit_breaker_tripped || health.failures > 0)) {
                   // Circuit breaker has tripped (or is accumulating failures).
                   // Surface a loud maintenance item — the worker is not draining
                   // the backlog and needs operator attention.
