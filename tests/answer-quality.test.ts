@@ -14,6 +14,7 @@
  * 6. Graceful skip — apiKey:null, no chat → skipped:true, zero network
  * 7. A/B driver — delta computed and signed correctly
  * 8. Live smoke (opt-in, skipped unless OPENROUTER_API_KEY is set)
+ * 13. Fix A regression: embeddings init gate — per-query search_mode honored (deterministic, no network)
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -22,7 +23,23 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { initDatabase, writeState } from "../src/db.js";
-import { _setExtractorForTesting, resetCircuitBreaker } from "../src/embeddings.js";
+import { _setExtractorForTesting, resetCircuitBreaker, initEmbeddings } from "../src/embeddings.js";
+
+// ---------------------------------------------------------------------------
+// Module-level mock: wrap initEmbeddings in a vi.fn() spy so tests can assert
+// whether the embeddings init gate opened or remained closed.
+// The spy delegates to the real implementation — when _testExtractor is
+// pre-installed via _setExtractorForTesting(), the real initEmbeddings() picks
+// it up and returns true without any network/model-download call.
+// All other exports remain real (importActual).
+// ---------------------------------------------------------------------------
+vi.mock("../src/embeddings.js", async (importActual) => {
+  const actual = await importActual<typeof import("../src/embeddings.js")>();
+  return {
+    ...actual,
+    initEmbeddings: vi.fn(actual.initEmbeddings),
+  };
+});
 import {
   boundarySerialize,
   serializeOrder,
@@ -1169,18 +1186,24 @@ describe("Fix A: embeddings init gate — per-query search_mode overrides global
   afterEach(() => {
     _setExtractorForTesting(null);
     resetCircuitBreaker();
+    vi.clearAllMocks();
   });
 
-  it("when global searchMode=lexical and per-query search_mode='semantic', embeddings are initialized and the query uses semantic mode (real-model path)", async () => {
-    // This test verifies Fix A without a mock extractor — it lets initEmbeddings() run
-    // against the real (locally cached) HuggingFace model.
-    // BEFORE Fix A: initEmbeddings() skipped (global=lexical) → extractor stays null
-    //               → generateEmbedding returns null → degrades to lexical
-    // AFTER  Fix A: initEmbeddings() IS called (per-query=semantic) → extractor loaded
-    //               → semantic search runs → effective_search_mode = "semantic"
-    // We clear extractor state first so the test doesn't inherit a prior test's extractor.
-    _setExtractorForTesting(null);
-    resetCircuitBreaker();
+  it("gate opens: initEmbeddings IS called when global=lexical but per-query search_mode='semantic'", async () => {
+    // Deterministic regression for Fix A. No HuggingFace model download — mock extractor is
+    // pre-installed so the real initEmbeddings() returns true via the _testExtractor fast-path.
+    //
+    // BEFORE Fix A: requiresEmbeddings checked only the global searchMode. With global=lexical,
+    //   requiresEmbeddings=false → initEmbeddings() never called → extractor stays null
+    //   → generateEmbedding returns null → silently degrades to lexical.
+    //   This test would FAIL: initEmbeddings call count = 0, not 1.
+    //
+    // AFTER Fix A: requiresEmbeddings checks each query's effective mode (per-query overrides
+    //   "all"). With per-query=semantic, requiresEmbeddings=true → initEmbeddings() IS called
+    //   → extractor is confirmed → semantic search runs.
+    //   This test PASSES: initEmbeddings call count = 1, effective_search_mode = "semantic".
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    _setExtractorForTesting(mockExtractor as any);
 
     const { db, dbPath } = makeTempDb();
     writeState(db, "projects/test", "s1", "The answer is Paris", ["active"]);
@@ -1204,18 +1227,62 @@ describe("Fix A: embeddings init gate — per-query search_mode overrides global
       queries,
       serialization: "linear",
       runnerMode: "raw",
-      searchMode: "lexical",   // global mode is lexical — without Fix A, embeddings skipped
+      searchMode: "lexical",   // global mode is lexical — without Fix A, gate stays closed
       answerModel: "test/model",
       judgeModel: "test/judge",
       chat,
     });
 
+    // Gate OPENED: initEmbeddings was called exactly once for the per-query semantic query.
+    // If Fix A were reverted, requiresEmbeddings would be false (global=lexical), initEmbeddings
+    // would NOT be called (count=0), and this assertion would catch the regression.
+    expect(vi.mocked(initEmbeddings)).toHaveBeenCalledTimes(1);
+
     expect(report.skipped).toBeUndefined();
     expect(report.results).toHaveLength(1);
-    // After Fix A: initEmbeddings() was called for the per-query semantic query.
-    // With locally cached model this succeeds → effective_search_mode = "semantic".
-    // (Without Fix A, the query would silently degrade to "lexical".)
     expect(report.results[0].effective_search_mode).toBe("semantic");
+  });
+
+  it("gate stays closed: initEmbeddings is NOT called when all queries are lexical", async () => {
+    // Complementary gate test: with global=lexical and per-query=lexical, requiresEmbeddings
+    // must remain false and initEmbeddings must NOT be called (no wasted init attempt).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    _setExtractorForTesting(mockExtractor as any);
+
+    const { db, dbPath } = makeTempDb();
+    writeState(db, "projects/test", "s1", "The answer is Rome", ["active"]);
+    db.close();
+
+    const queries: BenchmarkQuery[] = [
+      {
+        id: "q1",
+        query: "What is the answer?",
+        source: "derived",
+        category: "locomo/single-hop",
+        search_mode: "lexical",   // explicit lexical — no embeddings needed
+        expected_ids: [],
+        reference_answer: "Rome",
+      },
+    ];
+
+    const chat = makeMockChat();
+    const report = await runAnswerQuality({
+      snapshotPath: dbPath,
+      queries,
+      serialization: "linear",
+      runnerMode: "raw",
+      searchMode: "lexical",   // global mode is lexical too
+      answerModel: "test/model",
+      judgeModel: "test/judge",
+      chat,
+    });
+
+    // Gate CLOSED: initEmbeddings was never called (no eligible semantic/hybrid query).
+    expect(vi.mocked(initEmbeddings)).not.toHaveBeenCalled();
+
+    expect(report.skipped).toBeUndefined();
+    expect(report.results).toHaveLength(1);
+    expect(report.results[0].effective_search_mode).toBe("lexical");
   });
 
   it("when global searchMode=lexical and per-query search_mode='semantic', mock extractor enables semantic mode", async () => {
