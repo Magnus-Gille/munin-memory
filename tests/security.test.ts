@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   scanForSecrets,
+  redactSecrets,
   scanForInjection,
   injectionWarning,
   validateNamespace,
@@ -109,6 +110,37 @@ describe("scanForSecrets", () => {
       "API keys should never be stored in memory. The security module rejects them.",
     );
     expect(result.valid).toBe(true);
+  });
+
+  it("rejects bare OpenRouter API key (sk-or-v1-... without Bearer prefix)", () => {
+    const result = scanForSecrets("key is sk-or-v1-abcdefghijklmnopqrstuv");
+    expect(result.valid).toBe(false);
+    expect(result.error).toContain("OpenRouter API key");
+  });
+
+  it("rejects bare OpenRouter key embedded in an error message", () => {
+    const result = scanForSecrets("OpenRouter API error 401: sk-or-v1-abcdefghijklmnopqrstuv is invalid");
+    expect(result.valid).toBe(false);
+  });
+});
+
+describe("redactSecrets", () => {
+  it("redacts a bare OpenRouter API key (no Bearer prefix)", () => {
+    const raw = "error: sk-or-v1-abcdefghijklmnopqrstuv is invalid";
+    const redacted = redactSecrets(raw);
+    expect(redacted).not.toMatch(/sk-or-v1-[a-zA-Z0-9_-]{20,}/);
+    expect(redacted).toContain("[REDACTED]");
+  });
+
+  it("redacts all occurrences of a literal string that appears twice", () => {
+    // Simulates the consolidation chokepoint with a double-occurrence literal key
+    const key = "sk-or-v1-supersecretkey12345678";
+    const errorBody = `OpenRouter error 401: ${key} is invalid. Please check ${key} again.`;
+    // First do the literal-key split/join (as the new chokepoint code does), then redactSecrets
+    const afterLiteral = errorBody.split(key).join("[REDACTED]");
+    const afterRedact = redactSecrets(afterLiteral);
+    expect(afterRedact).not.toContain(key);
+    expect(afterRedact.match(/\[REDACTED\]/g)?.length).toBeGreaterThanOrEqual(2);
   });
 });
 

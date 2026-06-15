@@ -1764,6 +1764,70 @@ describe("meta/system-health alert entry — transition-only writes", () => {
     expect(parsed.last_error).toContain("[REDACTED]");
     expect(parsed.last_error).not.toContain(fakeKey);
   });
+
+  it("sanitizes ALL occurrences of the API key when it appears twice in the error body", async () => {
+    const fakeKey = "sk-or-v1-supersecretkey12345678";
+    _setApiKey(fakeKey);
+    _setWorkerDb(db);
+
+    for (let i = 0; i < _consolidationConfig.minLogs; i++) {
+      appendLog(db, "projects/doublekey", `Log ${i}`, []);
+    }
+
+    const originalFetch = globalThis.fetch;
+    // Error body contains the key TWICE (bare, no Bearer prefix)
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      text: () => Promise.resolve(`${fakeKey} is invalid. Retry with a valid key: ${fakeKey}`),
+    } as unknown as Response);
+
+    await processConsolidationBatch();
+    globalThis.fetch = originalFetch;
+
+    // In-memory health must have ZERO occurrences of the raw key
+    const health = getConsolidationHealth();
+    expect(health.last_error).not.toBeNull();
+    expect(health.last_error).not.toContain(fakeKey);
+    expect(health.last_error).toContain("[REDACTED]");
+
+    // Persisted entry must also have ZERO occurrences
+    const alertEntry = readState(db, "meta/system-health", "consolidation");
+    expect(alertEntry).not.toBeNull();
+    const parsed = JSON.parse(alertEntry!.content) as { last_error: string };
+    expect(parsed.last_error).not.toContain(fakeKey);
+  });
+
+  it("sanitizes bare OpenRouter key in error body (no Bearer prefix)", async () => {
+    const fakeKey = "sk-or-v1-supersecretkey12345678";
+    _setApiKey(fakeKey);
+    _setWorkerDb(db);
+
+    for (let i = 0; i < _consolidationConfig.minLogs; i++) {
+      appendLog(db, "projects/barekey", `Log ${i}`, []);
+    }
+
+    const originalFetch = globalThis.fetch;
+    // Error body: bare key, NO "Bearer " prefix — must be caught by the new sk-or-v1-... pattern
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      text: () => Promise.resolve(`API key ${fakeKey} is not authorized`),
+    } as unknown as Response);
+
+    await processConsolidationBatch();
+    globalThis.fetch = originalFetch;
+
+    const health = getConsolidationHealth();
+    expect(health.last_error).not.toBeNull();
+    expect(health.last_error).not.toContain(fakeKey);
+    expect(health.last_error).toContain("[REDACTED]");
+
+    const alertEntry = readState(db, "meta/system-health", "consolidation");
+    expect(alertEntry).not.toBeNull();
+    const parsedBare = JSON.parse(alertEntry!.content) as { last_error: string };
+    expect(parsedBare.last_error).not.toContain(fakeKey);
+  });
 });
 
 describe("startConsolidationWorker reconciliation on startup", () => {

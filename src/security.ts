@@ -1,6 +1,7 @@
 import type { SecurityResult } from "./types.js";
 
 const SECRET_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
+  { pattern: /sk-or-v1-[a-zA-Z0-9_-]{20,}/, label: "OpenRouter API key" },
   { pattern: /sk-[a-zA-Z0-9]{20,}/, label: "API key (sk-...)" },
   { pattern: /sk-proj-[a-zA-Z0-9]{20,}/, label: "OpenAI project API key (sk-proj-...)" },
   { pattern: /ghp_[a-zA-Z0-9]{36,}/, label: "GitHub personal access token" },

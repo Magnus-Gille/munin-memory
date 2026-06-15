@@ -358,7 +358,7 @@ export async function processConsolidationBatch(): Promise<void> {
         circuitBreakerFailures++;
         // Sanitize then truncate: redact secrets (API key literal + known patterns)
         // before storing so the health entry and memory_status never leak credentials.
-        lastError = redactSecrets(apiKey ? result.error.replace(apiKey, "[REDACTED]") : result.error).slice(0, 300);
+        lastError = redactSecrets(apiKey ? result.error.split(apiKey).join("[REDACTED]") : result.error).slice(0, 300);
         lastErrorAt = new Date().toISOString();
         console.error(`Consolidation failed for ${candidate.namespace} (${circuitBreakerFailures}/${config.maxFailures}): ${result.error}`);
 
