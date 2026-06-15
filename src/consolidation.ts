@@ -139,6 +139,13 @@ let workerProcessing = false;
 let workerInflightPromise: Promise<void> | null = null;
 let workerDb: Database.Database | null = null;
 
+// Health tracking state (for loud failure signal)
+let lastError: string | null = null;
+let lastErrorAt: string | null = null;
+// Tracks the last status written to meta/system-health:consolidation so we
+// only write on transitions, not on every failure.
+let lastWrittenStatus: "healthy" | "failing" | "tripped" | null = null;
+
 // --- API call ---
 
 async function callOpenRouter(prompt: string): Promise<ChatCompletionResponse> {
@@ -164,6 +171,66 @@ async function callOpenRouter(prompt: string): Promise<ChatCompletionResponse> {
   }
 
   return response.json() as Promise<ChatCompletionResponse>;
+}
+
+// --- Health reporting ---
+
+export interface ConsolidationHealth {
+  enabled: boolean;
+  api_key_present: boolean;
+  available: boolean;
+  circuit_breaker_tripped: boolean;
+  failures: number;
+  max_failures: number;
+  last_error: string | null;
+  last_error_at: string | null;
+}
+
+export function getConsolidationHealth(): ConsolidationHealth {
+  return {
+    enabled: config.enabled,
+    api_key_present: apiKey !== null,
+    available: isConsolidationAvailable(),
+    circuit_breaker_tripped: circuitBreakerTripped,
+    failures: circuitBreakerFailures,
+    max_failures: config.maxFailures,
+    last_error: lastError,
+    last_error_at: lastErrorAt,
+  };
+}
+
+/** Compute the current alert status bucket. */
+function currentAlertStatus(): "healthy" | "failing" | "tripped" {
+  if (circuitBreakerTripped) return "tripped";
+  if (circuitBreakerFailures > 0) return "failing";
+  return "healthy";
+}
+
+/**
+ * Write the alert state entry to meta/system-health:consolidation only when
+ * the status has changed (transition-only). Wrapped in try/catch so a write
+ * failure never propagates out of the worker. The entry content must not
+ * contain secrets — only status strings and truncated error messages.
+ */
+function maybeWriteHealthAlert(db: Database.Database): void {
+  const status = currentAlertStatus();
+  if (status === lastWrittenStatus) return;
+
+  const content = JSON.stringify({
+    status,
+    failures: circuitBreakerFailures,
+    max_failures: config.maxFailures,
+    last_error: lastError,
+    last_error_at: lastErrorAt,
+    updated_at: new Date().toISOString(),
+  });
+
+  try {
+    writeState(db, "meta/system-health", "consolidation", content, ["system_alert", "consolidation"], "consolidation-worker");
+    lastWrittenStatus = status;
+  } catch (err) {
+    console.error("consolidation: failed to write health alert entry:", err instanceof Error ? err.message : String(err));
+  }
 }
 
 // --- Lifecycle exports ---
@@ -220,6 +287,16 @@ export function getConsolidationBacklog(db: Database.Database): ConsolidationCan
 export function resetConsolidationCircuitBreaker(): void {
   circuitBreakerFailures = 0;
   circuitBreakerTripped = false;
+  lastError = null;
+  lastErrorAt = null;
+  // Write the healthy-transition alert if we have a db and the status changed
+  if (workerDb) {
+    maybeWriteHealthAlert(workerDb);
+  } else {
+    // Without a db (e.g. after stopConsolidationWorker), just update the tracked
+    // status so the next batch run will write on its first real transition.
+    lastWrittenStatus = "healthy";
+  }
 }
 
 // --- Worker loop ---
@@ -248,15 +325,25 @@ export async function processConsolidationBatch(): Promise<void> {
 
       if (result.error) {
         circuitBreakerFailures++;
+        // Truncate error to 300 chars to avoid storing large blobs in the health entry
+        lastError = result.error.slice(0, 300);
+        lastErrorAt = new Date().toISOString();
         console.error(`Consolidation failed for ${candidate.namespace} (${circuitBreakerFailures}/${config.maxFailures}): ${result.error}`);
 
         if (circuitBreakerFailures >= config.maxFailures) {
           circuitBreakerTripped = true;
           console.warn("Consolidation circuit breaker tripped — consolidation disabled until reset");
+          maybeWriteHealthAlert(db);
           break;
+        } else {
+          maybeWriteHealthAlert(db);
         }
       } else {
         circuitBreakerFailures = 0;
+        // On recovery within a batch, clear error state and transition to healthy
+        lastError = null;
+        lastErrorAt = null;
+        maybeWriteHealthAlert(db);
         if (result.orphans_discovered > 0) {
           console.log(
             `Consolidated ${candidate.namespace}: ${result.logs_processed} logs, ${result.cross_references_found} cross-refs (${result.orphans_discovered} scanner-discovered orphans)`,
@@ -969,6 +1056,13 @@ export function _setApiKey(key: string | null): void {
 
 export function _setWorkerDb(d: Database.Database | null): void {
   workerDb = d;
+}
+
+/** Reset the health-tracking state (lastError, lastErrorAt, lastWrittenStatus) for tests. */
+export function _resetHealthState(): void {
+  lastError = null;
+  lastErrorAt = null;
+  lastWrittenStatus = null;
 }
 
 export { config as _consolidationConfig };

@@ -106,6 +106,7 @@ import {
   consolidateNamespace,
   isConsolidationAvailable,
   getConsolidationBacklog,
+  getConsolidationHealth,
 } from "./consolidation.js";
 import type {
   WriteParams,
@@ -3899,24 +3900,45 @@ export function registerTools(
                 }
               }
 
-              // Consolidation pressure (owner-only). Only meaningful when the
-              // worker is actually available — otherwise a backlog is noise
-              // nothing will drain. A persistent backlog while consolidation is
-              // available means the worker is stalled or rate-limited. Tracked
-              // namespaces are owner-readable, so no per-namespace canRead pass is
-              // needed here (the whole signal is gated on owner). Distilled from
-              // the Letta memory-design harvest (see decisions/letta-harvest).
-              if (ctx.principalType === "owner" && isConsolidationAvailable()) {
-                for (const candidate of getConsolidationBacklog(db)) {
-                  const backlogItem: MaintenanceItem = {
-                    namespace: candidate.namespace,
-                    issue: "consolidation_backlog",
-                    suggestion: `${candidate.unincorporated_log_count} unincorporated log${candidate.unincorporated_log_count === 1 ? "" : "s"} awaiting consolidation. The worker drains these on its next run; a persistent backlog suggests it is stalled or rate-limited.`,
+              // Consolidation pressure and failure signal (owner-only).
+              // Two cases:
+              //   1. Worker available + backlog → surface consolidation_backlog items.
+              //   2. Worker enabled but circuit breaker tripped (or failing) →
+              //      surface consolidation_circuit_breaker warning. This MUST fire
+              //      even though isConsolidationAvailable() is false when tripped —
+              //      that was the silent-failure bug: the old guard suppressed the
+              //      warning exactly when the worker needed attention most.
+              // Tracked namespaces are owner-readable, so no per-namespace canRead
+              // pass is needed here (the whole signal is gated on owner).
+              // Distilled from the Letta memory-design harvest (see decisions/letta-harvest).
+              if (ctx.principalType === "owner") {
+                const health = getConsolidationHealth();
+                if (health.enabled && isConsolidationAvailable()) {
+                  for (const candidate of getConsolidationBacklog(db)) {
+                    const backlogItem: MaintenanceItem = {
+                      namespace: candidate.namespace,
+                      issue: "consolidation_backlog",
+                      suggestion: `${candidate.unincorporated_log_count} unincorporated log${candidate.unincorporated_log_count === 1 ? "" : "s"} awaiting consolidation. The worker drains these on its next run; a persistent backlog suggests it is stalled or rate-limited.`,
+                    };
+                    // Oldest-first: never-consolidated namespaces (null) sort ahead
+                    // of those with an older last-consolidated timestamp.
+                    maintenanceSortKey.set(backlogItem, candidate.last_consolidated_at ?? "");
+                    maintenanceNeeded.push(backlogItem);
+                  }
+                } else if (health.enabled && (health.circuit_breaker_tripped || health.failures > 0)) {
+                  // Circuit breaker has tripped (or is accumulating failures).
+                  // Surface a loud maintenance item — the worker is not draining
+                  // the backlog and needs operator attention.
+                  const failureSummary = health.last_error
+                    ? `${health.failures}/${health.max_failures} failures, last error: ${health.last_error.slice(0, 120)}`
+                    : `${health.failures}/${health.max_failures} failures`;
+                  const cbItem: MaintenanceItem = {
+                    namespace: null,
+                    issue: "consolidation_circuit_breaker",
+                    suggestion: `Consolidation worker is failing: ${failureSummary}. It will not drain backlog until fixed. Check memory_status / journalctl -u munin-memory.`,
                   };
-                  // Oldest-first: never-consolidated namespaces (null) sort ahead
-                  // of those with an older last-consolidated timestamp.
-                  maintenanceSortKey.set(backlogItem, candidate.last_consolidated_at ?? "");
-                  maintenanceNeeded.push(backlogItem);
+                  maintenanceSortKey.set(cbItem, "");
+                  maintenanceNeeded.push(cbItem);
                 }
               }
 
@@ -5969,8 +5991,9 @@ export function registerTools(
                   if (item.issue === "missing_lifecycle" && !includeMissingLifecycle) continue;
                   if (item.issue === "missing_status") continue;
 
+                  // namespace is always a string here (derived from assessment.row.namespace)
                   attentionItems.push(buildAttentionItem(
-                    item.namespace,
+                    item.namespace ?? assessment.row.namespace,
                     item.issue,
                     assessment.row.updated_at,
                     assessment.row.content_preview.slice(0, 150),
@@ -6525,6 +6548,7 @@ export function registerTools(
                   embeddings: isEmbeddingAvailable(),
                   semantic_search: isSemanticEnabled(),
                   hybrid_search: isHybridEnabled(),
+                  // Keep this boolean for backward compatibility (Heimdall reads it)
                   consolidation: isConsolidationAvailable(),
                 },
                 tools: {
@@ -6539,6 +6563,9 @@ export function registerTools(
               };
               if (ctx.principalType === "owner") {
                 statusResponse.telemetry = getToolCallAggregates(db, 7);
+                // Detailed health breakdown (owner-only) — includes circuit breaker
+                // state, failure count, and last error so failures are never silent.
+                statusResponse.consolidation_health = getConsolidationHealth();
               }
               return okResult("status", statusResponse);
             };

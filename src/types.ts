@@ -258,8 +258,8 @@ export interface DashboardEntry {
 }
 
 export interface MaintenanceItem {
-  namespace: string;
-  issue: "active_but_stale" | "missing_status" | "conflicting_lifecycle" | "missing_lifecycle" | "upcoming_event_stale" | "expiring_soon" | "expired" | "consolidation_backlog";
+  namespace: string | null;
+  issue: "active_but_stale" | "missing_status" | "conflicting_lifecycle" | "missing_lifecycle" | "upcoming_event_stale" | "expiring_soon" | "expired" | "consolidation_backlog" | "consolidation_circuit_breaker";
   suggestion: string;
 }
 

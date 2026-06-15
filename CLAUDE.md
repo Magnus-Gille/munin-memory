@@ -600,6 +600,29 @@ To grep for 4xx captures:
 ssh magnus@huginmunin.local "journalctl -u munin-memory -n 500 --no-pager | grep -E '\"status\":4[0-9]{2}' | grep '/mcp'"
 ```
 
+### Consolidation worker health alert
+
+The consolidation worker writes a pollable state entry at `meta/system-health`, key `consolidation`, **only on status transitions** (not every run). An external consumer (e.g. Ratatoskr) can poll this entry for Telegram alerts.
+
+JSON shape:
+```json
+{
+  "status": "healthy" | "failing" | "tripped",
+  "failures": 2,
+  "max_failures": 3,
+  "last_error": "OpenRouter API error 401: ...",
+  "last_error_at": "2026-06-15T10:30:00.000Z",
+  "updated_at": "2026-06-15T10:30:00.000Z"
+}
+```
+
+- `status: "healthy"` — no failures; entry written once when the worker recovers from a prior alert.
+- `status: "failing"` — one or more failures have occurred but the circuit breaker has not yet tripped.
+- `status: "tripped"` — circuit breaker tripped; worker will not process any batches until `resetConsolidationCircuitBreaker()` is called (requires server restart in production).
+- Tags: `["system_alert", "consolidation"]`
+- The entry is also surfaced as a `consolidation_circuit_breaker` maintenance item in `memory_orient` (owner-only), even when `isConsolidationAvailable()` is false — this is the key property: the warning is **louder when the breaker is tripped**, not silent.
+- `memory_status` exposes `consolidation_health` (owner-only) with the full breakdown including `circuit_breaker_tripped`, `failures`, `last_error`, etc. The existing `features.consolidation` boolean remains for backward compat.
+
 ## Code style
 
 - TypeScript strict mode
