@@ -2916,19 +2916,30 @@ export function replaceCrossReferences(
   const txn = db.transaction(() => {
     db.prepare("DELETE FROM cross_references WHERE source_namespace = ?").run(sourceNamespace);
 
+    // Use ON CONFLICT upsert so that duplicate (source, target, reference_type)
+    // tuples within the same refs array (e.g. when the LLM emits the same pair
+    // twice) are silently coalesced rather than throwing a UNIQUE constraint
+    // error. The DELETE above already cleared all rows for this source_namespace,
+    // so a conflict can only arise from within-call duplicates — the last one
+    // wins (refreshing context/confidence), which is correct.
     const insert = db.prepare(
       `INSERT INTO cross_references
          (id, source_namespace, target_namespace, reference_type, context,
           confidence, extracted_at, source_synthesis_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(source_namespace, target_namespace, reference_type) DO UPDATE SET
+         context = excluded.context,
+         confidence = excluded.confidence,
+         extracted_at = excluded.extracted_at,
+         source_synthesis_id = excluded.source_synthesis_id`,
     );
 
     const extractedAt = nowUTC();
     for (const ref of refs) {
       insert.run(
         randomUUID(),
-        ref.source_namespace,
-        ref.target_namespace,
+        sourceNamespace,        // use the trusted caller argument, not ref.source_namespace,
+        ref.target_namespace,   // so a mis-typed ref can't overwrite another namespace's rows
         ref.reference_type,
         ref.context ?? null,
         ref.confidence,
