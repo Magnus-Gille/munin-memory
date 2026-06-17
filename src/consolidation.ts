@@ -135,6 +135,10 @@ interface ChatCompletionResponse {
 let apiKey: string | null = null;
 let circuitBreakerFailures = 0;
 let circuitBreakerTripped = false;
+// Timestamp (ms) of when the breaker last tripped. Used for the half-open probe:
+// after HALF_OPEN_DELAY_MS the worker lets one attempt through, and resets the
+// breaker state on success so a transient can't leave it permanently stuck.
+let circuitBreakerTrippedAt: number | null = null;
 let workerTimer: ReturnType<typeof setTimeout> | null = null;
 let workerProcessing = false;
 let workerInflightPromise: Promise<void> | null = null;
@@ -316,6 +320,7 @@ export function getConsolidationBacklog(db: Database.Database): ConsolidationCan
 export function resetConsolidationCircuitBreaker(): void {
   circuitBreakerFailures = 0;
   circuitBreakerTripped = false;
+  circuitBreakerTrippedAt = null;
   lastError = null;
   lastErrorAt = null;
   // Write the healthy-transition alert if we have a db and the status changed.
@@ -343,8 +348,26 @@ function scheduleNextRun(): void {
   }, config.intervalMs);
 }
 
+// Half-open delay: after the circuit breaker trips, allow one probe attempt
+// per this many milliseconds. On success the breaker auto-resets; on failure
+// the probe window resets so the next attempt waits another full interval.
+// Minimum 5 minutes so we don't spam the LLM API immediately after a trip.
+const HALF_OPEN_DELAY_MS = Math.max(5 * 60 * 1000, config.intervalMs * 5);
+
 export async function processConsolidationBatch(): Promise<void> {
-  if (!workerDb || !apiKey || circuitBreakerTripped) return;
+  if (!workerDb || !apiKey) return;
+
+  if (circuitBreakerTripped) {
+    // Half-open probe: allow one attempt after HALF_OPEN_DELAY_MS so the worker
+    // can auto-recover once the underlying fault is resolved — without waiting
+    // for a manual resetConsolidationCircuitBreaker() call.
+    const trippedAgo = circuitBreakerTrippedAt != null ? Date.now() - circuitBreakerTrippedAt : HALF_OPEN_DELAY_MS;
+    if (trippedAgo < HALF_OPEN_DELAY_MS) return;
+    // Reset the trip timestamp so the next failure starts a fresh delay window.
+    circuitBreakerTrippedAt = Date.now();
+    console.log("Consolidation circuit breaker half-open probe — attempting one batch");
+  }
+
   workerProcessing = true;
 
   try {
@@ -364,6 +387,7 @@ export async function processConsolidationBatch(): Promise<void> {
 
         if (circuitBreakerFailures >= config.maxFailures) {
           circuitBreakerTripped = true;
+          circuitBreakerTrippedAt = Date.now();
           console.warn("Consolidation circuit breaker tripped — consolidation disabled until reset");
           maybeWriteHealthAlert(db);
           break;
@@ -371,8 +395,15 @@ export async function processConsolidationBatch(): Promise<void> {
           maybeWriteHealthAlert(db);
         }
       } else {
+        // On success: reset consecutive failure count AND un-trip the breaker so
+        // a previously-tripped worker auto-recovers once the root cause is fixed.
         circuitBreakerFailures = 0;
-        // On recovery within a batch, clear error state and transition to healthy
+        if (circuitBreakerTripped) {
+          circuitBreakerTripped = false;
+          circuitBreakerTrippedAt = null;
+          console.log("Consolidation circuit breaker auto-reset after successful probe");
+        }
+        // Clear error state and transition to healthy
         lastError = null;
         lastErrorAt = null;
         maybeWriteHealthAlert(db);
@@ -772,12 +803,36 @@ export function mergeCrossReferences(
   llmRefs: SynthesisResult["cross_references"],
   scannerRefs: SynthesisResult["cross_references"],
 ): SynthesisResult["cross_references"] {
-  const seen = new Set(llmRefs.map((r) => r.target_namespace));
-  const merged = [...llmRefs];
+  // Two-phase dedup:
+  // 1. Within LLM refs: deduplicate by the full DB key (target_namespace, reference_type)
+  //    so duplicate LLM outputs don't reach the SQL layer and trip the UNIQUE constraint
+  //    on (source_namespace, target_namespace, reference_type). First occurrence wins.
+  // 2. Scanner vs LLM: preserve the original "LLM wins on target" semantic — if the LLM
+  //    already produced any ref to a given target, skip all scanner refs for that target.
+  //    This prevents a scanner "related_to" from colliding with an LLM "depends_on" for
+  //    the same target even though they'd be separate rows (different reference_type).
+  const fullKey = (r: { target_namespace: string; reference_type: string }) =>
+    `${r.target_namespace}\0${r.reference_type}`;
+
+  const seenFullKeys = new Set<string>();
+  const dedupedLlmRefs: SynthesisResult["cross_references"] = [];
+  for (const ref of llmRefs) {
+    const k = fullKey(ref);
+    if (!seenFullKeys.has(k)) {
+      seenFullKeys.add(k);
+      dedupedLlmRefs.push(ref);
+    }
+  }
+
+  const llmTargets = new Set(dedupedLlmRefs.map((r) => r.target_namespace));
+  const merged = [...dedupedLlmRefs];
   for (const ref of scannerRefs) {
-    if (!seen.has(ref.target_namespace)) {
+    // LLM wins on same target, regardless of reference_type
+    if (llmTargets.has(ref.target_namespace)) continue;
+    const k = fullKey(ref);
+    if (!seenFullKeys.has(k)) {
+      seenFullKeys.add(k);
       merged.push(ref);
-      seen.add(ref.target_namespace);
     }
   }
   return merged;

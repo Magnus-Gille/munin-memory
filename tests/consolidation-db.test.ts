@@ -465,6 +465,37 @@ describe("replaceCrossReferences", () => {
       .all(ns);
     expect(rows).toHaveLength(0);
   });
+
+  it("does not throw when refs array contains duplicate (target, type) pairs — UNIQUE constraint idempotency", () => {
+    // Regression: the LLM can return the same (target_namespace, reference_type) pair
+    // twice in one synthesis run. The old plain INSERT would throw:
+    //   "UNIQUE constraint failed: cross_references.source_namespace,
+    //    cross_references.target_namespace, cross_references.reference_type"
+    // After the fix (ON CONFLICT … DO UPDATE) it should silently coalesce to one row.
+    const srcNs = "projects/dup-test";
+    const tgtNs = "projects/dup-target";
+
+    expect(() => {
+      replaceCrossReferences(db, srcNs, [
+        { source_namespace: srcNs, target_namespace: tgtNs, reference_type: "related_to", context: "first mention", confidence: 0.7 },
+        { source_namespace: srcNs, target_namespace: tgtNs, reference_type: "related_to", context: "second mention", confidence: 0.9 },
+      ]);
+    }).not.toThrow();
+
+    const rows = db
+      .prepare("SELECT * FROM cross_references WHERE source_namespace = ?")
+      .all(srcNs) as Array<{ target_namespace: string; reference_type: string; context: string; confidence: number }>;
+    // Exactly one row — the duplicate was coalesced
+    expect(rows).toHaveLength(1);
+    expect(rows[0].target_namespace).toBe(tgtNs);
+    expect(rows[0].reference_type).toBe("related_to");
+    // SQL-level "last-write wins": the ON CONFLICT UPDATE overwrites context/confidence
+    // with the second entry's values. Note: mergeCrossReferences() deduplicates at the
+    // application layer (first-wins) so in normal consolidation only one entry reaches
+    // the DB. This test exercises the SQL safety-net directly.
+    expect(rows[0].context).toBe("second mention");
+    expect(rows[0].confidence).toBe(0.9);
+  });
 });
 
 describe("getCrossReferences", () => {
