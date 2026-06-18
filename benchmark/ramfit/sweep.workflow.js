@@ -15,18 +15,19 @@ export const meta = {
 // ---------------------------------------------------------------------------
 // Context for every agent. The rig was pre-built during prep; agents discover
 // its exact interface by reading the files rather than relying on hard-coded
-// names. EVERYTHING runs in memory-capped Docker on the arm64 host; production
-// is never touched.
+// names. Memory caps use systemd-run --user --scope (Docker was blocked — user
+// not in docker group, no headless sudo). Production is never touched.
 // ---------------------------------------------------------------------------
 const HOST = '192.168.0.230' // magnus-desktop, arm64 8GB, Docker, non-prod
 const SNAP = '~/munin-ramfit/snapshot/memory.db' // 1.34GB prod snapshot, READ-ONLY
 const ENV = `
 ENVIRONMENT (verified during prep):
-- Reach the experiment host with: ssh ${HOST} '...'  (passwordless). arm64, 6 cores, 8GB, cgroup v2 memory controller, Docker 29.4.1. No node/sqlite3 on host — all work runs in Docker.
-- Repo on THIS laptop: ~/repos/munin-memory, branch experiment/ram-fit-sweep. New knobs already committed: MUNIN_EMBEDDINGS_DTYPE, MUNIN_SQLITE_CACHE_KIB, MUNIN_SQLITE_MMAP_BYTES.
-- The RAM-fit rig already exists under benchmark/ramfit/ (Dockerfile, measure.mjs, run-config.sh) and a built Docker image on the host. READ those files to learn the exact image tag + invocation. Baseline results are at ~/munin-ramfit/results/baseline.jsonl on the host.
+- Reach the experiment host with: ssh ${HOST} '...'  (passwordless; NO sudo, NO docker access). arm64, 6 cores, 8GB, cgroup v2 with the 'memory' controller delegated to the user slice. Node 20 installed via nvm during prep.
+- Memory caps use systemd-run (no privileges): export XDG_RUNTIME_DIR=/run/user/\$(id -u); systemd-run --user --scope --quiet -p MemoryMax=<cap> -p MemorySwapMax=0 env <KNOBS> node benchmark/ramfit/measure.mjs. A cgroup OOM-kill (process killed, no JSON emitted) = 'did not fit'.
+- Repo on THIS laptop: ~/repos/munin-memory, branch experiment/ram-fit-sweep. Knobs already committed: MUNIN_EMBEDDINGS_DTYPE, MUNIN_SQLITE_CACHE_KIB, MUNIN_SQLITE_MMAP_BYTES. The repo is also rsynced+built on the host at ~/munin-ramfit/repo.
+- The RAM-fit rig already exists under benchmark/ramfit/ (measure.mjs, run-config.sh — systemd-run based; Dockerfile is superseded/unused). READ those files to learn the exact invocation. Baseline results are at ~/munin-ramfit/results/baseline.jsonl on the host.
 - Real production DB snapshot (1.34GB, READ-ONLY, pristine) staged on host at ${SNAP}. Quality fixture: benchmark/fixtures/memory-snapshot-2026-04-07.db (2975 entries) + goldsets benchmark/queries/baseline.jsonl (15) + baseline-claude.jsonl (16).
-HARD RULES: never modify src/*; never touch huginmunin/production or any live DB; always mount the snapshot :ro; RAM-matrix containers must run ONE AT A TIME (concurrent containers corrupt peak-RSS readings). Record a 512m OOM (exit 137) as a valid 'did not fit' result, not a failure.
+HARD RULES: never modify src/*; never touch huginmunin/production or any live DB; open the snapshot read-only (or copy it); RAM-matrix runs must execute ONE AT A TIME (concurrent capped processes corrupt peak-RSS readings). Record an OOM-kill as a valid 'did not fit' result, not a failure.
 `
 
 // Curated config matrix (NOT full cartesian — staged search). Each agent reads

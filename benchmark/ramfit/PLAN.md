@@ -16,9 +16,10 @@ The binding constraint is the local embedding model. Today `src/embeddings.ts` l
 - The sweep NEVER touches production or the live DB. It runs against a **read-only copy** of the snapshot, staged on the non-prod arm64 host `magnus-desktop` (192.168.0.230) at `~/munin-ramfit/snapshot/memory.db` (byte-exact, verified).
 
 ## Experiment rig (built during prep by background subagent)
-- Host: `magnus-desktop` 192.168.0.230 — arm64, 6 cores, 8 GB, Docker 29.4.1, cgroup v2 memory controller.
-- `benchmark/ramfit/` on the branch: `Dockerfile`, `measure.mjs` (in-container RSS/latency probe), `run-config.sh` (capped `docker run`), `quality-eval.mjs` (added in the 22:00 finalize phase).
-- Memory measured via cgroup v2 `/sys/fs/cgroup/memory.peak`; `--memory=X --memory-swap=X` → hard cap, OOM = exit 137 = "did not fit".
+- Host: `magnus-desktop` 192.168.0.230 — arm64, 6 cores, 8 GB, cgroup v2 with the `memory` controller delegated to the user slice. Node 20 installed via nvm (user-space).
+- **Docker was blocked** (user not in `docker` group; no headless sudo) → pivoted to a no-privilege native cap: `export XDG_RUNTIME_DIR=/run/user/$(id -u); systemd-run --user --scope --quiet -p MemoryMax=<cap> -p MemorySwapMax=0 env <KNOBS> node benchmark/ramfit/measure.mjs`. (To re-enable Docker instead, run `sudo usermod -aG docker magnus` on the host.)
+- `benchmark/ramfit/` on the branch: `measure.mjs` (RSS/latency probe, reads its own cgroup `memory.peak`), `run-config.sh` (systemd-run capped runner), `quality-eval.mjs` (added in the 22:00 finalize phase). `Dockerfile` exists but is superseded.
+- Memory measured via cgroup v2 `memory.peak`; `MemorySwapMax=0` → hard cap, cgroup OOM-kill = "did not fit".
 - Quality fixture: `benchmark/fixtures/memory-snapshot-2026-04-07.db` + goldsets `benchmark/queries/baseline.jsonl` (15) + `baseline-claude.jsonl` (16); metric R@k/MRR/nDCG via `benchmark/runner.ts`.
 
 ## The 22:00 run
