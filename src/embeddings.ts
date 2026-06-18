@@ -1,11 +1,18 @@
 import { mkdirSync, existsSync } from "node:fs";
 import type Database from "better-sqlite3";
 import { getDataDir, vecLoaded, storeEmbedding } from "./db.js";
+import { resolveKnob } from "./profiles.js";
 
 // --- Configuration from env vars ---
+//
+// The three appliance-relevant knobs (ENABLED, DTYPE, BATCH_SIZE) flow through
+// resolveKnob, which applies precedence: explicit env var > MUNIN_PROFILE
+// default > hard default. With MUNIN_PROFILE unset, resolveKnob collapses to the
+// prior `process.env.X ?? hardDefault` read — byte-for-byte current behavior.
 
 const config = {
-  embeddingsEnabled: (process.env.MUNIN_EMBEDDINGS_ENABLED ?? "true") === "true",
+  embeddingsEnabled:
+    (resolveKnob("MUNIN_EMBEDDINGS_ENABLED", "true") ?? "true") === "true",
   semanticEnabled: (process.env.MUNIN_SEMANTIC_ENABLED ?? "true") === "true",
   hybridEnabled: (process.env.MUNIN_HYBRID_ENABLED ?? "true") === "true",
   model: process.env.MUNIN_EMBEDDINGS_MODEL ?? "Xenova/all-MiniLM-L6-v2",
@@ -14,8 +21,8 @@ const config = {
   // model memory ~3-4x, the primary lever for fitting embeddings on
   // zero/zero-plus appliance RAM. Valid values follow Transformers.js v3:
   // fp32 | fp16 | q8 | int8 | uint8 | q4 | bnb4.
-  dtype: process.env.MUNIN_EMBEDDINGS_DTYPE,
-  batchSize: parseInt(process.env.MUNIN_EMBEDDINGS_BATCH_SIZE ?? "25", 10) || 25,
+  dtype: resolveKnob("MUNIN_EMBEDDINGS_DTYPE", undefined),
+  batchSize: parseInt(resolveKnob("MUNIN_EMBEDDINGS_BATCH_SIZE", "25") ?? "25", 10) || 25,
   batchDelayMs: parseInt(process.env.MUNIN_EMBEDDINGS_BATCH_DELAY_MS ?? "200", 10) || 200,
   maxFailures: parseInt(process.env.MUNIN_EMBEDDINGS_MAX_FAILURES ?? "5", 10) || 5,
   localOnly: (process.env.MUNIN_EMBEDDINGS_LOCAL_ONLY ?? "false") === "true",

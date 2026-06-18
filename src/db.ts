@@ -17,6 +17,7 @@ import type {
   CrossReference,
 } from "./types.js";
 import { runMigrations } from "./migrations.js";
+import { resolveKnob } from "./profiles.js";
 import { scanForSecrets } from "./security.js";
 import {
   CLASSIFICATION_LEVELS,
@@ -82,12 +83,14 @@ export function initDatabase(dbPath?: string): Database.Database {
   //   MUNIN_SQLITE_CACHE_KIB  — page-cache cap in KiB (maps to negative cache_size).
   //   MUNIN_SQLITE_MMAP_BYTES — mmap_size in bytes; 0 disables mmap so file pages
   //                             are not charged to RSS under a cgroup memory cap.
-  const cacheKib = process.env.MUNIN_SQLITE_CACHE_KIB;
+  // resolveKnob applies precedence: explicit env var > MUNIN_PROFILE default >
+  // hard default (undefined here, so unset profile == prior `process.env.X` read).
+  const cacheKib = resolveKnob("MUNIN_SQLITE_CACHE_KIB", undefined);
   if (cacheKib !== undefined && cacheKib !== "") {
     const kib = parseInt(cacheKib, 10);
     if (Number.isFinite(kib) && kib > 0) db.pragma(`cache_size = -${kib}`);
   }
-  const mmapBytes = process.env.MUNIN_SQLITE_MMAP_BYTES;
+  const mmapBytes = resolveKnob("MUNIN_SQLITE_MMAP_BYTES", undefined);
   if (mmapBytes !== undefined && mmapBytes !== "") {
     const bytes = parseInt(mmapBytes, 10);
     if (Number.isFinite(bytes) && bytes >= 0) db.pragma(`mmap_size = ${bytes}`);
