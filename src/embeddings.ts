@@ -9,6 +9,12 @@ const config = {
   semanticEnabled: (process.env.MUNIN_SEMANTIC_ENABLED ?? "true") === "true",
   hybridEnabled: (process.env.MUNIN_HYBRID_ENABLED ?? "true") === "true",
   model: process.env.MUNIN_EMBEDDINGS_MODEL ?? "Xenova/all-MiniLM-L6-v2",
+  // ONNX weight precision for the embedding model. Unset = library default
+  // (fp32 for all-MiniLM). Lower precision (e.g. "q8"/"int8") cuts resident
+  // model memory ~3-4x, the primary lever for fitting embeddings on
+  // zero/zero-plus appliance RAM. Valid values follow Transformers.js v3:
+  // fp32 | fp16 | q8 | int8 | uint8 | q4 | bnb4.
+  dtype: process.env.MUNIN_EMBEDDINGS_DTYPE,
   batchSize: parseInt(process.env.MUNIN_EMBEDDINGS_BATCH_SIZE ?? "25", 10) || 25,
   batchDelayMs: parseInt(process.env.MUNIN_EMBEDDINGS_BATCH_DELAY_MS ?? "200", 10) || 200,
   maxFailures: parseInt(process.env.MUNIN_EMBEDDINGS_MAX_FAILURES ?? "5", 10) || 5,
@@ -108,6 +114,9 @@ export async function initEmbeddings(): Promise<boolean> {
     const pipelineOptions: Record<string, unknown> = { cache_dir: cacheDir };
     if (config.localOnly) {
       pipelineOptions.local_files_only = true;
+    }
+    if (config.dtype !== undefined && config.dtype !== "") {
+      pipelineOptions.dtype = config.dtype;
     }
     const pipe = await transformers.pipeline("feature-extraction", config.model, pipelineOptions);
     extractor = async (text: string, options: { pooling: PoolingType; normalize: boolean }) => {

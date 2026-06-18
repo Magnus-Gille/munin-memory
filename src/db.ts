@@ -77,6 +77,22 @@ export function initDatabase(dbPath?: string): Database.Database {
   db.pragma("synchronous = NORMAL");
   db.pragma("foreign_keys = ON");
 
+  // Memory-footprint knobs for constrained appliance profiles (zero/zero-plus).
+  // Both are opt-in via env; unset preserves better-sqlite3 / SQLite defaults.
+  //   MUNIN_SQLITE_CACHE_KIB  — page-cache cap in KiB (maps to negative cache_size).
+  //   MUNIN_SQLITE_MMAP_BYTES — mmap_size in bytes; 0 disables mmap so file pages
+  //                             are not charged to RSS under a cgroup memory cap.
+  const cacheKib = process.env.MUNIN_SQLITE_CACHE_KIB;
+  if (cacheKib !== undefined && cacheKib !== "") {
+    const kib = parseInt(cacheKib, 10);
+    if (Number.isFinite(kib) && kib > 0) db.pragma(`cache_size = -${kib}`);
+  }
+  const mmapBytes = process.env.MUNIN_SQLITE_MMAP_BYTES;
+  if (mmapBytes !== undefined && mmapBytes !== "") {
+    const bytes = parseInt(mmapBytes, 10);
+    if (Number.isFinite(bytes) && bytes >= 0) db.pragma(`mmap_size = ${bytes}`);
+  }
+
   // Load sqlite-vec extension (soft dependency — vec features disabled if unavailable)
   try {
     sqliteVec.load(db);
