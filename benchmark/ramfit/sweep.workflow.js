@@ -23,7 +23,9 @@ const SNAP = '~/munin-ramfit/snapshot/memory.db' // 1.34GB prod snapshot, READ-O
 const ENV = `
 ENVIRONMENT (verified during prep):
 - Reach the experiment host with: ssh ${HOST} '...'  (passwordless; NO sudo, NO docker access). arm64, 6 cores, 8GB, cgroup v2 with the 'memory' controller delegated to the user slice. Node 20 installed via nvm during prep.
-- Memory caps use systemd-run (no privileges): export XDG_RUNTIME_DIR=/run/user/\$(id -u); systemd-run --user --scope --quiet -p MemoryMax=<cap> -p MemorySwapMax=0 env <KNOBS> node benchmark/ramfit/measure.mjs. A cgroup OOM-kill (process killed, no JSON emitted) = 'did not fit'.
+- Memory caps use systemd-run (no privileges): export XDG_RUNTIME_DIR=/run/user/\$(id -u); systemd-run --user --scope --quiet -p MemoryMax=<cap> -p MemorySwapMax=0 env <KNOBS> node benchmark/ramfit/measure.mjs. A cgroup OOM-kill (process killed, no JSON emitted) = 'did not fit' (this is the gold-standard fit signal — trust it over any reported MB).
+- MEASUREMENT METHODOLOGY (the prep baseline had a hole — fix it): this kernel (5.15) has NO cgroup memory.peak (added in 5.19), so do NOT read memory.peak or a one-shot process RSS. Capture TRUE peak by polling /sys/fs/cgroup/<scope>/memory.current every ~50ms in a background sampler for the whole run and taking the max. Verify measure.mjs/run-config.sh do this; fix them if they still fall back to point-in-time RSS.
+- MEASURE BOTH PATHS per config: (i) QUERY path (semantic+hybrid over the goldset queries) AND (ii) WRITE / embedding-generation path — insert a batch of new entries and let the background embedding worker process a full batch (this is the real memory stressor; single queries miss it). Report peak for each.
 - Repo on THIS laptop: ~/repos/munin-memory, branch experiment/ram-fit-sweep. Knobs already committed: MUNIN_EMBEDDINGS_DTYPE, MUNIN_SQLITE_CACHE_KIB, MUNIN_SQLITE_MMAP_BYTES. The repo is also rsynced+built on the host at ~/munin-ramfit/repo.
 - The RAM-fit rig already exists under benchmark/ramfit/ (measure.mjs, run-config.sh — systemd-run based; Dockerfile is superseded/unused). READ those files to learn the exact invocation. Baseline results are at ~/munin-ramfit/results/baseline.jsonl on the host.
 - Real production DB snapshot (1.34GB, READ-ONLY, pristine) staged on host at ${SNAP}. Quality fixture: benchmark/fixtures/memory-snapshot-2026-04-07.db (2975 entries) + goldsets benchmark/queries/baseline.jsonl (15) + baseline-claude.jsonl (16).
@@ -33,7 +35,8 @@ HARD RULES: never modify src/*; never touch huginmunin/production or any live DB
 // Curated config matrix (NOT full cartesian — staged search). Each agent reads
 // the harness to map these knobs onto run-config.sh.
 const RAM_MATRIX = `
-RAM-FIT MATRIX — run serially against the real 1.34GB snapshot, measure peak RSS + OOM(137) + sem/hybrid p50 latency + vec_loaded. Caps as noted.
+RAM-FIT MATRIX — run serially against the real 1.34GB snapshot. For EACH config, sweep the CAP LADDER {1024m, 512m, 320m} (stop a config at the cap where it OOMs) and record true peak (memory.current polling), OOM/fit, sem/hybrid p50, vec_loaded, for BOTH query and write modes.
+CAP MEANING (state this in synthesis): 1024m≈1GB board; 512m≈512MB board (generous); 320m≈ the REAL available RAM on a 512MB Pi Zero 2W / Pi 3A+ after the OS (~150-200MB) — 320m is the honest test for the cheapest boards, NOT 512m. Prep baseline (query-path only, understated RSS) showed fp32 ~220MB / q8 ~138MB and everything fit 512m with no OOM — promising but must be re-confirmed with true-peak polling + the write path + the 320m cap.
 Goal A (keep MiniLM quality, target 1024m):
   A1 dtype=fp32  batch=4  sqlite=default                          @1024m
   A2 dtype=q8    batch=4  sqlite=default                          @1024m
