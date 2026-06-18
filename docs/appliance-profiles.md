@@ -17,11 +17,17 @@ That means the right first move is **not** a full rewrite of the codebase. The r
 
 ## Profiles
 
-| Profile | Target hardware | Default capabilities | Notes |
+| Profile (`MUNIN_PROFILE`) | Target hardware | Default capabilities | Notes |
 |---------|-----------------|----------------------|-------|
-| `zero-appliance` | Raspberry Pi Zero 2 W class hardware | Core memory: state/log/orient/list/history/read/query with lexical search | Semantic is out by hardware constraint (see below), not by quality preference. |
-| `zero-plus-appliance` | Raspberry Pi 5 2GB class hardware | Core memory + local embeddings/hybrid search in an appliance form factor | New tier. Justified by v3 pilot data showing semantic materially lifts recall on prose-weighted corpora. Previously speculative; now a planned product tier. |
-| `full-node` | Raspberry Pi 4/5 4GB+, mini PC, VPS, or stronger x86/ARM hardware | Full public-remote deployment, OAuth, retrieval analytics, and local semantic/hybrid search | This matches the current "Pi 5 on my desk" style deployment most closely. |
+| `zero-appliance` | Raspberry Pi 3A+ / Pi Zero 2 W (512 MB-class) — the cheapest, primary target (both sourceable to Jan 2030) | Core memory **+ q8 semantic/hybrid search** | **Updated 2026-06-18:** the 2026-06-18 on-hardware RAM-fit sweep proved q8 MiniLM semantic fits a 128 MB cgroup cap (peak working set ≈ 85–94 MB across query/write/concurrent), so this tier ships semantic ON via q8, not lexical-only. See "Validated RAM-fit findings" below. |
+| `zero-plus` | Raspberry Pi 5 2 GB-class hardware | Core memory + q8 local embeddings/hybrid search, batch 4 + larger page cache | Pilot data (v3) shows semantic materially lifts recall on prose-weighted corpora; tonight's sweep confirms the memory cost is small (peak anon ≈ 85–99 MB). |
+| `full-node` | Raspberry Pi 4/5 4GB+, mini PC, VPS, or stronger x86/ARM hardware | Full public-remote deployment, OAuth, retrieval analytics, and **full-fidelity fp32 semantic/hybrid search** | Matches the current "Pi 5 on my desk" deployment. No memory clamps; fp32 gives the best recall and fits with ~800 MB free at 1 GB. |
+
+> **`MUNIN_PROFILE` precedence.** A profile sets *default* knob values. An
+> explicit env var always wins, then the profile default, then the hard-coded
+> default. With `MUNIN_PROFILE` unset, behavior is byte-for-byte unchanged.
+> Resolver: `src/profiles.ts` (wired into `src/embeddings.ts` and `src/db.ts`).
+> The doc's earlier `zero-plus-appliance` label is now canonically `zero-plus`.
 
 ## What stays stable
 
@@ -36,12 +42,32 @@ The product can evolve packaging and runtime topology without throwing away the 
 
 Semantic search stays a first-class feature for any profile that has the RAM headroom for it. The Munin Zero retrieval pilot (2026-04-19, `munin-zero/docs/experiments/retrieval-pilot-2026-04-19/pilot-report-v3.md`) confirmed that on prose-weighted content — long-form logs, meeting notes, narrative entries — hybrid search lifts R@20 by +14pp overall (+23pp on prose-log, +40pp on prose-state) versus lexical-only. An earlier v2 run on a state-heavy corpus showed no lift; the two experiments do not contradict, they sample different content shapes. Real-world Munin usage contains a lot of prose, so cutting semantic is not a free tradeoff.
 
-Current recommendation:
+Current recommendation (revised 2026-06-18 after the on-hardware RAM-fit sweep):
 
-- `full-node` continues to offer local semantic and hybrid search, enabled by default.
-- `zero-plus-appliance` (Pi 5 2GB) is the right home for an appliance-form-factor box that still runs embeddings. This tier exists because v3 showed the recall cost of dropping semantic is real for the persona-A prose-heavy user.
-- `zero-appliance` (Pi Zero 2 W) stays lexical-only. The 425MB total RAM / ~310MB available budget cannot host an embedding model plus index — this is a hardware ceiling, not a quality judgement. Acceptance on Zero relies on the appliance UX being tolerant of imperfect recall (model asks a clarifying question instead of failing).
+- `full-node` offers full-fidelity fp32 local semantic and hybrid search, enabled by default.
+- `zero-plus` (Pi 5 2GB) runs q8 semantic with more headroom (batch 4, larger page cache). This tier exists because v3 showed the recall cost of dropping semantic is real for the persona-A prose-heavy user.
+- `zero-appliance` (Pi 3A+ / Pi Zero 2 W, 512 MB-class) **now runs q8 semantic too** — this reverses the earlier lexical-only stance. The earlier "425 MB total / ~310 MB available cannot host an embedding model plus index" was an *unmeasured estimate*. Measured: q8 MiniLM holds a peak working set (un-reclaimable `anon + shmem`) of ≈ 85–94 MB across the query, write, and sustained-concurrent-burst paths, fitting a **128 MB** cgroup cap with `MemorySwapMax=0`. The recall cost of q8 vs fp32 is small (R@10 and R@20 are identical on the goldset; only R@5 dips ≈ 6 pp). Lexical-only remains available as a fallback (`MUNIN_EMBEDDINGS_ENABLED=false`, ~13 MB anon) for the most constrained deployments, but it is no longer the *default* for this tier.
 - Lexical is not uniformly worse. On structured-vocabulary content (research notes, short state entries) lexical ties or beats hybrid. A possible future direction is content-shape-aware routing, but N=50 single-model data is too thin to justify that complexity today.
+
+### Validated RAM-fit findings (2026-06-18)
+
+Validated on an aarch64 / 8 GB Linux board (cgroup v2) under `systemd-run --user
+--scope -p MemoryMax=<cap> -p MemorySwapMax=0`, against the pristine 1.34 GB
+production DB snapshot. The must-fit metric is peak **`anon + shmem`** (the
+un-reclaimable working set; `memory.current` is dominated by reclaimable file
+cache and is informational only). The dispositive fit signal is the absence of a
+cgroup OOM-kill. Full results and methodology: `benchmark/ramfit/FINDINGS.md`.
+
+| Tier | dtype | semantic | Peak anon (sustained burst) | Fits cap | Goldset R@5 / R@20 |
+|---|---|---|---|---|---|
+| `full-node` (1 GB) | fp32 MiniLM | ON | ≈ 230 MB | 1024 MB (huge headroom) | 0.58 / 0.65 |
+| `zero-plus` (Pi 5 2 GB) | q8 MiniLM | ON | ≈ 99 MB | 320 MB+ | 0.52 / 0.65 |
+| `zero-appliance` (512 MB) | q8 MiniLM | ON | ≈ 91–93 MB | down to 128 MB | 0.52 / 0.65 |
+| (fallback, any tier) | none (lexical) | OFF | ≈ 13 MB | down to 64 MB | n/a |
+
+fp16 MiniLM is **not** an option on this onnxruntime build (it fails to
+initialise with an `InsertedPrecisionFreeCast` graph error). Use q8 or int8 for
+quantised tiers.
 
 ## Sidecar stance
 
