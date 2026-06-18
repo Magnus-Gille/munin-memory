@@ -22,6 +22,13 @@ The binding constraint is the local embedding model. Today `src/embeddings.ts` l
 - Memory measured via cgroup v2 `memory.peak`; `MemorySwapMax=0` → hard cap, cgroup OOM-kill = "did not fit".
 - Quality fixture: `benchmark/fixtures/memory-snapshot-2026-04-07.db` + goldsets `benchmark/queries/baseline.jsonl` (15) + `baseline-claude.jsonl` (16); metric R@k/MRR/nDCG via `benchmark/runner.ts`.
 
+## Baseline findings (prep, 2026-06-18 — to be confirmed by the full sweep)
+- **arm64 native stack works:** better-sqlite3 + sqlite-vec + onnxruntime-node compile and load. Semantic+hybrid queries return (~12/28 ms p50). This was the main risk — passed.
+- **Query path is cheap:** true peak (cgroup polling) fp32 **172 MB**, q8 **80 MB**.
+- **Nothing OOM-killed at 320 MB** under `MemorySwapMax=0`, in ANY mode — query or write, fp32 or q8, even batch=25. Under a hard cap with swap off, survival ⇒ the un-reclaimable (anon) working set fits. So real demand fits ~320 MB everywhere tested.
+- **Measurement trap caught:** baseline2's "~1.7 GB write peak" was an artifact — `memory.current` counts the 1.34 GB DB copy on /tmp (ext4) as reclaimable **file cache**, not demand (`memory.stat`: file=2.0 GB vs anon=7.5 MB). The real must-fit metric is **peak anon+shmem**, which is tiny. The 22:00 sweep reports peak_anon, not memory.current.
+- **Preliminary verdict:** full Munin experience (incl. local semantic/hybrid on the 1.34 GB corpus) appears to fit even the ~320 MB a real 512 MB Pi Zero 2W / Pi 3A+ leaves userland — i.e. **little/no quality loss needed for Goal B**, and quantization (q8) buys headroom/cache-perf rather than capability. This would overturn the old `appliance-profiles.md` "Zero can't host the model" stance (which was an estimate, not a measurement). The full sweep confirms with precise anon peaks, a lower cap floor, sustained/concurrent load, and the quality matrix.
+
 ## The 22:00 run
 Driven by the workflow script `benchmark/ramfit/sweep.workflow.js`. Phases: Finalize harness → RAM matrix (serial, real 1.34 GB DB, caps 1024m/512m) → Quality matrix (uncapped, re-embed per config) → Synthesize (Goal A / Goal B / sidecar, parallel) → Adversarial verify → Deliverables (FINDINGS.md + prune-bug fix + docs/CHANGELOG/CLAUDE.md + draft PR).
 
