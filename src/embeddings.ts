@@ -10,6 +10,27 @@ import { resolveKnob } from "./profiles.js";
 // default > hard default. With MUNIN_PROFILE unset, resolveKnob collapses to the
 // prior `process.env.X ?? hardDefault` read — byte-for-byte current behavior.
 
+/** Valid ONNX weight precision values accepted by Transformers.js v3. */
+export const VALID_DTYPES = ["fp32", "fp16", "q8", "int8", "uint8", "q4", "bnb4"] as const;
+export type ValidDtype = (typeof VALID_DTYPES)[number];
+
+/**
+ * Validate the resolved dtype against the known-good Transformers.js v3 set.
+ * Returns the dtype if valid, or `undefined` if:
+ *  - the value is undefined or empty string (unset — fall through to library default)
+ *  - the value is set but not in the allowed list (warn + fall through to library default)
+ *
+ * Exported for unit testing.
+ */
+export function resolveEmbeddingsDtype(raw: string | undefined): string | undefined {
+  if (raw === undefined || raw === "") return undefined;
+  if ((VALID_DTYPES as readonly string[]).includes(raw)) return raw;
+  console.warn(
+    `[munin] MUNIN_EMBEDDINGS_DTYPE="${raw}" is not a recognised dtype — ignored, using library default. Allowed: ${VALID_DTYPES.join(", ")}`,
+  );
+  return undefined;
+}
+
 const config = {
   embeddingsEnabled:
     (resolveKnob("MUNIN_EMBEDDINGS_ENABLED", "true") ?? "true") === "true",
@@ -21,7 +42,7 @@ const config = {
   // model memory ~3-4x, the primary lever for fitting embeddings on
   // zero/zero-plus appliance RAM. Valid values follow Transformers.js v3:
   // fp32 | fp16 | q8 | int8 | uint8 | q4 | bnb4.
-  dtype: resolveKnob("MUNIN_EMBEDDINGS_DTYPE", undefined),
+  dtype: resolveEmbeddingsDtype(resolveKnob("MUNIN_EMBEDDINGS_DTYPE", undefined)),
   batchSize: parseInt(resolveKnob("MUNIN_EMBEDDINGS_BATCH_SIZE", "25") ?? "25", 10) || 25,
   batchDelayMs: parseInt(process.env.MUNIN_EMBEDDINGS_BATCH_DELAY_MS ?? "200", 10) || 200,
   maxFailures: parseInt(process.env.MUNIN_EMBEDDINGS_MAX_FAILURES ?? "5", 10) || 5,

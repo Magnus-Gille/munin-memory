@@ -77,7 +77,8 @@ for f in ${all[@]+"${all[@]}"}; do
     [ "$sundays" -ge 4 ] && break
     d=$(printf '%s\n' "$f" | sed -nE 's/^memory-([0-9]{4}-[0-9]{2}-[0-9]{2}).*/\1/p')
     [ -z "$d" ] && continue
-    if [ "$(date -d "$d" +%u 2>/dev/null || echo 0)" = "7" ]; then
+    dow=$(date -d "$d" +%u 2>/dev/null || date -j -f "%Y-%m-%d" "$d" +%u 2>/dev/null || echo 0)
+    if [ "$dow" = "7" ]; then
         printf '%s\n' "$f" >> "$keep"
         sundays=$((sundays + 1))
     fi

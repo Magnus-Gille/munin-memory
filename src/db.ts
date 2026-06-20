@@ -35,6 +35,37 @@ import {
 
 let _vecLoaded = false;
 
+/**
+ * Strictly parse an integer from a raw string value for SQLite PRAGMA settings.
+ *
+ * Accepts only all-digit strings (optionally prefixed with a sign handled
+ * separately by callers). Silently returns `undefined` for junk like "1024junk",
+ * exponent notation ("1e9"), negative values, empty strings, or whitespace —
+ * and emits a console.warn naming the bad var and value so the operator can fix
+ * their config without the server crashing on startup.
+ *
+ * @param raw   The raw string to parse.
+ * @param varName  The env var name, used in the warning message.
+ * @param min   The minimum acceptable value (inclusive). Defaults to 0.
+ * @returns The parsed integer, or `undefined` if the value is invalid.
+ */
+export function parsePragmaInt(raw: string, varName: string, { min = 0 }: { min?: number } = {}): number | undefined {
+  if (!/^\d+$/.test(raw)) {
+    console.warn(`[munin] ${varName}="${raw}" is not a valid integer — ignored, using default`);
+    return undefined;
+  }
+  const n = Number(raw);
+  if (!Number.isSafeInteger(n)) {
+    console.warn(`[munin] ${varName}="${raw}" exceeds safe integer range — ignored, using default`);
+    return undefined;
+  }
+  if (n < min) {
+    console.warn(`[munin] ${varName}="${raw}" is below minimum ${min} — ignored, using default`);
+    return undefined;
+  }
+  return n;
+}
+
 export function nowUTC(): string {
   return new Date().toISOString();
 }
@@ -87,13 +118,13 @@ export function initDatabase(dbPath?: string): Database.Database {
   // hard default (undefined here, so unset profile == prior `process.env.X` read).
   const cacheKib = resolveKnob("MUNIN_SQLITE_CACHE_KIB", undefined);
   if (cacheKib !== undefined && cacheKib !== "") {
-    const kib = parseInt(cacheKib, 10);
-    if (Number.isFinite(kib) && kib > 0) db.pragma(`cache_size = -${kib}`);
+    const kib = parsePragmaInt(cacheKib, "MUNIN_SQLITE_CACHE_KIB", { min: 1 });
+    if (kib !== undefined) db.pragma(`cache_size = -${kib}`);
   }
   const mmapBytes = resolveKnob("MUNIN_SQLITE_MMAP_BYTES", undefined);
   if (mmapBytes !== undefined && mmapBytes !== "") {
-    const bytes = parseInt(mmapBytes, 10);
-    if (Number.isFinite(bytes) && bytes >= 0) db.pragma(`mmap_size = ${bytes}`);
+    const bytes = parsePragmaInt(mmapBytes, "MUNIN_SQLITE_MMAP_BYTES", { min: 0 });
+    if (bytes !== undefined) db.pragma(`mmap_size = ${bytes}`);
   }
 
   // Load sqlite-vec extension (soft dependency — vec features disabled if unavailable)

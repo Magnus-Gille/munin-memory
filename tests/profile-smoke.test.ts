@@ -30,12 +30,30 @@ import { resolveProfile, resolveKnob } from "../src/profiles.js";
  * offline, and deterministic — safe inside the coverage-ratchet floors.
  */
 
+/** All env vars that MUNIN_PROFILE resolution can override. */
+const PROFILE_CONTROLLED_KNOBS = [
+  "MUNIN_SQLITE_CACHE_KIB",
+  "MUNIN_SQLITE_MMAP_BYTES",
+  "MUNIN_EMBEDDINGS_DTYPE",
+  "MUNIN_EMBEDDINGS_BATCH_SIZE",
+  "MUNIN_EMBEDDINGS_ENABLED",
+] as const;
+
 describe("MUNIN_PROFILE=zero-appliance — core path smoke test", () => {
   let tmpDir: string;
   let dbPath: string;
   let prevProfile: string | undefined;
+  // Saved copies of any profile-controlled knobs that were set before the test.
+  const savedKnobs: Partial<Record<string, string>> = {};
 
   beforeEach(() => {
+    // 1. Save and delete all profile-controlled explicit knobs so the profile
+    //    drives resolution — not whatever a dev/CI box happens to have set.
+    for (const key of PROFILE_CONTROLLED_KNOBS) {
+      savedKnobs[key] = process.env[key];
+      delete process.env[key];
+    }
+    // 2. Set the profile.
     prevProfile = process.env.MUNIN_PROFILE;
     process.env.MUNIN_PROFILE = "zero-appliance";
     tmpDir = mkdtempSync(join(tmpdir(), "munin-profile-smoke-"));
@@ -43,8 +61,14 @@ describe("MUNIN_PROFILE=zero-appliance — core path smoke test", () => {
   });
 
   afterEach(() => {
+    // Restore profile.
     if (prevProfile === undefined) delete process.env.MUNIN_PROFILE;
     else process.env.MUNIN_PROFILE = prevProfile;
+    // Restore all profile-controlled knobs.
+    for (const key of PROFILE_CONTROLLED_KNOBS) {
+      if (savedKnobs[key] === undefined) delete process.env[key];
+      else process.env[key] = savedKnobs[key];
+    }
     try {
       rmSync(tmpDir, { recursive: true, force: true });
     } catch {

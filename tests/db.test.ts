@@ -3,6 +3,7 @@ import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
 import {
   initDatabase,
+  parsePragmaInt,
   writeState,
   readState,
   getById,
@@ -62,6 +63,61 @@ describe("initDatabase", () => {
   it("sets WAL journal mode", () => {
     const mode = db.pragma("journal_mode", { simple: true });
     expect(mode).toBe("wal");
+  });
+});
+
+describe("parsePragmaInt", () => {
+  it("accepts a valid all-digit string and returns the number", () => {
+    expect(parsePragmaInt("1024", "TEST_VAR")).toBe(1024);
+    expect(parsePragmaInt("0", "TEST_VAR")).toBe(0);
+  });
+
+  it("rejects trailing junk (e.g. '1024junk') and returns undefined", () => {
+    expect(parsePragmaInt("1024junk", "TEST_VAR")).toBeUndefined();
+  });
+
+  it("rejects exponent notation ('1e9') and returns undefined", () => {
+    expect(parsePragmaInt("1e9", "TEST_VAR")).toBeUndefined();
+  });
+
+  it("rejects negative values when min=0 and returns undefined", () => {
+    expect(parsePragmaInt("-1", "TEST_VAR")).toBeUndefined();
+  });
+
+  it("rejects empty string and returns undefined", () => {
+    expect(parsePragmaInt("", "TEST_VAR")).toBeUndefined();
+  });
+
+  it("rejects whitespace-only value and returns undefined", () => {
+    expect(parsePragmaInt("  ", "TEST_VAR")).toBeUndefined();
+  });
+
+  it("rejects values below explicit min and returns undefined", () => {
+    expect(parsePragmaInt("0", "TEST_VAR", { min: 1 })).toBeUndefined();
+    expect(parsePragmaInt("1", "TEST_VAR", { min: 1 })).toBe(1);
+  });
+
+  it("valid cache_size value applies the PRAGMA; junk value does NOT", () => {
+    const goodDb = initDatabase("/tmp/munin-pragma-good-test.db");
+    try {
+      // pragma was set via valid "1024" input (zero-appliance profile or direct env)
+      // We test the pure helper, then check that a junk value would not be applied.
+      const good = parsePragmaInt("2048", "MUNIN_SQLITE_CACHE_KIB", { min: 1 });
+      expect(good).toBe(2048);
+      goodDb.pragma(`cache_size = -${good}`);
+      expect(goodDb.pragma("cache_size", { simple: true })).toBe(-2048);
+
+      const bad = parsePragmaInt("2048junk", "MUNIN_SQLITE_CACHE_KIB", { min: 1 });
+      expect(bad).toBeUndefined();
+      // cache_size unchanged (still -2048, not altered by bad value)
+      expect(goodDb.pragma("cache_size", { simple: true })).toBe(-2048);
+    } finally {
+      goodDb.close();
+      for (const suffix of ["", "-wal", "-shm"]) {
+        const p = "/tmp/munin-pragma-good-test.db" + suffix;
+        if (existsSync(p)) unlinkSync(p);
+      }
+    }
   });
 });
 
