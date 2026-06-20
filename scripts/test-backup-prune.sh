@@ -79,7 +79,11 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 # ── Fixture: 40 consecutive daily snapshots ending 2026-06-18 (a Thursday).
 #    mtime set so `ls -1t` orders them newest-first deterministically. ─────────
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+expected=$(mktemp)
+# Single top-level cleanup trap for ALL temp paths. prune_dir is invoked in a
+# subshell below, so its own `trap ... EXIT` (mirrored byte-identically from
+# backup-to-nas.sh) fires inside that subshell and can't clobber this one.
+trap 'rm -rf "$tmp" "$expected"' EXIT
 
 ANCHOR="2026-06-18"
 
@@ -98,14 +102,15 @@ total_before=$(ls -1 "$tmp"/memory-*.db | wc -l | tr -d ' ')
 
 # ── Run the prune; assert it does NOT trip SIGPIPE / pipefail. ───────────────
 rc=0
-prune_dir "$tmp" || rc=$?
+# Subshell: isolates prune_dir's `cd`, `set -euo pipefail`, and EXIT trap from
+# this script (otherwise its trap would replace the cleanup trap above).
+( prune_dir "$tmp" ) || rc=$?
 [ "$rc" = "0" ] || fail "prune exited non-zero (rc=$rc) — SIGPIPE/pipefail regression"
 
 # ── Compute the EXACT expected keep-set from the fixture dates. ────────────────
 # Rule: keep = (14 newest dailies) UNION (4 newest Sundays across all 40 days).
 # Use a temp file as a portable set (bash 3 compatible — no associative arrays).
-expected=$(mktemp)
-trap 'rm -f "$expected"' EXIT
+# ($expected was created up front and is cleaned by the consolidated trap above.)
 
 # 14 newest dailies (i=0..13)
 for i in $(seq 0 13); do
