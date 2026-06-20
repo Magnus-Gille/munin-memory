@@ -8,6 +8,8 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+## [0.3.3] — 2026-06-20
+
 ### Added
 
 - **`MUNIN_PROFILE` appliance preset resolver (`src/profiles.ts`).** A single
