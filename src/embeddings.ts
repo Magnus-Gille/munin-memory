@@ -1,15 +1,49 @@
 import { mkdirSync, existsSync } from "node:fs";
 import type Database from "better-sqlite3";
 import { getDataDir, vecLoaded, storeEmbedding } from "./db.js";
+import { resolveKnob } from "./profiles.js";
 
 // --- Configuration from env vars ---
+//
+// The three appliance-relevant knobs (ENABLED, DTYPE, BATCH_SIZE) flow through
+// resolveKnob, which applies precedence: explicit env var > MUNIN_PROFILE
+// default > hard default. With MUNIN_PROFILE unset, resolveKnob collapses to the
+// prior `process.env.X ?? hardDefault` read — byte-for-byte current behavior.
+
+/** Valid ONNX weight precision values accepted by Transformers.js v3. */
+export const VALID_DTYPES = ["fp32", "fp16", "q8", "int8", "uint8", "q4", "bnb4"] as const;
+export type ValidDtype = (typeof VALID_DTYPES)[number];
+
+/**
+ * Validate the resolved dtype against the known-good Transformers.js v3 set.
+ * Returns the dtype if valid, or `undefined` if:
+ *  - the value is undefined or empty string (unset — fall through to library default)
+ *  - the value is set but not in the allowed list (warn + fall through to library default)
+ *
+ * Exported for unit testing.
+ */
+export function resolveEmbeddingsDtype(raw: string | undefined): string | undefined {
+  if (raw === undefined || raw === "") return undefined;
+  if ((VALID_DTYPES as readonly string[]).includes(raw)) return raw;
+  console.warn(
+    `[munin] MUNIN_EMBEDDINGS_DTYPE="${raw}" is not a recognised dtype — ignored, using library default. Allowed: ${VALID_DTYPES.join(", ")}`,
+  );
+  return undefined;
+}
 
 const config = {
-  embeddingsEnabled: (process.env.MUNIN_EMBEDDINGS_ENABLED ?? "true") === "true",
+  embeddingsEnabled:
+    (resolveKnob("MUNIN_EMBEDDINGS_ENABLED", "true") ?? "true") === "true",
   semanticEnabled: (process.env.MUNIN_SEMANTIC_ENABLED ?? "true") === "true",
   hybridEnabled: (process.env.MUNIN_HYBRID_ENABLED ?? "true") === "true",
   model: process.env.MUNIN_EMBEDDINGS_MODEL ?? "Xenova/all-MiniLM-L6-v2",
-  batchSize: parseInt(process.env.MUNIN_EMBEDDINGS_BATCH_SIZE ?? "25", 10) || 25,
+  // ONNX weight precision for the embedding model. Unset = library default
+  // (fp32 for all-MiniLM). Lower precision (e.g. "q8"/"int8") cuts resident
+  // model memory ~3-4x, the primary lever for fitting embeddings on
+  // zero/zero-plus appliance RAM. Valid values follow Transformers.js v3:
+  // fp32 | fp16 | q8 | int8 | uint8 | q4 | bnb4.
+  dtype: resolveEmbeddingsDtype(resolveKnob("MUNIN_EMBEDDINGS_DTYPE", undefined)),
+  batchSize: parseInt(resolveKnob("MUNIN_EMBEDDINGS_BATCH_SIZE", "25") ?? "25", 10) || 25,
   batchDelayMs: parseInt(process.env.MUNIN_EMBEDDINGS_BATCH_DELAY_MS ?? "200", 10) || 200,
   maxFailures: parseInt(process.env.MUNIN_EMBEDDINGS_MAX_FAILURES ?? "5", 10) || 5,
   localOnly: (process.env.MUNIN_EMBEDDINGS_LOCAL_ONLY ?? "false") === "true",
@@ -108,6 +142,9 @@ export async function initEmbeddings(): Promise<boolean> {
     const pipelineOptions: Record<string, unknown> = { cache_dir: cacheDir };
     if (config.localOnly) {
       pipelineOptions.local_files_only = true;
+    }
+    if (config.dtype !== undefined && config.dtype !== "") {
+      pipelineOptions.dtype = config.dtype;
     }
     const pipe = await transformers.pipeline("feature-extraction", config.model, pipelineOptions);
     extractor = async (text: string, options: { pooling: PoolingType; normalize: boolean }) => {

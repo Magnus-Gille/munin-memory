@@ -17,6 +17,7 @@ import type {
   CrossReference,
 } from "./types.js";
 import { runMigrations } from "./migrations.js";
+import { resolveKnob } from "./profiles.js";
 import { scanForSecrets } from "./security.js";
 import {
   CLASSIFICATION_LEVELS,
@@ -33,6 +34,37 @@ import {
 } from "./librarian.js";
 
 let _vecLoaded = false;
+
+/**
+ * Strictly parse an integer from a raw string value for SQLite PRAGMA settings.
+ *
+ * Accepts only all-digit strings (optionally prefixed with a sign handled
+ * separately by callers). Silently returns `undefined` for junk like "1024junk",
+ * exponent notation ("1e9"), negative values, empty strings, or whitespace —
+ * and emits a console.warn naming the bad var and value so the operator can fix
+ * their config without the server crashing on startup.
+ *
+ * @param raw   The raw string to parse.
+ * @param varName  The env var name, used in the warning message.
+ * @param min   The minimum acceptable value (inclusive). Defaults to 0.
+ * @returns The parsed integer, or `undefined` if the value is invalid.
+ */
+export function parsePragmaInt(raw: string, varName: string, { min = 0 }: { min?: number } = {}): number | undefined {
+  if (!/^\d+$/.test(raw)) {
+    console.warn(`[munin] ${varName}="${raw}" is not a valid integer — ignored, using default`);
+    return undefined;
+  }
+  const n = Number(raw);
+  if (!Number.isSafeInteger(n)) {
+    console.warn(`[munin] ${varName}="${raw}" exceeds safe integer range — ignored, using default`);
+    return undefined;
+  }
+  if (n < min) {
+    console.warn(`[munin] ${varName}="${raw}" is below minimum ${min} — ignored, using default`);
+    return undefined;
+  }
+  return n;
+}
 
 export function nowUTC(): string {
   return new Date().toISOString();
@@ -76,6 +108,24 @@ export function initDatabase(dbPath?: string): Database.Database {
   db.pragma("busy_timeout = 5000");
   db.pragma("synchronous = NORMAL");
   db.pragma("foreign_keys = ON");
+
+  // Memory-footprint knobs for constrained appliance profiles (zero/zero-plus).
+  // Both are opt-in via env; unset preserves better-sqlite3 / SQLite defaults.
+  //   MUNIN_SQLITE_CACHE_KIB  — page-cache cap in KiB (maps to negative cache_size).
+  //   MUNIN_SQLITE_MMAP_BYTES — mmap_size in bytes; 0 disables mmap so file pages
+  //                             are not charged to RSS under a cgroup memory cap.
+  // resolveKnob applies precedence: explicit env var > MUNIN_PROFILE default >
+  // hard default (undefined here, so unset profile == prior `process.env.X` read).
+  const cacheKib = resolveKnob("MUNIN_SQLITE_CACHE_KIB", undefined);
+  if (cacheKib !== undefined && cacheKib !== "") {
+    const kib = parsePragmaInt(cacheKib, "MUNIN_SQLITE_CACHE_KIB", { min: 1 });
+    if (kib !== undefined) db.pragma(`cache_size = -${kib}`);
+  }
+  const mmapBytes = resolveKnob("MUNIN_SQLITE_MMAP_BYTES", undefined);
+  if (mmapBytes !== undefined && mmapBytes !== "") {
+    const bytes = parsePragmaInt(mmapBytes, "MUNIN_SQLITE_MMAP_BYTES", { min: 0 });
+    if (bytes !== undefined) db.pragma(`mmap_size = ${bytes}`);
+  }
 
   // Load sqlite-vec extension (soft dependency — vec features disabled if unavailable)
   try {

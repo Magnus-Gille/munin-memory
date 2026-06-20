@@ -88,11 +88,11 @@ Munin Memory now has an explicit tiered appliance direction instead of assuming 
 
 | Profile | Target | Default expectations |
 |---------|--------|----------------------|
-| `zero-appliance` | Raspberry Pi Zero 2 W class hardware | Core memory and lexical search only. Semantic is out by hardware constraint (~310MB available RAM cannot host an embedding model + index), not by quality preference. |
-| `zero-plus-appliance` | Raspberry Pi 5 2GB class hardware | Core memory plus local embeddings/hybrid search in an appliance form factor. Justified by retrieval pilot data showing semantic materially lifts recall on prose-weighted corpora. |
+| `zero-appliance` | Raspberry Pi 3A+ / Zero 2 W (512MB class) | Core memory **plus q8 semantic/hybrid search**. The 2026-06-18 on-hardware RAM-fit sweep refuted the earlier "semantic is out by hardware constraint" assumption: q8 MiniLM holds a peak working set ≈ 74–99 MB and fits even a 128MB cgroup cap. |
+| `zero-plus` | Raspberry Pi 5 2GB class hardware | Core memory plus q8 semantic/hybrid search with more headroom (larger embedding batch, bigger page cache). |
 | `full-node` | Raspberry Pi 4/5 4GB+, mini PC, VPS, or stronger hardware | Full public-remote deployment, OAuth, and local semantic/hybrid search. |
 
-No full rewrite is recommended as the first move. The current direction is to keep the MCP and SQLite contract stable, validate the constrained profile on real hardware, and decide whether the entry tier should stay at Zero or move up to `zero-plus-appliance`. See [docs/appliance-profiles.md](docs/appliance-profiles.md) for the full rationale and the real-hardware spike plan.
+No full rewrite is recommended as the first move: keep the MCP and SQLite contract stable. The 2026-06-18 RAM-fit sweep validated the constrained profile on real hardware and settled the entry tier — Zero/3A+ stays viable as `zero-appliance` with q8 semantic ON. Select a tier with the `MUNIN_PROFILE` env var. See [docs/appliance-profiles.md](docs/appliance-profiles.md) for the full rationale and the validated findings.
 
 ## Getting started
 

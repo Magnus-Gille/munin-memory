@@ -663,6 +663,7 @@ Enforcement is two-layered:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MUNIN_MEMORY_DB_PATH` | `~/.munin-memory/memory.db` | Database file location |
+| `MUNIN_PROFILE` | — (unset = current defaults) | Appliance preset: `zero-appliance` (512 MB-class — Pi 3A+/Zero 2 W; q8 semantic ON, lean knobs), `zero-plus` (Pi 5 2 GB; q8 semantic, batch 4), or `full-node` (fp32 semantic, no clamps). Sets *default* knob values; precedence is **explicit env var > profile default > hard default**. Unset = byte-for-byte current behavior. Resolver: `src/profiles.ts`; defaults from `benchmark/ramfit/FINDINGS.md`. |
 | `MUNIN_TRANSPORT` | `stdio` | Transport mode: `stdio` or `http` |
 | `MUNIN_HTTP_PORT` | `3030` | HTTP server port (http mode only) |
 | `MUNIN_HTTP_HOST` | `127.0.0.1` | HTTP bind address (http mode only) |
@@ -672,6 +673,9 @@ Enforcement is two-layered:
 | `MUNIN_SEMANTIC_ENABLED` | `true` | Gate 1: accept `search_mode: "semantic"` |
 | `MUNIN_HYBRID_ENABLED` | `true` | Gate 2: accept `search_mode: "hybrid"` |
 | `MUNIN_EMBEDDINGS_MODEL` | `Xenova/all-MiniLM-L6-v2` | HuggingFace model for embeddings |
+| `MUNIN_EMBEDDINGS_DTYPE` | — (library default = fp32) | ONNX weight precision for the embedding model. Lower precision (`q8`, `int8`) cuts resident model memory ~3–4×, the primary lever for fitting embeddings on constrained appliance RAM. Values follow Transformers.js v3: `fp32`/`fp16`/`q8`/`int8`/`uint8`/`q4`/`bnb4`. (`fp16` fails on some onnxruntime arm64 builds — prefer `q8`.) Validated: `q8` MiniLM holds peak anon ≈ 91 MB and fits a 128 MB cgroup cap. |
+| `MUNIN_SQLITE_CACHE_KIB` | — (SQLite default) | SQLite page-cache cap in KiB (maps to negative `cache_size`). Lower it on constrained boards to bound RSS. |
+| `MUNIN_SQLITE_MMAP_BYTES` | — (SQLite default) | SQLite `mmap_size` in bytes; `0` disables mmap so file pages aren't charged to RSS under a cgroup memory cap. |
 | `MUNIN_EMBEDDINGS_MAX_FAILURES` | `5` | Circuit breaker failure threshold |
 | `MUNIN_SEMANTIC_MAX_DISTANCE` | — (unset = unbounded) | Optional L2 distance cutoff for semantic/hybrid KNN. When set to a finite, non-negative value, vector candidates farther than the cutoff are dropped so pure-KNN search can't return unrelated "nearest" neighbours. Embeddings are normalized 384-dim, so L2² = 2(1−cosine); L2 ranges 0 (identical) to 2 (opposite). Unset preserves prior unbounded behavior. |
 | `MUNIN_ALLOWED_HOSTS` | — | Comma-separated extra Host headers to accept |

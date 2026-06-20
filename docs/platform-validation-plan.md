@@ -193,11 +193,11 @@ Run the platform validation track in this order:
 
 At the end of the platform track, explicitly choose one of:
 
-1. `zero-appliance` is viable for core memory only — users who want semantic move up to `zero-plus-appliance` (Pi 5 2GB).
+1. `zero-appliance` is viable for core memory only — users who want semantic move up to `zero-plus` (Pi 5 2GB).
 2. `zero-appliance` is viable for core memory plus some form of constrained semantic search (e.g. smaller model, offloaded embedding path).
-3. Zero-class hardware is not a good product target; collapse into `zero-plus-appliance` as the entry tier and raise the hardware floor.
+3. Zero-class hardware is not a good product target; collapse into `zero-plus` as the entry tier and raise the hardware floor.
 
-See [appliance-profiles.md](appliance-profiles.md) for the full profile matrix including `zero-plus-appliance`.
+**Resolved (2026-06-18 RAM-fit sweep): outcome 2.** q8 MiniLM semantic fits a 512MB-class board (peak working set ≈ 74–99 MB; fits even a 128MB cgroup cap), so `zero-appliance` ships semantic ON via q8 rather than lexical-only. See [appliance-profiles.md](appliance-profiles.md) for the full profile matrix and the validated findings.
 
 ## Done Criteria
 

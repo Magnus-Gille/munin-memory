@@ -8,6 +8,56 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Added
+
+- **`MUNIN_PROFILE` appliance preset resolver (`src/profiles.ts`).** A single
+  env var selects a tier of memory/feature defaults instead of hand-setting each
+  knob. Three tiers, with defaults chosen from the 2026-06-18 on-hardware RAM-fit
+  sweep (`benchmark/ramfit/FINDINGS.md`):
+  - `zero-appliance` (Pi 3A+ / Pi Zero 2 W, 512 MB-class — the cheapest primary
+    target): **semantic ON** via q8 MiniLM, batch 1, `MUNIN_SQLITE_CACHE_KIB=1024`,
+    `MUNIN_SQLITE_MMAP_BYTES=0`. Peak anon ≈ 74–99 MB across
+    query/write/concurrent (≈ 91–94 MB under sustained burst at appliance caps);
+    fits a 128 MB cgroup cap with headroom.
+  - `zero-plus` (Pi 5 2 GB-class): semantic ON via q8 MiniLM, batch 4, larger
+    page cache.
+  - `full-node` (Pi 4/5 4 GB+, mini PC, VPS): full-fidelity fp32 semantic, no
+    memory clamps (leaves dtype/cache/mmap at their hard defaults).
+
+  Resolution precedence is **explicit env var > profile default > current hard
+  default**. With `MUNIN_PROFILE` unset, behavior is byte-for-byte unchanged
+  (fully backward compatible). The resolver is wired into `src/embeddings.ts`
+  (`MUNIN_EMBEDDINGS_ENABLED` / `_DTYPE` / `_BATCH_SIZE`) and `src/db.ts`
+  (`MUNIN_SQLITE_CACHE_KIB` / `_MMAP_BYTES`). A constrained-profile CI smoke test
+  brings up the core path under `MUNIN_PROFILE=zero-appliance` and asserts the
+  server serves core memory (write/read + lexical query) and that the resolved
+  SQLite knobs actually take effect.
+- **Three appliance memory knobs documented** (`MUNIN_EMBEDDINGS_DTYPE`,
+  `MUNIN_SQLITE_CACHE_KIB`, `MUNIN_SQLITE_MMAP_BYTES`). `MUNIN_EMBEDDINGS_DTYPE`
+  lowers ONNX weight precision (e.g. `q8`) to cut resident model memory ~3–4×;
+  the two SQLite knobs cap the page cache and disable mmap so file pages are not
+  charged to RSS under a cgroup memory cap.
+- **On-hardware RAM-fit findings** (`benchmark/ramfit/FINDINGS.md`). Validated
+  on an aarch64 8 GB board under `systemd-run` memory caps against the 1.34 GB
+  production snapshot. Headlines: **1 GB → fp32 MiniLM full-quality semantic
+  (peak anon ≈ 230 MB under sustained burst); 512 MB → q8 MiniLM, semantic still
+  ON (peak anon ≈ 74–99 MB across query/write/concurrent; ≈ 91–94 MB under sustained burst at appliance caps).** The earlier "zero-appliance must be lexical-only,
+  hardware ceiling" stance is **walked back**: q8 semantic fits a 128 MB cap.
+
+### Fixed
+
+- **Nightly NAS backup no longer fails on the prune step (`scripts/backup-to-nas.sh`).**
+  The GFS retention prune piped `ls -1t … | head -n N` and a `for … done | head -n 4`
+  under `set -o pipefail`; when the producer kept writing after `head` closed the
+  pipe it took SIGPIPE, the pipeline returned 141, and `set -e` aborted the whole
+  script — so the service reported failure every night and **retention never ran**
+  (20 dailies piled up instead of 14 dailies + 4 Sundays). The rsync itself had
+  already succeeded. The prune now reads the file list into a bash array and slices
+  with a counter + `break` (no `head` on a live producer, so no SIGPIPE); the
+  backup itself is unchanged. Covered by `scripts/test-backup-prune.sh` (a local
+  fixture that reproduces the old 141 and asserts the new prune exits 0 with the
+  correct 14 + 4 retention).
+
 ### Security
 
 - **Consolidation worker hardened against synthesis poisoning.** Log content and

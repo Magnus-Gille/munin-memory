@@ -32,6 +32,8 @@ import {
   stopEmbeddingWorker,
   _embeddingConfig,
   getEmbeddingCacheDir,
+  VALID_DTYPES,
+  resolveEmbeddingsDtype,
 } from "../src/embeddings.js";
 
 const TEST_DB_PATH = "/tmp/munin-memory-embeddings-test.db";
@@ -847,5 +849,47 @@ describe("getSemanticMaxDistance", () => {
     // We can't control what the env was at import time in this test run,
     // but the function should return either undefined or a non-negative number.
     expect(result === undefined || (typeof result === "number" && result >= 0)).toBe(true);
+  });
+});
+
+// ─── resolveEmbeddingsDtype — dtype enum validation ───────────────────────────
+
+describe("resolveEmbeddingsDtype", () => {
+  it("returns undefined for undefined input (unset knob)", () => {
+    expect(resolveEmbeddingsDtype(undefined)).toBeUndefined();
+  });
+
+  it("returns undefined for empty string (empty env var)", () => {
+    expect(resolveEmbeddingsDtype("")).toBeUndefined();
+  });
+
+  it("returns the value for each valid dtype in the allowed set", () => {
+    for (const dtype of VALID_DTYPES) {
+      expect(resolveEmbeddingsDtype(dtype)).toBe(dtype);
+    }
+  });
+
+  it("returns undefined and warns for a typo not in the allowed set", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = resolveEmbeddingsDtype("q16");
+      expect(result).toBeUndefined();
+      expect(warnSpy).toHaveBeenCalledOnce();
+      expect(warnSpy.mock.calls[0][0]).toContain("MUNIN_EMBEDDINGS_DTYPE");
+      expect(warnSpy.mock.calls[0][0]).toContain("q16");
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("returns undefined and warns for a plausible misspelling ('float32')", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = resolveEmbeddingsDtype("float32");
+      expect(result).toBeUndefined();
+      expect(warnSpy).toHaveBeenCalledOnce();
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });
