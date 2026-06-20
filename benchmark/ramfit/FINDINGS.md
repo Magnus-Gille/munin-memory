@@ -29,15 +29,16 @@ recall (R@5 0.58 / R@20 0.65 on the goldset) and still leave ~800 MB free.
 ### 512 MB target — quantise to q8, keep semantic ON
 
 **Run q8 MiniLM. Semantic + hybrid search fits a 512 MB box (and a 320 MB, and a
-128 MB box) with a peak working set of ≈ 85–94 MB — roughly one-third of fp32.**
+128 MB box) with a peak working set of ≈ 74–99 MB across query/write/concurrent
+(≈ 91–94 MB under sustained burst at appliance caps) — roughly one-third of fp32.**
 q8 quantisation of all-MiniLM-L6-v2 is near-lossless for retrieval, so the recall
 cost of fitting 512 MB is small. The headline reverses the previous appliance
 doctrine: **a 512 MB-class board does NOT need to drop to lexical-only.**
 
 > **Best 512 MB config:** MiniLM **q8**, batch 1, `MUNIN_SQLITE_CACHE_KIB=1024`,
 > `MUNIN_SQLITE_MMAP_BYTES=0`, semantic+hybrid ON.
-> **Peak anon:** **≈ 93 MB** under sustained concurrent load (≈ 91 MB on the
-> heavy 25/100 burst).
+> **Peak anon:** **≈ 91–94 MB** under sustained concurrent burst at appliance
+> caps (91 MB heavy 25/100 burst @512M/320M; 93–94 MB standard 15/50 burst).
 > **Recall loss vs full fp32:** small — **R@10 and R@20 are identical** (0.6452);
 > only R@5 dips ~6.5 pp (0.5806 → 0.5161), MRR −0.9 pp, nDCG@20 −0.8 pp. The
 > meaningful comparison is against the *alternative* — dropping to lexical-only
@@ -196,8 +197,8 @@ index — a hardware ceiling"). **Tonight's data refutes that for a 512 MB-class
 board.** Corrections applied:
 
 1. **Walked back: "zero-appliance must be lexical-only."** q8 MiniLM semantic
-   fits a 128 MB anon-budget with headroom (peak anon ≈ 85–94 MB across query,
-   write, and sustained concurrent burst). A 512 MB-class board (Pi 3A+, Pi Zero
+   fits a 128 MB anon-budget with headroom (peak anon ≈ 74–99 MB across
+   query/write/concurrent; ≈ 91–94 MB under sustained burst at appliance caps). A 512 MB-class board (Pi 3A+, Pi Zero
    2 W) has ample room for semantic + hybrid. The doctrine that semantic is "out
    by hardware constraint" on this tier is wrong — it was based on an unmeasured
    memory estimate. `docs/appliance-profiles.md` is updated accordingly.

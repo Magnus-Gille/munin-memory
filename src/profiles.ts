@@ -6,7 +6,8 @@
  * Provenance: the per-tier defaults below are taken directly from the
  * 2026-06-18 RAM-fit sweep (benchmark/ramfit/FINDINGS.md). The decisive result:
  * q8 MiniLM semantic search fits with large headroom on a 512MB-class board
- * (peak anon ~74-87MB; fits even a 128m cgroup cap, query AND write paths). So
+ * (peak anon ~74-99MB across query/write/concurrent; ~91-94MB under sustained
+ * burst at appliance caps; fits even a 128MB cgroup cap). So
  * the cheapest primary tier (zero-appliance) keeps semantic ON with quantised
  * weights rather than falling back to lexical-only.
  *
@@ -46,9 +47,11 @@ export interface ResolvedProfile {
  *
  * - zero-appliance (Pi 3A+ / Pi Zero 2 W, 512MB-class — the cheapest primary
  *   target): semantic ON via q8 MiniLM, batch=1, lean SQLite page cache, mmap
- *   off. Measured peak anon ~85MB; fits a 128m cap with headroom.
+ *   off. Peak anon ~74-99MB across query/write/concurrent (~91-94MB under
+ *   sustained burst at appliance caps); fits a 128MB cgroup cap with headroom.
  * - zero-plus (Pi 5 2GB-class): semantic ON via q8 MiniLM, batch=4 and a larger
- *   page cache since there is more headroom. Measured peak anon ~85MB.
+ *   page cache since there is more headroom. Peak anon ~74-99MB (same model/dtype
+ *   as zero-appliance; burst at 1024MB cap peaks ~99MB).
  * - full-node (Pi 4/5 4GB+, mini PC, VPS): full-fidelity fp32 semantic, no
  *   memory clamps. Leaves DTYPE / cache / mmap UNSET so the existing hard
  *   defaults flow through unchanged.

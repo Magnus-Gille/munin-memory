@@ -50,14 +50,20 @@ cd "$1" || exit 0
 keep=$(mktemp)
 trap 'rm -f "$keep"' EXIT
 
-# All snapshots, newest first, read into an array via a `while read` loop. The
-# producer (`ls`) runs to completion feeding the loop — there is no `head` to
-# close the pipe early, so no SIGPIPE, so no spurious pipefail/`set -e` abort.
-# (`while read` is portable to bash 3.2; `mapfile` is bash 4+.)
+# All snapshots, sorted by encoded filename date (newest first), read into an
+# array via a `while read` loop. Using `ls -1 | sort -r` instead of `ls -1t`
+# ensures retention is based on the date the snapshot *represents* (encoded in
+# the filename as YYYY-MM-DD), not the file's mtime. A backfill/restore/rsync
+# --ignore-times re-sync can touch an old-dated file and give it a fresh mtime,
+# which would make `ls -t` sort it as "newest" and keep a stale snapshot while
+# pruning a genuinely recent one. Lexical descending = date descending because
+# filenames are zero-padded ISO dates. `sort` drains its input fully before
+# emitting output, so there is no live producer for `| head` to truncate — no
+# SIGPIPE possible. (`while read` is portable to bash 3.2; `mapfile` is bash 4+.)
 all=()
 while IFS= read -r line; do
     all+=("$line")
-done < <(ls -1t memory-*.db 2>/dev/null || true)
+done < <(ls -1 memory-*.db 2>/dev/null | sort -r || true)
 
 # Keep the 14 most recent daily snapshots (array slice, not `head`). The
 # `${all[@]+...}` guard keeps `set -u` happy when the array is empty.

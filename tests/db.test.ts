@@ -97,6 +97,12 @@ describe("parsePragmaInt", () => {
     expect(parsePragmaInt("1", "TEST_VAR", { min: 1 })).toBe(1);
   });
 
+  it("rejects all-digit strings that exceed Number.MAX_SAFE_INTEGER and returns undefined", () => {
+    // "99999999999999999999" passes /^\d+$/ but Number("99999999999999999999") is not a safe integer.
+    // This exercises the !Number.isSafeInteger(n) branch, which no other case reaches.
+    expect(parsePragmaInt("99999999999999999999", "TEST_VAR")).toBeUndefined();
+  });
+
   it("valid cache_size value applies the PRAGMA; junk value does NOT", () => {
     const goodDb = initDatabase("/tmp/munin-pragma-good-test.db");
     try {

@@ -134,7 +134,27 @@ describe("MUNIN_PROFILE=zero-appliance — core path smoke test", () => {
     }
   });
 
-  it("profile posture: zero-appliance keeps semantic ON via q8 (resolver agrees)", () => {
+  it("MUNIN_SQLITE_MMAP_BYTES=65536 applies the mmap_size pragma (discriminating — default is 0)", () => {
+    // better-sqlite3's default mmap_size is already 0, so asserting mmap_size===0
+    // is not discriminating. This case sets a NON-zero value and verifies initDatabase
+    // actually applies the pragma, proving the mmap branch in src/db.ts is active.
+    const prevMmap = process.env.MUNIN_SQLITE_MMAP_BYTES;
+    process.env.MUNIN_SQLITE_MMAP_BYTES = "65536";
+    try {
+      const db = initDatabase(dbPath);
+      try {
+        const mmapSize = db.pragma("mmap_size", { simple: true });
+        expect(mmapSize).toBe(65536);
+      } finally {
+        db.close();
+      }
+    } finally {
+      if (prevMmap === undefined) delete process.env.MUNIN_SQLITE_MMAP_BYTES;
+      else process.env.MUNIN_SQLITE_MMAP_BYTES = prevMmap;
+    }
+  });
+
+  it("profile posture: zero-appliance keeps semantic ON via q8 (resolver metadata — not runtime state)", () => {
     const p = resolveProfile("zero-appliance");
     expect(p.semantic).toBe(true);
     expect(resolveKnob("MUNIN_EMBEDDINGS_DTYPE", undefined)).toBe("q8");

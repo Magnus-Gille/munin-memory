@@ -1,13 +1,26 @@
 #!/usr/bin/env bash
-# Self-check for the SIGPIPE-safe GFS prune logic in backup-to-nas.sh.
+# Self-check for the GFS prune logic in backup-to-nas.sh.
 #
-# Why this exists: the previous prune used `ls -1t ... | head -n N`, which trips
-# `set -o pipefail` with SIGPIPE (exit 141) because `ls` keeps writing after
-# `head` closes the pipe. Under `set -e` that 141 aborted the script, so the
-# backup service reported failure nightly and retention never ran (20 dailies
-# piled up instead of 14 + 4 Sundays). This test reproduces the failure shape
-# and asserts the new array-slice prune (a) exits 0 and (b) keeps EXACTLY the
-# 14 newest dailies UNION the 4 newest Sundays — not just ">= 14".
+# What this test does: it creates a 40-file fixture of fake daily snapshots
+# with zero-padded ISO-date filenames (memory-YYYY-MM-DD-HHMM.db), runs the
+# same array-slice retention logic used in the production remote heredoc, and
+# asserts that (a) the prune exits 0 and (b) exactly the 14 newest dailies
+# UNION the 4 newest Sundays survive — not just ">= 14".
+#
+# Why it does NOT reproduce the old SIGPIPE race: the bug was that `ls | head`
+# under `set -o pipefail` caused exit 141 because `ls` kept writing after
+# `head` closed the pipe. That race does not fire at small fixture scale — 40
+# filenames fit inside the 64 KB pipe buffer, so `ls` completes before `head`
+# reads anything, and SIGPIPE never fires. A meaningful SIGPIPE repro would
+# need thousands of files, which adds runtime and flakiness for no extra
+# correctness signal. The value of this test is the exact-retention assertion,
+# which mutation-testing confirms is non-tautological (changing the slice bound
+# or the Sunday counter makes it fail).
+#
+# Sorting: production now uses `ls -1 | sort -r` (lexical descending =
+# newest-encoded-date first) rather than `ls -1t` (mtime order). This test
+# matches that logic. File mtimes are NOT used to determine order — the fixture
+# dates are encoded in filenames, which is what `sort -r` reads.
 #
 # Run: bash scripts/test-backup-prune.sh   (no NAS, no SSH — pure local fixture)
 set -euo pipefail
@@ -30,9 +43,10 @@ portable_dow() {
         || { echo "SKIP: neither GNU nor BSD date is available — cannot determine weekday" >&2; exit 77; }
 }
 
-# ── The prune logic under test — kept byte-identical to backup-to-nas.sh's
+# ── The prune logic under test — kept logically identical to backup-to-nas.sh's
 #    remote heredoc body (the `cd "$1"` + array-slice retention). If you change
-#    one, change the other. ──────────────────────────────────────────────────
+#    one, change the other. Both now use `ls -1 | sort -r` for date-based
+#    ordering rather than `ls -1t` (mtime order). ─────────────────────────────
 prune_dir() {
     set -euo pipefail
     cd "$1" || exit 0
@@ -43,7 +57,7 @@ prune_dir() {
     all=()
     while IFS= read -r line; do
         all+=("$line")
-    done < <(ls -1t memory-*.db 2>/dev/null || true)
+    done < <(ls -1 memory-*.db 2>/dev/null | sort -r || true)
 
     i=0
     for f in ${all[@]+"${all[@]}"}; do
@@ -77,7 +91,8 @@ prune_dir() {
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # ── Fixture: 40 consecutive daily snapshots ending 2026-06-18 (a Thursday).
-#    mtime set so `ls -1t` orders them newest-first deterministically. ─────────
+#    Order is determined by the encoded date in the filename (lexical descending
+#    via `sort -r`). File mtimes are irrelevant and are not set specially. ──────
 tmp=$(mktemp -d)
 expected=$(mktemp)
 # Single top-level cleanup trap for ALL temp paths. prune_dir is invoked in a
@@ -88,13 +103,11 @@ trap 'rm -rf "$tmp" "$expected"' EXIT
 ANCHOR="2026-06-18"
 
 # Build 40 days back from the anchor using the portable helper.
+# Mtimes are not set specially — ordering is determined by the encoded date in
+# the filename, which `ls -1 | sort -r` reads lexically (newest = i=0).
 for i in $(seq 0 39); do
     day=$(portable_date_minus "$ANCHOR" "$i")
-    f="$tmp/memory-${day}-0300.db"
-    : > "$f"
-    # Older files get older mtimes so `ls -t` is deterministic (newest = i=0).
-    touch -d "$ANCHOR -${i} days" "$f" 2>/dev/null \
-        || touch -t "$(date -u -j -v-"${i}"d -f '%Y-%m-%d' "$ANCHOR" +%Y%m%d0300)" "$f"
+    : > "$tmp/memory-${day}-0300.db"
 done
 
 total_before=$(ls -1 "$tmp"/memory-*.db | wc -l | tr -d ' ')
