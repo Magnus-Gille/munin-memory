@@ -8,6 +8,14 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Added
+
+- **`MUNIN_CONSOLIDATION_MAX_ATTEMPTS` env var (default `2`).** Number of synthesis call+parse attempts per consolidation run before recording a circuit-breaker failure.
+
+### Fixed
+
+- **Consolidation worker re-rolls on malformed LLM JSON before tripping the breaker (#131).** The synthesis call is retried up to `MUNIN_CONSOLIDATION_MAX_ATTEMPTS` times. The model intermittently returns unparseable JSON (bad escapes, empty responses) non-deterministically; a single bad sample previously counted toward the circuit breaker, generating spurious "consolidation worker failing/tripped" alerts. A transient glitch now self-heals within the run.
+
 ## [0.3.3] — 2026-06-20
 
 ### Added

@@ -565,6 +565,73 @@ describe("consolidateNamespace", () => {
     expect(mockCallApi).not.toHaveBeenCalled();
   });
 
+  // ─── Retry on transient malformed-JSON response (#131) ────────────────────
+  // The LLM intermittently returns unparseable / non-JSON content (bad escapes,
+  // empty responses). A single bad sample should re-roll, not count toward the
+  // circuit breaker — the failures are non-deterministic, so a retry usually
+  // lands valid JSON.
+
+  it("retries the synthesis call when the first response is unparseable, then succeeds", async () => {
+    for (let i = 0; i < 3; i++) {
+      appendLog(db, "projects/retry-ok", `Log ${i}`, []);
+    }
+
+    const badThenGood = vi
+      .fn<(prompt: string) => Promise<ChatCompletionResponse>>()
+      .mockResolvedValueOnce({
+        choices: [{ message: { content: "Sorry, here is the summary: (no JSON)" } }],
+        usage: { prompt_tokens: 500, completion_tokens: 50 },
+      })
+      .mockResolvedValue(cannedResponse);
+
+    const result = await consolidateNamespace(db, "projects/retry-ok", badThenGood);
+
+    expect(result.error).toBeUndefined();
+    expect(result.logs_processed).toBe(3);
+    expect(badThenGood).toHaveBeenCalledTimes(2);
+
+    const synthesis = db
+      .prepare("SELECT content FROM entries WHERE namespace = ? AND key = 'synthesis'")
+      .get("projects/retry-ok") as { content: string } | undefined;
+    expect(synthesis!.content).toBe(cannedSynthesisResult.status_content);
+  });
+
+  it("does not retry when the first attempt parses successfully", async () => {
+    for (let i = 0; i < 3; i++) {
+      appendLog(db, "projects/retry-none", `Log ${i}`, []);
+    }
+
+    const result = await consolidateNamespace(db, "projects/retry-none", mockCallApi);
+
+    expect(result.error).toBeUndefined();
+    expect(mockCallApi).toHaveBeenCalledTimes(1);
+  });
+
+  it("counts a circuit-breaker failure only after every attempt fails (no DB writes)", async () => {
+    for (let i = 0; i < 3; i++) {
+      appendLog(db, "projects/retry-fail", `Log ${i}`, []);
+    }
+
+    const alwaysBad = vi
+      .fn<(prompt: string) => Promise<ChatCompletionResponse>>()
+      .mockResolvedValue({
+        choices: [{ message: { content: "no valid json here at all" } }],
+        usage: { prompt_tokens: 500, completion_tokens: 50 },
+      });
+
+    const result = await consolidateNamespace(db, "projects/retry-fail", alwaysBad);
+
+    expect(result.error).toBeDefined();
+    expect(result.logs_processed).toBe(0);
+    // Default MUNIN_CONSOLIDATION_MAX_ATTEMPTS = 2 → one initial call + one retry.
+    expect(alwaysBad).toHaveBeenCalledTimes(2);
+
+    const synthesis = db
+      .prepare("SELECT * FROM entries WHERE namespace = ? AND key = 'synthesis'")
+      .get("projects/retry-fail");
+    expect(synthesis).toBeUndefined();
+  });
+
   it("returns error when no API key is available", async () => {
     for (let i = 0; i < 3; i++) {
       appendLog(db, "projects/no-key", `Log ${i}`, []);
@@ -937,7 +1004,9 @@ describe("circuit breaker", () => {
     let callCount = 0;
     const mixedCallApi = vi.fn().mockImplementation(() => {
       callCount++;
-      if (callCount === 1) {
+      // Reject every attempt for the first namespace so retries are exhausted and
+      // a real error surfaces (#131); succeed on the next namespace.
+      if (callCount <= _consolidationConfig.maxAttempts) {
         return Promise.reject(new Error("Fail 1"));
       }
       return Promise.resolve(cannedResponse);
@@ -950,7 +1019,8 @@ describe("circuit breaker", () => {
     const r2 = await consolidateNamespace(db, "projects/ok1", mixedCallApi);
     expect(r2.error).toBeUndefined();
     expect(r2.logs_processed).toBeGreaterThan(0);
-    expect(callCount).toBe(2);
+    // fail1 consumed maxAttempts calls (all rejected); ok1 succeeded on its first.
+    expect(callCount).toBe(_consolidationConfig.maxAttempts + 1);
   });
 
   it("resetConsolidationCircuitBreaker clears tripped state", () => {

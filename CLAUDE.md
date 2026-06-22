@@ -687,6 +687,7 @@ Enforcement is two-layered:
 | `MUNIN_DISPLAY_TIMEZONE` | `Europe/Stockholm` | IANA timezone for display timestamps (storage stays UTC) |
 | `MUNIN_CONSOLIDATION_ENABLED` | `false` | Enable the consolidation background worker |
 | `MUNIN_CONSOLIDATION_MODEL` | `anthropic/claude-haiku-4-5-20251001` | OpenRouter model ID for synthesis |
+| `MUNIN_CONSOLIDATION_MAX_ATTEMPTS` | `2` | Synthesis call+parse attempts per run before recording a circuit-breaker failure. The LLM intermittently returns unparseable JSON non-deterministically; a re-roll usually lands valid JSON, so a transient glitch self-heals instead of tripping the breaker (#131). |
 | `OPENROUTER_API_KEY` | — | OpenRouter API key for consolidation worker (required when consolidation enabled) |
 
 ## Important constraints
