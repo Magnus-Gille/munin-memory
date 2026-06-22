@@ -565,6 +565,90 @@ describe("consolidateNamespace", () => {
     expect(mockCallApi).not.toHaveBeenCalled();
   });
 
+  // ─── Retry on transient malformed-JSON response (#131) ────────────────────
+  // The LLM intermittently returns unparseable / non-JSON content (bad escapes,
+  // empty responses). A single bad sample should re-roll, not count toward the
+  // circuit breaker — the failures are non-deterministic, so a retry usually
+  // lands valid JSON.
+
+  it("retries the synthesis call when the first response is unparseable, then succeeds", async () => {
+    for (let i = 0; i < 3; i++) {
+      appendLog(db, "projects/retry-ok", `Log ${i}`, []);
+    }
+
+    const badThenGood = vi
+      .fn<(prompt: string) => Promise<ChatCompletionResponse>>()
+      .mockResolvedValueOnce({
+        choices: [{ message: { content: "Sorry, here is the summary: (no JSON)" } }],
+        usage: { prompt_tokens: 500, completion_tokens: 50 },
+      })
+      .mockResolvedValue(cannedResponse);
+
+    const result = await consolidateNamespace(db, "projects/retry-ok", badThenGood);
+
+    expect(result.error).toBeUndefined();
+    expect(result.logs_processed).toBe(3);
+    expect(badThenGood).toHaveBeenCalledTimes(2);
+
+    const synthesis = db
+      .prepare("SELECT content FROM entries WHERE namespace = ? AND key = 'synthesis'")
+      .get("projects/retry-ok") as { content: string } | undefined;
+    expect(synthesis!.content).toBe(cannedSynthesisResult.status_content);
+  });
+
+  it("does not retry when the first attempt parses successfully", async () => {
+    for (let i = 0; i < 3; i++) {
+      appendLog(db, "projects/retry-none", `Log ${i}`, []);
+    }
+
+    const result = await consolidateNamespace(db, "projects/retry-none", mockCallApi);
+
+    expect(result.error).toBeUndefined();
+    expect(mockCallApi).toHaveBeenCalledTimes(1);
+  });
+
+  it("exhausts all attempts on a persistent parse failure, then errors with no DB writes", async () => {
+    for (let i = 0; i < 3; i++) {
+      appendLog(db, "projects/retry-fail", `Log ${i}`, []);
+    }
+
+    const alwaysBad = vi
+      .fn<(prompt: string) => Promise<ChatCompletionResponse>>()
+      .mockResolvedValue({
+        choices: [{ message: { content: "no valid json here at all" } }],
+        usage: { prompt_tokens: 500, completion_tokens: 50 },
+      });
+
+    const result = await consolidateNamespace(db, "projects/retry-fail", alwaysBad);
+
+    expect(result.error).toBeDefined();
+    expect(result.logs_processed).toBe(0);
+    // Default MUNIN_CONSOLIDATION_MAX_ATTEMPTS = 2 → one initial call + one retry.
+    expect(alwaysBad).toHaveBeenCalledTimes(2);
+
+    const synthesis = db
+      .prepare("SELECT * FROM entries WHERE namespace = ? AND key = 'synthesis'")
+      .get("projects/retry-fail");
+    expect(synthesis).toBeUndefined();
+  });
+
+  it("does not retry an API-call error — surfaces it on the first attempt", async () => {
+    for (let i = 0; i < 3; i++) {
+      appendLog(db, "projects/api-err", `Log ${i}`, []);
+    }
+
+    const apiError = vi
+      .fn<(prompt: string) => Promise<ChatCompletionResponse>>()
+      .mockRejectedValue(new Error("OpenRouter API error 401: Unauthorized"));
+
+    const result = await consolidateNamespace(db, "projects/api-err", apiError);
+
+    expect(result.error).toContain("401");
+    // Auth/quota/4xx errors are deterministic — retrying cannot fix them, so the
+    // call must not be repeated (#131).
+    expect(apiError).toHaveBeenCalledTimes(1);
+  });
+
   it("returns error when no API key is available", async () => {
     for (let i = 0; i < 3; i++) {
       appendLog(db, "projects/no-key", `Log ${i}`, []);
@@ -943,7 +1027,9 @@ describe("circuit breaker", () => {
       return Promise.resolve(cannedResponse);
     });
 
-    // Test via direct consolidateNamespace calls (simulating what batch does)
+    // Test via direct consolidateNamespace calls (simulating what batch does).
+    // The rejection is an API-call error (not a parse failure), so it is NOT
+    // retried (#131) — it surfaces on the first attempt, consuming one call.
     const r1 = await consolidateNamespace(db, "projects/fail1", mixedCallApi);
     expect(r1.error).toContain("Fail 1");
 
@@ -964,6 +1050,97 @@ describe("circuit breaker", () => {
     _setWorkerDb(null);
     await processConsolidationBatch();
     _setApiKey(null);
+  });
+});
+
+// ─── Retry × circuit-breaker interaction at the batch level (#131) ────────────
+// The retry lives inside consolidateNamespace; the breaker counter lives in
+// processConsolidationBatch. These tests stub global fetch to prove the headline
+// contract end-to-end: a transient parse glitch that recovers on retry must NOT
+// increment the breaker, and a persistent one must increment it exactly once.
+
+describe("consolidation retry × circuit breaker (#131)", () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  let logSpy: ReturnType<typeof vi.spyOn>;
+
+  const okResponse = {
+    ok: true,
+    status: 200,
+    json: () =>
+      Promise.resolve({
+        choices: [{ message: { content: JSON.stringify(cannedSynthesisResult) } }],
+        usage: { prompt_tokens: 500, completion_tokens: 300 },
+      }),
+  } as unknown as Response;
+
+  const badContentResponse = {
+    ok: true,
+    status: 200,
+    json: () =>
+      Promise.resolve({
+        choices: [{ message: { content: "here is your summary (not json)" } }],
+        usage: { prompt_tokens: 500, completion_tokens: 50 },
+      }),
+  } as unknown as Response;
+
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    resetConsolidationCircuitBreaker();
+    _resetHealthState();
+    _setApiKey("fake-key");
+    _setWorkerDb(db);
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+    warnSpy.mockRestore();
+    logSpy.mockRestore();
+    _setApiKey(null);
+    _setWorkerDb(null);
+    resetConsolidationCircuitBreaker();
+    _resetHealthState();
+  });
+
+  it("a transient parse failure that recovers on retry does NOT increment the breaker", async () => {
+    for (let i = 0; i < _consolidationConfig.minLogs; i++) {
+      appendLog(db, "projects/cb-retry-ok", `Log ${i}`, []);
+    }
+
+    const fetchMock = vi.fn().mockResolvedValueOnce(badContentResponse).mockResolvedValue(okResponse);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await processConsolidationBatch();
+
+    globalThis.fetch = originalFetch;
+
+    // Bad-then-good within one run: synthesis succeeds, breaker stays clean.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(getConsolidationHealth().failures).toBe(0);
+    expect(getConsolidationHealth().circuit_breaker_tripped).toBe(false);
+    expect(readState(db, "projects/cb-retry-ok", "synthesis")).not.toBeNull();
+  });
+
+  it("a persistent parse failure increments the breaker exactly once per namespace", async () => {
+    for (let i = 0; i < _consolidationConfig.minLogs; i++) {
+      appendLog(db, "projects/cb-retry-fail", `Log ${i}`, []);
+    }
+
+    const fetchMock = vi.fn().mockResolvedValue(badContentResponse);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await processConsolidationBatch();
+
+    globalThis.fetch = originalFetch;
+
+    // One namespace, all attempts fail → maxAttempts calls, exactly ONE failure.
+    expect(fetchMock).toHaveBeenCalledTimes(_consolidationConfig.maxAttempts);
+    expect(getConsolidationHealth().failures).toBe(1);
+    expect(readState(db, "projects/cb-retry-fail", "synthesis")).toBeNull();
   });
 });
 

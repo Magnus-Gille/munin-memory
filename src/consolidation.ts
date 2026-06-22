@@ -121,6 +121,11 @@ const config = {
   // ticks instead of producing one synthesis that overflows max_tokens,
   // truncates, fails to parse, and eventually trips the circuit breaker (#51).
   maxLogsPerRun: parseInt(process.env.MUNIN_CONSOLIDATION_MAX_LOGS_PER_RUN ?? "15", 10) || 15,
+  // How many times to call+parse the synthesis per run before giving up. The
+  // LLM intermittently returns unparseable JSON (bad escapes, empty responses)
+  // non-deterministically, so a single re-roll usually lands valid JSON and
+  // keeps a transient glitch from counting toward the circuit breaker (#131).
+  maxAttempts: Math.max(1, parseInt(process.env.MUNIN_CONSOLIDATION_MAX_ATTEMPTS ?? "2", 10) || 2),
 };
 
 // --- OpenRouter API types ---
@@ -614,16 +619,37 @@ function readLogsWindow(
 async function callAndParseSynthesis(
   doCall: (prompt: string) => Promise<ChatCompletionResponse>,
   prompt: string,
+  maxAttempts: number = config.maxAttempts,
 ): Promise<{ response: ChatCompletionResponse; result: SynthesisResult; durationMs: number }> {
+  // Re-roll on an unparseable response before surfacing the error. The model's
+  // malformed-JSON failures are non-deterministic, so a fresh sample usually
+  // parses — this stops a transient glitch from counting toward the circuit
+  // breaker (#131). Retries cover ONLY response-shape/parse failures: an error
+  // thrown by the API call itself (auth, quota, 4xx/5xx) is deterministic for a
+  // given config, so it propagates immediately rather than burning extra calls.
+  // startTime is outside the loop so durationMs reflects the real run cost
+  // (failed attempts + the successful retry), not just the last attempt.
   const startTime = Date.now();
-  const response = await doCall(prompt);
-  const durationMs = Date.now() - startTime;
-  const text = response.choices?.[0]?.message?.content;
-  if (!text) {
-    throw new Error("Unexpected response format: no content in first choice");
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const response = await doCall(prompt);
+    try {
+      const text = response.choices?.[0]?.message?.content;
+      if (!text) {
+        throw new Error("Unexpected response format: no content in first choice");
+      }
+      const result = parseSynthesisResponse(text);
+      return { response, result, durationMs: Date.now() - startTime };
+    } catch (err) {
+      lastError = err;
+      if (attempt < maxAttempts) {
+        console.warn(
+          `consolidation: synthesis parse attempt ${attempt}/${maxAttempts} failed, retrying: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
   }
-  const result = parseSynthesisResponse(text);
-  return { response, result, durationMs };
+  throw lastError;
 }
 
 export async function consolidateNamespace(
