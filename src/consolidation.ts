@@ -621,27 +621,30 @@ async function callAndParseSynthesis(
   prompt: string,
   maxAttempts: number = config.maxAttempts,
 ): Promise<{ response: ChatCompletionResponse; result: SynthesisResult; durationMs: number }> {
-  // Re-roll on a failed call/parse before surfacing the error. The model's
+  // Re-roll on an unparseable response before surfacing the error. The model's
   // malformed-JSON failures are non-deterministic, so a fresh sample usually
   // parses — this stops a transient glitch from counting toward the circuit
-  // breaker (#131). Only the final attempt's error propagates.
+  // breaker (#131). Retries cover ONLY response-shape/parse failures: an error
+  // thrown by the API call itself (auth, quota, 4xx/5xx) is deterministic for a
+  // given config, so it propagates immediately rather than burning extra calls.
+  // startTime is outside the loop so durationMs reflects the real run cost
+  // (failed attempts + the successful retry), not just the last attempt.
+  const startTime = Date.now();
   let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const startTime = Date.now();
+    const response = await doCall(prompt);
     try {
-      const response = await doCall(prompt);
-      const durationMs = Date.now() - startTime;
       const text = response.choices?.[0]?.message?.content;
       if (!text) {
         throw new Error("Unexpected response format: no content in first choice");
       }
       const result = parseSynthesisResponse(text);
-      return { response, result, durationMs };
+      return { response, result, durationMs: Date.now() - startTime };
     } catch (err) {
       lastError = err;
       if (attempt < maxAttempts) {
         console.warn(
-          `consolidation: synthesis attempt ${attempt}/${maxAttempts} failed, retrying: ${err instanceof Error ? err.message : String(err)}`,
+          `consolidation: synthesis parse attempt ${attempt}/${maxAttempts} failed, retrying: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     }

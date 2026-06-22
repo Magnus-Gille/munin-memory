@@ -14,7 +14,7 @@ changelog is the canonical record of what moved.
 
 ### Fixed
 
-- **Consolidation worker re-rolls on malformed LLM JSON before tripping the breaker (#131).** The synthesis call is retried up to `MUNIN_CONSOLIDATION_MAX_ATTEMPTS` times. The model intermittently returns unparseable JSON (bad escapes, empty responses) non-deterministically; a single bad sample previously counted toward the circuit breaker, generating spurious "consolidation worker failing/tripped" alerts. A transient glitch now self-heals within the run.
+- **Consolidation worker re-rolls on malformed LLM JSON before tripping the breaker (#131).** The synthesis call is retried up to `MUNIN_CONSOLIDATION_MAX_ATTEMPTS` times. The model intermittently returns unparseable JSON (bad escapes, empty responses) non-deterministically; a single bad sample previously counted toward the circuit breaker, generating spurious "consolidation worker failing/tripped" alerts. A transient glitch now self-heals within the run. Only response-shape/parse failures are retried — deterministic API errors (auth/quota/4xx) still propagate immediately without burning extra calls.
 
 ## [0.3.3] — 2026-06-20
 
