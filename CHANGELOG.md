@@ -8,6 +8,8 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+## [0.3.4] — 2026-06-24
+
 ### Added
 
 - **`MUNIN_CONSOLIDATION_MAX_ATTEMPTS` env var (default `2`).** Number of synthesis call+parse attempts per consolidation run before recording a circuit-breaker failure.
