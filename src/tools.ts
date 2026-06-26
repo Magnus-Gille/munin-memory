@@ -1133,6 +1133,10 @@ function getAttentionSeverity(category: AttentionItem["category"]): AttentionIte
     case "missing_status":
     case "missing_lifecycle":
       return "medium";
+    case "retrieved_unused":
+    case "consolidation_backlog":
+    case "consolidation_circuit_breaker":
+      return "low";
     default:
       return "low";
   }
@@ -1173,6 +1177,9 @@ function buildAttentionItem(
       break;
     case "expired":
       reason = "Status validity window has expired.";
+      break;
+    case "retrieved_unused":
+      reason = "Entries repeatedly retrieved but never opened or acted on.";
       break;
     default:
       reason = suggestion;
@@ -3675,6 +3682,16 @@ const SIGNAL_STALENESS_PRESSURE_THRESHOLD = 0.5;
 const SIGNAL_NO_FOLLOWTHROUGH_THRESHOLD = 0.05;
 const SIGNAL_NO_FOLLOWTHROUGH_MIN_IMPRESSIONS = 5;
 
+// --- Retrieved-but-unused signal thresholds ---
+/** Minimum impression count (within the rolling window) to qualify an entry as "unused". */
+const RETRIEVED_UNUSED_MIN_IMPRESSIONS = 5;
+/** Minimum qualifying entries before a memory_patterns PatternItem is emitted. */
+const RETRIEVED_UNUSED_PATTERN_MIN = 2;
+/** Minimum qualifying entries before a memory_orient MaintenanceItem is emitted. */
+const RETRIEVED_UNUSED_ORIENT_MIN = 3;
+/** Rolling window in days for both surfaces. */
+const RETRIEVED_UNUSED_SINCE_DAYS = 30;
+
 function computeEntryInsight(row: {
   entry_id: string;
   namespace: string | null;
@@ -3957,6 +3974,29 @@ export function registerTools(
                   };
                   maintenanceSortKey.set(cbItem, "");
                   maintenanceNeeded.push(cbItem);
+                }
+
+                // Block 3: Retrieved-but-unused signal — entries repeatedly shown in search
+                // results with zero follow-through over the rolling window.
+                // Restricted to projects/* and clients/* at SQL level so reference namespaces
+                // (meta/*, documents/*, people/*, decisions/*, reading/*, signals/*, digests/*)
+                // are excluded before LIMIT rather than as a post-filter.
+                {
+                  const sinceWindowOrient = new Date(Date.now() - RETRIEVED_UNUSED_SINCE_DAYS * 86400000).toISOString();
+                  const hasRecent = db.prepare("SELECT 1 FROM retrieval_events WHERE timestamp >= ? LIMIT 1").get(sinceWindowOrient);
+                  const unusedOrient = hasRecent
+                    ? getInsightsByEntry(db, undefined, RETRIEVED_UNUSED_MIN_IMPRESSIONS, 10, sinceWindowOrient, true)
+                        .filter((r) => r.followthrough_events === 0)
+                    : [];
+                  if (unusedOrient.length >= RETRIEVED_UNUSED_ORIENT_MIN) {
+                    const unusedOrientItem: MaintenanceItem = {
+                      namespace: null,
+                      issue: "retrieved_unused",
+                      suggestion: `${unusedOrient.length} entr${unusedOrient.length === 1 ? "y" : "ies"} retrieved ${RETRIEVED_UNUSED_MIN_IMPRESSIONS}+ times (last ${RETRIEVED_UNUSED_SINCE_DAYS}d) with zero follow-through. Run memory_patterns to review.`,
+                    };
+                    maintenanceSortKey.set(unusedOrientItem, "");
+                    maintenanceNeeded.push(unusedOrientItem);
+                  }
                 }
               }
 
@@ -4794,6 +4834,29 @@ export function registerTools(
                 });
               }
 
+              // Retrieved-but-unused pattern (owner-only).
+              // Surfaces entries that are repeatedly shown in search results but
+              // never opened or acted on — a signal that they may be noise or
+              // mislabelled, or that retrieval recall is too aggressive.
+              // Restricted to tracked namespaces (projects/*, clients/*) in SQL to
+              // avoid false positives from reference namespaces (meta/*, documents/*, etc.).
+              if (ctx.principalType === "owner") {
+                const sinceWindow = new Date(Date.now() - RETRIEVED_UNUSED_SINCE_DAYS * 86400000).toISOString();
+                const unused = getInsightsByEntry(db, namespace, RETRIEVED_UNUSED_MIN_IMPRESSIONS, 20, sinceWindow, true)
+                  .filter((r) => r.followthrough_events === 0);
+                if (unused.length >= RETRIEVED_UNUSED_PATTERN_MIN) {
+                  const unusedIds = unused.slice(0, 6).map((r) => r.entry_id);
+                  unusedIds.forEach((id) => sourceIds.add(id));
+                  patterns.push({
+                    kind: "retrieved_unused",
+                    summary: `${unused.length} entr${unused.length === 1 ? "y" : "ies"} retrieved ${RETRIEVED_UNUSED_MIN_IMPRESSIONS}+ times in the last ${RETRIEVED_UNUSED_SINCE_DAYS} days with zero follow-through. Run memory_insights to review.`,
+                    confidence: Math.min(0.85, 0.5 + unused.length * 0.05),
+                    source_entry_ids: unusedIds,
+                    source_namespaces: [...new Set(unused.slice(0, 6).map((r) => r.namespace).filter((n): n is string => n !== null))],
+                  });
+                }
+              }
+
               const sortedPatterns = patterns
                 .sort((a, b) => b.confidence - a.confidence || a.summary.localeCompare(b.summary))
                 .slice(0, limit);
@@ -5522,6 +5585,14 @@ export function registerTools(
                   }
                   if (isStale(parsed.updated_at)) {
                     result.stale = true;
+                  }
+                  // Analytics: log opened_result outcome (mirrors memory_read behaviour)
+                  if (sessionId) {
+                    logRetrievalOutcome(db, sessionId, {
+                      outcomeType: "opened_result",
+                      entryId: parsed.id,
+                      namespace: parsed.namespace,
+                    });
                   }
                   return result;
                 }

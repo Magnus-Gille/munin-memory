@@ -2145,12 +2145,22 @@ export function logRetrievalOutcome(
  * Impressions counted only from memory_query and memory_attention events
  * (result_ids non-empty). staleness_pressure = fraction of opened_result outcomes
  * where the entry was older than 14 days at the time of opening.
+ *
+ * @param since Optional ISO 8601 timestamp. When provided, only impression events
+ *   at or after this timestamp are counted, bounding results to a rolling window.
+ *   Default behavior (undefined) is unbounded.
+ * @param restrictToTracked When true, restrict results to entries in tracked/operational
+ *   namespaces (projects/* and clients/*) only. Applied at the SQL level before LIMIT,
+ *   preventing reference namespaces (meta/*, documents/*, people/*, etc.) from consuming
+ *   limit slots or producing false-positive "unused" signals.
  */
 export function getInsightsByEntry(
   db: Database.Database,
   namespace?: string,
   minImpressions = 3,
   limit = 20,
+  since?: string,
+  restrictToTracked?: boolean,
 ): EntryInsightRow[] {
   const clampedLimit = Math.min(Math.max(limit, 1), 50);
 
@@ -2167,6 +2177,15 @@ export function getInsightsByEntry(
     }
   }
 
+  // Restrict to tracked (operational) namespaces — literal LIKE patterns, no extra params.
+  const trackedFilter = restrictToTracked
+    ? "AND (e.namespace LIKE 'projects/%' OR e.namespace LIKE 'clients/%')"
+    : "";
+
+  // Optional rolling-window filter on impression event timestamp
+  const sinceFilter = since ? "AND rev.timestamp >= ?" : "";
+  const sinceParams: unknown[] = since ? [since] : [];
+
   const sql = `
     WITH impressions_cte AS (
       -- One row per (entry_id, event_id) from query/attention events with results
@@ -2177,6 +2196,7 @@ export function getInsightsByEntry(
            json_each(rev.result_ids) AS e_json
       WHERE rev.tool_name IN ('memory_query', 'memory_attention')
         AND json_array_length(rev.result_ids) > 0
+        ${sinceFilter}
     ),
     opens_cte AS (
       SELECT ro.entry_id, ro.retrieval_event_id
@@ -2222,6 +2242,7 @@ export function getInsightsByEntry(
       AND ro_l.outcome_type = 'log_in_result_namespace'
     WHERE TRUE
       ${nsFilter}
+      ${trackedFilter}
     GROUP BY imp.entry_id, e.namespace, e.updated_at
     HAVING COUNT(DISTINCT imp.event_id) >= ?
     ORDER BY impressions DESC
@@ -2230,7 +2251,7 @@ export function getInsightsByEntry(
 
   return db
     .prepare(sql)
-    .all(...nsParams, minImpressions, clampedLimit) as EntryInsightRow[];
+    .all(...sinceParams, ...nsParams, minImpressions, clampedLimit) as EntryInsightRow[];
 }
 
 /**

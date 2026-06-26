@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import type { AccessContext } from "../src/access.js";
 import { initDatabase, writeState } from "../src/db.js";
 import { registerTools } from "../src/tools.js";
 
@@ -441,5 +442,316 @@ describe("memory_insights tool", () => {
     const clampEntry = result.entries.find((e) => e.entry_id === entry.id);
     expect(clampEntry).toBeDefined();
     expect(clampEntry!.followthrough_rate).toBeLessThanOrEqual(1.0);
+  });
+});
+
+// -----------------------------------------------------------------------
+// Helper: create a callTool bound to a given AccessContext
+// -----------------------------------------------------------------------
+function makeCallTool(
+  db: Database.Database,
+  ctx: AccessContext,
+  sid = "test-session-owner",
+): (name: string, args?: Record<string, unknown>) => Promise<unknown> {
+  const s = new Server(
+    { name: "test-munin-unused", version: "0.0.1" },
+    { capabilities: { tools: {} } },
+  );
+  registerTools(s, db, sid, ctx);
+  return async (name: string, args: Record<string, unknown> = {}) => {
+    const handler = (
+      s as unknown as { _requestHandlers: Map<string, Function> }
+    )._requestHandlers?.get("tools/call");
+    if (!handler) throw new Error("no handler");
+    return handler({ method: "tools/call", params: { name, arguments: args } });
+  };
+}
+
+function ownerCtx(): AccessContext {
+  return { principalId: "owner", principalType: "owner", accessibleNamespaces: [] };
+}
+
+function agentCtx(): AccessContext {
+  return {
+    principalId: "agent:test",
+    principalType: "agent",
+    accessibleNamespaces: [{ pattern: "projects/*", permissions: "rw" }],
+  };
+}
+
+/**
+ * Seed `count` impression events (memory_query, no outcomes) for `entryId`.
+ * Returns a fresh-enough ISO timestamp so the rolling window covers them.
+ */
+function seedImpressions(
+  db: Database.Database,
+  entryId: string,
+  count: number,
+  prefix: string,
+): void {
+  const now = new Date().toISOString();
+  for (let i = 0; i < count; i++) {
+    db.prepare(
+      `INSERT INTO retrieval_events (id, session_id, timestamp, tool_name, result_ids, result_namespaces, result_ranks)
+       VALUES (?, ?, ?, 'memory_query', json_array(?), '[]', '[]')`,
+    ).run(`evt-${prefix}-${i}`, `sess-${prefix}`, now, entryId);
+  }
+}
+
+/** Seed a single opened_result outcome for the most recent event of an entry. */
+function seedOpenOutcome(
+  db: Database.Database,
+  entryId: string,
+  prefix: string,
+): void {
+  const event = db
+    .prepare(
+      `SELECT id FROM retrieval_events WHERE result_ids LIKE '%' || ? || '%' ORDER BY timestamp DESC LIMIT 1`,
+    )
+    .get(entryId) as { id: string } | undefined;
+  if (!event) throw new Error("No event found for entryId: " + entryId);
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO retrieval_outcomes (id, retrieval_event_id, timestamp, outcome_type, entry_id)
+     VALUES (?, ?, ?, 'opened_result', ?)`,
+  ).run(`out-${prefix}`, event.id, now, entryId);
+}
+
+// -----------------------------------------------------------------------
+// memory_patterns — retrieved_unused pattern
+// -----------------------------------------------------------------------
+describe("memory_patterns — retrieved_unused pattern", () => {
+  it("emits retrieved_unused pattern when >=2 entries have >=5 impressions and zero follow-through (owner)", async () => {
+    const call = makeCallTool(db, ownerCtx());
+
+    // Create two entries
+    writeState(db, "projects/unused-a", "status", "unused project alpha", ["active"]);
+    writeState(db, "projects/unused-b", "status", "unused project beta", ["active"]);
+    const entryA = (db.prepare("SELECT id FROM entries WHERE namespace = 'projects/unused-a' AND key = 'status'").get() as { id: string }).id;
+    const entryB = (db.prepare("SELECT id FROM entries WHERE namespace = 'projects/unused-b' AND key = 'status'").get() as { id: string }).id;
+
+    seedImpressions(db, entryA, 5, "ua");
+    seedImpressions(db, entryB, 5, "ub");
+
+    const raw = await call("memory_patterns", {});
+    const result = parseToolResponse(raw) as { patterns: Array<{ kind: string; summary: string; source_entry_ids: string[] }> };
+
+    const unusedPattern = result.patterns.find((p) => p.kind === "retrieved_unused");
+    expect(unusedPattern).toBeDefined();
+    expect(unusedPattern!.source_entry_ids.length).toBeGreaterThan(0);
+  });
+
+  it("pattern fires from qualifying entries and excludes the entry with a positive outcome", async () => {
+    const call = makeCallTool(db, ownerCtx());
+
+    // Entry A: 5 impressions, no outcome → qualifies
+    writeState(db, "projects/out-a", "status", "outcome project alpha", ["active"]);
+    const entryA = (db.prepare("SELECT id FROM entries WHERE namespace = 'projects/out-a' AND key = 'status'").get() as { id: string }).id;
+    seedImpressions(db, entryA, 5, "ot-a");
+
+    // Entry B: 5 impressions + opened_result → disqualified (has follow-through)
+    writeState(db, "projects/out-b", "status", "outcome project beta", ["active"]);
+    const entryB = (db.prepare("SELECT id FROM entries WHERE namespace = 'projects/out-b' AND key = 'status'").get() as { id: string }).id;
+    seedImpressions(db, entryB, 5, "ot-b");
+    seedOpenOutcome(db, entryB, "ot-b");
+
+    // Entry C: 5 impressions, no outcome → qualifies
+    writeState(db, "projects/out-c", "status", "outcome project gamma", ["active"]);
+    const entryC = (db.prepare("SELECT id FROM entries WHERE namespace = 'projects/out-c' AND key = 'status'").get() as { id: string }).id;
+    seedImpressions(db, entryC, 5, "ot-c");
+
+    // A and C qualify (count=2 >= RETRIEVED_UNUSED_PATTERN_MIN) → pattern fires
+    const raw = await call("memory_patterns", {});
+    const result = parseToolResponse(raw) as { patterns: Array<{ kind: string; source_entry_ids: string[] }> };
+    const unusedPattern = result.patterns.find((p) => p.kind === "retrieved_unused");
+    expect(unusedPattern).toBeDefined();
+    // B must not appear in source_entry_ids because it had a follow-through outcome
+    expect(unusedPattern!.source_entry_ids).not.toContain(entryB);
+    // A and C should be in source_entry_ids
+    expect(unusedPattern!.source_entry_ids).toContain(entryA);
+    expect(unusedPattern!.source_entry_ids).toContain(entryC);
+  });
+
+  it("does NOT emit retrieved_unused when impressions < 5", async () => {
+    const call = makeCallTool(db, ownerCtx());
+
+    // Both entries have only 4 impressions (below threshold)
+    writeState(db, "projects/low-imp-a", "status", "low impressions alpha", ["active"]);
+    writeState(db, "projects/low-imp-b", "status", "low impressions beta", ["active"]);
+    const entryA = (db.prepare("SELECT id FROM entries WHERE namespace = 'projects/low-imp-a' AND key = 'status'").get() as { id: string }).id;
+    const entryB = (db.prepare("SELECT id FROM entries WHERE namespace = 'projects/low-imp-b' AND key = 'status'").get() as { id: string }).id;
+    seedImpressions(db, entryA, 4, "li-a");
+    seedImpressions(db, entryB, 4, "li-b");
+
+    const raw = await call("memory_patterns", {});
+    const result = parseToolResponse(raw) as { patterns: Array<{ kind: string }> };
+    expect(result.patterns.find((p) => p.kind === "retrieved_unused")).toBeUndefined();
+  });
+
+  it("does NOT emit retrieved_unused when only 1 entry qualifies", async () => {
+    const call = makeCallTool(db, ownerCtx());
+
+    writeState(db, "projects/solo-unused", "status", "solo unused project", ["active"]);
+    const entryA = (db.prepare("SELECT id FROM entries WHERE namespace = 'projects/solo-unused' AND key = 'status'").get() as { id: string }).id;
+    seedImpressions(db, entryA, 5, "solo");
+
+    const raw = await call("memory_patterns", {});
+    const result = parseToolResponse(raw) as { patterns: Array<{ kind: string }> };
+    expect(result.patterns.find((p) => p.kind === "retrieved_unused")).toBeUndefined();
+  });
+
+  it("does NOT emit retrieved_unused for non-owner context", async () => {
+    const call = makeCallTool(db, agentCtx());
+
+    writeState(db, "projects/agent-unused-a", "status", "agent unused alpha", ["active"]);
+    writeState(db, "projects/agent-unused-b", "status", "agent unused beta", ["active"]);
+    const entryA = (db.prepare("SELECT id FROM entries WHERE namespace = 'projects/agent-unused-a' AND key = 'status'").get() as { id: string }).id;
+    const entryB = (db.prepare("SELECT id FROM entries WHERE namespace = 'projects/agent-unused-b' AND key = 'status'").get() as { id: string }).id;
+    seedImpressions(db, entryA, 5, "ag-a");
+    seedImpressions(db, entryB, 5, "ag-b");
+
+    const raw = await call("memory_patterns", {});
+    const result = parseToolResponse(raw) as { patterns: Array<{ kind: string }> };
+    expect(result.patterns.find((p) => p.kind === "retrieved_unused")).toBeUndefined();
+  });
+
+  it("does NOT include meta/* entries in retrieved_unused pattern", async () => {
+    const call = makeCallTool(db, ownerCtx());
+
+    // meta/ entries should be excluded (only projects/* and clients/* are tracked)
+    writeState(db, "meta/excluded-a", "notes", "meta entry alpha", []);
+    writeState(db, "meta/excluded-b", "notes", "meta entry beta", []);
+    const entryA = (db.prepare("SELECT id FROM entries WHERE namespace = 'meta/excluded-a' AND key = 'notes'").get() as { id: string }).id;
+    const entryB = (db.prepare("SELECT id FROM entries WHERE namespace = 'meta/excluded-b' AND key = 'notes'").get() as { id: string }).id;
+    seedImpressions(db, entryA, 5, "me-a");
+    seedImpressions(db, entryB, 5, "me-b");
+
+    const raw = await call("memory_patterns", {});
+    const result = parseToolResponse(raw) as { patterns: Array<{ kind: string }> };
+    expect(result.patterns.find((p) => p.kind === "retrieved_unused")).toBeUndefined();
+  });
+
+  it("30-day rolling window: old impressions (31d ago) do NOT qualify", async () => {
+    const call = makeCallTool(db, ownerCtx());
+    const oldTs = new Date(Date.now() - 31 * 86400 * 1000).toISOString();
+
+    writeState(db, "projects/old-imp-a", "status", "old impressions alpha", ["active"]);
+    writeState(db, "projects/old-imp-b", "status", "old impressions beta", ["active"]);
+    const entryA = (db.prepare("SELECT id FROM entries WHERE namespace = 'projects/old-imp-a' AND key = 'status'").get() as { id: string }).id;
+    const entryB = (db.prepare("SELECT id FROM entries WHERE namespace = 'projects/old-imp-b' AND key = 'status'").get() as { id: string }).id;
+
+    // Seed 5 impressions per entry, all timestamped 31 days ago (outside the 30d window)
+    for (let i = 0; i < 5; i++) {
+      db.prepare(
+        `INSERT INTO retrieval_events (id, session_id, timestamp, tool_name, result_ids, result_namespaces, result_ranks)
+         VALUES (?, 'sess-old-a', ?, 'memory_query', json_array(?), '[]', '[]')`,
+      ).run(`evt-old-a-${i}`, oldTs, entryA);
+      db.prepare(
+        `INSERT INTO retrieval_events (id, session_id, timestamp, tool_name, result_ids, result_namespaces, result_ranks)
+         VALUES (?, 'sess-old-b', ?, 'memory_query', json_array(?), '[]', '[]')`,
+      ).run(`evt-old-b-${i}`, oldTs, entryB);
+    }
+
+    // Old impressions are outside the rolling window → should NOT qualify
+    const raw = await call("memory_patterns", {});
+    const result = parseToolResponse(raw) as { patterns: Array<{ kind: string }> };
+    expect(result.patterns.find((p) => p.kind === "retrieved_unused")).toBeUndefined();
+  });
+
+  it("30-day rolling window: in-window impressions DO qualify (control)", async () => {
+    const call = makeCallTool(db, ownerCtx());
+    const oldTs = new Date(Date.now() - 31 * 86400 * 1000).toISOString();
+
+    writeState(db, "projects/win-ctrl-a", "status", "window control alpha", ["active"]);
+    writeState(db, "projects/win-ctrl-b", "status", "window control beta", ["active"]);
+    const entryA = (db.prepare("SELECT id FROM entries WHERE namespace = 'projects/win-ctrl-a' AND key = 'status'").get() as { id: string }).id;
+    const entryB = (db.prepare("SELECT id FROM entries WHERE namespace = 'projects/win-ctrl-b' AND key = 'status'").get() as { id: string }).id;
+
+    // Seed 5 OLD impressions per entry (outside window) — should not count
+    for (let i = 0; i < 5; i++) {
+      db.prepare(
+        `INSERT INTO retrieval_events (id, session_id, timestamp, tool_name, result_ids, result_namespaces, result_ranks)
+         VALUES (?, 'sess-wc-old-a', ?, 'memory_query', json_array(?), '[]', '[]')`,
+      ).run(`evt-wc-old-a-${i}`, oldTs, entryA);
+      db.prepare(
+        `INSERT INTO retrieval_events (id, session_id, timestamp, tool_name, result_ids, result_namespaces, result_ranks)
+         VALUES (?, 'sess-wc-old-b', ?, 'memory_query', json_array(?), '[]', '[]')`,
+      ).run(`evt-wc-old-b-${i}`, oldTs, entryB);
+    }
+
+    // Seed 5 IN-WINDOW impressions per entry (now)
+    seedImpressions(db, entryA, 5, "wc-new-a");
+    seedImpressions(db, entryB, 5, "wc-new-b");
+
+    // In-window impressions meet the threshold → pattern fires
+    const raw = await call("memory_patterns", {});
+    const result = parseToolResponse(raw) as { patterns: Array<{ kind: string }> };
+    expect(result.patterns.find((p) => p.kind === "retrieved_unused")).toBeDefined();
+  });
+});
+
+// -----------------------------------------------------------------------
+// memory_orient — retrieved_unused maintenance signal
+// -----------------------------------------------------------------------
+describe("memory_orient — retrieved_unused maintenance signal", () => {
+  it("includes retrieved_unused in maintenance_needed when >=3 entries qualify (owner)", async () => {
+    const call = makeCallTool(db, ownerCtx());
+
+    for (const label of ["a", "b", "c"]) {
+      writeState(db, `projects/orient-unused-${label}`, "status", `orient unused ${label}`, ["active"]);
+      const id = (db.prepare(`SELECT id FROM entries WHERE namespace = 'projects/orient-unused-${label}' AND key = 'status'`).get() as { id: string }).id;
+      seedImpressions(db, id, 5, `oru-${label}`);
+    }
+
+    const raw = await call("memory_orient", {});
+    const result = parseToolResponse(raw) as { maintenance_needed?: Array<{ issue: string }> };
+    const item = (result.maintenance_needed ?? []).find((m) => m.issue === "retrieved_unused");
+    expect(item).toBeDefined();
+  });
+
+  it("does NOT include retrieved_unused when exactly 2 entries qualify (below orient threshold)", async () => {
+    const call = makeCallTool(db, ownerCtx());
+
+    for (const label of ["x", "y"]) {
+      writeState(db, `projects/orient-two-${label}`, "status", `orient two ${label}`, ["active"]);
+      const id = (db.prepare(`SELECT id FROM entries WHERE namespace = 'projects/orient-two-${label}' AND key = 'status'`).get() as { id: string }).id;
+      seedImpressions(db, id, 5, `ot2-${label}`);
+    }
+
+    const raw = await call("memory_orient", {});
+    const result = parseToolResponse(raw) as { maintenance_needed?: Array<{ issue: string }> };
+    const item = (result.maintenance_needed ?? []).find((m) => m.issue === "retrieved_unused");
+    expect(item).toBeUndefined();
+  });
+
+  it("does NOT include retrieved_unused for non-owner context", async () => {
+    const call = makeCallTool(db, agentCtx());
+
+    for (const label of ["p", "q", "r"]) {
+      writeState(db, `projects/orient-agent-${label}`, "status", `orient agent ${label}`, ["active"]);
+      const id = (db.prepare(`SELECT id FROM entries WHERE namespace = 'projects/orient-agent-${label}' AND key = 'status'`).get() as { id: string }).id;
+      seedImpressions(db, id, 5, `oag-${label}`);
+    }
+
+    const raw = await call("memory_orient", {});
+    const result = parseToolResponse(raw) as { maintenance_needed?: Array<{ issue: string }> };
+    const item = (result.maintenance_needed ?? []).find((m) => m.issue === "retrieved_unused");
+    expect(item).toBeUndefined();
+  });
+
+  it("does NOT include meta/* entries in orient retrieved_unused signal", async () => {
+    const call = makeCallTool(db, ownerCtx());
+
+    // Only meta/ entries qualify — should not trigger
+    for (const label of ["d", "e", "f"]) {
+      writeState(db, `meta/orient-meta-${label}`, "notes", `orient meta ${label}`, []);
+      const id = (db.prepare(`SELECT id FROM entries WHERE namespace = 'meta/orient-meta-${label}' AND key = 'notes'`).get() as { id: string }).id;
+      seedImpressions(db, id, 5, `ometa-${label}`);
+    }
+
+    const raw = await call("memory_orient", {});
+    const result = parseToolResponse(raw) as { maintenance_needed?: Array<{ issue: string }> };
+    const item = (result.maintenance_needed ?? []).find((m) => m.issue === "retrieved_unused");
+    expect(item).toBeUndefined();
   });
 });
