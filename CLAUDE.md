@@ -685,10 +685,17 @@ Enforcement is two-layered:
 | `MUNIN_OAUTH_IDENTITY_HEADER` | — | Header with authenticated user's email for multi-user consent (e.g. `cf-access-authenticated-user-email`) |
 | `MUNIN_ANALYTICS_RETENTION_DAYS` | `90` | Retention for retrieval_events/outcomes. Sessions pruned at 7 days. |
 | `MUNIN_DISPLAY_TIMEZONE` | `Europe/Stockholm` | IANA timezone for display timestamps (storage stays UTC) |
+| `MUNIN_LLM_BASE_URL` | `https://openrouter.ai/api/v1` | OpenAI-compatible chat-completions base URL used by the answer-quality eval and the consolidation worker. Point at a local llama.cpp / Ollama / vLLM server to run without calling OpenRouter. `OPENROUTER_API_KEY` becomes optional when this is set to a non-default URL. Trailing slashes are trimmed automatically. |
 | `MUNIN_CONSOLIDATION_ENABLED` | `false` | Enable the consolidation background worker |
 | `MUNIN_CONSOLIDATION_MODEL` | `anthropic/claude-haiku-4-5-20251001` | OpenRouter model ID for synthesis |
 | `MUNIN_CONSOLIDATION_MAX_ATTEMPTS` | `2` | Synthesis call+parse attempts per run before recording a circuit-breaker failure. The LLM intermittently returns unparseable JSON non-deterministically; a re-roll usually lands valid JSON, so a transient glitch self-heals instead of tripping the breaker (#131). Only response-shape/parse failures are retried — deterministic API errors (auth/quota/4xx) propagate immediately. Set to `1` to disable retries. |
-| `OPENROUTER_API_KEY` | — | OpenRouter API key for consolidation worker (required when consolidation enabled) |
+| `OPENROUTER_API_KEY` | — | OpenRouter API key for consolidation worker (required when consolidation enabled, unless `MUNIN_LLM_BASE_URL` points at a non-default/local endpoint) |
+
+### Running against a local model
+
+Set `MUNIN_LLM_BASE_URL` to any OpenAI-compatible server (llama.cpp, Ollama, vLLM) and omit
+`OPENROUTER_API_KEY`. Both the answer-quality eval and the consolidation worker will route all
+LLM calls to the local endpoint without an `Authorization` header.
 
 ## Important constraints
 
