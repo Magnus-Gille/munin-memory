@@ -241,7 +241,7 @@ export function initConsolidation(): boolean {
     return false;
   }
 
-  apiKey = key ?? null;
+  apiKey = key && key.length > 0 ? key : null;
   return true;
 }
 

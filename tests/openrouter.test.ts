@@ -52,74 +52,107 @@ afterEach(() => {
 });
 
 // ---------------------------------------------------------------------------
-// getLlmBaseUrl
+// getLlmBaseUrl — env injection
 // ---------------------------------------------------------------------------
 
-describe("getLlmBaseUrl", () => {
-  it("returns default when MUNIN_LLM_BASE_URL is unset", () => {
-    delete process.env.MUNIN_LLM_BASE_URL;
-    expect(getLlmBaseUrl()).toBe(DEFAULT_BASE_URL);
+describe("getLlmBaseUrl (env injection)", () => {
+  it("returns default when env has no MUNIN_LLM_BASE_URL", () => {
+    expect(getLlmBaseUrl({})).toBe(DEFAULT_BASE_URL);
   });
 
-  it("returns default when MUNIN_LLM_BASE_URL is empty string", () => {
-    process.env.MUNIN_LLM_BASE_URL = "";
-    expect(getLlmBaseUrl()).toBe(DEFAULT_BASE_URL);
+  it("returns default when env MUNIN_LLM_BASE_URL is empty string", () => {
+    expect(getLlmBaseUrl({ MUNIN_LLM_BASE_URL: "" })).toBe(DEFAULT_BASE_URL);
   });
 
-  it("returns default when MUNIN_LLM_BASE_URL is whitespace only", () => {
-    process.env.MUNIN_LLM_BASE_URL = "   ";
-    expect(getLlmBaseUrl()).toBe(DEFAULT_BASE_URL);
+  it("returns default when env MUNIN_LLM_BASE_URL is whitespace only", () => {
+    expect(getLlmBaseUrl({ MUNIN_LLM_BASE_URL: "   " })).toBe(DEFAULT_BASE_URL);
   });
 
   it("returns custom URL, trimming trailing slashes", () => {
-    process.env.MUNIN_LLM_BASE_URL = "http://localhost:1234/v1";
-    expect(getLlmBaseUrl()).toBe("http://localhost:1234/v1");
+    expect(getLlmBaseUrl({ MUNIN_LLM_BASE_URL: "http://localhost:1234/v1" })).toBe("http://localhost:1234/v1");
   });
 
   it("trims trailing slash from custom URL", () => {
-    process.env.MUNIN_LLM_BASE_URL = "http://localhost:1234/v1/";
-    expect(getLlmBaseUrl()).toBe("http://localhost:1234/v1");
+    expect(getLlmBaseUrl({ MUNIN_LLM_BASE_URL: "http://localhost:1234/v1/" })).toBe("http://localhost:1234/v1");
   });
 
   it("trims multiple trailing slashes from custom URL", () => {
-    process.env.MUNIN_LLM_BASE_URL = "http://localhost:1234/v1///";
-    expect(getLlmBaseUrl()).toBe("http://localhost:1234/v1");
+    expect(getLlmBaseUrl({ MUNIN_LLM_BASE_URL: "http://localhost:1234/v1///" })).toBe("http://localhost:1234/v1");
+  });
+
+  // FIX 4: full-endpoint URL normalization
+  it("(FIX 4) strips /chat/completions suffix from a full-endpoint custom URL", () => {
+    expect(getLlmBaseUrl({ MUNIN_LLM_BASE_URL: "http://localhost:1234/v1/chat/completions" })).toBe(
+      "http://localhost:1234/v1",
+    );
+  });
+
+  it("(FIX 4) strips /chat/completions suffix + trailing slash", () => {
+    expect(getLlmBaseUrl({ MUNIN_LLM_BASE_URL: "http://localhost:1234/v1/chat/completions/" })).toBe(
+      "http://localhost:1234/v1",
+    );
   });
 });
 
 // ---------------------------------------------------------------------------
-// isCustomLlmBaseUrl
+// getLlmBaseUrl — process.env fallback (smoke)
 // ---------------------------------------------------------------------------
 
-describe("isCustomLlmBaseUrl", () => {
-  it("returns false when MUNIN_LLM_BASE_URL is unset", () => {
+describe("getLlmBaseUrl (process.env fallback)", () => {
+  it("returns default when MUNIN_LLM_BASE_URL is unset in process.env", () => {
     delete process.env.MUNIN_LLM_BASE_URL;
-    expect(isCustomLlmBaseUrl()).toBe(false);
+    expect(getLlmBaseUrl()).toBe(DEFAULT_BASE_URL);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isCustomLlmBaseUrl — env injection
+// ---------------------------------------------------------------------------
+
+describe("isCustomLlmBaseUrl (env injection)", () => {
+  it("returns false when env has no MUNIN_LLM_BASE_URL", () => {
+    expect(isCustomLlmBaseUrl({})).toBe(false);
   });
 
-  it("returns false when MUNIN_LLM_BASE_URL is empty", () => {
-    process.env.MUNIN_LLM_BASE_URL = "";
-    expect(isCustomLlmBaseUrl()).toBe(false);
+  it("returns false when env MUNIN_LLM_BASE_URL is empty", () => {
+    expect(isCustomLlmBaseUrl({ MUNIN_LLM_BASE_URL: "" })).toBe(false);
   });
 
   it("returns false when MUNIN_LLM_BASE_URL equals the default URL", () => {
-    process.env.MUNIN_LLM_BASE_URL = DEFAULT_BASE_URL;
-    expect(isCustomLlmBaseUrl()).toBe(false);
+    expect(isCustomLlmBaseUrl({ MUNIN_LLM_BASE_URL: DEFAULT_BASE_URL })).toBe(false);
   });
 
   it("returns false when MUNIN_LLM_BASE_URL equals default with trailing slash", () => {
-    process.env.MUNIN_LLM_BASE_URL = `${DEFAULT_BASE_URL}/`;
-    expect(isCustomLlmBaseUrl()).toBe(false);
+    expect(isCustomLlmBaseUrl({ MUNIN_LLM_BASE_URL: `${DEFAULT_BASE_URL}/` })).toBe(false);
   });
 
   it("returns true when MUNIN_LLM_BASE_URL is a non-default URL", () => {
-    process.env.MUNIN_LLM_BASE_URL = "http://localhost:1234/v1";
-    expect(isCustomLlmBaseUrl()).toBe(true);
+    expect(isCustomLlmBaseUrl({ MUNIN_LLM_BASE_URL: "http://localhost:1234/v1" })).toBe(true);
   });
 
   it("returns true when MUNIN_LLM_BASE_URL is a non-default URL with trailing slash", () => {
-    process.env.MUNIN_LLM_BASE_URL = "http://localhost:1234/v1/";
-    expect(isCustomLlmBaseUrl()).toBe(true);
+    expect(isCustomLlmBaseUrl({ MUNIN_LLM_BASE_URL: "http://localhost:1234/v1/" })).toBe(true);
+  });
+
+  // FIX 4: default full-endpoint URL must NOT be treated as custom
+  it("(FIX 4) returns false when MUNIN_LLM_BASE_URL is the default full-endpoint URL", () => {
+    expect(isCustomLlmBaseUrl({ MUNIN_LLM_BASE_URL: `${DEFAULT_BASE_URL}/chat/completions` })).toBe(false);
+  });
+
+  // FIX 4: non-default full-endpoint URL IS treated as custom
+  it("(FIX 4) returns true when MUNIN_LLM_BASE_URL is a non-default full-endpoint URL", () => {
+    expect(isCustomLlmBaseUrl({ MUNIN_LLM_BASE_URL: "http://localhost:1234/v1/chat/completions" })).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isCustomLlmBaseUrl — process.env fallback (smoke)
+// ---------------------------------------------------------------------------
+
+describe("isCustomLlmBaseUrl (process.env fallback)", () => {
+  it("returns false when MUNIN_LLM_BASE_URL is unset in process.env", () => {
+    delete process.env.MUNIN_LLM_BASE_URL;
+    expect(isCustomLlmBaseUrl()).toBe(false);
   });
 });
 
@@ -328,6 +361,67 @@ describe("callOpenRouter — body shape", () => {
 
     const bodyWithTemp = JSON.parse(fetchMockWithTemp.mock.calls[0][1].body as string);
     expect(bodyWithTemp.temperature).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// callOpenRouter — header order (FIX 2)
+// ---------------------------------------------------------------------------
+
+describe("callOpenRouter — header order (FIX 2)", () => {
+  it("Authorization is FIRST key when apiKey is present", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(makeOkResponse());
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await callOpenRouter({
+      model: "test-model",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "sk-xxx",
+    });
+
+    const headers = fetchMock.mock.calls[0][1].headers as Record<string, string>;
+    const keys = Object.keys(headers);
+    expect(keys[0]).toBe("Authorization");
+    expect(keys).toEqual(["Authorization", "Content-Type", "HTTP-Referer", "X-Title"]);
+  });
+
+  it("Content-Type is FIRST key when no apiKey", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(makeOkResponse());
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await callOpenRouter({
+      model: "test-model",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: null,
+    });
+
+    const headers = fetchMock.mock.calls[0][1].headers as Record<string, string>;
+    const keys = Object.keys(headers);
+    expect(keys[0]).toBe("Content-Type");
+    expect(keys).toEqual(["Content-Type", "HTTP-Referer", "X-Title"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// callOpenRouter — FIX 4: full-endpoint URL normalization
+// ---------------------------------------------------------------------------
+
+describe("callOpenRouter — full-endpoint URL normalization (FIX 4)", () => {
+  it("does not double-append /chat/completions when MUNIN_LLM_BASE_URL is already a full endpoint", async () => {
+    process.env.MUNIN_LLM_BASE_URL = "http://localhost:1234/v1/chat/completions";
+    const fetchMock = vi.fn().mockResolvedValue(makeOkResponse());
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await callOpenRouter({
+      model: "test-model",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "sk-test",
+    });
+
+    const url = fetchMock.mock.calls[0][0] as string;
+    expect(url).toBe("http://localhost:1234/v1/chat/completions");
+    // Must end with exactly one /chat/completions, not two
+    expect(url.match(/\/chat\/completions/g)?.length).toBe(1);
   });
 });
 

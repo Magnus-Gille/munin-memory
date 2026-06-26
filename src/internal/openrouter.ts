@@ -47,23 +47,37 @@ const HTTP_REFERER = "https://munin-memory.gille.ai";
 // --- Base-URL resolution ---
 
 /**
- * Resolve the OpenAI-compatible chat-completions base URL.
- * MUNIN_LLM_BASE_URL overrides the default; trailing slashes are trimmed.
+ * Normalize a raw base-URL value: strip trailing slashes and a trailing
+ * `/chat/completions` suffix (so a full-endpoint URL does not double-append).
+ * Applied to both the override and the comparison target so the default
+ * full-endpoint URL also normalizes to DEFAULT_LLM_BASE_URL.
  */
-export function getLlmBaseUrl(): string {
-  const raw = process.env.MUNIN_LLM_BASE_URL;
+function normalizeBaseUrl(raw: string): string {
+  return raw.replace(/\/+$/, "").replace(/\/chat\/completions$/, "").replace(/\/+$/, "");
+}
+
+/**
+ * Resolve the OpenAI-compatible chat-completions base URL.
+ * MUNIN_LLM_BASE_URL overrides the default; trailing slashes and a trailing
+ * `/chat/completions` suffix are stripped so the endpoint can be appended
+ * uniformly. Accepts an optional env map for testability.
+ */
+export function getLlmBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
+  const raw = env.MUNIN_LLM_BASE_URL;
   const base = raw && raw.trim().length > 0 ? raw.trim() : DEFAULT_LLM_BASE_URL;
-  return base.replace(/\/+$/, "");
+  return normalizeBaseUrl(base);
 }
 
 /**
  * True when a non-default (local) base URL is configured — used to make the
  * API key optional so local inference servers (llama.cpp, Ollama, vLLM) that
- * need no auth can be targeted without supplying a dummy key.
+ * need no auth can be targeted without supplying a dummy key. Accepts an
+ * optional env map for testability.
  */
-export function isCustomLlmBaseUrl(): boolean {
-  const raw = process.env.MUNIN_LLM_BASE_URL;
-  return !!(raw && raw.trim().length > 0 && raw.trim().replace(/\/+$/, "") !== DEFAULT_LLM_BASE_URL);
+export function isCustomLlmBaseUrl(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env.MUNIN_LLM_BASE_URL;
+  if (!raw || raw.trim().length === 0) return false;
+  return normalizeBaseUrl(raw.trim()) !== DEFAULT_LLM_BASE_URL;
 }
 
 // --- Client ---
@@ -86,14 +100,15 @@ export async function callOpenRouter(opts: OpenRouterCallOptions): Promise<ChatC
     body.temperature = opts.temperature;
   }
 
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    "HTTP-Referer": HTTP_REFERER,
-    "X-Title": opts.title ?? DEFAULT_TITLE,
-  };
+  // Build headers with Authorization first (when present) to preserve the
+  // original request shape: Authorization, Content-Type, HTTP-Referer, X-Title.
+  const headers: Record<string, string> = {};
   if (opts.apiKey && opts.apiKey.length > 0) {
     headers["Authorization"] = `Bearer ${opts.apiKey}`;
   }
+  headers["Content-Type"] = "application/json";
+  headers["HTTP-Referer"] = HTTP_REFERER;
+  headers["X-Title"] = opts.title ?? DEFAULT_TITLE;
 
   const endpoint = `${getLlmBaseUrl()}/chat/completions`;
 

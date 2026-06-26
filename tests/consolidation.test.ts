@@ -969,6 +969,32 @@ describe("initConsolidation", () => {
     const result = initConsolidation();
     expect(result).toBe(false);
   });
+
+  // FIX 3: empty string OPENROUTER_API_KEY with custom base URL → enabled, api_key_present false
+  it("(FIX 3) custom base URL + OPENROUTER_API_KEY='' → returns true, api_key_present === false", () => {
+    const savedLlmBaseUrl = process.env.MUNIN_LLM_BASE_URL;
+    process.env.MUNIN_LLM_BASE_URL = "http://localhost:8091/v1";
+    process.env.OPENROUTER_API_KEY = "";
+    const savedEnabled = _consolidationConfig.enabled;
+    _consolidationConfig.enabled = true;
+
+    let result: boolean;
+    try {
+      result = initConsolidation();
+    } finally {
+      _consolidationConfig.enabled = savedEnabled;
+      if (savedLlmBaseUrl === undefined) {
+        delete process.env.MUNIN_LLM_BASE_URL;
+      } else {
+        process.env.MUNIN_LLM_BASE_URL = savedLlmBaseUrl;
+      }
+      // restore apiKey module var to null so other tests are unaffected
+      _setApiKey(null);
+    }
+
+    expect(result!).toBe(true);
+    expect(getConsolidationHealth().api_key_present).toBe(false);
+  });
 });
 
 describe("startConsolidationWorker / stopConsolidationWorker", () => {
