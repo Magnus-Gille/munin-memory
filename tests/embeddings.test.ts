@@ -34,6 +34,7 @@ import {
   getEmbeddingCacheDir,
   VALID_DTYPES,
   resolveEmbeddingsDtype,
+  _setPipelineFactoryForTesting,
 } from "../src/embeddings.js";
 
 const TEST_DB_PATH = "/tmp/munin-memory-embeddings-test.db";
@@ -891,5 +892,92 @@ describe("resolveEmbeddingsDtype", () => {
     } finally {
       warnSpy.mockRestore();
     }
+  });
+});
+
+// ─── dtype -> pipelineOptions wiring (pipeline factory seam, #126 follow-up) ───
+//
+// resolveEmbeddingsDtype is unit-tested above, but nothing asserted the resolved
+// dtype actually flows into the transformers.pipeline() call — the _testExtractor
+// hook short-circuits initEmbeddings before the pipeline is ever built. These
+// tests inject a fake pipeline factory to capture the options the pipeline is
+// constructed with, closing that gap.
+
+describe("initEmbeddings pipeline options wiring", () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+  const originalDtype = _embeddingConfig.dtype;
+  const originalLocalOnly = _embeddingConfig.localOnly;
+
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    errorSpy.mockRestore();
+    _setPipelineFactoryForTesting(null);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (_embeddingConfig as any).dtype = originalDtype;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (_embeddingConfig as any).localOnly = originalLocalOnly;
+    // Restore the shared mock extractor for subsequent tests.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    _setExtractorForTesting(mockExtractor as any);
+  });
+
+  // A fake pipeline that records the construction options and returns a callable
+  // standing in for the real feature-extraction pipe.
+  function captureFactory(sink: { options?: Record<string, unknown>; task?: string; model?: string }) {
+    const fakePipe = (_t: string, _o: { pooling: string; normalize: boolean }) =>
+      Promise.resolve({ data: makeEmbedding(1) });
+    _setPipelineFactoryForTesting((task, model, options) => {
+      sink.task = task;
+      sink.model = model;
+      sink.options = options;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return Promise.resolve(fakePipe as any);
+    });
+  }
+
+  it.skipIf(!vecAvailable)("passes the resolved dtype through to pipeline options", async () => {
+    const sink: { options?: Record<string, unknown>; task?: string; model?: string } = {};
+    captureFactory(sink);
+
+    // Clear the test extractor so initEmbeddings exercises the build path.
+    _setExtractorForTesting(null);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (_embeddingConfig as any).dtype = "q8";
+
+    const ok = await initEmbeddings();
+    expect(ok).toBe(true);
+    expect(sink.task).toBe("feature-extraction");
+    expect(sink.model).toBe(_embeddingConfig.model);
+    expect(sink.options?.dtype).toBe("q8");
+    expect(sink.options?.cache_dir).toBe(getEmbeddingCacheDir());
+  });
+
+  it.skipIf(!vecAvailable)("omits dtype from pipeline options when unset", async () => {
+    const sink: { options?: Record<string, unknown> } = {};
+    captureFactory(sink);
+
+    _setExtractorForTesting(null);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (_embeddingConfig as any).dtype = undefined;
+
+    const ok = await initEmbeddings();
+    expect(ok).toBe(true);
+    expect(sink.options).toBeDefined();
+    expect("dtype" in sink.options!).toBe(false);
+  });
+
+  it.skipIf(!vecAvailable)("sets local_files_only only when localOnly is enabled", async () => {
+    const sink: { options?: Record<string, unknown> } = {};
+    captureFactory(sink);
+
+    _setExtractorForTesting(null);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (_embeddingConfig as any).localOnly = true;
+
+    const ok = await initEmbeddings();
+    expect(ok).toBe(true);
+    expect(sink.options?.local_files_only).toBe(true);
   });
 });

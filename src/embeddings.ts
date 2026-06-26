@@ -90,6 +90,34 @@ export function _setExtractorForTesting(fn: ExtractorFn | null): void {
   }
 }
 
+// --- Test hook: pipeline factory seam ---
+//
+// Production initEmbeddings dynamically imports @huggingface/transformers and
+// calls transformers.pipeline(). The _testExtractor hook above short-circuits
+// before that path, so the construction of pipelineOptions — notably the
+// dtype -> pipelineOptions.dtype wiring — was never exercised by tests. This
+// seam lets a test inject a fake pipeline factory to assert those options
+// without loading the real model. (#126 follow-up.)
+
+type LoadedPipeline = (
+  text: string,
+  options: { pooling: PoolingType; normalize: boolean },
+) => Promise<{ data: Float32Array }>;
+
+type PipelineFactory = (
+  task: string,
+  model: string,
+  options: Record<string, unknown>,
+) => Promise<LoadedPipeline>;
+
+let _testPipelineFactory: PipelineFactory | null = null;
+
+export function _setPipelineFactoryForTesting(fn: PipelineFactory | null): void {
+  if (process.env.VITEST) {
+    _testPipelineFactory = fn;
+  }
+}
+
 // --- Float32Array → Buffer conversion ---
 
 export function embeddingToBuffer(f32: Float32Array): Buffer {
@@ -124,14 +152,7 @@ export async function initEmbeddings(): Promise<boolean> {
       return true;
     }
 
-    const transformers = await import("@huggingface/transformers");
-
-    // Point model cache to the data directory (writable under systemd sandboxing)
     const cacheDir = getEmbeddingCacheDir();
-    if (!existsSync(cacheDir)) {
-      mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
-    }
-    transformers.env.cacheDir = cacheDir;
 
     // Short-circuit only when the extractor is already loaded AND bound to the
     // same cache_dir. If the DB path (and therefore cache_dir) changed, rebuild.
@@ -146,10 +167,11 @@ export async function initEmbeddings(): Promise<boolean> {
     if (config.dtype !== undefined && config.dtype !== "") {
       pipelineOptions.dtype = config.dtype;
     }
-    const pipe = await transformers.pipeline("feature-extraction", config.model, pipelineOptions);
+
+    const pipe = await loadFeatureExtractionPipeline(config.model, pipelineOptions, cacheDir);
     extractor = async (text: string, options: { pooling: PoolingType; normalize: boolean }) => {
       const result = await pipe(text, { pooling: options.pooling, normalize: options.normalize });
-      return { data: result.data as Float32Array };
+      return { data: result.data };
     };
     extractorCacheDir = cacheDir;
     return true;
@@ -158,6 +180,37 @@ export async function initEmbeddings(): Promise<boolean> {
     console.error(`Failed to initialize embedding model: ${message}`);
     return false;
   }
+}
+
+/**
+ * Load the feature-extraction pipeline. In production this dynamically imports
+ * @huggingface/transformers, points its cache at the writable data dir, and
+ * builds the pipeline with the resolved options (cache_dir, local_files_only,
+ * dtype). Under test, a factory injected via _setPipelineFactoryForTesting
+ * stands in, so the options wiring can be asserted without loading a model.
+ */
+async function loadFeatureExtractionPipeline(
+  model: string,
+  options: Record<string, unknown>,
+  cacheDir: string,
+): Promise<LoadedPipeline> {
+  if (_testPipelineFactory) {
+    return _testPipelineFactory("feature-extraction", model, options);
+  }
+
+  const transformers = await import("@huggingface/transformers");
+
+  // Point model cache to the data directory (writable under systemd sandboxing)
+  if (!existsSync(cacheDir)) {
+    mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
+  }
+  transformers.env.cacheDir = cacheDir;
+
+  return transformers.pipeline(
+    "feature-extraction",
+    model,
+    options,
+  ) as unknown as Promise<LoadedPipeline>;
 }
 
 // --- Embedding generation ---
