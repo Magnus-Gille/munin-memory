@@ -54,6 +54,38 @@ const OAUTH_CLEANUP_INTERVAL_MS = 60 * 1000;
 export const RATE_LIMIT_MAX = 60;
 export const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 
+// --- Heimdall self-descriptor ---
+// Served at GET /heimdall.json for Tier-1 discovery by the Heimdall dashboard.
+// Shape must satisfy Heimdall's validateDescriptor (schema/service/v1).
+// Keep version in sync with package.json when bumping.
+export const HEIMDALL_DESCRIPTOR = {
+  _schema: 'https://heimdall.gille.ai/schema/service/v1',
+  service: {
+    name: 'munin-memory',
+    label: 'Munin Memory',
+    namespace: 'grimnir',
+    instance_id: 'huginmunin',
+    criticality: 'normal',
+  },
+  kind: 'mcp',
+  status: 'pass',
+  version: '0.3.4',
+  deploy: {
+    host: 'huginmunin',
+    systemd_unit: 'munin-memory',
+    platform: 'bare-metal',
+  },
+  metrics: [],
+  alerts: { rules: [], active_count: 0, firing: [] },
+  panels: [],
+  links: {
+    self: '/heimdall.json',
+    health: '/health',
+    repo: 'https://github.com/Magnus-Gille/munin-memory',
+  },
+  ui: { icon: 'brain', category: 'infra' },
+} as const;
+
 // --- Types ---
 
 export type BodyParseResult =
@@ -595,6 +627,11 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
   // --- Health check (no auth) ---
   app.get("/health", (_req: Request, res: Response) => {
     res.json({ status: "ok" });
+  });
+
+  // --- Heimdall self-descriptor (no auth) ---
+  app.get("/heimdall.json", (_req: Request, res: Response) => {
+    res.json(HEIMDALL_DESCRIPTOR);
   });
 
   // OAuth consent must be protected by a trusted user signal.

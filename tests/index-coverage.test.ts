@@ -42,6 +42,7 @@ import {
   validateHost,
   RATE_LIMIT_MAX,
   RATE_LIMIT_WINDOW_MS,
+  HEIMDALL_DESCRIPTOR,
   type ConsentAuthConfig,
   type RequestLogEntry,
 } from "../src/index.js";
@@ -483,6 +484,72 @@ describe("createHttpApp — HTTP app endpoints", () => {
       .set({ Host: "127.0.0.1:3030" })
       .expect(200);
     expect(res.body).toEqual({ status: "ok" });
+  });
+
+  // --- /heimdall.json descriptor tests ---
+
+  it("/heimdall.json returns 200 with no auth", async () => {
+    const { app } = makeApp(db);
+    const res = await supertest(app)
+      .get("/heimdall.json")
+      .set({ Host: "127.0.0.1:3030" })
+      .expect(200);
+    expect(res.headers["content-type"]).toMatch(/application\/json/);
+  });
+
+  it("/heimdall.json descriptor satisfies the Heimdall contract (required fields + valid shape)", async () => {
+    const { app } = makeApp(db);
+    const res = await supertest(app)
+      .get("/heimdall.json")
+      .set({ Host: "127.0.0.1:3030" })
+      .expect(200);
+    const d = res.body as typeof HEIMDALL_DESCRIPTOR;
+
+    // Required: service.name must be a non-empty string
+    expect(typeof d.service?.name).toBe("string");
+    expect(d.service.name.length).toBeGreaterThan(0);
+
+    // kind must be one of the valid archetypes
+    const ARCHETYPES = ["inference", "http-service", "timer", "static", "mcp"] as const;
+    expect(ARCHETYPES).toContain(d.kind);
+
+    // status must be a valid contract status
+    const STATUSES = ["pass", "warn", "fail"] as const;
+    expect(STATUSES).toContain(d.status);
+
+    // _schema must reference the v1 service schema
+    expect(typeof d._schema).toBe("string");
+    expect(d._schema).toContain("/service/v1");
+
+    // links values must be safe hrefs (root-relative or absolute https)
+    const isSafeHref = (url: string) =>
+      url.startsWith("/") ? !url.startsWith("//") : /^https?:\/\//i.test(url);
+    for (const [key, url] of Object.entries(d.links)) {
+      expect(isSafeHref(url), `links.${key} must be a safe href`).toBe(true);
+    }
+
+    // version must be a string when present
+    if (d.version !== null && d.version !== undefined) {
+      expect(typeof d.version).toBe("string");
+    }
+  });
+
+  it("/heimdall.json returns the expected static descriptor", async () => {
+    const { app } = makeApp(db);
+    const res = await supertest(app)
+      .get("/heimdall.json")
+      .set({ Host: "127.0.0.1:3030" })
+      .expect(200);
+    expect(res.body).toMatchObject({
+      service: { name: "munin-memory", label: "Munin Memory", namespace: "grimnir" },
+      kind: "mcp",
+      status: "pass",
+      links: {
+        self: "/heimdall.json",
+        health: "/health",
+        repo: "https://github.com/Magnus-Gille/munin-memory",
+      },
+    });
   });
 
   it("sets X-Content-Type-Options and Cache-Control security headers", async () => {
