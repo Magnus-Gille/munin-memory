@@ -12,6 +12,7 @@
 import type { QuerySetSource, DurationSummary, RunnerMode } from "../types.js";
 import type { SearchMode } from "../../src/types.js";
 import type { SerializationMode } from "../../src/internal/retrieval-shared.js";
+import type { CorpusEmbeddingSummary } from "../adapters/shared.js";
 
 export type { SerializationMode };
 
@@ -109,6 +110,8 @@ export interface AnswerQualityReport {
   results: AnswerQualityResult[];
   total_usage?: TokenUsage;
   warnings?: string[];
+  /** Summary of corpus embedding pre-population (populated for hybrid/semantic runs). */
+  embedding_summary?: CorpusEmbeddingSummary | null;
   // Graceful skip (when OPENROUTER_API_KEY is unset)
   skipped?: boolean;
   skip_reason?: string;

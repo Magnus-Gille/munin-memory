@@ -22,6 +22,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
+import * as sqliteVec from "sqlite-vec";
 import { initDatabase, writeState } from "../src/db.js";
 import { _setExtractorForTesting, resetCircuitBreaker, initEmbeddings } from "../src/embeddings.js";
 
@@ -51,6 +52,7 @@ import {
   runAnswerQuality,
   shouldSkipForMissingKey,
   runAnswerQualityInner,
+  querySetRequiresEmbeddings,
 } from "../benchmark/answer-quality/runner.js";
 import { runAnswerQualityAb } from "../benchmark/answer-quality/ab.js";
 import { validateParsedArgs, parseArgs } from "../benchmark/answer-quality/run.js";
@@ -58,6 +60,22 @@ import { executeQuery, applyProductionReranker, checkProductionRankerPrereqs } f
 import type { Entry } from "../src/types.js";
 import type { BenchmarkQuery } from "../benchmark/types.js";
 import type { OpenRouterCallOptions, ChatCompletionResponse } from "../src/internal/openrouter.js";
+
+// ---------------------------------------------------------------------------
+// Module-level sqlite-vec availability probe (synchronous — needed for it.skipIf)
+// ---------------------------------------------------------------------------
+
+function probeVecAvailable(): boolean {
+  try {
+    const db = new Database(":memory:");
+    sqliteVec.load(db);
+    db.close();
+    return true;
+  } catch {
+    return false;
+  }
+}
+const vecAvailable = probeVecAvailable();
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1233,10 +1251,12 @@ describe("Fix A: embeddings init gate — per-query search_mode overrides global
       chat,
     });
 
-    // Gate OPENED: initEmbeddings was called exactly once for the per-query semantic query.
-    // If Fix A were reverted, requiresEmbeddings would be false (global=lexical), initEmbeddings
-    // would NOT be called (count=0), and this assertion would catch the regression.
-    expect(vi.mocked(initEmbeddings)).toHaveBeenCalledTimes(1);
+    // Gate OPENED: initEmbeddings was called for the per-query semantic query.
+    // Two calls are expected: (1) inside populateCorpusEmbeddings (pre-population pass,
+    // added by #137) and (2) inside runAnswerQualityInner (query-time init, idempotent).
+    // If Fix A were reverted, requiresEmbeddings would be false (global=lexical),
+    // populateCorpusEmbeddings would NOT be called, and initEmbeddings would be called 0 times.
+    expect(vi.mocked(initEmbeddings)).toHaveBeenCalledTimes(2);
 
     expect(report.skipped).toBeUndefined();
     expect(report.results).toHaveLength(1);
@@ -1366,4 +1386,115 @@ describe("Fix A: embeddings init gate — per-query search_mode overrides global
     // With global=semantic and query.search_mode="all", effective mode = semantic
     expect(report.results[0].effective_search_mode).toBe("semantic");
   });
+});
+
+// ---------------------------------------------------------------------------
+// 14. Fix #137: querySetRequiresEmbeddings (pure unit tests)
+// ---------------------------------------------------------------------------
+
+describe("Fix #137: querySetRequiresEmbeddings (pure unit tests)", () => {
+  it("returns false when all eligible queries have search_mode='lexical'", () => {
+    const queries: BenchmarkQuery[] = [
+      { id: "q1", query: "q", source: "derived", category: "c", search_mode: "lexical", expected_ids: [], reference_answer: "r" },
+      { id: "q2", query: "q", source: "derived", category: "c", search_mode: "lexical", expected_ids: [], reference_answer: "r" },
+    ];
+    expect(querySetRequiresEmbeddings(queries, "hybrid")).toBe(false);
+  });
+
+  it("returns true when a query has search_mode='all' and global searchMode is 'hybrid'", () => {
+    const queries: BenchmarkQuery[] = [
+      { id: "q1", query: "q", source: "derived", category: "c", search_mode: "all", expected_ids: [], reference_answer: "r" },
+    ];
+    expect(querySetRequiresEmbeddings(queries, "hybrid")).toBe(true);
+  });
+
+  it("returns true when a query has search_mode='semantic' and global searchMode is 'lexical'", () => {
+    const queries: BenchmarkQuery[] = [
+      { id: "q1", query: "q", source: "derived", category: "c", search_mode: "semantic", expected_ids: [], reference_answer: "r" },
+    ];
+    expect(querySetRequiresEmbeddings(queries, "lexical")).toBe(true);
+  });
+
+  it("ignores queries without reference_answer — does not force true", () => {
+    const queries: BenchmarkQuery[] = [
+      // has a non-lexical search_mode but NO reference_answer → must be ignored
+      { id: "q1", query: "q", source: "derived", category: "c", search_mode: "hybrid", expected_ids: [] },
+    ];
+    expect(querySetRequiresEmbeddings(queries, "lexical")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 15. Fix #137: corpus embedding pre-population integration test
+// ---------------------------------------------------------------------------
+
+describe("Fix #137: corpus embedding pre-population (integration)", () => {
+  const EMBEDDING_DIM = 384;
+  const mockExtractor = async (_text: string, _opts: { pooling: string; normalize: boolean }) => {
+    return { data: new Float32Array(EMBEDDING_DIM).fill(0.1) };
+  };
+
+  afterEach(() => {
+    _setExtractorForTesting(null);
+    resetCircuitBreaker();
+    vi.clearAllMocks();
+  });
+
+  it.skipIf(!vecAvailable)(
+    "runAnswerQuality populates corpus embeddings before opening read-only DB for hybrid mode",
+    async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      _setExtractorForTesting(mockExtractor as any);
+
+      const { db, dbPath } = makeTempDb();
+      writeState(db, "projects/fix137", "e1", "The quick brown fox jumps over the lazy dog.", ["active"]);
+      writeState(db, "projects/fix137", "e2", "Paris is the capital of France.", ["active"]);
+      writeState(db, "projects/fix137", "e3", "SQLite is a lightweight database engine.", ["active"]);
+      const entryCount = 3;
+      db.close();
+
+      const queries: BenchmarkQuery[] = [
+        {
+          id: "q1",
+          query: "What is the capital of France?",
+          source: "derived",
+          category: "locomo/single-hop",
+          search_mode: "all", // defers to global searchMode = "hybrid"
+          expected_ids: [],
+          reference_answer: "Paris",
+        },
+      ];
+
+      const chat = makeMockChat();
+      const report = await runAnswerQuality({
+        snapshotPath: dbPath,
+        queries,
+        serialization: "linear",
+        runnerMode: "raw",
+        searchMode: "hybrid",
+        answerModel: "test/model",
+        judgeModel: "test/judge",
+        chat,
+      });
+
+      // embedding_summary must be populated (non-null) — pre-fix this field didn't exist
+      expect(report.embedding_summary).not.toBeNull();
+      expect(report.embedding_summary).toBeDefined();
+      // All entries should have been embedded
+      expect(report.embedding_summary!.generated).toBeGreaterThanOrEqual(entryCount);
+      expect(report.embedding_summary!.failed).toBe(0);
+
+      // Verify at the DB level: all entries must now be embedding_status='generated'
+      const verifyDb = new Database(dbPath);
+      try {
+        const rows = verifyDb.prepare("SELECT embedding_status FROM entries").all() as Array<{ embedding_status: string }>;
+        expect(rows).toHaveLength(entryCount);
+        for (const row of rows) {
+          expect(row.embedding_status).toBe("generated");
+        }
+      } finally {
+        verifyDb.close();
+      }
+    },
+  );
 });
