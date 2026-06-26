@@ -20,6 +20,7 @@ import {
   getDaysUntil,
   isEntryExpiringSoon,
   findUpcomingEventDate,
+  findPassedForwardDate,
   isTrackedNamespace,
   RELAXED_QUERY_STOPWORDS,
 } from "./retrieval-shared.js";
@@ -254,6 +255,17 @@ function applyActiveLifecycleAttention(
     return "upcoming_event_stale";
   }
 
+  const passedDate = findPassedForwardDate(row.content);
+  if (passedDate) {
+    const daysSince = Math.floor((Date.now() - new Date(passedDate + "T23:59:59Z").getTime()) / 86400000);
+    maintenanceItems.push({
+      namespace: row.namespace,
+      issue: "temporal_stale",
+      suggestion: `Content references ${passedDate} (${daysSince} day${daysSince === 1 ? "" : "s"} ago) with forward-looking phrasing. Restate what actually happened or remove the forward-looking reference.`,
+    });
+    return "temporal_stale";
+  }
+
   return undefined;
 }
 
@@ -367,6 +379,7 @@ function scoreTriageTrackedStatus(trackedStatus: TrackedStatusAssessment): numbe
     let s = 28;
     if (trackedStatus.attentionReason === "upcoming_event_stale") s += 4;
     if (trackedStatus.attentionReason === "active_but_stale") s += 2;
+    if (trackedStatus.attentionReason === "temporal_stale") s += 3;
     return s;
   }
   if (trackedStatus.lifecycle === "active") return -8;
