@@ -22,6 +22,8 @@ import type { AccessContext } from "./access.js";
 import { validateNamespace, scanForSecrets, redactSecrets } from "./security.js";
 import type { ClassificationLevel } from "./types.js";
 import type { Entry, SynthesisResult, ConsolidationRunResult, CrossReferenceType, ConsolidationCandidate } from "./types.js";
+import { callOpenRouter as callLlm, isCustomLlmBaseUrl } from "./internal/openrouter.js";
+import type { ChatCompletionResponse as SharedChatCompletionResponse } from "./internal/openrouter.js";
 
 // --- Cross-zone containment guard (#96) ---
 //
@@ -108,8 +110,6 @@ function filterCrossZoneRefs(
 
 // --- Configuration from env vars ---
 
-const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions";
-
 const config = {
   enabled: (process.env.MUNIN_CONSOLIDATION_ENABLED ?? "false") === "true",
   model: process.env.MUNIN_CONSOLIDATION_MODEL ?? "anthropic/claude-haiku-4-5-20251001",
@@ -130,10 +130,8 @@ const config = {
 
 // --- OpenRouter API types ---
 
-interface ChatCompletionResponse {
-  choices: Array<{ message: { content: string } }>;
-  usage?: { prompt_tokens: number; completion_tokens: number };
-}
+// Re-use the shared client's type so they can't drift apart.
+type ChatCompletionResponse = SharedChatCompletionResponse;
 
 // --- Module state ---
 
@@ -159,28 +157,13 @@ let lastWrittenStatus: "healthy" | "failing" | "tripped" | null = null;
 // --- API call ---
 
 async function callOpenRouter(prompt: string): Promise<ChatCompletionResponse> {
-  const response = await fetch(OPENROUTER_BASE_URL, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": "https://munin-memory.gille.ai",
-      "X-Title": "Munin Memory Consolidation",
-    },
-    body: JSON.stringify({
-      model: config.model,
-      max_tokens: 4096,
-      messages: [{ role: "user", content: prompt }],
-      provider: { zdr: true },
-    }),
+  return callLlm({
+    model: config.model,
+    messages: [{ role: "user", content: prompt }],
+    apiKey,
+    maxTokens: 4096,
+    title: "Munin Memory Consolidation",
   });
-
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    throw new Error(`OpenRouter API error ${response.status}: ${body.slice(0, 200)}`);
-  }
-
-  return response.json() as Promise<ChatCompletionResponse>;
 }
 
 // --- Health reporting ---
@@ -251,17 +234,19 @@ export function initConsolidation(): boolean {
   }
 
   const key = process.env.OPENROUTER_API_KEY;
-  if (!key) {
-    console.warn("MUNIN_CONSOLIDATION_ENABLED=true but OPENROUTER_API_KEY is not set — consolidation disabled");
+  if (!key && !isCustomLlmBaseUrl()) {
+    console.warn(
+      "MUNIN_CONSOLIDATION_ENABLED=true but OPENROUTER_API_KEY is not set (and no custom MUNIN_LLM_BASE_URL) — consolidation disabled",
+    );
     return false;
   }
 
-  apiKey = key;
+  apiKey = key && key.length > 0 ? key : null;
   return true;
 }
 
 export function startConsolidationWorker(db: Database.Database): void {
-  if (apiKey === null) return;
+  if (apiKey === null && !isCustomLlmBaseUrl()) return;
   workerDb = db;
 
   // Reconcile stale persisted alert on startup. If a previous run tripped or
@@ -307,7 +292,7 @@ export async function stopConsolidationWorker(): Promise<void> {
 }
 
 export function isConsolidationAvailable(): boolean {
-  return config.enabled && apiKey !== null && !circuitBreakerTripped;
+  return config.enabled && (apiKey !== null || isCustomLlmBaseUrl()) && !circuitBreakerTripped;
 }
 
 /**
@@ -360,7 +345,7 @@ function scheduleNextRun(): void {
 const HALF_OPEN_DELAY_MS = Math.max(5 * 60 * 1000, config.intervalMs * 5);
 
 export async function processConsolidationBatch(): Promise<void> {
-  if (!workerDb || !apiKey) return;
+  if (!workerDb || (apiKey === null && !isCustomLlmBaseUrl())) return;
 
   if (circuitBreakerTripped) {
     // Half-open probe: allow one attempt after HALF_OPEN_DELAY_MS so the worker
@@ -685,7 +670,7 @@ export async function consolidateNamespace(
   );
 
   const doCall = callApi ?? callOpenRouter;
-  if (!callApi && !apiKey) {
+  if (!callApi && apiKey === null && !isCustomLlmBaseUrl()) {
     return makeRunResult(namespace, { error: "No API key available — consolidation not initialized" });
   }
 

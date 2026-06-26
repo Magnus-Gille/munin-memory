@@ -608,6 +608,18 @@ describe("graceful skip", () => {
     expect(msg).toBeNull();
   });
 
+  // FIX 1: custom base URL makes the eval runnable even without a key
+  it("(FIX 1) shouldSkipForMissingKey: returns null when MUNIN_LLM_BASE_URL is non-default, no key", () => {
+    const msg = shouldSkipForMissingKey(undefined, undefined, { MUNIN_LLM_BASE_URL: "http://localhost:1234/v1" });
+    expect(msg).toBeNull();
+  });
+
+  it("(FIX 1) shouldSkipForMissingKey: still returns message when default base URL + no key", () => {
+    const msg = shouldSkipForMissingKey(null, undefined, { MUNIN_LLM_BASE_URL: "https://openrouter.ai/api/v1" });
+    expect(msg).not.toBeNull();
+    expect(msg).toContain("OPENROUTER_API_KEY");
+  });
+
   it("runAnswerQuality: returns skipped:true with no network calls when apiKey is null", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch");
 

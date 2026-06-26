@@ -27,6 +27,7 @@ import {
 import {
   callOpenRouter as defaultCallOpenRouter,
   getOpenRouterApiKey,
+  isCustomLlmBaseUrl,
 } from "../../src/internal/openrouter.js";
 import type { QueryParams } from "../../src/types.js";
 import type { SearchMode } from "../../src/types.js";
@@ -83,13 +84,13 @@ export function shouldSkipForMissingKey(
 ): string | null {
   if (chat) return null; // injected mock — always runnable
   const key = apiKey ?? env.OPENROUTER_API_KEY ?? null;
-  if (!key || key.length === 0) {
-    return (
-      "OPENROUTER_API_KEY unset — answer-quality eval requires it. " +
-      "Set OPENROUTER_API_KEY in your environment and re-run."
-    );
-  }
-  return null;
+  if (key && key.length > 0) return null; // explicit key provided
+  // A non-default base URL (local server) needs no API key — allow running.
+  if (isCustomLlmBaseUrl(env)) return null;
+  return (
+    "OPENROUTER_API_KEY unset — answer-quality eval requires it. " +
+    "Set OPENROUTER_API_KEY in your environment and re-run."
+  );
 }
 
 // --- Embedding requirement predicate ---
