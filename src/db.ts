@@ -2149,6 +2149,10 @@ export function logRetrievalOutcome(
  * @param since Optional ISO 8601 timestamp. When provided, only impression events
  *   at or after this timestamp are counted, bounding results to a rolling window.
  *   Default behavior (undefined) is unbounded.
+ * @param restrictToTracked When true, restrict results to entries in tracked/operational
+ *   namespaces (projects/* and clients/*) only. Applied at the SQL level before LIMIT,
+ *   preventing reference namespaces (meta/*, documents/*, people/*, etc.) from consuming
+ *   limit slots or producing false-positive "unused" signals.
  */
 export function getInsightsByEntry(
   db: Database.Database,
@@ -2156,6 +2160,7 @@ export function getInsightsByEntry(
   minImpressions = 3,
   limit = 20,
   since?: string,
+  restrictToTracked?: boolean,
 ): EntryInsightRow[] {
   const clampedLimit = Math.min(Math.max(limit, 1), 50);
 
@@ -2171,6 +2176,11 @@ export function getInsightsByEntry(
       nsParams.push(namespace);
     }
   }
+
+  // Restrict to tracked (operational) namespaces — literal LIKE patterns, no extra params.
+  const trackedFilter = restrictToTracked
+    ? "AND (e.namespace LIKE 'projects/%' OR e.namespace LIKE 'clients/%')"
+    : "";
 
   // Optional rolling-window filter on impression event timestamp
   const sinceFilter = since ? "AND rev.timestamp >= ?" : "";
@@ -2232,6 +2242,7 @@ export function getInsightsByEntry(
       AND ro_l.outcome_type = 'log_in_result_namespace'
     WHERE TRUE
       ${nsFilter}
+      ${trackedFilter}
     GROUP BY imp.entry_id, e.namespace, e.updated_at
     HAVING COUNT(DISTINCT imp.event_id) >= ?
     ORDER BY impressions DESC

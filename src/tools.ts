@@ -3978,12 +3978,16 @@ export function registerTools(
 
                 // Block 3: Retrieved-but-unused signal — entries repeatedly shown in search
                 // results with zero follow-through over the rolling window.
-                // meta/* entries are excluded (reference docs are legitimately retrieved
-                // without being "opened" and would produce false positives).
+                // Restricted to projects/* and clients/* at SQL level so reference namespaces
+                // (meta/*, documents/*, people/*, decisions/*, reading/*, signals/*, digests/*)
+                // are excluded before LIMIT rather than as a post-filter.
                 {
                   const sinceWindowOrient = new Date(Date.now() - RETRIEVED_UNUSED_SINCE_DAYS * 86400000).toISOString();
-                  const unusedOrient = getInsightsByEntry(db, undefined, RETRIEVED_UNUSED_MIN_IMPRESSIONS, 10, sinceWindowOrient)
-                    .filter((r) => r.followthrough_events === 0 && !(r.namespace ?? "").startsWith("meta/"));
+                  const hasRecent = db.prepare("SELECT 1 FROM retrieval_events WHERE timestamp >= ? LIMIT 1").get(sinceWindowOrient);
+                  const unusedOrient = hasRecent
+                    ? getInsightsByEntry(db, undefined, RETRIEVED_UNUSED_MIN_IMPRESSIONS, 10, sinceWindowOrient, true)
+                        .filter((r) => r.followthrough_events === 0)
+                    : [];
                   if (unusedOrient.length >= RETRIEVED_UNUSED_ORIENT_MIN) {
                     const unusedOrientItem: MaintenanceItem = {
                       namespace: null,
@@ -4834,10 +4838,12 @@ export function registerTools(
               // Surfaces entries that are repeatedly shown in search results but
               // never opened or acted on — a signal that they may be noise or
               // mislabelled, or that retrieval recall is too aggressive.
+              // Restricted to tracked namespaces (projects/*, clients/*) in SQL to
+              // avoid false positives from reference namespaces (meta/*, documents/*, etc.).
               if (ctx.principalType === "owner") {
                 const sinceWindow = new Date(Date.now() - RETRIEVED_UNUSED_SINCE_DAYS * 86400000).toISOString();
-                const unused = getInsightsByEntry(db, namespace, RETRIEVED_UNUSED_MIN_IMPRESSIONS, 20, sinceWindow)
-                  .filter((r) => r.followthrough_events === 0 && !(r.namespace ?? "").startsWith("meta/"));
+                const unused = getInsightsByEntry(db, namespace, RETRIEVED_UNUSED_MIN_IMPRESSIONS, 20, sinceWindow, true)
+                  .filter((r) => r.followthrough_events === 0);
                 if (unused.length >= RETRIEVED_UNUSED_PATTERN_MIN) {
                   const unusedIds = unused.slice(0, 6).map((r) => r.entry_id);
                   unusedIds.forEach((id) => sourceIds.add(id));
@@ -5579,6 +5585,14 @@ export function registerTools(
                   }
                   if (isStale(parsed.updated_at)) {
                     result.stale = true;
+                  }
+                  // Analytics: log opened_result outcome (mirrors memory_read behaviour)
+                  if (sessionId) {
+                    logRetrievalOutcome(db, sessionId, {
+                      outcomeType: "opened_result",
+                      entryId: parsed.id,
+                      namespace: parsed.namespace,
+                    });
                   }
                   return result;
                 }

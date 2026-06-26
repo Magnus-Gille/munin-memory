@@ -541,25 +541,35 @@ describe("memory_patterns — retrieved_unused pattern", () => {
     expect(unusedPattern!.source_entry_ids.length).toBeGreaterThan(0);
   });
 
-  it("does NOT emit retrieved_unused when one entry has a positive outcome", async () => {
+  it("pattern fires from qualifying entries and excludes the entry with a positive outcome", async () => {
     const call = makeCallTool(db, ownerCtx());
 
     // Entry A: 5 impressions, no outcome → qualifies
-    writeState(db, "projects/open-ok-a", "status", "open project alpha", ["active"]);
-    const entryA = (db.prepare("SELECT id FROM entries WHERE namespace = 'projects/open-ok-a' AND key = 'status'").get() as { id: string }).id;
-    seedImpressions(db, entryA, 5, "ok-a");
+    writeState(db, "projects/out-a", "status", "outcome project alpha", ["active"]);
+    const entryA = (db.prepare("SELECT id FROM entries WHERE namespace = 'projects/out-a' AND key = 'status'").get() as { id: string }).id;
+    seedImpressions(db, entryA, 5, "ot-a");
 
-    // Entry B: 5 impressions + opened_result → disqualifies
-    writeState(db, "projects/open-ok-b", "status", "open project beta", ["active"]);
-    const entryB = (db.prepare("SELECT id FROM entries WHERE namespace = 'projects/open-ok-b' AND key = 'status'").get() as { id: string }).id;
-    seedImpressions(db, entryB, 5, "ok-b");
-    seedOpenOutcome(db, entryB, "ok-b");
+    // Entry B: 5 impressions + opened_result → disqualified (has follow-through)
+    writeState(db, "projects/out-b", "status", "outcome project beta", ["active"]);
+    const entryB = (db.prepare("SELECT id FROM entries WHERE namespace = 'projects/out-b' AND key = 'status'").get() as { id: string }).id;
+    seedImpressions(db, entryB, 5, "ot-b");
+    seedOpenOutcome(db, entryB, "ot-b");
 
-    // Only A qualifies → count=1 < RETRIEVED_UNUSED_PATTERN_MIN(2) → no pattern
+    // Entry C: 5 impressions, no outcome → qualifies
+    writeState(db, "projects/out-c", "status", "outcome project gamma", ["active"]);
+    const entryC = (db.prepare("SELECT id FROM entries WHERE namespace = 'projects/out-c' AND key = 'status'").get() as { id: string }).id;
+    seedImpressions(db, entryC, 5, "ot-c");
+
+    // A and C qualify (count=2 >= RETRIEVED_UNUSED_PATTERN_MIN) → pattern fires
     const raw = await call("memory_patterns", {});
-    const result = parseToolResponse(raw) as { patterns: Array<{ kind: string }> };
+    const result = parseToolResponse(raw) as { patterns: Array<{ kind: string; source_entry_ids: string[] }> };
     const unusedPattern = result.patterns.find((p) => p.kind === "retrieved_unused");
-    expect(unusedPattern).toBeUndefined();
+    expect(unusedPattern).toBeDefined();
+    // B must not appear in source_entry_ids because it had a follow-through outcome
+    expect(unusedPattern!.source_entry_ids).not.toContain(entryB);
+    // A and C should be in source_entry_ids
+    expect(unusedPattern!.source_entry_ids).toContain(entryA);
+    expect(unusedPattern!.source_entry_ids).toContain(entryC);
   });
 
   it("does NOT emit retrieved_unused when impressions < 5", async () => {
@@ -608,7 +618,7 @@ describe("memory_patterns — retrieved_unused pattern", () => {
   it("does NOT include meta/* entries in retrieved_unused pattern", async () => {
     const call = makeCallTool(db, ownerCtx());
 
-    // meta/ entries should be excluded
+    // meta/ entries should be excluded (only projects/* and clients/* are tracked)
     writeState(db, "meta/excluded-a", "notes", "meta entry alpha", []);
     writeState(db, "meta/excluded-b", "notes", "meta entry beta", []);
     const entryA = (db.prepare("SELECT id FROM entries WHERE namespace = 'meta/excluded-a' AND key = 'notes'").get() as { id: string }).id;
@@ -619,6 +629,64 @@ describe("memory_patterns — retrieved_unused pattern", () => {
     const raw = await call("memory_patterns", {});
     const result = parseToolResponse(raw) as { patterns: Array<{ kind: string }> };
     expect(result.patterns.find((p) => p.kind === "retrieved_unused")).toBeUndefined();
+  });
+
+  it("30-day rolling window: old impressions (31d ago) do NOT qualify", async () => {
+    const call = makeCallTool(db, ownerCtx());
+    const oldTs = new Date(Date.now() - 31 * 86400 * 1000).toISOString();
+
+    writeState(db, "projects/old-imp-a", "status", "old impressions alpha", ["active"]);
+    writeState(db, "projects/old-imp-b", "status", "old impressions beta", ["active"]);
+    const entryA = (db.prepare("SELECT id FROM entries WHERE namespace = 'projects/old-imp-a' AND key = 'status'").get() as { id: string }).id;
+    const entryB = (db.prepare("SELECT id FROM entries WHERE namespace = 'projects/old-imp-b' AND key = 'status'").get() as { id: string }).id;
+
+    // Seed 5 impressions per entry, all timestamped 31 days ago (outside the 30d window)
+    for (let i = 0; i < 5; i++) {
+      db.prepare(
+        `INSERT INTO retrieval_events (id, session_id, timestamp, tool_name, result_ids, result_namespaces, result_ranks)
+         VALUES (?, 'sess-old-a', ?, 'memory_query', json_array(?), '[]', '[]')`,
+      ).run(`evt-old-a-${i}`, oldTs, entryA);
+      db.prepare(
+        `INSERT INTO retrieval_events (id, session_id, timestamp, tool_name, result_ids, result_namespaces, result_ranks)
+         VALUES (?, 'sess-old-b', ?, 'memory_query', json_array(?), '[]', '[]')`,
+      ).run(`evt-old-b-${i}`, oldTs, entryB);
+    }
+
+    // Old impressions are outside the rolling window → should NOT qualify
+    const raw = await call("memory_patterns", {});
+    const result = parseToolResponse(raw) as { patterns: Array<{ kind: string }> };
+    expect(result.patterns.find((p) => p.kind === "retrieved_unused")).toBeUndefined();
+  });
+
+  it("30-day rolling window: in-window impressions DO qualify (control)", async () => {
+    const call = makeCallTool(db, ownerCtx());
+    const oldTs = new Date(Date.now() - 31 * 86400 * 1000).toISOString();
+
+    writeState(db, "projects/win-ctrl-a", "status", "window control alpha", ["active"]);
+    writeState(db, "projects/win-ctrl-b", "status", "window control beta", ["active"]);
+    const entryA = (db.prepare("SELECT id FROM entries WHERE namespace = 'projects/win-ctrl-a' AND key = 'status'").get() as { id: string }).id;
+    const entryB = (db.prepare("SELECT id FROM entries WHERE namespace = 'projects/win-ctrl-b' AND key = 'status'").get() as { id: string }).id;
+
+    // Seed 5 OLD impressions per entry (outside window) — should not count
+    for (let i = 0; i < 5; i++) {
+      db.prepare(
+        `INSERT INTO retrieval_events (id, session_id, timestamp, tool_name, result_ids, result_namespaces, result_ranks)
+         VALUES (?, 'sess-wc-old-a', ?, 'memory_query', json_array(?), '[]', '[]')`,
+      ).run(`evt-wc-old-a-${i}`, oldTs, entryA);
+      db.prepare(
+        `INSERT INTO retrieval_events (id, session_id, timestamp, tool_name, result_ids, result_namespaces, result_ranks)
+         VALUES (?, 'sess-wc-old-b', ?, 'memory_query', json_array(?), '[]', '[]')`,
+      ).run(`evt-wc-old-b-${i}`, oldTs, entryB);
+    }
+
+    // Seed 5 IN-WINDOW impressions per entry (now)
+    seedImpressions(db, entryA, 5, "wc-new-a");
+    seedImpressions(db, entryB, 5, "wc-new-b");
+
+    // In-window impressions meet the threshold → pattern fires
+    const raw = await call("memory_patterns", {});
+    const result = parseToolResponse(raw) as { patterns: Array<{ kind: string }> };
+    expect(result.patterns.find((p) => p.kind === "retrieved_unused")).toBeDefined();
   });
 });
 
