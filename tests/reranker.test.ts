@@ -442,6 +442,67 @@ describe("assessTrackedStatus", () => {
     expect(result.attentionReason).toBe("upcoming_event_stale");
     expect(result.maintenanceItems.find(m => m.issue === "temporal_stale")).toBeUndefined();
   });
+
+  // --- Codex-review regression tests (#140 fixes) ---
+
+  it("does NOT flag temporal_stale for 'will continue' after a past date (bare 'will' removed from pattern)", () => {
+    const pastDate = new Date(Date.now() - 10 * 86400 * 1000).toISOString().slice(0, 10);
+    const recentUpdate = new Date(Date.now() - 2 * 86400 * 1000).toISOString();
+    const row = makeRow({
+      content: `Shipped ${pastDate}; will continue with follow-up work.`,
+      updated_at: recentUpdate,
+      tags: JSON.stringify(["active"]),
+    });
+    const result = assessTrackedStatus(row);
+    expect(result.maintenanceItems.find(m => m.issue === "temporal_stale")).toBeUndefined();
+  });
+
+  it("does NOT flag temporal_stale for a proper name 'Will' near a past date", () => {
+    const pastDate = new Date(Date.now() - 10 * 86400 * 1000).toISOString().slice(0, 10);
+    const recentUpdate = new Date(Date.now() - 2 * 86400 * 1000).toISOString();
+    const row = makeRow({
+      content: `${pastDate} follow-up with Will.`,
+      updated_at: recentUpdate,
+      tags: JSON.stringify(["active"]),
+    });
+    const result = assessTrackedStatus(row);
+    expect(result.maintenanceItems.find(m => m.issue === "temporal_stale")).toBeUndefined();
+  });
+
+  it("still flags temporal_stale for strong forward-looking cue (positive control after fix)", () => {
+    const pastDate = new Date(Date.now() - 10 * 86400 * 1000).toISOString().slice(0, 10);
+    const recentUpdate = new Date(Date.now() - 2 * 86400 * 1000).toISOString();
+    const row = makeRow({
+      content: `Planning to attend the conference on ${pastDate}.`,
+      updated_at: recentUpdate,
+      tags: JSON.stringify(["active"]),
+    });
+    const result = assessTrackedStatus(row);
+    expect(result.attentionReason).toBe("temporal_stale");
+  });
+
+  it("does NOT flag temporal_stale for an invalid date (2026-02-31 rolls over — rejected by round-trip check)", () => {
+    const recentUpdate = new Date(Date.now() - 2 * 86400 * 1000).toISOString();
+    const row = makeRow({
+      content: `Planning around 2026-02-31.`,
+      updated_at: recentUpdate,
+      tags: JSON.stringify(["active"]),
+    });
+    const result = assessTrackedStatus(row);
+    expect(result.maintenanceItems.find(m => m.issue === "temporal_stale")).toBeUndefined();
+  });
+
+  it("does NOT flag temporal_stale when forward-looking cue is in a different sentence (cross-sentence)", () => {
+    const pastDate = new Date(Date.now() - 10 * 86400 * 1000).toISOString().slice(0, 10);
+    const recentUpdate = new Date(Date.now() - 2 * 86400 * 1000).toISOString();
+    const row = makeRow({
+      content: `Conference was ${pastDate}. Next quarter we are planning to expand.`,
+      updated_at: recentUpdate,
+      tags: JSON.stringify(["active"]),
+    });
+    const result = assessTrackedStatus(row);
+    expect(result.maintenanceItems.find(m => m.issue === "temporal_stale")).toBeUndefined();
+  });
 });
 
 // --- getQueryHeuristicScore ---
