@@ -1251,16 +1251,16 @@ describe("Fix A: embeddings init gate — per-query search_mode overrides global
       chat,
     });
 
-    // Gate OPENED: initEmbeddings was called for the per-query semantic query.
-    // Two calls are expected: (1) inside populateCorpusEmbeddings (pre-population pass,
-    // added by #137) and (2) inside runAnswerQualityInner (query-time init, idempotent).
-    // If Fix A were reverted, requiresEmbeddings would be false (global=lexical),
-    // populateCorpusEmbeddings would NOT be called, and initEmbeddings would be called 0 times.
-    expect(vi.mocked(initEmbeddings)).toHaveBeenCalledTimes(2);
-
+    // Gate OPENED: initEmbeddings was called at least once, confirming the per-query
+    // semantic override triggered the embedding path. (The exact number of calls is an
+    // internal implementation detail and may change as the pipeline evolves.)
+    expect(vi.mocked(initEmbeddings)).toHaveBeenCalled();
+    // Behavioral proof: the run succeeded and semantic mode was honored
     expect(report.skipped).toBeUndefined();
     expect(report.results).toHaveLength(1);
     expect(report.results[0].effective_search_mode).toBe("semantic");
+    // Pre-population was triggered (embedding_summary present)
+    expect(report.embedding_summary).toBeDefined();
   });
 
   it("gate stays closed: initEmbeddings is NOT called when all queries are lexical", async () => {
@@ -1480,9 +1480,11 @@ describe("Fix #137: corpus embedding pre-population (integration)", () => {
       // embedding_summary must be populated (non-null) — pre-fix this field didn't exist
       expect(report.embedding_summary).not.toBeNull();
       expect(report.embedding_summary).toBeDefined();
-      // All entries should have been embedded
-      expect(report.embedding_summary!.generated).toBeGreaterThanOrEqual(entryCount);
+      // All entries should have been embedded (exact counts)
+      expect(report.embedding_summary!.generated).toBe(entryCount);
       expect(report.embedding_summary!.failed).toBe(0);
+      // Real vectors must exist in entries_vec (proves usable vectors, not just status flags)
+      expect(report.embedding_summary!.vector_rows).toBe(entryCount);
 
       // Verify at the DB level: all entries must now be embedding_status='generated'
       const verifyDb = new Database(dbPath);

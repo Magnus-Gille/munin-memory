@@ -16,6 +16,8 @@ export interface CorpusEmbeddingSummary {
   generated: number;
   failed: number;
   skipped: number;
+  /** Actual row count in entries_vec — 0 when sqlite-vec is unavailable or the table is empty. */
+  vector_rows: number;
 }
 
 /**
@@ -74,7 +76,14 @@ export async function populateCorpusEmbeddings(dbPath: string): Promise<CorpusEm
       }
     }
 
-    return { total: totalRows.cnt, generated, failed, skipped };
+    let vectorRows = 0;
+    try {
+      vectorRows = (db.prepare("SELECT COUNT(*) AS c FROM entries_vec").get() as { c: number }).c;
+    } catch {
+      vectorRows = 0;
+    }
+
+    return { total: totalRows.cnt, generated, failed, skipped, vector_rows: vectorRows };
   } finally {
     db.close();
   }

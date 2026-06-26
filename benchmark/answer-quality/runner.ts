@@ -210,14 +210,11 @@ export async function runAnswerQuality(
   let embeddingSummary: CorpusEmbeddingSummary | null = null;
   if (querySetRequiresEmbeddings(opts.queries, searchMode)) {
     embeddingSummary = await populateCorpusEmbeddings(opts.snapshotPath);
-    if (
-      embeddingSummary.total > 0 &&
-      embeddingSummary.generated === 0 &&
-      embeddingSummary.skipped === 0
-    ) {
+    if (embeddingSummary.total > 0 && embeddingSummary.vector_rows === 0) {
       throw new Error(
-        `answer-quality: hybrid/semantic run requested but snapshot ${opts.snapshotPath} produced 0 embeddings ` +
-          `(total=${embeddingSummary.total}, failed=${embeddingSummary.failed}) — the run would silently degrade to lexical (see #137).`,
+        `answer-quality: hybrid/semantic run requested but snapshot ${opts.snapshotPath} has 0 usable vectors ` +
+          `(total=${embeddingSummary.total}, generated=${embeddingSummary.generated}, failed=${embeddingSummary.failed}, ` +
+          `vector_rows=${embeddingSummary.vector_rows}) — the run would silently degrade to lexical (see #137).`,
       );
     }
   }
