@@ -387,6 +387,61 @@ describe("assessTrackedStatus", () => {
     expect(result.needsAttention).toBe(true);
     expect(result.attentionReason).toBe("active_but_stale");
   });
+
+  it("flags temporal_stale when a past date appears near forward-looking phrasing", () => {
+    const pastDate = new Date(Date.now() - 10 * 86400 * 1000).toISOString().slice(0, 10);
+    const recentUpdate = new Date(Date.now() - 2 * 86400 * 1000).toISOString();
+    const row = makeRow({
+      content: `Planning to attend the conference on ${pastDate}. Very excited!`,
+      updated_at: recentUpdate,
+      tags: JSON.stringify(["active"]),
+    });
+    const result = assessTrackedStatus(row);
+    expect(result.attentionReason).toBe("temporal_stale");
+    const item = result.maintenanceItems.find(m => m.issue === "temporal_stale");
+    expect(item).toBeDefined();
+    expect(item!.suggestion).toContain(pastDate);
+    expect(item!.suggestion).toMatch(/\d+ day/);
+  });
+
+  it("does NOT flag temporal_stale for retrospective phrasing near a past date", () => {
+    const pastDate = new Date(Date.now() - 10 * 86400 * 1000).toISOString().slice(0, 10);
+    const recentUpdate = new Date(Date.now() - 2 * 86400 * 1000).toISOString();
+    const row = makeRow({
+      content: `Completed the conference on ${pastDate}. It went great.`,
+      updated_at: recentUpdate,
+      tags: JSON.stringify(["active"]),
+    });
+    const result = assessTrackedStatus(row);
+    expect(result.attentionReason).not.toBe("temporal_stale");
+    expect(result.maintenanceItems.find(m => m.issue === "temporal_stale")).toBeUndefined();
+  });
+
+  it("does NOT flag temporal_stale when entry is already caught by active_but_stale (>14d)", () => {
+    const pastDate = new Date(Date.now() - 10 * 86400 * 1000).toISOString().slice(0, 10);
+    const staleDate = new Date(Date.now() - 20 * 86400 * 1000).toISOString();
+    const row = makeRow({
+      content: `Planning to attend the conference on ${pastDate}.`,
+      updated_at: staleDate,
+      tags: JSON.stringify(["active"]),
+    });
+    const result = assessTrackedStatus(row);
+    expect(result.attentionReason).toBe("active_but_stale");
+    expect(result.maintenanceItems.find(m => m.issue === "temporal_stale")).toBeUndefined();
+  });
+
+  it("does NOT flag temporal_stale for a future date with forward-looking phrasing (caught by upcoming_event_stale)", () => {
+    const futureDate = new Date(Date.now() + 3 * 86400 * 1000).toISOString().slice(0, 10);
+    const recentUpdateButStaleEnough = new Date(Date.now() - 5 * 86400 * 1000).toISOString();
+    const row = makeRow({
+      content: `Planning to attend the workshop on ${futureDate}.`,
+      updated_at: recentUpdateButStaleEnough,
+      tags: JSON.stringify(["active"]),
+    });
+    const result = assessTrackedStatus(row);
+    expect(result.attentionReason).toBe("upcoming_event_stale");
+    expect(result.maintenanceItems.find(m => m.issue === "temporal_stale")).toBeUndefined();
+  });
 });
 
 // --- getQueryHeuristicScore ---

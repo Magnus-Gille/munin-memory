@@ -187,6 +187,7 @@ export interface AttentionParams {
   include_blocked?: boolean;
   include_stale?: boolean;
   include_upcoming_events?: boolean;
+  include_temporal_stale?: boolean;
   include_expiring?: boolean;
   include_missing_status?: boolean;
   include_conflicting_lifecycle?: boolean;
@@ -259,7 +260,7 @@ export interface DashboardEntry {
 
 export interface MaintenanceItem {
   namespace: string | null;
-  issue: "active_but_stale" | "missing_status" | "conflicting_lifecycle" | "missing_lifecycle" | "upcoming_event_stale" | "expiring_soon" | "expired" | "consolidation_backlog" | "consolidation_circuit_breaker";
+  issue: "active_but_stale" | "missing_status" | "conflicting_lifecycle" | "missing_lifecycle" | "upcoming_event_stale" | "temporal_stale" | "expiring_soon" | "expired" | "consolidation_backlog" | "consolidation_circuit_breaker";
   suggestion: string;
 }
 

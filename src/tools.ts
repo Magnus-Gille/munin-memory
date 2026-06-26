@@ -1128,6 +1128,7 @@ function getAttentionSeverity(category: AttentionItem["category"]): AttentionIte
     case "conflicting_lifecycle":
       return "high";
     case "active_but_stale":
+    case "temporal_stale":
     case "expiring_soon":
     case "missing_status":
     case "missing_lifecycle":
@@ -1154,6 +1155,9 @@ function buildAttentionItem(
       break;
     case "upcoming_event_stale":
       reason = "Upcoming event is close and the status is stale.";
+      break;
+    case "temporal_stale":
+      reason = "Content references a past date with forward-looking phrasing.";
       break;
     case "missing_status":
       reason = "Tracked namespace has entries but no status key.";
@@ -3375,6 +3379,10 @@ const TOOL_DEFINITIONS = [
         include_upcoming_events: {
           type: "boolean",
           description: "Optional. Include stale statuses with near-term event dates. Default: true.",
+        },
+        include_temporal_stale: {
+          type: "boolean",
+          description: "Optional. Include statuses that reference a past date with forward-looking phrasing. Default: true.",
         },
         include_expiring: {
           type: "boolean",
@@ -5969,6 +5977,7 @@ export function registerTools(
               const includeBlocked = attentionArgs.include_blocked !== false;
               const includeStale = attentionArgs.include_stale !== false;
               const includeUpcomingEvents = attentionArgs.include_upcoming_events !== false;
+              const includeTemporalStale = attentionArgs.include_temporal_stale !== false;
               const includeExpiring = attentionArgs.include_expiring !== false;
               const includeMissingStatus = attentionArgs.include_missing_status !== false;
               const includeConflictingLifecycle = attentionArgs.include_conflicting_lifecycle !== false;
@@ -5996,6 +6005,7 @@ export function registerTools(
                 for (const item of assessment.maintenanceItems) {
                   if (item.issue === "active_but_stale" && !includeStale) continue;
                   if (item.issue === "upcoming_event_stale" && !includeUpcomingEvents) continue;
+                  if (item.issue === "temporal_stale" && !includeTemporalStale) continue;
                   if ((item.issue === "expiring_soon" || item.issue === "expired") && !includeExpiring) continue;
                   if (item.issue === "conflicting_lifecycle" && !includeConflictingLifecycle) continue;
                   if (item.issue === "missing_lifecycle" && !includeMissingLifecycle) continue;

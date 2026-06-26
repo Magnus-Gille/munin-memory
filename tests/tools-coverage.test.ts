@@ -1761,6 +1761,28 @@ describe("memory_attention categories", () => {
     expect(byCategory.get("active_but_stale")?.severity).toBe("medium");
     expect(byCategory.get("upcoming_event_stale")?.severity).toBe("high");
   });
+
+  it("builds reason and severity for temporal_stale category", async () => {
+    const pastDate = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const temporal = parseToolResponse(await callTool("memory_write", {
+      namespace: "projects/att-temporal",
+      key: "status",
+      content: `## Phase\nActive\n## Notes\nScheduled to attend the summit on ${pastDate}.`,
+      tags: ["active"],
+    }));
+    backdateEntry(temporal.id, 2);
+
+    const res = parseToolResponse(await callTool("memory_attention", {}));
+    expect(res.ok).toBe(true);
+    const byCategory = new Map<string, ToolResponse>(
+      res.items.map((item: ToolResponse) => [item.category as string, item]),
+    );
+
+    expect(byCategory.get("temporal_stale")?.reason).toBe(
+      "Content references a past date with forward-looking phrasing.",
+    );
+    expect(byCategory.get("temporal_stale")?.severity).toBe("medium");
+  });
 });
 
 // ---------------------------------------------------------------------------

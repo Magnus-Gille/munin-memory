@@ -18,6 +18,9 @@ export const EXPIRES_SOON_DAYS = 7;
 // Date pattern: YYYY-MM-DD (standalone or in ISO timestamp)
 export const DATE_PATTERN = /\b(20\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))\b/g;
 
+// Forward-looking phrasing that, when appearing near a past date, signals a stale statement.
+export const FORWARD_LOOKING_PATTERN = /\b(?:going\s+to|will(?:\s+be)?|plan(?:n?ing)?(?:\s+to)?|scheduled\s+(?:for|to)|upcoming|attend(?:ing)?|presenting\s+at|speaking\s+at|travel(?:l?ing)?(?:\s+to)?|join(?:ing)?)\b/i;
+
 // --- Lifecycle tag management ---
 
 export const LIFECYCLE_TAGS = new Set(["active", "blocked", "completed", "stopped", "maintenance", "archived"]);
@@ -80,6 +83,25 @@ export function findUpcomingEventDate(content: string, updatedAt: string): strin
     }
   }
   return soonest;
+}
+
+/**
+ * Detect a YYYY-MM-DD date that has already passed while forward-looking
+ * phrasing appears within 200 chars of it. Returns the first such past date
+ * string, or null. Advisory signal for stale forward-looking statements like
+ * "going to conference 2026-03-10" after that date elapsed.
+ */
+export function findPassedForwardDate(content: string): string | null {
+  const now = Date.now();
+  for (const match of content.matchAll(DATE_PATTERN)) {
+    const dateStr = match[1];
+    const dateMs = new Date(dateStr + "T23:59:59Z").getTime();
+    if (dateMs >= now) continue; // future/today — handled by findUpcomingEventDate
+    const start = Math.max(0, (match.index ?? 0) - 200);
+    const end = Math.min(content.length, (match.index ?? 0) + match[0].length + 200);
+    if (FORWARD_LOOKING_PATTERN.test(content.slice(start, end))) return dateStr;
+  }
+  return null;
 }
 
 export function isTrackedNamespace(namespace: string): boolean {
