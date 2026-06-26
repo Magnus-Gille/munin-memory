@@ -5824,6 +5824,37 @@ describe("maintenance suggestions (memory_orient)", () => {
     expect(eventStale).toBeUndefined();
   });
 
+  it("flags temporal_stale when a past date appears near forward-looking phrasing", async () => {
+    const pastDate = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const content = `**Phase:** Active\n**Current work:** Planning to present at the summit on ${pastDate}.`;
+    await callTool("memory_write", { namespace: "projects/temporal-test", key: "status", content, tags: ["active"] });
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+    db.prepare("UPDATE entries SET updated_at = ? WHERE namespace = 'projects/temporal-test' AND key = 'status'").run(twoDaysAgo);
+
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as {
+      maintenance_needed: Array<{ namespace: string; issue: string; suggestion: string }>;
+    };
+    const item = result.maintenance_needed?.find(m => m.issue === "temporal_stale" && m.namespace === "projects/temporal-test");
+    expect(item).toBeDefined();
+    expect(item!.suggestion).toContain(pastDate);
+  });
+
+  it("does NOT flag temporal_stale for retrospective phrasing near a past date", async () => {
+    const pastDate = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const content = `**Phase:** Completed\n**Notes:** Wrapped up the summit on ${pastDate}. It went well.`;
+    await callTool("memory_write", { namespace: "projects/temporal-retro", key: "status", content, tags: ["active"] });
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+    db.prepare("UPDATE entries SET updated_at = ? WHERE namespace = 'projects/temporal-retro' AND key = 'status'").run(twoDaysAgo);
+
+    const raw = await callTool("memory_orient", {});
+    const result = parseToolResponse(raw) as {
+      maintenance_needed?: Array<{ namespace: string; issue: string }>;
+    };
+    const item = (result.maintenance_needed ?? []).find(m => m.issue === "temporal_stale" && m.namespace === "projects/temporal-retro");
+    expect(item).toBeUndefined();
+  });
+
   it("does not flag non-tracked namespaces", async () => {
     await callTool("memory_write", { namespace: "people/alice", key: "prefs", content: "vim" });
 

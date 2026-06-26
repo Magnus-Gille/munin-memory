@@ -18,6 +18,11 @@ export const EXPIRES_SOON_DAYS = 7;
 // Date pattern: YYYY-MM-DD (standalone or in ISO timestamp)
 export const DATE_PATTERN = /\b(20\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01]))\b/g;
 
+// Forward-looking phrasing that, when appearing in the same sentence as a past date, signals a
+// stale statement. "will" is intentionally excluded — it fires on retrospective uses like
+// "shipped 2026-03-10, will continue" and on proper names like "follow-up with Will".
+export const FORWARD_LOOKING_PATTERN = /\b(?:going\s+to|plan(?:n?ing)?(?:\s+to)?|scheduled\s+(?:for|to)|upcoming|attend(?:ing)?|presenting\s+at|speaking\s+at|travel(?:l?ing)?(?:\s+to)?|join(?:ing)?)\b/i;
+
 // --- Lifecycle tag management ---
 
 export const LIFECYCLE_TAGS = new Set(["active", "blocked", "completed", "stopped", "maintenance", "archived"]);
@@ -80,6 +85,44 @@ export function findUpcomingEventDate(content: string, updatedAt: string): strin
     }
   }
   return soonest;
+}
+
+/**
+ * Detect a YYYY-MM-DD date that has already passed while forward-looking
+ * phrasing appears in the SAME sentence/line as the date. Returns the first
+ * such past date string, or null. Advisory signal for stale statements like
+ * "planning to attend conference 2026-03-10" after that date elapsed.
+ *
+ * Precision choices:
+ * - Sentence/line scoping (not a 200-char window) prevents adjacent clauses
+ *   from triggering (e.g. "Conference was 2026-03-10. Next we are planning…").
+ * - Round-trip date validation rejects calendar overflows like 2026-02-31.
+ */
+export function findPassedForwardDate(content: string): string | null {
+  const now = Date.now();
+  for (const match of content.matchAll(DATE_PATTERN)) {
+    const dateStr = match[1];
+    const parsed = new Date(dateStr + "T23:59:59Z");
+    if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== dateStr) continue;
+    if (parsed.getTime() >= now) continue; // future/today — handled by findUpcomingEventDate
+
+    // Scope to the sentence/line containing the date match.
+    const idx = match.index ?? 0;
+    const before = Math.max(
+      content.lastIndexOf(".", idx - 1),
+      content.lastIndexOf("!", idx - 1),
+      content.lastIndexOf("?", idx - 1),
+      content.lastIndexOf("\n", idx - 1),
+    );
+    let after = content.length;
+    for (const ch of [".", "!", "?", "\n"]) {
+      const p = content.indexOf(ch, idx + match[0].length);
+      if (p !== -1 && p < after) after = p;
+    }
+    const sentence = content.slice(before + 1, after);
+    if (FORWARD_LOOKING_PATTERN.test(sentence)) return dateStr;
+  }
+  return null;
 }
 
 export function isTrackedNamespace(namespace: string): boolean {

@@ -969,6 +969,32 @@ describe("initConsolidation", () => {
     const result = initConsolidation();
     expect(result).toBe(false);
   });
+
+  // FIX 3: empty string OPENROUTER_API_KEY with custom base URL → enabled, api_key_present false
+  it("(FIX 3) custom base URL + OPENROUTER_API_KEY='' → returns true, api_key_present === false", () => {
+    const savedLlmBaseUrl = process.env.MUNIN_LLM_BASE_URL;
+    process.env.MUNIN_LLM_BASE_URL = "http://localhost:8091/v1";
+    process.env.OPENROUTER_API_KEY = "";
+    const savedEnabled = _consolidationConfig.enabled;
+    _consolidationConfig.enabled = true;
+
+    let result: boolean;
+    try {
+      result = initConsolidation();
+    } finally {
+      _consolidationConfig.enabled = savedEnabled;
+      if (savedLlmBaseUrl === undefined) {
+        delete process.env.MUNIN_LLM_BASE_URL;
+      } else {
+        process.env.MUNIN_LLM_BASE_URL = savedLlmBaseUrl;
+      }
+      // restore apiKey module var to null so other tests are unaffected
+      _setApiKey(null);
+    }
+
+    expect(result!).toBe(true);
+    expect(getConsolidationHealth().api_key_present).toBe(false);
+  });
 });
 
 describe("startConsolidationWorker / stopConsolidationWorker", () => {
@@ -2173,5 +2199,158 @@ describe("processConsolidationBatch success path — stubbed fetch", () => {
     // If scanner found the orphan, the cross-ref should exist.
     // (it may not if the batch ran into namespace-floor guard issues)
     expect(typeof crossRefs.length).toBe("number");
+  });
+});
+
+// ─── #123: Unified consolidation shape regression ─────────────────────────────
+//
+// These tests prove that after unifying the consolidation worker to delegate to
+// the shared openrouter client, the fetch request shape is byte-for-byte
+// identical to the previous inline implementation. The fetch-spy is the key
+// safety net: it captures the actual arguments to globalThis.fetch and lets us
+// assert URL, headers, and body without touching the real network.
+
+describe("#123 — consolidated fetch shape regression", () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  let logSpy: ReturnType<typeof vi.spyOn>;
+  let originalFetch: typeof globalThis.fetch;
+  let savedLlmBaseUrl: string | undefined;
+
+  const validSynthesisBody = JSON.stringify({
+    status_content: "## Phase: Active\n\nRegression synthesis.",
+    tags: ["active"],
+    cross_references: [],
+  });
+
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    resetConsolidationCircuitBreaker();
+    _resetHealthState();
+    originalFetch = globalThis.fetch;
+    savedLlmBaseUrl = process.env.MUNIN_LLM_BASE_URL;
+    delete process.env.MUNIN_LLM_BASE_URL;
+  });
+
+  afterEach(async () => {
+    globalThis.fetch = originalFetch;
+    if (savedLlmBaseUrl === undefined) {
+      delete process.env.MUNIN_LLM_BASE_URL;
+    } else {
+      process.env.MUNIN_LLM_BASE_URL = savedLlmBaseUrl;
+    }
+    errorSpy.mockRestore();
+    warnSpy.mockRestore();
+    logSpy.mockRestore();
+    _setApiKey(null);
+    _setWorkerDb(null);
+    resetConsolidationCircuitBreaker();
+    _resetHealthState();
+  });
+
+  it("default path: hits https://openrouter.ai/api/v1/chat/completions with correct headers + body shape", async () => {
+    // Seed enough logs to trigger consolidation
+    for (let i = 0; i < _consolidationConfig.minLogs; i++) {
+      appendLog(db, "projects/shape-regression", `Log entry ${i}`, []);
+    }
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          choices: [{ message: { content: validSynthesisBody } }],
+          usage: { prompt_tokens: 100, completion_tokens: 50 },
+        }),
+      text: () => Promise.resolve(""),
+    } as unknown as Response);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    // Set key and run
+    _setApiKey("sk-regression-key");
+    _setWorkerDb(db);
+
+    await processConsolidationBatch();
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = init.headers as Record<string, string>;
+    const body = JSON.parse(init.body as string);
+
+    // URL must be the OpenRouter chat-completions endpoint
+    expect(url).toBe("https://openrouter.ai/api/v1/chat/completions");
+
+    // Authorization header
+    expect(headers["Authorization"]).toBe("Bearer sk-regression-key");
+
+    // Fixed headers
+    expect(headers["HTTP-Referer"]).toBe("https://munin-memory.gille.ai");
+    expect(headers["X-Title"]).toBe("Munin Memory Consolidation");
+    expect(headers["Content-Type"]).toBe("application/json");
+
+    // Body shape: user-only message, max_tokens 4096, ZDR provider, no temperature
+    expect(body.max_tokens).toBe(4096);
+    expect(body.provider).toEqual({ zdr: true });
+    expect(body.messages).toHaveLength(1);
+    expect(body.messages[0].role).toBe("user");
+    expect(typeof body.messages[0].content).toBe("string");
+    expect(Object.prototype.hasOwnProperty.call(body, "temperature")).toBe(false);
+  });
+
+  it("local path: MUNIN_LLM_BASE_URL set + no key → runs and omits Authorization", async () => {
+    // config.enabled is evaluated at module load time and is false in the test
+    // suite (MUNIN_CONSOLIDATION_ENABLED is not set). Temporarily set it via the
+    // exported config reference so we can test initConsolidation's key-gating
+    // logic in isolation, then restore it.
+    process.env.MUNIN_LLM_BASE_URL = "http://localhost:8091/v1";
+    delete process.env.OPENROUTER_API_KEY;
+    const savedEnabled = _consolidationConfig.enabled;
+    _consolidationConfig.enabled = true;
+
+    let initialized: boolean;
+    try {
+      initialized = initConsolidation();
+    } finally {
+      _consolidationConfig.enabled = savedEnabled;
+    }
+    // initConsolidation must succeed without a key when custom base URL is set
+    expect(initialized).toBe(true);
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          choices: [{ message: { content: validSynthesisBody } }],
+          usage: { prompt_tokens: 100, completion_tokens: 50 },
+        }),
+      text: () => Promise.resolve(""),
+    } as unknown as Response);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    // Seed logs; apiKey is now null (set by initConsolidation above) + MUNIN_LLM_BASE_URL is local
+    for (let i = 0; i < _consolidationConfig.minLogs; i++) {
+      appendLog(db, "projects/local-path-test", `Log ${i}`, []);
+    }
+    _setWorkerDb(db);
+    await processConsolidationBatch();
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = init.headers as Record<string, string>;
+
+    // Must hit local URL
+    expect(url).toBe("http://localhost:8091/v1/chat/completions");
+
+    // Must NOT include Authorization header for keyless local path
+    expect(Object.prototype.hasOwnProperty.call(headers, "Authorization")).toBe(false);
+
+    // Fixed headers still present
+    expect(headers["HTTP-Referer"]).toBe("https://munin-memory.gille.ai");
+    expect(headers["X-Title"]).toBe("Munin Memory Consolidation");
   });
 });

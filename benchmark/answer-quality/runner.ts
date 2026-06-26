@@ -27,11 +27,13 @@ import {
 import {
   callOpenRouter as defaultCallOpenRouter,
   getOpenRouterApiKey,
+  isCustomLlmBaseUrl,
 } from "../../src/internal/openrouter.js";
 import type { QueryParams } from "../../src/types.js";
 import type { SearchMode } from "../../src/types.js";
 import { executeQuery, applyProductionReranker, checkProductionRankerPrereqs } from "../runner.js";
 import type { BenchmarkQuery, QuerySetSource, DurationSummary, RunnerMode } from "../types.js";
+import { populateCorpusEmbeddings, type CorpusEmbeddingSummary } from "../adapters/shared.js";
 import { serializeContext } from "./serialize.js";
 import { generateAnswer, judgeAnswer, type ChatFn } from "./judge.js";
 import {
@@ -82,13 +84,33 @@ export function shouldSkipForMissingKey(
 ): string | null {
   if (chat) return null; // injected mock — always runnable
   const key = apiKey ?? env.OPENROUTER_API_KEY ?? null;
-  if (!key || key.length === 0) {
-    return (
-      "OPENROUTER_API_KEY unset — answer-quality eval requires it. " +
-      "Set OPENROUTER_API_KEY in your environment and re-run."
-    );
-  }
-  return null;
+  if (key && key.length > 0) return null; // explicit key provided
+  // A non-default base URL (local server) needs no API key — allow running.
+  if (isCustomLlmBaseUrl(env)) return null;
+  return (
+    "OPENROUTER_API_KEY unset — answer-quality eval requires it. " +
+    "Set OPENROUTER_API_KEY in your environment and re-run."
+  );
+}
+
+// --- Embedding requirement predicate ---
+
+/**
+ * Returns true when at least one eligible query (has reference_answer) will
+ * use a non-lexical search mode, meaning corpus embeddings must be generated
+ * before the read-only DB is opened.
+ *
+ * Exported for unit tests.
+ */
+export function querySetRequiresEmbeddings(
+  queries: BenchmarkQuery[],
+  searchMode: SearchMode,
+): boolean {
+  return queries.some((q) => {
+    if (q.reference_answer === undefined) return false; // only eligible queries run
+    const effectiveMode = q.search_mode === "all" ? searchMode : q.search_mode;
+    return effectiveMode !== "lexical";
+  });
 }
 
 // --- Aggregation helpers ---
@@ -174,6 +196,7 @@ export async function runAnswerQuality(
       overall_duration: { p50_ms: null, p95_ms: null, total_ms: 0 },
       by_category: [],
       results: [],
+      embedding_summary: null,
       skipped: true,
       skip_reason: skipReason,
     };
@@ -181,6 +204,21 @@ export async function runAnswerQuality(
 
   const apiKey = opts.apiKey ?? getOpenRouterApiKey() ?? "";
   const chat: ChatFn = opts.chat ?? defaultCallOpenRouter;
+
+  // Pre-populate corpus embeddings (read-write pass) BEFORE opening the read-only DB.
+  // A hybrid/semantic run has no vectors in a freshly-copied snapshot — without this
+  // the run silently degrades to lexical (see #137).
+  let embeddingSummary: CorpusEmbeddingSummary | null = null;
+  if (querySetRequiresEmbeddings(opts.queries, searchMode)) {
+    embeddingSummary = await populateCorpusEmbeddings(opts.snapshotPath);
+    if (embeddingSummary.total > 0 && embeddingSummary.vector_rows === 0) {
+      throw new Error(
+        `answer-quality: hybrid/semantic run requested but snapshot ${opts.snapshotPath} has 0 usable vectors ` +
+          `(total=${embeddingSummary.total}, generated=${embeddingSummary.generated}, failed=${embeddingSummary.failed}, ` +
+          `vector_rows=${embeddingSummary.vector_rows}) — the run would silently degrade to lexical (see #137).`,
+      );
+    }
+  }
 
   // Open snapshot DB (read-only)
   const db = new Database(opts.snapshotPath, { readonly: true });
@@ -196,6 +234,7 @@ export async function runAnswerQuality(
       searchRecencyWeight,
       apiKey,
       chat,
+      embeddingSummary,
     );
   } finally {
     db.close();
@@ -213,6 +252,7 @@ export async function runAnswerQualityInner(
   searchRecencyWeight: number | null,
   apiKey: string,
   chat: ChatFn,
+  embeddingSummary: CorpusEmbeddingSummary | null = null,
 ): Promise<AnswerQualityReport> {
   const warnings: string[] = [];
 
@@ -228,10 +268,7 @@ export async function runAnswerQualityInner(
   // global searchMode is used. This fixes a bug where the embeddings init was gated only on
   // the global searchMode: when global=lexical but a per-query search_mode="semantic|hybrid",
   // embeddings were never initialized, silently degrading those queries to lexical.
-  const requiresEmbeddings = eligible.some((q) => {
-    const effectiveMode = q.search_mode === "all" ? searchMode : q.search_mode;
-    return effectiveMode !== "lexical";
-  });
+  const requiresEmbeddings = querySetRequiresEmbeddings(opts.queries, searchMode);
 
   // Load sqlite-vec (soft dependency — lexical still works without it)
   try {
@@ -458,6 +495,7 @@ export async function runAnswerQualityInner(
     results,
     total_usage: totalUsage,
     warnings: warnings.length > 0 ? warnings : undefined,
+    embedding_summary: embeddingSummary,
   };
 }
 

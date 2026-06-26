@@ -24,6 +24,7 @@
 
 import { resolve } from "node:path";
 import { loadQueriesWithSource } from "../runner.js";
+import { ensureSafeGeneratedPath } from "../adapters/shared.js";
 import { shouldSkipForMissingKey, runAnswerQuality, writeAnswerQualityReport } from "./runner.js";
 import { runAnswerQualityAb, writeAbReport, printAbSummary } from "./ab.js";
 import type { SerializationMode } from "./types.js";
@@ -183,6 +184,10 @@ async function main() {
     console.log(`Skipping answer-quality eval: ${skipReason}`);
     process.exit(0);
   }
+
+  // Guard: snapshot must live under benchmark/generated/ to prevent accidental
+  // writes against the live Munin DB (hybrid/semantic runs embed in-place).
+  ensureSafeGeneratedPath(parsed.snapshotPath, "Answer-quality snapshot");
 
   // Load queries
   const { queries, source } = loadQueriesWithSource(parsed.queriesPath);
