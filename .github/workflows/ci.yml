@@ -43,3 +43,12 @@ jobs:
       # Fails the build if recall/ranking regresses. Re-bless an intentional
       # change with: npm run benchmark:ci-gate -- --update-baseline
       - run: npm run benchmark:ci-gate
+      # Hybrid retrieval gate: same corpus, but FTS5 + vector KNN fused by RRF
+      # over COMMITTED frozen embedding vectors (no model download — hermetic
+      # and deterministic). Guards the raw vector+RRF layer under memory_query's
+      # default hybrid mode, which the lexical gate cannot reach. --require-vec
+      # makes a missing sqlite-vec a hard failure HERE (it's an environment
+      # regression on ubuntu-latest, not a soft skip), so the gate can't silently
+      # no-op. Re-bless after a vector/query change with:
+      #   npm run benchmark:ci-gate -- --hybrid --update-baseline
+      - run: npm run benchmark:ci-gate:hybrid -- --require-vec

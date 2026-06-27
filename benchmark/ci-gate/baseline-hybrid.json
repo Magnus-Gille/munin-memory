@@ -1,0 +1,15 @@
+{
+  "baseline_schema_version": 1,
+  "generated_at": "2026-06-27T20:55:55.156Z",
+  "corpus_sha256": "fe3a7242a2d9f3fd559ea6b8d0d79e3a5dfc67cf489020a7aee63182510d0919",
+  "embeddings_sha256": "c58f13f07a3b2fd98e9f2dc353c6e0b31fcf5cc709168ddfe7c24e811407468c",
+  "query_set_checksum": "ecab5a47a31c6f0d04fd8c6d8084e125c88d2d5b5addd1e23053af20f7470887",
+  "query_count": 12,
+  "overall": {
+    "recallAt1": 0.6666666666666666,
+    "recallAt5": 1,
+    "recallAt10": 1,
+    "ndcgAt5": 0.8384671926370709,
+    "mrr": 0.7847222222222223
+  }
+}
