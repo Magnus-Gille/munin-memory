@@ -8,6 +8,10 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Security
+
+- **Cleared the production npm-audit advisories by raising dependency `overrides` floors.** Bumped `hono` → `^4.12.25` (was `^4.12.18`; GHSA-88fw-hqm2-52qc, CORS/serve-static path-traversal, **HIGH**, transitive via `@modelcontextprotocol/sdk`) and `protobufjs` → `^7.6.3` (was `^7.6.1`; GHSA-f38q-mgvj-vph7, prototype-property shadowing, **MODERATE**, transitive via `@huggingface/transformers`) — the two production advisories flagged by `npm audit` on the Pi — and added `form-data` → `^4.0.6` (GHSA-hmw2-7cc7-3qxx, CRLF injection, **HIGH**, dev-only via `supertest`). All three resolve within existing semver ranges (lockfile-only, no application-code change). The remaining low-severity `esbuild` advisory (dev-only, via `tsx`) is intentionally deferred: its fix forces a ~100-package lockfile re-hoist disproportionate to a dev-only low not present in production.
+
 ## [0.4.0] — 2026-06-27
 
 ### Added
