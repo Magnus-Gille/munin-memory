@@ -69,7 +69,7 @@ export const HEIMDALL_DESCRIPTOR = {
   },
   kind: 'mcp',
   status: 'pass',
-  version: '0.3.4',
+  version: '0.4.0',
   deploy: {
     host: 'huginmunin',
     systemd_unit: 'munin-memory',

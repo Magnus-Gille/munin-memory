@@ -8,6 +8,19 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-06-27
+
+### Added
+
+- **`MUNIN_LLM_BASE_URL` env var (default `https://openrouter.ai/api/v1`) (#123).** Makes the LLM endpoint configurable for both the answer-quality eval and the consolidation worker, so they can target a local OpenAI-compatible server (llama.cpp / Ollama / vLLM) instead of OpenRouter. The API key becomes **optional** when a non-default base URL is configured — a local inference server that needs no auth can be targeted without supplying a dummy key. Default behavior (unset → OpenRouter, key required) is byte-for-byte unchanged. The two previously-separate OpenRouter clients (eval + consolidation) are now unified behind `src/internal/openrouter.ts`, preserving consolidation's exact request shape.
+- **`temporal_stale` advisory maintenance signal (#114).** `memory_orient` and `memory_attention` now flag a tracked `projects/*`/`clients/*` **active** status when it references a `YYYY-MM-DD` date that has already passed while the surrounding phrasing is still forward-looking ("going to … `<date>`"). Advisory only — it surfaces the entry for the owner to restate and never rewrites content. `memory_attention` gains an `include_temporal_stale` filter (default true).
+- **Retrieved-but-never-followed-up quality signal (#99).** `memory_patterns` (a new `retrieved_unused` pattern) and `memory_orient` (`maintenance_needed`) now surface entries that are repeatedly shown in search results but never opened or acted on — a signal that they may be stale, mis-tagged, or low-value. Owner-only, scoped to `projects/*`/`clients/*`, over a rolling 30-day window with a ≥5-impression / zero-follow-through threshold. `getInsightsByEntry` gains an optional `since` window and `restrictToTracked` flag. An observe-only precursor to learned reranking.
+- **`GET /heimdall.json` service self-descriptor endpoint (#135)** for Tier-1 discovery by the Heimdall dashboard.
+
+### Fixed
+
+- **`memory_read_batch` now records retrieval outcomes (#99).** It read entries without logging an `opened_result` outcome (unlike `memory_read`), so entries retrieved via search and then bulk-read showed zero follow-through in retrieval analytics. Batch reads are now counted as follow-through, fixing a latent gap in `memory_insights` and the new retrieved-unused signal.
+
 ## [0.3.4] — 2026-06-24
 
 ### Added
