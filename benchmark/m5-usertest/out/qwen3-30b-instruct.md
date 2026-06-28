@@ -1,0 +1,99 @@
+# M5 User-Test: qwen3-30b-instruct
+
+**Duration:** 27.6s  
+**Steps:** 5  
+**Tool calls:** 4  
+**Tool calling supported:** Yes  
+**Tools used:** memory_orient, memory_write, memory_log, memory_query
+
+## Transcript
+
+### Step 0: `memory_orient`
+```json
+{
+  "detail": "standard"
+}
+```
+**Result:**
+```
+{"ok":true,"action":"orient","conventions":{"content":"# Quick Reference (compact)\nFull conventions: memory_read(\"meta/conventions\", \"conventions\") — last updated 2026-04-01\n\n## Key Rules\n- **Handshake:** memory_orient first, then memory_read for specifics, memory_query for search.\n- **Read vs get:** `memory_read` uses namespace+key. `memory_get` uses an entry UUID from query results.\n- **State entries** = current truth (mutable). **Log entries** = chronological (append-only).\n- **Wri
+```
+
+### Step 1: `memory_write`
+```json
+{
+  "namespace": "decisions/tech-stack",
+  "key": "sqlite-vs-postgres",
+  "content": "Chose SQLite+FTS5 over Postgres for the memory store because of ARM/edge deployment. SQLite's single-file, zero-configuration model eliminates the need for a separate database server process, which is critical for low-power, resource-constrained edge devices. Postgres requires significant memory and CPU overhead 
+```
+**Result:**
+```
+{"ok":true,"action":"write","status":"created","id":"34d519c9-6505-458e-893b-6de7cf624138","namespace":"decisions/tech-stack","key":"sqlite-vs-postgres","updated_at":"2026-06-28T19:02:03.637Z","classification":"internal","hint":"This is the first entry in this namespace.","provenance":{"principal_id":"owner","owner_principal_id":"owner"}}
+```
+
+### Step 2: `memory_log`
+```json
+{
+  "namespace": "decisions/tech-stack",
+  "content": "Recorded the decision to use SQLite+FTS5 over Postgres for the memory store, with rationale for ARM/edge deployment. This log entry captures the final decision and its justification for future reference.",
+  "tags": [
+    "decision",
+    "milestone",
+    "source:internal"
+  ]
+}
+```
+**Result:**
+```
+{"ok":true,"action":"log","status":"logged","id":"544c83b2-1266-49b3-b826-84cff92cb9a8","namespace":"decisions/tech-stack","timestamp":"2026-06-28T19:02:05.189Z","timestamp_local":"Sun, 28 Jun, 21:02 CEST","classification":"internal","provenance":{"principal_id":"owner","owner_principal_id":"owner"}}
+```
+
+### Step 3: `memory_query`
+```json
+{
+  "query": "Chose SQLite+FTS5 over Postgres for the memory store because of ARM/edge deployment",
+  "namespace": "decisions/tech-stack",
+  "search_mode": "hybrid",
+  "include_expired": false,
+  "explain": false
+}
+```
+**Result:**
+```
+{"ok":true,"action":"query","results":[{"id":"34d519c9-6505-458e-893b-6de7cf624138","namespace":"decisions/tech-stack","key":"sqlite-vs-postgres","entry_type":"state","content_preview":"Chose SQLite+FTS5 over Postgres for the memory store because of ARM/edge deployment. SQLite's single-file, zero-configuration model eliminates the need for a separate database server process, which is critical for low-power, resource-constrained edge devices. Postgres requires significant memory and CPU overhead 
+```
+
+### Step 4: Model content
+# UX Report: Onboarding with Munin
+
+**Onboarding Clarity: 8/10**  
+The initial `memory_orient` call provided a comprehensive, well-structured overview of the system's conventions, dashboard, and namespace hierarchy. The quick reference was immediately actionable, and the dashboard gave clear visibility into active projects. The only minor friction was the need to infer that `memory_orient` is mandatory before any other operation—though this is clearly stated in the conventions.
+
+**What Was Intuitive:**  
+- The `memory_orient` call was the perfect onboarding entry point. It returned everything 
+
+## UX Report
+
+# UX Report: Onboarding with Munin
+
+**Onboarding Clarity: 8/10**  
+The initial `memory_orient` call provided a comprehensive, well-structured overview of the system's conventions, dashboard, and namespace hierarchy. The quick reference was immediately actionable, and the dashboard gave clear visibility into active projects. The only minor friction was the need to infer that `memory_orient` is mandatory before any other operation—though this is clearly stated in the conventions.
+
+**What Was Intuitive:**  
+- The `memory_orient` call was the perfect onboarding entry point. It returned everything needed to start, including a project dashboard and namespace overview.  
+- The `memory_write` and `memory_log` workflow for recording decisions felt natural: write the fact, then log the rationale.  
+- The `memory_query` with natural language worked seamlessly, even with the fallback to lexical search (the warning was helpful).  
+- The `decisions/<topic>` namespace is an excellent, dedicated place for cross-cutting decisions, making it easy to find and reference.
+
+**What Confused Me:**  
+- The `classification:internal` tag on read results was initially confusing. I had to re-read the conventions to understand it’s a system-injected floor marker, not something I set.  
+- The `expected_updated_at` field for CAS was not immediately obvious in the `memory_write` docs—though it’s critical for avoiding overwrites. A brief example in the conventions would help.  
+- The `memory_list` tool wasn’t used, but its purpose (browsing namespaces) wasn’t immediately clear from the `memory_orient` output.
+
+**What I’d Want:**  
+- A simple `memory_resume` command to get a targeted continuation pack after `memory_orient`, especially for long-running projects.  
+- A visual dashboard or status board (e.g., a Kanban-style view) for the project lifecycle, not just a text list.  
+- Better in-tool guidance for `expected_updated_at` and `patch` operations—perhaps a tooltip or example in the docs.
+
+**Single Biggest Friction:**  
+The lack of a built-in `memory_resume` equivalent after `memory_orient`. While `memory_orient` gives a full picture, it’s not ideal for resuming a session after a break. A `memory_resume` that returns only the relevant project status, recent logs, and key decisions would save time and reduce cognitive load.
