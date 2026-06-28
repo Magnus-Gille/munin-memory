@@ -21,27 +21,45 @@ This is the current benchmark progression for public proxy evaluations. The goal
 - If temporal questions remain weak after `round` + hybrid, query preprocessing and temporal indexing become justified.
 - If all of the above remain weak, the benchmark is signaling a deeper mismatch between Munin's product model and conversational-memory benchmarks.
 
-## Current Baseline
+## Methodology note — per-question haystack isolation (required for comparable numbers)
+
+All runs prior to the per-question isolation change (merged as part of the
+`feat/longmemeval-per-question-isolation` work) pooled ALL 500 questions'
+sessions into a single shared ~20K-entry DB and queried each question against
+that global pool. Canonical LongMemEval methodology scores each question only
+against its own ~40-session haystack.
+
+The global-pool numbers below are **superseded** and should not be compared to
+published LongMemEval scores or future Munin runs. The adapter now emits
+`scope_namespace` per query and inserts sessions into per-question namespaces —
+all new runs use per-question isolation automatically. Comparable numbers are
+to be regenerated.
+
+## Current Baseline (SUPERSEDED — global pool, not comparable)
 
 - `LongMemEval-S`, `session` + lexical
 - 500 queries
-- 19,195 synthetic entries
+- 19,195 synthetic entries (global pool)
 - `R@1 = 0.025`
 - `R@5 = 0.0508`
 - `R@10 = 0.0558`
 - `NDCG@5 = 0.04467`
 - `MRR = 0.05237`
 
-## Current Best Result
+## Current Best Result (SUPERSEDED — global pool, not comparable)
 
 - `LongMemEval-S`, `session` + hybrid
 - 500 queries
-- 19,195 synthetic entries
+- 19,195 synthetic entries (global pool)
 - `R@1 = 0.1017`
 - `R@5 = 0.2255`
 - `R@10 = 0.2793`
 - `NDCG@5 = 0.1818`
 - `MRR = 0.2034`
+
+## Per-question isolation baseline
+
+To be regenerated after rebuilding the benchmark artifacts with the new adapter.
 
 ## LoCoMo
 

@@ -9,6 +9,7 @@ import {
   writeState,
   appendLog,
   queryEntriesSemantic,
+  queryEntriesSemanticScored,
   queryEntriesHybrid,
   queryEntriesHybridScored,
   vecLoaded,
@@ -362,6 +363,51 @@ describe("semantic search (vec integration)", () => {
     const results = queryEntriesSemantic(db, { queryEmbedding: queryEmb, tags: ["important"] });
     expect(results.length).toBe(1);
     expect(results[0].id).toBe(id1);
+  });
+
+  it.skipIf(!vecAvailable)("knnFetch restricts candidate window for namespace-scoped search", () => {
+    // Construct a corpus where nsA has one entry far from the query (seed 99)
+    // and nsB has 3 entries very close (seed 1 = same as query).
+    // With knnFetch=3, the top-3 KNN candidates are all nsB → nsA entry is
+    // outside the window → namespace-filtered result is empty.
+    // With knnFetch=4 (all), nsA entry IS included → found after namespace filter.
+
+    const queryEmb = embeddingToBuffer(makeEmbedding(1));
+
+    // nsB: 3 entries close to query (seed 1)
+    const nb1 = writeState(db, "nsB", "b1", "nsB entry 1", []);
+    const nb2 = writeState(db, "nsB", "b2", "nsB entry 2", []);
+    const nb3 = writeState(db, "nsB", "b3", "nsB entry 3", []);
+    storeEmbedding(db, nb1.id, embeddingToBuffer(makeEmbedding(1)), "test");
+    storeEmbedding(db, nb2.id, embeddingToBuffer(makeEmbedding(1)), "test");
+    storeEmbedding(db, nb3.id, embeddingToBuffer(makeEmbedding(1)), "test");
+    db.prepare("UPDATE entries SET embedding_status = 'generated' WHERE id IN (?, ?, ?)").run(nb1.id, nb2.id, nb3.id);
+
+    // nsA: 1 entry far from query (seed 99)
+    const na1 = writeState(db, "nsA", "a1", "nsA entry 1", []);
+    storeEmbedding(db, na1.id, embeddingToBuffer(makeEmbedding(99)), "test");
+    db.prepare("UPDATE entries SET embedding_status = 'generated' WHERE id = ?").run(na1.id);
+
+    // With knnFetch=3: top-3 are all nsB → no nsA entry survives filter
+    const missResults = queryEntriesSemanticScored(db, {
+      queryEmbedding: queryEmb,
+      namespace: "nsA",
+      limit: 10,
+      includeExpired: true,
+      knnFetch: 3,
+    });
+    expect(missResults.length).toBe(0);
+
+    // With knnFetch=4 (exhaustive for this corpus): nsA entry is in the window
+    const hitResults = queryEntriesSemanticScored(db, {
+      queryEmbedding: queryEmb,
+      namespace: "nsA",
+      limit: 10,
+      includeExpired: true,
+      knnFetch: 4,
+    });
+    expect(hitResults.length).toBe(1);
+    expect(hitResults[0].entry.id).toBe(na1.id);
   });
 });
 

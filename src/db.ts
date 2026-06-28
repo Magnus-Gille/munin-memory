@@ -1688,6 +1688,14 @@ export interface SemanticQueryOptions {
    * is actually close. Unset (default) preserves the prior unbounded behavior.
    */
   maxDistance?: number;
+  /**
+   * Benchmark-only: override the KNN candidate window. When set, fetch this
+   * many nearest vectors (clamped to the number of rows in entries_vec) before
+   * namespace/tag filtering. Used to make namespace-scoped semantic search
+   * exact — fetching all candidates then filtering to a namespace reproduces
+   * true per-namespace KNN. Unset preserves the default adaptive window.
+   */
+  knnFetch?: number;
 }
 
 export function queryEntriesSemantic(
@@ -1736,7 +1744,15 @@ export function queryEntriesSemanticScored(
   // Fetch enough KNN candidates to satisfy clampedLimit after filtering.
   // vec0 KNN queries can't include tag/namespace predicates, so we
   // over-fetch and filter inline, stopping once we have enough matches.
-  const knnFetch = Math.min(Math.max(clampedLimit * 10, 100), 500);
+  // When knnFetch is provided (benchmark exhaustive mode), use it directly
+  // clamped to the actual vec row count so namespace-scoped search is exact.
+  let knnFetch: number;
+  if (options.knnFetch !== undefined) {
+    const rowCount = (db.prepare("SELECT COUNT(*) AS c FROM entries_vec").get() as { c: number }).c;
+    knnFetch = Math.max(1, Math.min(options.knnFetch, rowCount));
+  } else {
+    knnFetch = Math.min(Math.max(clampedLimit * 10, 100), 500);
+  }
 
   // KNN query via vec0
   const vecResults = db
