@@ -15,6 +15,7 @@ import {
   _setExtractorForTesting,
   resetCircuitBreaker,
   embeddingToBuffer,
+  getActiveEmbeddingModel,
 } from "../src/embeddings.js";
 
 const TEST_DB_PATH = "/tmp/munin-memory-tools-coverage-test.db";
@@ -752,8 +753,8 @@ describe.skipIf(!vecAvailable)("memory_query semantic and hybrid paths", () => {
       content: "The dog dug in the garden",
     }));
     dogId = dog.id;
-    storeEmbedding(db, catId, embeddingToBuffer(makeEmbedding(1)), "test-model");
-    storeEmbedding(db, dogId, embeddingToBuffer(makeEmbedding(2)), "test-model");
+    storeEmbedding(db, catId, embeddingToBuffer(makeEmbedding(1)), getActiveEmbeddingModel());
+    storeEmbedding(db, dogId, embeddingToBuffer(makeEmbedding(2)), getActiveEmbeddingModel());
   });
 
   afterEach(() => {

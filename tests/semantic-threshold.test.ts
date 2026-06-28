@@ -14,6 +14,7 @@ import {
   embeddingToBuffer,
   _setExtractorForTesting,
   resetCircuitBreaker,
+  getActiveEmbeddingModel,
 } from "../src/embeddings.js";
 import { registerTools } from "../src/tools.js";
 
@@ -89,7 +90,7 @@ afterEach(() => {
 
 function seedEntry(namespace: string, key: string, content: string, seed: number, tags: string[] = []) {
   const { id } = writeState(db, namespace, key, content, tags);
-  storeEmbedding(db, id, embeddingToBuffer(makeEmbedding(seed)), "test");
+  storeEmbedding(db, id, embeddingToBuffer(makeEmbedding(seed)), getActiveEmbeddingModel());
   db.prepare("UPDATE entries SET embedding_status = 'generated' WHERE id = ?").run(id);
   return id;
 }
