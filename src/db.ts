@@ -1672,6 +1672,13 @@ export function executeDelete(
 
 // --- Semantic search operations ---
 
+/**
+ * sqlite-vec hard ceiling on `k` in a vec0 KNN query. Requesting more than
+ * this throws "k value in knn query too large". Used to clamp the benchmark
+ * exhaustive-fetch path (see `queryEntriesSemanticScored`).
+ */
+const VEC_KNN_MAX_K = 4096;
+
 export interface SemanticQueryOptions {
   queryEmbedding: Buffer;
   namespace?: string;
@@ -1745,11 +1752,16 @@ export function queryEntriesSemanticScored(
   // vec0 KNN queries can't include tag/namespace predicates, so we
   // over-fetch and filter inline, stopping once we have enough matches.
   // When knnFetch is provided (benchmark exhaustive mode), use it directly
-  // clamped to the actual vec row count so namespace-scoped search is exact.
+  // clamped to the actual vec row count AND to vec0's hard KNN ceiling
+  // (k must be <= 4096, else vec0 throws "k value in knn query too large").
+  // The 4096 cap is effectively lossless for namespace-scoped recall: an
+  // entry relevant to the query is semantically near it and so falls well
+  // within the 4096 nearest globally; the cap only truncates far candidates
+  // that would never rank in the top-K of a namespace anyway.
   let knnFetch: number;
   if (options.knnFetch !== undefined) {
     const rowCount = (db.prepare("SELECT COUNT(*) AS c FROM entries_vec").get() as { c: number }).c;
-    knnFetch = Math.max(1, Math.min(options.knnFetch, rowCount));
+    knnFetch = Math.max(1, Math.min(options.knnFetch, rowCount, VEC_KNN_MAX_K));
   } else {
     knnFetch = Math.min(Math.max(clampedLimit * 10, 100), 500);
   }
