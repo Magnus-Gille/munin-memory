@@ -1,4 +1,7 @@
 import { describe, it, expect } from "vitest";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   compareToBaseline,
   formatVerdict,
@@ -8,7 +11,24 @@ import {
   type GateBaseline,
   type GatedScores,
 } from "../benchmark/ci-gate-policy.js";
-import { runCiGate, makeBaseline } from "../benchmark/ci-gate.js";
+import {
+  runCiGate,
+  makeBaseline,
+  isVecAvailable,
+  DEFAULT_HYBRID_PATHS,
+} from "../benchmark/ci-gate.js";
+
+interface FrozenFixture {
+  model: string;
+  dim: number;
+  generated_at: string;
+  corpus: Record<string, number[]>;
+  queries: Record<string, number[]>;
+}
+
+// Probe vec at collection time, mirroring tests/embeddings.test.ts. The hybrid
+// gate skips (not fails) where sqlite-vec is unavailable, so its tests do too.
+const vecAvailable = isVecAvailable();
 
 const PERFECT: GatedScores = {
   recallAt1: 1,
@@ -112,6 +132,41 @@ describe("compareToBaseline policy", () => {
     expect(failText).toContain("RESULT: FAIL");
     expect(failText).toContain("mrr");
   });
+
+  it("does not fail on a regression in a NON-enforced metric (hybrid subset)", () => {
+    // mrr drops hard, but with only R@5/R@10 enforced the gate must still pass.
+    const dropped: GatedScores = { ...PERFECT, mrr: 0.1, recallAt1: 0.2 };
+    const v = compareToBaseline(dropped, baselineOf(PERFECT), {
+      enforcedMetrics: ["recallAt5", "recallAt10"],
+    });
+    expect(v.pass).toBe(true);
+    expect(v.regressions).toEqual([]);
+    // The dropped metric is still reported, just marked non-enforced.
+    const mrrDelta = v.deltas.find((d) => d.metric === "mrr")!;
+    expect(mrrDelta.enforced).toBe(false);
+    expect(mrrDelta.regressed).toBe(false);
+  });
+
+  it("fails when an ENFORCED metric regresses under a subset", () => {
+    const v = compareToBaseline({ ...PERFECT, recallAt5: 0.8 }, baselineOf(PERFECT), {
+      enforcedMetrics: ["recallAt5", "recallAt10"],
+    });
+    expect(v.pass).toBe(false);
+    expect(v.regressions.map((r) => r.metric)).toEqual(["recallAt5"]);
+  });
+
+  it("formats the enforced footer + info status for a subset verdict", () => {
+    const text = formatVerdict(
+      compareToBaseline({ ...PERFECT, mrr: 0.5 }, baselineOf(PERFECT), {
+        enforcedMetrics: ["recallAt5", "recallAt10"],
+      }),
+      "hybrid",
+    );
+    expect(text).toContain("hybrid");
+    expect(text).toContain("enforced: recallAt5, recallAt10");
+    expect(text).toContain("info"); // the dropped, non-enforced mrr renders as info
+    expect(text).toContain("RESULT: PASS");
+  });
 });
 
 describe("validateBaseline", () => {
@@ -198,5 +253,93 @@ describe("ci-gate end-to-end (committed fixture + baseline)", () => {
     const v = compareToBaseline(result.current, fresh, { lineage: result.lineage });
     expect(v.pass).toBe(true);
     expect(v.warnings).toEqual([]);
+  }, 30_000);
+});
+
+describe.skipIf(!vecAvailable)("ci-gate hybrid end-to-end (frozen vectors + committed baseline)", () => {
+  it("runs FTS5 + vector RRF over frozen vectors and passes the committed hybrid baseline", async () => {
+    const result = await runCiGate({ mode: "hybrid" });
+
+    expect(result.mode).toBe("hybrid");
+    expect(result.baseline).not.toBeNull();
+    expect(result.verdict).not.toBeNull();
+    // The committed hybrid baseline must still hold — a regression here means a
+    // change degraded the vector + RRF ranking path the lexical gate can't see.
+    expect(result.verdict!.pass).toBe(true);
+    expect(result.verdict!.warnings).toEqual([]);
+
+    // Lineage must match the committed corpus, frozen embeddings, AND query set.
+    // Re-bless with: npm run benchmark:ci-gate -- --hybrid --update-baseline
+    expect(result.lineage.corpus_sha256).toBe(result.baseline!.corpus_sha256);
+    expect(result.lineage.embeddings_sha256).toBe(result.baseline!.embeddings_sha256);
+    expect(result.lineage.query_set_checksum).toBe(result.baseline!.query_set_checksum);
+
+    // The frozen provider supplied a vector for EVERY query, so none degraded to
+    // lexical — actual_mode is only set when the effective mode differs from the
+    // requested one. This proves the run was genuinely hybrid (no silent model).
+    for (const q of result.report.queries) {
+      expect(q.search_mode).toBe("hybrid");
+      expect(q.actual_mode).toBeUndefined();
+    }
+
+    // R@5/R@10 sit at the robust 1.0 ceiling: every target is reachable via the
+    // hybrid path with margin, so the baseline is stable against FP noise while
+    // a real regression (a target dropping out of top-5) trips it.
+    expect(result.current.recallAt5).toBe(1);
+    expect(result.current.recallAt10).toBe(1);
+  }, 30_000);
+
+  it("is deterministic — two runs over the frozen vectors produce identical scores", async () => {
+    const a = await runCiGate({ mode: "hybrid" });
+    const b = await runCiGate({ mode: "hybrid" });
+    expect(b.current).toEqual(a.current);
+  }, 30_000);
+
+  it("trips when the vector arm is neutralized (the enforced R@5/R@10 genuinely depend on vectors)", async () => {
+    const fixture = JSON.parse(
+      readFileSync(DEFAULT_HYBRID_PATHS.embeddingsPath, "utf-8"),
+    ) as FrozenFixture;
+
+    // Zero every query vector while leaving the query TEXT intact: the KNN arm is
+    // neutralized (all corpus vectors are ~equidistant from the origin) and only
+    // FTS5 remains. The vector-dependent queries lose their target from the
+    // window, so R@5 — an ENFORCED hybrid metric — drops below 1.0 and the gate
+    // must fail. If R@5 held, the vectors wouldn't be contributing to retrieval.
+    const dim = fixture.dim;
+    const zeroed: Record<string, number[]> = {};
+    for (const id of Object.keys(fixture.queries)) zeroed[id] = new Array(dim).fill(0);
+    const neutralized: FrozenFixture = { ...fixture, queries: zeroed };
+
+    const dir = mkdtempSync(join(tmpdir(), "ci-gate-hybrid-novec-"));
+    try {
+      const p = join(dir, "embeddings.json");
+      writeFileSync(p, JSON.stringify(neutralized));
+      const result = await runCiGate({ mode: "hybrid", paths: { embeddingsPath: p } });
+      expect(result.current.recallAt5).toBeLessThan(1);
+      expect(result.verdict!.pass).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("fails loud when a query is missing its frozen vector (no silent lexical degrade)", async () => {
+    const fixture = JSON.parse(
+      readFileSync(DEFAULT_HYBRID_PATHS.embeddingsPath, "utf-8"),
+    ) as FrozenFixture;
+    const ids = Object.keys(fixture.queries);
+    const queries = { ...fixture.queries };
+    delete queries[ids[0]];
+    const broken: FrozenFixture = { ...fixture, queries };
+
+    const dir = mkdtempSync(join(tmpdir(), "ci-gate-hybrid-missing-"));
+    try {
+      const p = join(dir, "embeddings.json");
+      writeFileSync(p, JSON.stringify(broken));
+      await expect(
+        runCiGate({ mode: "hybrid", paths: { embeddingsPath: p } }),
+      ).rejects.toThrow(/missing query/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }, 30_000);
 });

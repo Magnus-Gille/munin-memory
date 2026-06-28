@@ -325,6 +325,20 @@ export interface RunBenchmarkOptions {
    * rerank). Range [0, 1].
    */
   searchRecencyWeight?: number;
+  /**
+   * Optional frozen query-embedding provider. When set, semantic/hybrid
+   * queries use the vector it returns for the query text instead of calling
+   * the live embedding model — the mechanism that lets the CI hybrid gate
+   * run hermetically (no model download, deterministic across machines)
+   * over committed query vectors. When provided, the embedding model is
+   * never initialized (`initEmbeddings` is skipped); sqlite-vec must still
+   * be loaded for the KNN, which the requiresEmbeddings guard above
+   * enforces. Returning `null` for a query text is treated by
+   * `executeQuery` exactly like a live-model embedding failure (degrade to
+   * lexical) — callers that need full hybrid coverage (the gate) must
+   * validate that every query text resolves before relying on the report.
+   */
+  queryEmbeddingProvider?: (queryText: string) => Float32Array | null;
 }
 
 /**
@@ -383,13 +397,21 @@ export async function executeQuery(
   query: string,
   mode: SearchMode,
   limit: number = 10,
+  queryEmbeddingProvider?: (queryText: string) => Float32Array | null,
 ): Promise<{ entries: Entry[]; relaxed: boolean; effectiveMode: SearchMode }> {
   if (mode === "lexical") {
     return runLexical(db, query, limit);
   }
 
+  // When a frozen-embedding provider is supplied (CI hybrid gate), use the
+  // committed query vector instead of the live model so the run is hermetic
+  // and deterministic. A null from the provider is handled identically to a
+  // live-model failure below (degrade to lexical).
+  const embedQuery = (): Float32Array | null | Promise<Float32Array | null> =>
+    queryEmbeddingProvider ? queryEmbeddingProvider(query) : generateEmbedding(query);
+
   if (mode === "semantic") {
-    const emb = await generateEmbedding(query);
+    const emb = await embedQuery();
     if (!emb) {
       // Mirror memory_query's per-query semantic→lexical degradation
       // (src/tools.ts:5828-5831): when embedding generation fails, fall
@@ -410,7 +432,7 @@ export async function executeQuery(
   }
 
   // hybrid
-  const emb = await generateEmbedding(query);
+  const emb = await embedQuery();
   if (!emb) {
     // memory_query degrades hybrid→lexical on embedding failure (strict
     // first, then relaxed). Mirror it. Previously we ran strict-only
@@ -684,9 +706,14 @@ async function runBenchmarkInner(
       : null;
 
   // requiresEmbeddings was computed above (it also gates the sqlite-vec load).
-  const embeddingsAvailable = requiresEmbeddings
-    ? await initEmbeddings()
-    : false;
+  // A frozen-embedding provider supplies query vectors directly, so the live
+  // model is never loaded — initEmbeddings is skipped entirely in that path.
+  const usingFrozenEmbeddings = options.queryEmbeddingProvider !== undefined;
+  const embeddingsAvailable = usingFrozenEmbeddings
+    ? true
+    : requiresEmbeddings
+      ? await initEmbeddings()
+      : false;
   if (requiresEmbeddings && !embeddingsAvailable) {
     warnings.push("Embeddings unavailable — semantic and hybrid modes will return empty results or fall back to lexical.");
   }
@@ -737,6 +764,7 @@ async function runBenchmarkInner(
         query.query,
         mode,
         internalLimit,
+        options.queryEmbeddingProvider,
       );
       const actualMode = effectiveMode;
 

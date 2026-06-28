@@ -2,25 +2,43 @@
  * Retrieval CI regression gate.
  *
  * Turns the benchmark harness from "runnable" into "automatically catches a
- * bad ranking change". On every CI run it:
+ * bad ranking change". It runs in two modes over the same synthetic corpus:
  *
- *   1. Builds a small, fully synthetic corpus into an ephemeral SQLite DB
- *      (nothing binary is committed — the corpus is `ci-gate/corpus.json`).
- *   2. Runs the benchmark in `raw` + `lexical` mode. bm25 over a fixed corpus
- *      with no embeddings, no network, and no recency/time dependence is
- *      deterministic across machines, so the numbers are stable run-to-run.
- *   3. Compares the aggregate scores against the committed baseline
- *      (`ci-gate/baseline.json`) and fails if any gated metric regresses.
+ *   - `lexical` (default) — builds `ci-gate/corpus.json` into an ephemeral
+ *     SQLite DB and runs the benchmark in `raw` + `lexical` mode. bm25 over a
+ *     fixed corpus with no embeddings, no network, and no recency/time
+ *     dependence is deterministic across machines.
+ *   - `hybrid` (`--hybrid`) — additionally loads committed FROZEN embedding
+ *     vectors (`ci-gate/embeddings.json`) for both the corpus and the query
+ *     set, so the production hybrid path (FTS5 + vector KNN fused by RRF) runs
+ *     WITHOUT loading the embedding model. Freezing both vector sets keeps the
+ *     run hermetic and deterministic — CI never downloads a model — while
+ *     still exercising the vector + fusion code that the lexical gate cannot
+ *     reach. This guards the raw FTS5 + vector + RRF layer that underlies
+ *     `memory_query`'s default hybrid mode (the production reranker on top is
+ *     covered separately by tests/runner-parity.test.ts).
  *
- * Scope: this gate covers the retrieval-recall + lexical-ranking layer (the
- * `raw` path). The production reranker is intentionally NOT gated here because
- * its freshness/attention inputs are time-relative and would rot a committed
+ * Each mode compares aggregate scores against its committed baseline
+ * (`ci-gate/baseline.json` / `ci-gate/baseline-hybrid.json`) and fails if any
+ * gated metric regresses.
+ *
+ * Scope: both gates cover the retrieval-recall + ranking layer (the `raw`
+ * path). The production reranker is intentionally NOT gated here because its
+ * freshness/attention inputs are time-relative and would rot a committed
  * baseline; raw-vs-production parity is guarded separately by
- * tests/runner-parity.test.ts.
+ * tests/runner-parity.test.ts. The hybrid gate freezes the embedding *vectors*
+ * (not the model), so it guards the KNN + RRF fusion logic, not the embedding
+ * model itself — a deliberate model swap is an intentional re-bless.
+ *
+ * The hybrid gate requires sqlite-vec. Consistent with the codebase's
+ * soft-vec stance (initDatabase treats vec as optional), it SKIPS with a loud
+ * warning and exit 0 when vec is unavailable rather than failing the build.
  *
  * CLI:
- *   npm run benchmark:ci-gate                  # run the gate, exit 1 on regression
- *   npm run benchmark:ci-gate -- --update-baseline   # re-bless the baseline
+ *   npm run benchmark:ci-gate                         # lexical gate
+ *   npm run benchmark:ci-gate -- --hybrid             # hybrid gate
+ *   npm run benchmark:ci-gate -- --update-baseline    # re-bless lexical baseline
+ *   npm run benchmark:ci-gate -- --hybrid --update-baseline  # re-bless hybrid baseline
  *   npm run benchmark:ci-gate -- --tolerance 0.01     # override FP tolerance
  */
 
@@ -30,7 +48,8 @@ import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { initDatabase } from "../src/db.js";
+import { initDatabase, storeEmbedding, vecLoaded } from "../src/db.js";
+import { embeddingToBuffer } from "../src/embeddings.js";
 import { runBenchmark, loadQueriesWithSource } from "./runner.js";
 import type { BenchmarkReport } from "./types.js";
 import {
@@ -38,6 +57,7 @@ import {
   formatVerdict,
   validateBaseline,
   DEFAULT_GATE_TOLERANCE,
+  HYBRID_GATED_METRICS,
   type GatedScores,
   type GateBaseline,
   type GateVerdict,
@@ -45,17 +65,37 @@ import {
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
+/** Which retrieval layer the gate exercises. */
+export type GateMode = "lexical" | "hybrid";
+
+/** The dimensionality of every frozen embedding vector (MiniLM-L6). */
+export const EMBEDDING_DIM = 384;
+
 export interface CiGatePaths {
   corpusPath: string;
   queriesPath: string;
   baselinePath: string;
+  /** Frozen embeddings fixture — hybrid mode only. */
+  embeddingsPath: string;
 }
 
 export const DEFAULT_PATHS: CiGatePaths = {
   corpusPath: join(HERE, "ci-gate", "corpus.json"),
   queriesPath: join(HERE, "ci-gate", "queries.jsonl"),
   baselinePath: join(HERE, "ci-gate", "baseline.json"),
+  embeddingsPath: join(HERE, "ci-gate", "embeddings.json"),
 };
+
+export const DEFAULT_HYBRID_PATHS: CiGatePaths = {
+  corpusPath: join(HERE, "ci-gate", "corpus.json"),
+  queriesPath: join(HERE, "ci-gate", "queries-hybrid.jsonl"),
+  baselinePath: join(HERE, "ci-gate", "baseline-hybrid.json"),
+  embeddingsPath: join(HERE, "ci-gate", "embeddings.json"),
+};
+
+export function defaultPathsForMode(mode: GateMode): CiGatePaths {
+  return mode === "hybrid" ? DEFAULT_HYBRID_PATHS : DEFAULT_PATHS;
+}
 
 interface CorpusEntry {
   id: string;
@@ -66,9 +106,59 @@ interface CorpusEntry {
   created_at: string;
 }
 
+/**
+ * Frozen-embeddings fixture shape. Vectors are stored as plain `number[]` of
+ * length EMBEDDING_DIM; float32 round-trips losslessly through JSON, so
+ * `Float32Array.from(arr)` reproduces the original bytes the model emitted.
+ */
+interface FrozenEmbeddings {
+  model: string;
+  dim: number;
+  generated_at: string;
+  /** entry_id → 384-dim vector */
+  corpus: Record<string, number[]>;
+  /** query_id → 384-dim vector */
+  queries: Record<string, number[]>;
+}
+
+/** Convert a frozen `number[]` vector to the Buffer the vec table expects. */
+function frozenVectorToBuffer(vec: number[], label: string): Buffer {
+  if (!Array.isArray(vec) || vec.length !== EMBEDDING_DIM) {
+    throw new Error(
+      `Frozen embedding for ${label} must be a ${EMBEDDING_DIM}-dim array (got ${Array.isArray(vec) ? vec.length : typeof vec}).`,
+    );
+  }
+  return embeddingToBuffer(Float32Array.from(vec));
+}
+
+/** Load and structurally validate the frozen-embeddings fixture. */
+function loadFrozenEmbeddings(path: string): { fixture: FrozenEmbeddings; sha256: string } {
+  const bytes = readFileSync(path);
+  const sha256 = sha256Hex(bytes);
+  const parsed = JSON.parse(bytes.toString("utf-8")) as FrozenEmbeddings;
+  // `typeof null === "object"` and arrays are objects too — reject both so a
+  // null/array corpus surfaces the actionable message here rather than a later
+  // opaque TypeError in the entry loop.
+  const isPlainObject = (v: unknown): boolean =>
+    typeof v === "object" && v !== null && !Array.isArray(v);
+  if (!isPlainObject(parsed) || !isPlainObject(parsed.corpus) || !isPlainObject(parsed.queries)) {
+    throw new Error(
+      `Malformed embeddings fixture at ${path}: corpus and queries must each be an object mapping id -> vector.`,
+    );
+  }
+  return { fixture: parsed, sha256 };
+}
+
 export interface CiGateResult {
+  mode: GateMode;
   current: GatedScores;
-  lineage: { corpus_sha256: string; query_set_checksum: string; query_count: number };
+  lineage: {
+    corpus_sha256: string;
+    /** Present only for the hybrid gate. */
+    embeddings_sha256?: string;
+    query_set_checksum: string;
+    query_count: number;
+  };
   baseline: GateBaseline | null;
   /** null when no baseline file exists yet (first run / pre-bless). */
   verdict: GateVerdict | null;
@@ -80,11 +170,41 @@ function sha256Hex(bytes: Buffer | string): string {
 }
 
 /**
+ * Probe whether sqlite-vec is available on this platform. initDatabase loads
+ * vec as a soft dependency and records the result in the module-level
+ * `vecLoaded()` flag. The hybrid gate skips (rather than fails) when this is
+ * false, matching how tests/embeddings.test.ts guards vec-dependent suites.
+ */
+export function isVecAvailable(): boolean {
+  const tmpDir = mkdtempSync(join(tmpdir(), "munin-vec-probe-"));
+  const dbPath = join(tmpDir, "probe.db");
+  try {
+    // Deliberately do NOT catch: a genuine init failure (migration/DB bug) must
+    // surface loudly, not be silently swallowed as "vec unavailable" — that
+    // would mask an unrelated regression behind the skip-green path. Only a
+    // clean init where the vec extension didn't load returns false.
+    const db = initDatabase(dbPath);
+    db.close();
+    return vecLoaded();
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+/**
  * Build the synthetic fixture DB from the committed corpus. Mirrors the
  * direct-insert pattern used by the dataset adapters (the AFTER INSERT trigger
  * on `entries` populates the FTS index automatically).
+ *
+ * When `frozenCorpus` is provided (hybrid mode), each entry's committed vector
+ * is stored into `entries_vec` via the same `storeEmbedding` path production
+ * uses, so the KNN the gate exercises is byte-identical to production storage.
  */
-function buildFixtureDb(corpus: CorpusEntry[], dbPath: string): void {
+function buildFixtureDb(
+  corpus: CorpusEntry[],
+  dbPath: string,
+  frozenCorpus?: { vectors: Record<string, number[]>; model: string },
+): void {
   const db: Database.Database = initDatabase(dbPath);
   try {
     const insert = db.prepare(`
@@ -114,6 +234,19 @@ function buildFixtureDb(corpus: CorpusEntry[], dbPath: string): void {
       }
     });
     tx(corpus);
+
+    if (frozenCorpus) {
+      // Fail loud on any missing/malformed corpus vector — a silent gap would
+      // drop that entry out of the KNN and produce a falsely-blessed baseline.
+      for (const e of corpus) {
+        const vec = frozenCorpus.vectors[e.id];
+        if (vec === undefined) {
+          throw new Error(`Frozen embeddings fixture is missing corpus entry "${e.id}".`);
+        }
+        storeEmbedding(db, e.id, frozenVectorToBuffer(vec, `corpus:${e.id}`), frozenCorpus.model);
+      }
+    }
+
     // Checkpoint so the read-only connection opened by runBenchmark sees all
     // rows even if the WAL hasn't been auto-checkpointed yet.
     db.pragma("wal_checkpoint(TRUNCATE)");
@@ -125,11 +258,17 @@ function buildFixtureDb(corpus: CorpusEntry[], dbPath: string): void {
 /**
  * Run the gate end to end and return a structured result. Does NOT call
  * process.exit — the CLI wrapper owns the exit code so tests can import this.
+ *
+ * Note: `mode: "hybrid"` assumes sqlite-vec is loaded (it builds the vec table
+ * and runs KNN); it throws inside the runner if vec is unavailable. The skip-on-
+ * missing-vec behavior lives in the CLI `main()`, so programmatic callers must
+ * gate on `isVecAvailable()` themselves (as `main()` and the tests do).
  */
 export async function runCiGate(
-  opts: { paths?: Partial<CiGatePaths>; tolerance?: number } = {},
+  opts: { mode?: GateMode; paths?: Partial<CiGatePaths>; tolerance?: number } = {},
 ): Promise<CiGateResult> {
-  const paths = { ...DEFAULT_PATHS, ...opts.paths };
+  const mode: GateMode = opts.mode ?? "lexical";
+  const paths = { ...defaultPathsForMode(mode), ...opts.paths };
 
   const corpusBytes = readFileSync(paths.corpusPath);
   const corpus = JSON.parse(corpusBytes.toString("utf-8")) as CorpusEntry[];
@@ -137,15 +276,44 @@ export async function runCiGate(
 
   const { queries, source } = loadQueriesWithSource(paths.queriesPath);
 
+  // Hybrid mode: load the frozen vectors and wire a query-embedding provider
+  // so the run never touches the live model. Every query MUST resolve to a
+  // committed vector — a miss would silently degrade that query to lexical and
+  // bless a baseline that doesn't actually exercise the vector path.
+  let frozenCorpus: { vectors: Record<string, number[]>; model: string } | undefined;
+  let queryEmbeddingProvider: ((queryText: string) => Float32Array | null) | undefined;
+  let embeddingsSha: string | undefined;
+  if (mode === "hybrid") {
+    const { fixture, sha256 } = loadFrozenEmbeddings(paths.embeddingsPath);
+    embeddingsSha = sha256;
+    frozenCorpus = { vectors: fixture.corpus, model: fixture.model };
+
+    const textToVector = new Map<string, Float32Array>();
+    for (const q of queries) {
+      const vec = fixture.queries[q.id];
+      if (vec === undefined) {
+        throw new Error(`Frozen embeddings fixture is missing query "${q.id}".`);
+      }
+      // frozenVectorToBuffer throws on wrong dimensionality — call it for that
+      // validation side-effect, then map the query TEXT (what executeQuery
+      // receives) to its frozen vector. Identical texts share a vector
+      // (last-writer-wins), which is correct.
+      frozenVectorToBuffer(vec, `query:${q.id}`);
+      textToVector.set(q.query, Float32Array.from(vec));
+    }
+    queryEmbeddingProvider = (text: string): Float32Array | null => textToVector.get(text) ?? null;
+  }
+
   const tmpDir = mkdtempSync(join(tmpdir(), "munin-ci-gate-"));
   const dbPath = join(tmpDir, "fixture.db");
   let report: BenchmarkReport;
   try {
-    buildFixtureDb(corpus, dbPath);
+    buildFixtureDb(corpus, dbPath, frozenCorpus);
     report = await runBenchmark(dbPath, queries, {
       runnerMode: "raw",
       querySetSources: [source],
       manifestPath: null,
+      queryEmbeddingProvider,
     });
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
@@ -160,6 +328,7 @@ export async function runCiGate(
   };
   const lineage = {
     corpus_sha256: corpusSha,
+    ...(embeddingsSha ? { embeddings_sha256: embeddingsSha } : {}),
     query_set_checksum: report.query_set_checksum,
     query_count: report.query_count,
   };
@@ -190,20 +359,32 @@ export async function runCiGate(
   }
 
   const verdict = baseline
-    ? compareToBaseline(current, baseline, { tolerance: opts.tolerance, lineage })
+    ? compareToBaseline(current, baseline, {
+        tolerance: opts.tolerance,
+        // Hybrid enforces only the membership-recall metrics (R@5/R@10); the
+        // rank-order metrics are reported but not gated, because the baseline is
+        // blessed off the CI platform. See HYBRID_GATED_METRICS.
+        enforcedMetrics: mode === "hybrid" ? HYBRID_GATED_METRICS : undefined,
+        lineage,
+      })
     : null;
 
-  return { current, lineage, baseline, verdict, report };
+  return { mode, current, lineage, baseline, verdict, report };
 }
 
 /**
  * Build a fresh baseline file from a gate result. Used by --update-baseline.
+ * Carries `embeddings_sha256` only for the hybrid gate (it is absent from the
+ * lexical lineage), so re-blessing a lexical baseline never adds the field.
  */
 export function makeBaseline(result: CiGateResult, generatedAt: string): GateBaseline {
   return {
     baseline_schema_version: 1,
     generated_at: generatedAt,
     corpus_sha256: result.lineage.corpus_sha256,
+    ...(result.lineage.embeddings_sha256
+      ? { embeddings_sha256: result.lineage.embeddings_sha256 }
+      : {}),
     query_set_checksum: result.lineage.query_set_checksum,
     query_count: result.lineage.query_count,
     overall: result.current,
@@ -213,6 +394,11 @@ export function makeBaseline(result: CiGateResult, generatedAt: string): GateBas
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const updateBaseline = args.includes("--update-baseline");
+  const mode: GateMode = args.includes("--hybrid") ? "hybrid" : "lexical";
+  // On a runner that MUST support vectors (CI), treat a vec-unavailable skip as a
+  // hard failure instead — otherwise the gate (and every skipIf'd vector test)
+  // could silently no-op if sqlite-vec stopped loading, masking a regression.
+  const requireVec = args.includes("--require-vec");
   const tolIdx = args.indexOf("--tolerance");
   const tolerance = tolIdx >= 0 ? Number(args[tolIdx + 1]) : undefined;
   if (tolIdx >= 0 && !Number.isFinite(tolerance)) {
@@ -220,7 +406,29 @@ async function main(): Promise<void> {
     process.exit(2);
   }
 
-  const result = await runCiGate({ tolerance });
+  const baselinePath = defaultPathsForMode(mode).baselinePath;
+  const blessCmd = `npm run benchmark:ci-gate${mode === "hybrid" ? " -- --hybrid --update-baseline" : " -- --update-baseline"}`;
+
+  // Hybrid mode needs sqlite-vec. Consistent with the codebase's soft-vec
+  // stance, SKIP (exit 0) rather than failing the build when it is missing —
+  // unless --require-vec says this runner must have it (CI), in which case a
+  // missing extension is an environment regression and we fail loud.
+  if (mode === "hybrid" && !isVecAvailable()) {
+    if (requireVec) {
+      console.error("Retrieval CI gate — hybrid: sqlite-vec is REQUIRED here (--require-vec) but did not load.");
+      console.error("  This runner is configured to enforce the vector path, so a missing/broken");
+      console.error("  sqlite-vec is an environment regression — failing rather than silently skipping.");
+      process.exit(1);
+    }
+    console.log("Retrieval CI gate — hybrid (FTS5 + vector RRF)");
+    console.log("");
+    console.log("  SKIPPED — sqlite-vec is unavailable on this platform, so the");
+    console.log("  vector path cannot run. The lexical gate still enforces ranking;");
+    console.log("  the hybrid gate is enforced wherever sqlite-vec loads.");
+    return;
+  }
+
+  const result = await runCiGate({ mode, tolerance });
 
   if (result.report.warnings && result.report.warnings.length > 0) {
     for (const w of result.report.warnings) console.error(`  runner warning: ${w}`);
@@ -228,8 +436,8 @@ async function main(): Promise<void> {
 
   if (updateBaseline) {
     const baseline = makeBaseline(result, new Date().toISOString());
-    writeFileSync(DEFAULT_PATHS.baselinePath, JSON.stringify(baseline, null, 2) + "\n");
-    console.log(`Baseline re-blessed → ${DEFAULT_PATHS.baselinePath}`);
+    writeFileSync(baselinePath, JSON.stringify(baseline, null, 2) + "\n");
+    console.log(`${mode} baseline re-blessed → ${baselinePath}`);
     console.log(
       `  R@1=${pct(baseline.overall.recallAt1)} R@5=${pct(baseline.overall.recallAt5)} R@10=${pct(baseline.overall.recallAt10)} nDCG@5=${pct(baseline.overall.ndcgAt5)} MRR=${pct(baseline.overall.mrr)} over ${baseline.query_count} queries`,
     );
@@ -237,13 +445,11 @@ async function main(): Promise<void> {
   }
 
   if (!result.verdict) {
-    console.error(
-      `No baseline at ${DEFAULT_PATHS.baselinePath}. Generate one with: npm run benchmark:ci-gate -- --update-baseline`,
-    );
+    console.error(`No baseline at ${baselinePath}. Generate one with: ${blessCmd}`);
     process.exit(2);
   }
 
-  console.log(formatVerdict(result.verdict));
+  console.log(formatVerdict(result.verdict, mode));
   if (!result.verdict.pass) {
     process.exit(1);
   }

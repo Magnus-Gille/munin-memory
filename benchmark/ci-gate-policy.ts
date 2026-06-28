@@ -34,6 +34,13 @@ export interface GateBaseline {
   generated_at: string;
   /** SHA-256 over the committed corpus file — detects corpus drift. */
   corpus_sha256: string;
+  /**
+   * SHA-256 over the committed frozen-embeddings fixture. Present only for the
+   * hybrid gate (the lexical gate has no embeddings). Drift is a warning, not a
+   * failure — re-bless with --update-baseline when the vectors change
+   * intentionally (e.g. a new embedding model).
+   */
+  embeddings_sha256?: string;
   /** Deterministic checksum of the query set the baseline was measured on. */
   query_set_checksum: string;
   /** Number of queries evaluated. Informational; mismatch is surfaced as a warning. */
@@ -42,7 +49,7 @@ export interface GateBaseline {
   overall: GatedScores;
 }
 
-/** The metric keys the gate enforces, in display order. */
+/** The metric keys shown in the verdict table, in display order. */
 export const GATED_METRICS: (keyof GatedScores)[] = [
   "recallAt1",
   "recallAt5",
@@ -50,6 +57,23 @@ export const GATED_METRICS: (keyof GatedScores)[] = [
   "ndcgAt5",
   "mrr",
 ];
+
+/**
+ * Metrics the HYBRID gate actually ENFORCES (fails on). Deliberately the two
+ * membership-recall metrics, not the rank-order ones.
+ *
+ * Why a subset: the hybrid baseline is blessed off the CI platform (a dev box),
+ * but the gate runs on ubuntu-latest. Membership metrics (is the target in the
+ * top K?) are stable across architectures — a within-window reordering from
+ * float32 SIMD/FMA differences in sqlite-vec's KNN doesn't change them. The
+ * rank-order metrics (recallAt1/ndcgAt5/mrr) CAN shift by a discrete ~1/12 on a
+ * single cross-platform rank flip, which would false-fail unrelated PRs. They
+ * are still reported (and committed in the baseline) for observability — just
+ * not enforced. R@5/R@10 sit at a 1.0 ceiling with a ≥1-rank margin and a
+ * measured ~4.7e-4 nearest-neighbour gap (~100x FP noise), so a real
+ * vector/RRF regression (a target dropping out of the window) still trips them.
+ */
+export const HYBRID_GATED_METRICS: (keyof GatedScores)[] = ["recallAt5", "recallAt10"];
 
 /** Default tolerance — absorbs FP noise only. See module doc. */
 export const DEFAULT_GATE_TOLERANCE = 1e-6;
@@ -104,7 +128,9 @@ export interface MetricDelta {
   current: number;
   /** current - baseline. Negative means worse. */
   delta: number;
-  /** True when delta < -tolerance. */
+  /** Whether this metric can fail the gate (vs. reported for observability only). */
+  enforced: boolean;
+  /** True when the metric is enforced AND delta < -tolerance. */
   regressed: boolean;
 }
 
@@ -132,17 +158,38 @@ export function compareToBaseline(
   baseline: GateBaseline,
   options: {
     tolerance?: number;
-    lineage?: { corpus_sha256?: string; query_set_checksum?: string; query_count?: number };
+    /**
+     * Which metrics fail the gate. Defaults to all GATED_METRICS (the lexical
+     * gate). The hybrid gate passes HYBRID_GATED_METRICS so off-platform rank
+     * noise in the unenforced metrics can't false-fail. All GATED_METRICS are
+     * still shown in the verdict; only these can trip it.
+     */
+    enforcedMetrics?: (keyof GatedScores)[];
+    lineage?: {
+      corpus_sha256?: string;
+      embeddings_sha256?: string;
+      query_set_checksum?: string;
+      query_count?: number;
+    };
   } = {},
 ): GateVerdict {
   const tolerance = options.tolerance ?? DEFAULT_GATE_TOLERANCE;
+  const enforced = new Set(options.enforcedMetrics ?? GATED_METRICS);
   const warnings: string[] = [];
 
   if (options.lineage) {
-    const { corpus_sha256, query_set_checksum, query_count } = options.lineage;
+    const { corpus_sha256, embeddings_sha256, query_set_checksum, query_count } = options.lineage;
     if (corpus_sha256 !== undefined && corpus_sha256 !== baseline.corpus_sha256) {
       warnings.push(
         `Corpus changed since baseline was blessed (baseline=${baseline.corpus_sha256.slice(0, 12)} current=${corpus_sha256.slice(0, 12)}). Re-bless with --update-baseline if intentional.`,
+      );
+    }
+    if (
+      embeddings_sha256 !== undefined &&
+      embeddings_sha256 !== (baseline.embeddings_sha256 ?? undefined)
+    ) {
+      warnings.push(
+        `Embeddings fixture changed since baseline was blessed (baseline=${(baseline.embeddings_sha256 ?? "none").slice(0, 12)} current=${embeddings_sha256.slice(0, 12)}). Re-bless with --update-baseline if intentional.`,
       );
     }
     if (
@@ -164,12 +211,14 @@ export function compareToBaseline(
     const baselineVal = baseline.overall[metric];
     const currentVal = current[metric];
     const delta = currentVal - baselineVal;
+    const isEnforced = enforced.has(metric);
     return {
       metric,
       baseline: baselineVal,
       current: currentVal,
       delta,
-      regressed: delta < -tolerance,
+      enforced: isEnforced,
+      regressed: isEnforced && delta < -tolerance,
     };
   });
 
@@ -184,19 +233,39 @@ export function compareToBaseline(
 }
 
 /**
- * Format a verdict as a human-readable table for CI logs.
+ * Format a verdict as a human-readable table for CI logs. `mode` only changes
+ * the header line so lexical and hybrid runs are distinguishable in logs.
  */
-export function formatVerdict(verdict: GateVerdict): string {
+export function formatVerdict(verdict: GateVerdict, mode: "lexical" | "hybrid" = "lexical"): string {
   const lines: string[] = [];
-  lines.push("Retrieval CI gate — raw/lexical, deterministic");
+  lines.push(
+    mode === "hybrid"
+      ? "Retrieval CI gate — hybrid (FTS5 + vector RRF), frozen vectors"
+      : "Retrieval CI gate — raw/lexical, deterministic",
+  );
   lines.push("");
   lines.push("  metric        baseline   current    delta      status");
   lines.push("  ------------  ---------  ---------  ---------  ------");
   for (const d of verdict.deltas) {
-    const status = d.regressed ? "FAIL" : d.delta > verdict.tolerance ? "up" : "ok";
+    // Non-enforced metrics are informational only (e.g. rank-order metrics on
+    // the hybrid gate): show "info", or "info↓" when they slipped, so a drop is
+    // visible without failing the build.
+    const status = d.regressed
+      ? "FAIL"
+      : !d.enforced
+        ? d.delta < -verdict.tolerance
+          ? "info↓"
+          : "info"
+        : d.delta > verdict.tolerance
+          ? "up"
+          : "ok";
     lines.push(
       `  ${d.metric.padEnd(12)}  ${fmt(d.baseline)}  ${fmt(d.current)}  ${fmtSigned(d.delta)}  ${status}`,
     );
+  }
+  const enforcedNames = verdict.deltas.filter((d) => d.enforced).map((d) => d.metric);
+  if (enforcedNames.length < verdict.deltas.length) {
+    lines.push(`  enforced: ${enforcedNames.join(", ")} (others informational)`);
   }
   for (const w of verdict.warnings) {
     lines.push(`  WARNING: ${w}`);

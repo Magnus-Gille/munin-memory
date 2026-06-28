@@ -37,6 +37,8 @@
     "test:watch": "vitest",
     "benchmark": "MUNIN_BENCHMARK=true vitest run tests/benchmark.test.ts",
     "benchmark:ci-gate": "tsx benchmark/ci-gate.ts",
+    "benchmark:ci-gate:hybrid": "tsx benchmark/ci-gate.ts --hybrid",
+    "benchmark:ci-gate:embeddings": "tsx benchmark/ci-gate/generate-embeddings.ts",
     "benchmark:derive": "tsx scripts/derive-benchmark-queries.ts",
     "benchmark:curate": "tsx scripts/curate-benchmark-query.ts",
     "benchmark:synthesize": "tsx scripts/generate-synthetic-queries.ts",
