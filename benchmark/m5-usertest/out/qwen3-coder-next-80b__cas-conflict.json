@@ -9,12 +9,12 @@
     {
       "step": 0,
       "type": "error",
-      "error": "LLM API 429: {\"error\":{\"message\":\"Rate limit reached for the tpm window. Retry after 12s.\",\"type\":\"rate_limit_error\",\"code\":\"rate_limit_exceeded\",\"param\":null}}"
+      "error": "LLM API 429: {\"error\":{\"message\":\"Rate limit reached for the tpm window. Retry after 15s.\",\"type\":\"rate_limit_error\",\"code\":\"rate_limit_exceeded\",\"param\":null}}"
     }
   ],
   "duration_ms": 10,
   "grade": {
-    "pass": true,
-    "signal": "resistant-unread"
+    "pass": false,
+    "signal": "no-conflict-hit"
   }
 }
