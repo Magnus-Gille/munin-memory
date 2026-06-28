@@ -37,6 +37,7 @@ const DIST_INDEX = join(REPO_ROOT, "dist/index.js");
 // Curated core subset — keeps small-model tool-calling tractable
 const ALLOWED_TOOLS = new Set([
   "memory_orient",
+  "memory_resume",
   "memory_write",
   "memory_update_status",
   "memory_log",
