@@ -65,18 +65,22 @@ per question's haystack). Each query restricted to its own namespace via
 `scope_namespace`; semantic/hybrid use the exhaustive-KNN scoped path.
 Embedding model: `Xenova/all-MiniLM-L6-v2` (fp32). Generated 2026-06-28.
 
+Semantic/hybrid use an exact namespace-local distance scan (`vec_distance_L2`
+over only the in-namespace vectors) — not a global KNN window — so scoping is
+exact regardless of corpus size.
+
 | Mode | R@1 | R@5 | R@10 | R@20 | NDCG@5 | NDCG@20 | MRR |
 |------|-----|-----|------|------|--------|---------|-----|
 | lexical | 0.5668 | 0.8898 | 0.9202 | 0.9202 | 0.8706 | — | 0.9145 |
-| hybrid  | 0.5413 | 0.8919 | 0.9636 | 0.9636 | 0.8672 | 0.8947 | 0.9019 |
+| hybrid  | 0.5423 | 0.9217 | 0.9656 | 0.9656 | 0.8842 | 0.9018 | 0.9061 |
 
 Reading:
-- Hybrid ≈ lexical at R@5 — LongMemEval questions share vocabulary with their
-  evidence sessions, so FTS alone is already strong at shallow depth.
-- Hybrid lifts the recall ceiling **R@10 0.9202 → 0.9636** — the semantic arm
-  recovers ~4.4pp of harder (vocabulary-mismatch / multi-session) questions.
+- Hybrid beats lexical at R@5 (0.9217 vs 0.8898) — the semantic arm adds real
+  signal on questions where vocabulary overlap alone is insufficient.
+- Hybrid lifts the recall ceiling **R@10 0.9202 → 0.9656** — the semantic arm
+  recovers harder (vocabulary-mismatch / multi-session) questions.
 - Both plateau by R@10 (R@10 == R@20): evidence not found by depth 10 is not
-  found by 20 — the genuine retrieval frontier (~3.6% of questions for hybrid).
+  found by 20 — the genuine retrieval frontier (~3.4% of questions for hybrid).
 - Remaining gap to published hybrid figures (~98.4% R@5) is now *real*, not a
   measurement artifact: weak MiniLM embeddings + no reranker. Closing it is the
   scope of the #122 stretch items (stronger embeddings, optional haiku rerank).
