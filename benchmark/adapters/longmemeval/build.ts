@@ -52,8 +52,8 @@ export interface ConvertResult {
 
 export interface BuildOptions {
   split: string;
-  granularity: LongMemEvalGranularity;
-  searchMode: SearchMode;
+  granularity?: LongMemEvalGranularity;
+  searchMode?: SearchMode;
   inputPath: string;
   dbPath: string;
   queryPath: string;
@@ -115,12 +115,24 @@ function parseArgs(argv: string[]): BuildOptions {
   };
 }
 
-export function makeSyntheticEntryId(split: string, sessionId: string): string {
-  return `longmemeval:${split}:${sessionId}`;
+/**
+ * Normalize a question_id (or any raw string) into a safe namespace segment.
+ * Namespace segments allow [a-zA-Z0-9_-]; any other char is replaced with '-'.
+ * The '/' separator is NOT allowed within a segment — it is added by the
+ * caller when building the full namespace path.
+ */
+export function normalizeNsSegment(raw: string): string {
+  return raw.replace(/[^a-zA-Z0-9_-]+/g, "-");
 }
 
-export function makeSyntheticRoundEntryId(split: string, sessionId: string, roundIndex: number): string {
-  return `longmemeval:${split}:round:${sessionId}:${roundIndex}`;
+export function makeSyntheticEntryId(split: string, questionId: string, sessionId: string): string {
+  const qSeg = normalizeNsSegment(questionId);
+  return `longmemeval:${split}:${qSeg}:${sessionId}`;
+}
+
+export function makeSyntheticRoundEntryId(split: string, questionId: string, sessionId: string, roundIndex: number): string {
+  const qSeg = normalizeNsSegment(questionId);
+  return `longmemeval:${split}:${qSeg}:round:${sessionId}:${roundIndex}`;
 }
 
 function normalizeKey(raw: string): string {
@@ -227,21 +239,42 @@ export function convertLongMemEvalDataset(
   limit?: number,
 ): ConvertResult {
   const sliced = typeof limit === "number" ? items.slice(0, limit) : items;
-  const namespace = `benchmarks/longmemeval/${split}/${granularity === "session" ? "sessions" : "rounds"}`;
+  // entryMap is keyed by question-scoped entry ID so sessions shared across
+  // questions become separate copies — cross-question dedup is intentionally
+  // disabled so each question is scored only against its own haystack.
   const entryMap = new Map<string, SyntheticEntry>();
   const queries: BenchmarkQuery[] = [];
   let skippedQueries = 0;
   let dedupedSessions = 0;
   let evidenceRoundFallbacks = 0;
 
+  // Injectivity check: two distinct question_ids must not normalize to the same
+  // namespace segment — that would silently merge their haystacks and corrupt
+  // per-question isolation.  E.g. "a/b" and "a-b" both normalize to "a-b".
+  const segToRawId = new Map<string, string>();
+
   for (const item of sliced) {
+    const qSeg = normalizeNsSegment(item.question_id);
+    const existingRaw = segToRawId.get(qSeg);
+    if (existingRaw !== undefined && existingRaw !== item.question_id) {
+      throw new Error(
+        `normalizeNsSegment collision: question_ids "${existingRaw}" and "${item.question_id}" ` +
+          `both normalize to segment "${qSeg}" — namespace isolation would be silently broken.`,
+      );
+    }
+    segToRawId.set(qSeg, item.question_id);
+    // Per-question namespace: each question's haystack lives in its own
+    // namespace so retrieval can be scoped to exactly that question's corpus.
+    const namespace = `benchmarks/longmemeval/${split}/q/${qSeg}`;
+
     for (let i = 0; i < item.haystack_session_ids.length; i += 1) {
       const sessionId = item.haystack_session_ids[i];
       const messages = item.haystack_sessions[i] ?? [];
       const sessionDate = item.haystack_dates[i];
       if (granularity === "session") {
-        const entryId = makeSyntheticEntryId(split, sessionId);
+        const entryId = makeSyntheticEntryId(split, item.question_id, sessionId);
         if (entryMap.has(entryId)) {
+          // Intra-question dedup only (cross-question copies are distinct IDs)
           dedupedSessions += 1;
           continue;
         }
@@ -263,7 +296,7 @@ export function convertLongMemEvalDataset(
       } else {
         const rounds = chunkSessionIntoRounds(messages);
         for (const round of rounds) {
-          const entryId = makeSyntheticRoundEntryId(split, sessionId, round.roundIndex);
+          const entryId = makeSyntheticRoundEntryId(split, item.question_id, sessionId, round.roundIndex);
           if (entryMap.has(entryId)) {
             continue;
           }
@@ -287,7 +320,7 @@ export function convertLongMemEvalDataset(
 
     const expectedIds = granularity === "session"
       ? item.answer_session_ids
-        .map((sessionId) => makeSyntheticEntryId(split, sessionId))
+        .map((sessionId) => makeSyntheticEntryId(split, item.question_id, sessionId))
         .filter((entryId) => entryMap.has(entryId))
       : (() => {
         const result: string[] = [];
@@ -303,7 +336,7 @@ export function convertLongMemEvalDataset(
             usedFallback = true;
           }
           for (const round of chosenRounds) {
-            const entryId = makeSyntheticRoundEntryId(split, answerSessionId, round.roundIndex);
+            const entryId = makeSyntheticRoundEntryId(split, item.question_id, answerSessionId, round.roundIndex);
             if (entryMap.has(entryId)) {
               result.push(entryId);
             }
@@ -327,6 +360,7 @@ export function convertLongMemEvalDataset(
       category: mapQuestionCategory(item.question_type),
       search_mode: searchMode,
       expected_ids: expectedIds,
+      scope_namespace: namespace,
       notes: `LongMemEval ${split} question ${item.question_id}; answer=${item.answer}`,
     });
   }
@@ -390,12 +424,15 @@ export function buildLongMemEvalArtifacts(options: BuildOptions): ConvertResult 
   mkdirSync(dirname(options.queryPath), { recursive: true });
   mkdirSync(dirname(options.provenancePath), { recursive: true });
 
+  const granularity: LongMemEvalGranularity = options.granularity ?? "session";
+  const searchMode: SearchMode = options.searchMode ?? "lexical";
+
   const items = JSON.parse(readFileSync(options.inputPath, "utf-8")) as LongMemEvalItem[];
   const converted = convertLongMemEvalDataset(
     items,
     options.split,
-    options.granularity,
-    options.searchMode,
+    granularity,
+    searchMode,
     options.limit,
   );
 
@@ -413,15 +450,15 @@ export function buildLongMemEvalArtifacts(options: BuildOptions): ConvertResult 
   const metadata: BuildMetadata = {
     adapter: "longmemeval",
     split: options.split,
-    granularity: options.granularity,
-    search_mode: options.searchMode,
+    granularity,
+    search_mode: searchMode,
     generated_at: new Date().toISOString(),
     input_path: options.inputPath,
     db_path: options.dbPath,
     query_path: options.queryPath,
-    id_scheme: options.granularity === "session"
-      ? "longmemeval:<split>:<session_id>"
-      : "longmemeval:<split>:round:<session_id>:<round_index>",
+    id_scheme: granularity === "session"
+      ? "longmemeval:<split>:<question_id>:<session_id>"
+      : "longmemeval:<split>:<question_id>:round:<session_id>:<round_index>",
     limit: options.limit,
     stats: converted.stats,
   };
@@ -433,8 +470,8 @@ export function buildLongMemEvalArtifacts(options: BuildOptions): ConvertResult 
 function printSummary(result: ConvertResult, options: BuildOptions): void {
   console.log("Built LongMemEval benchmark artifacts");
   console.log(`  Split:   ${options.split}`);
-  console.log(`  Gran:    ${options.granularity}`);
-  console.log(`  Mode:    ${options.searchMode}`);
+  console.log(`  Gran:    ${options.granularity ?? "session"}`);
+  console.log(`  Mode:    ${options.searchMode ?? "lexical"}`);
   console.log(`  Input:   ${options.inputPath}`);
   console.log(`  DB:      ${options.dbPath}`);
   console.log(`  Queries: ${options.queryPath}`);

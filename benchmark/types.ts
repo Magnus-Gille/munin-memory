@@ -38,6 +38,13 @@ export interface BenchmarkQuery {
    * `skipped_no_reference`).
    */
   reference_answer?: string;
+  /**
+   * When set, retrieval for this query is restricted to this exact namespace.
+   * Reproduces per-question-haystack isolation (e.g. LongMemEval: each
+   * question scored only against its own corpus). Unset = search the whole DB
+   * (default).
+   */
+  scope_namespace?: string;
 }
 
 /**

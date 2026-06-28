@@ -1440,6 +1440,85 @@ describe("Fix #137: querySetRequiresEmbeddings (pure unit tests)", () => {
 // 15. Fix #137: corpus embedding pre-population integration test
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Finding 2: answer-quality runner respects scope_namespace
+// ---------------------------------------------------------------------------
+
+describe("Finding 2: scope_namespace isolation in runAnswerQualityInner", () => {
+  it("retrieved_ids come only from the scoped namespace when scope_namespace is set", async () => {
+    const { db, dbPath } = makeTempDb();
+
+    // Two namespaces with non-overlapping vocabulary.
+    // ns-alpha: content about "starfish" and "coral reef"
+    // ns-beta: content about "volcano" and "lava"
+    writeState(db, "ns-alpha", "entry1", "Starfish live on coral reef ecosystems.", []);
+    writeState(db, "ns-alpha", "entry2", "Coral reefs are home to many species.", []);
+    writeState(db, "ns-beta", "entry3", "Volcanoes erupt molten lava from the earth.", []);
+    writeState(db, "ns-beta", "entry4", "Lava flows can travel far from the volcano.", []);
+    db.close();
+
+    const queries: BenchmarkQuery[] = [
+      {
+        id: "q-scope",
+        query: "starfish coral",
+        source: "derived",
+        category: "test/scope",
+        search_mode: "lexical",
+        expected_ids: [],
+        reference_answer: "Starfish live on coral reef ecosystems.",
+        // Scope to ns-alpha only — ns-beta entries must not appear.
+        scope_namespace: "ns-alpha",
+      },
+    ];
+
+    const chat = makeMockChat(
+      "Starfish live on coral reef ecosystems.",
+      '{"correct":true,"score":1.0,"reasoning":"matches"}',
+    );
+
+    const report = await runAnswerQuality({
+      snapshotPath: dbPath,
+      queries,
+      serialization: "linear",
+      runnerMode: "raw",
+      searchMode: "lexical",
+      answerModel: "test/model",
+      judgeModel: "test/judge",
+      chat,
+    });
+
+    expect(report.results).toHaveLength(1);
+    const result = report.results[0];
+
+    // All retrieved entries must be from ns-alpha — none from ns-beta.
+    const allFromNsAlpha = result.retrieved_ids.every((id) => {
+      // The entry id is the UUIDv4 assigned by writeState; look up the namespace via the db.
+      // Since we only have 2 ns-alpha entries, both ids must be from ns-alpha.
+      // A simpler proxy: there should be > 0 results and no volcanic content in context.
+      return true; // Structural check below is sufficient.
+    });
+    expect(allFromNsAlpha).toBe(true);
+
+    // The retrieved count must be > 0 (starfish/coral ARE in ns-alpha).
+    expect(result.retrieved_ids.length).toBeGreaterThan(0);
+    // ns-beta entry IDs must NOT appear in retrieved_ids.
+    // We can verify this by checking that all retrieved entries have content
+    // from ns-alpha — do a quick re-open to confirm.
+    const verifyDb = new Database(dbPath, { readonly: true });
+    try {
+      for (const id of result.retrieved_ids) {
+        const row = verifyDb
+          .prepare("SELECT namespace FROM entries WHERE id = ?")
+          .get(id) as { namespace: string } | undefined;
+        expect(row).toBeDefined();
+        expect(row!.namespace).toBe("ns-alpha");
+      }
+    } finally {
+      verifyDb.close();
+    }
+  });
+});
+
 describe("Fix #137: corpus embedding pre-population (integration)", () => {
   const EMBEDDING_DIM = 384;
   const mockExtractor = async (_text: string, _opts: { pooling: string; normalize: boolean }) => {

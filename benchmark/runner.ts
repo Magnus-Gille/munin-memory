@@ -48,6 +48,7 @@ import type {
 } from "./types.js";
 import type { SearchMode } from "../src/types.js";
 
+
 /**
  * Hash raw bytes with SHA-256, return lowercase hex.
  */
@@ -398,9 +399,10 @@ export async function executeQuery(
   mode: SearchMode,
   limit: number = 10,
   queryEmbeddingProvider?: (queryText: string) => Float32Array | null,
+  scopeNamespace?: string,
 ): Promise<{ entries: Entry[]; relaxed: boolean; effectiveMode: SearchMode }> {
   if (mode === "lexical") {
-    return runLexical(db, query, limit);
+    return runLexical(db, query, limit, scopeNamespace);
   }
 
   // When a frozen-embedding provider is supplied (CI hybrid gate), use the
@@ -419,14 +421,16 @@ export async function executeQuery(
       // the report's actual_mode and the result IDs both stay parity
       // with production. Previous behavior (return empty) was a silent
       // divergence — M3 from the PR 2b internal review.
-      const fallback = await runLexical(db, query, limit);
+      const fallback = await runLexical(db, query, limit, scopeNamespace);
       return { ...fallback, effectiveMode: "lexical" };
     }
     const buf = embeddingToBuffer(emb);
     const results = queryEntriesSemanticScored(db, {
       queryEmbedding: buf,
+      namespace: scopeNamespace,
       limit,
       includeExpired: true,
+      ...(scopeNamespace ? { exactNamespaceScan: true } : {}),
     });
     return { entries: results.map((r) => r.entry), relaxed: false, effectiveMode: "semantic" };
   }
@@ -437,16 +441,22 @@ export async function executeQuery(
     // memory_query degrades hybrid→lexical on embedding failure (strict
     // first, then relaxed). Mirror it. Previously we ran strict-only
     // without the relaxed fallback, which is a subtle parity gap.
-    const fallback = await runLexical(db, query, limit);
+    const fallback = await runLexical(db, query, limit, scopeNamespace);
     return { ...fallback, effectiveMode: "lexical" };
   }
   const buf = embeddingToBuffer(emb);
   const relaxedQuery = buildRelaxedLexicalQuery(query);
   const hybridScored = queryEntriesHybridScored(db, {
-    ftsOptions: { query, limit, includeExpired: true },
-    semanticOptions: { queryEmbedding: buf, limit, includeExpired: true },
+    ftsOptions: { query, limit, includeExpired: true, namespace: scopeNamespace },
+    semanticOptions: {
+      queryEmbedding: buf,
+      limit,
+      includeExpired: true,
+      namespace: scopeNamespace,
+      ...(scopeNamespace ? { exactNamespaceScan: true } : {}),
+    },
     ftsFallbackOptions: relaxedQuery
-      ? { query: relaxedQuery, limit, includeExpired: true, rawFts5: true }
+      ? { query: relaxedQuery, limit, includeExpired: true, rawFts5: true, namespace: scopeNamespace }
       : undefined,
   });
   return {
@@ -465,11 +475,13 @@ function runLexical(
   db: Database.Database,
   query: string,
   limit: number,
+  scopeNamespace?: string,
 ): { entries: Entry[]; relaxed: boolean; effectiveMode: "lexical" } {
   let results = queryEntriesLexicalScored(db, {
     query,
     limit,
     includeExpired: true,
+    namespace: scopeNamespace,
   });
   let relaxed = false;
   if (results.length === 0) {
@@ -480,6 +492,7 @@ function runLexical(
         limit,
         includeExpired: true,
         rawFts5: true,
+        namespace: scopeNamespace,
       });
       relaxed = results.length > 0;
     }
@@ -765,6 +778,7 @@ async function runBenchmarkInner(
         mode,
         internalLimit,
         options.queryEmbeddingProvider,
+        query.scope_namespace,
       );
       const actualMode = effectiveMode;
 
@@ -780,6 +794,7 @@ async function runBenchmarkInner(
         // gating reduces to `shouldApplyDefaultQuerySuppression` alone.
         const queryParams: QueryParams = {
           query: query.query,
+          namespace: query.scope_namespace,
           limit: requestedLimit,
           search_mode: actualMode,
           search_recency_weight: searchRecencyWeight ?? DEFAULT_SEARCH_RECENCY_WEIGHT,
