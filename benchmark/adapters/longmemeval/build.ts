@@ -248,8 +248,21 @@ export function convertLongMemEvalDataset(
   let dedupedSessions = 0;
   let evidenceRoundFallbacks = 0;
 
+  // Injectivity check: two distinct question_ids must not normalize to the same
+  // namespace segment — that would silently merge their haystacks and corrupt
+  // per-question isolation.  E.g. "a/b" and "a-b" both normalize to "a-b".
+  const segToRawId = new Map<string, string>();
+
   for (const item of sliced) {
     const qSeg = normalizeNsSegment(item.question_id);
+    const existingRaw = segToRawId.get(qSeg);
+    if (existingRaw !== undefined && existingRaw !== item.question_id) {
+      throw new Error(
+        `normalizeNsSegment collision: question_ids "${existingRaw}" and "${item.question_id}" ` +
+          `both normalize to segment "${qSeg}" — namespace isolation would be silently broken.`,
+      );
+    }
+    segToRawId.set(qSeg, item.question_id);
     // Per-question namespace: each question's haystack lives in its own
     // namespace so retrieval can be scoped to exactly that question's corpus.
     const namespace = `benchmarks/longmemeval/${split}/q/${qSeg}`;

@@ -365,49 +365,70 @@ describe("semantic search (vec integration)", () => {
     expect(results[0].id).toBe(id1);
   });
 
-  it.skipIf(!vecAvailable)("knnFetch restricts candidate window for namespace-scoped search", () => {
-    // Construct a corpus where nsA has one entry far from the query (seed 99)
-    // and nsB has 3 entries very close (seed 1 = same as query).
-    // With knnFetch=3, the top-3 KNN candidates are all nsB → nsA entry is
-    // outside the window → namespace-filtered result is empty.
-    // With knnFetch=4 (all), nsA entry IS included → found after namespace filter.
+  it.skipIf(!vecAvailable)("exactNamespaceScan: returns in-scope entry beyond vec0 4096-k ceiling", () => {
+    // Regression test for the CRITICAL finding from the Codex review:
+    // The old global-KNN-then-filter approach was NOT exact when the corpus exceeded
+    // vec0's k=4096 ceiling. If 4097 out-of-scope entries are all closer to the query
+    // than the one in-scope entry, the in-scope entry sits at global rank 4098 and is
+    // silently dropped from the KNN window.
+    //
+    // Corpus:
+    //   nsB: 4097 entries, all embeddings = seed 1 (same as query = closest possible)
+    //   nsA: 1 entry, embedding = seed 99 (far from query)
+    //
+    // With exactNamespaceScan: distances computed over nsA-only rows → finds the nsA entry.
+    // Without exactNamespaceScan (default global KNN, window = 100-500): misses nsA.
 
+    const NSB_COUNT = 4097; // intentionally exceeds vec0's k=4096 hard ceiling
+    const now = new Date().toISOString();
     const queryEmb = embeddingToBuffer(makeEmbedding(1));
+    const closeEmb = embeddingToBuffer(makeEmbedding(1)); // identical to query = smallest possible L2
+    const farEmb = embeddingToBuffer(makeEmbedding(99));  // far from query
 
-    // nsB: 3 entries close to query (seed 1)
-    const nb1 = writeState(db, "nsB", "b1", "nsB entry 1", []);
-    const nb2 = writeState(db, "nsB", "b2", "nsB entry 2", []);
-    const nb3 = writeState(db, "nsB", "b3", "nsB entry 3", []);
-    storeEmbedding(db, nb1.id, embeddingToBuffer(makeEmbedding(1)), "test");
-    storeEmbedding(db, nb2.id, embeddingToBuffer(makeEmbedding(1)), "test");
-    storeEmbedding(db, nb3.id, embeddingToBuffer(makeEmbedding(1)), "test");
-    db.prepare("UPDATE entries SET embedding_status = 'generated' WHERE id IN (?, ?, ?)").run(nb1.id, nb2.id, nb3.id);
+    // Batch-insert 4097 nsB entries all closer to query than nsA via a transaction.
+    const insertEntry = db.prepare(
+      `INSERT INTO entries
+         (id, namespace, key, entry_type, content, tags, agent_id, owner_principal_id,
+          created_at, updated_at, valid_until, classification, embedding_status)
+       VALUES (?, ?, ?, 'state', ?, '[]', NULL, NULL, ?, ?, NULL, 'internal', 'generated')`,
+    );
+    const insertVec = db.prepare("INSERT INTO entries_vec (entry_id, embedding) VALUES (?, ?)");
 
-    // nsA: 1 entry far from query (seed 99)
-    const na1 = writeState(db, "nsA", "a1", "nsA entry 1", []);
-    storeEmbedding(db, na1.id, embeddingToBuffer(makeEmbedding(99)), "test");
-    db.prepare("UPDATE entries SET embedding_status = 'generated' WHERE id = ?").run(na1.id);
+    const batchInsert = db.transaction(() => {
+      for (let i = 0; i < NSB_COUNT; i++) {
+        const id = `nsb-batch-${i}`;
+        insertEntry.run(id, "nsB", `b${i}`, `nsB entry ${i}`, now, now);
+        insertVec.run(id, closeEmb);
+      }
+    });
+    batchInsert();
 
-    // With knnFetch=3: top-3 are all nsB → no nsA entry survives filter
-    const missResults = queryEntriesSemanticScored(db, {
+    // One nsA entry that is FAR from query (sits at global rank 4098 behind all nsB entries)
+    const nsaId = "nsa-far-beyond-ceiling";
+    insertEntry.run(nsaId, "nsA", "a1", "nsA entry far from query", now, now);
+    insertVec.run(nsaId, farEmb);
+
+    // DEFAULT path (no exactNamespaceScan): global KNN window is 100–500; all 4097 nsB entries
+    // are closer → nsA entry is not in the window → result is empty.
+    const defaultResults = queryEntriesSemanticScored(db, {
       queryEmbedding: queryEmb,
       namespace: "nsA",
-      limit: 10,
+      limit: 5,
       includeExpired: true,
-      knnFetch: 3,
+      // exactNamespaceScan NOT set → uses default global-KNN path
     });
-    expect(missResults.length).toBe(0);
+    expect(defaultResults.length).toBe(0);
 
-    // With knnFetch=4 (exhaustive for this corpus): nsA entry is in the window
-    const hitResults = queryEntriesSemanticScored(db, {
+    // exactNamespaceScan path: distances computed over nsA-only rows → nsA entry found.
+    const exactResults = queryEntriesSemanticScored(db, {
       queryEmbedding: queryEmb,
       namespace: "nsA",
-      limit: 10,
+      exactNamespaceScan: true,
+      limit: 5,
       includeExpired: true,
-      knnFetch: 4,
     });
-    expect(hitResults.length).toBe(1);
-    expect(hitResults[0].entry.id).toBe(na1.id);
+    expect(exactResults.length).toBe(1);
+    expect(exactResults[0].entry.id).toBe(nsaId);
   });
 });
 

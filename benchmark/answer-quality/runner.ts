@@ -337,6 +337,8 @@ export async function runAnswerQualityInner(
       query.query,
       querySearchMode,
       internalLimit,
+      undefined,
+      query.scope_namespace,
     );
 
     let finalEntries = rawEntries;
@@ -348,6 +350,7 @@ export async function runAnswerQualityInner(
         search_recency_weight: searchRecencyWeight ?? DEFAULT_SEARCH_RECENCY_WEIGHT,
         include_expired: true,
         explain: false,
+        namespace: query.scope_namespace,
       };
       finalEntries = applyProductionReranker(db, rawEntries, queryParams, topK);
     } else {

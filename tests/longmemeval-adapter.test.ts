@@ -8,6 +8,7 @@ import {
   convertLongMemEvalDataset,
   makeSyntheticEntryId,
   makeSyntheticRoundEntryId,
+  normalizeNsSegment,
 } from "../benchmark/adapters/longmemeval/build.js";
 import { queryEntriesLexicalScored } from "../src/db.js";
 import type { LongMemEvalItem } from "../benchmark/adapters/longmemeval/build.js";
@@ -35,6 +36,44 @@ afterEach(() => {
       rmSync(dir, { recursive: true, force: true });
     }
   }
+});
+
+describe("normalizeNsSegment", () => {
+  it("replaces slashes and special chars with hyphens", () => {
+    expect(normalizeNsSegment("a/b")).toBe("a-b");
+    expect(normalizeNsSegment("a-b")).toBe("a-b");
+    expect(normalizeNsSegment("q 001")).toBe("q-001");
+  });
+
+  it("collision guard: throws when two question_ids normalize to the same segment", () => {
+    // "a/b" and "a-b" both normalize to "a-b" — that would silently merge their haystacks.
+    const item1: LongMemEvalItem = {
+      question_id: "a/b",
+      question_type: "single-session-user",
+      question: "Q1?",
+      answer: "A1",
+      question_date: "2023/01/01 00:00",
+      answer_session_ids: [],
+      haystack_session_ids: [],
+      haystack_sessions: [],
+      haystack_dates: [],
+    };
+    const item2: LongMemEvalItem = {
+      question_id: "a-b",
+      question_type: "single-session-user",
+      question: "Q2?",
+      answer: "A2",
+      question_date: "2023/01/01 00:00",
+      answer_session_ids: [],
+      haystack_session_ids: [],
+      haystack_sessions: [],
+      haystack_dates: [],
+    };
+
+    expect(() => convertLongMemEvalDataset([item1, item2], "test")).toThrow(
+      /normalizeNsSegment collision/,
+    );
+  });
 });
 
 describe("LongMemEval adapter", () => {

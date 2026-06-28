@@ -1672,13 +1672,6 @@ export function executeDelete(
 
 // --- Semantic search operations ---
 
-/**
- * sqlite-vec hard ceiling on `k` in a vec0 KNN query. Requesting more than
- * this throws "k value in knn query too large". Used to clamp the benchmark
- * exhaustive-fetch path (see `queryEntriesSemanticScored`).
- */
-const VEC_KNN_MAX_K = 4096;
-
 export interface SemanticQueryOptions {
   queryEmbedding: Buffer;
   namespace?: string;
@@ -1696,13 +1689,13 @@ export interface SemanticQueryOptions {
    */
   maxDistance?: number;
   /**
-   * Benchmark-only: override the KNN candidate window. When set, fetch this
-   * many nearest vectors (clamped to the number of rows in entries_vec) before
-   * namespace/tag filtering. Used to make namespace-scoped semantic search
-   * exact — fetching all candidates then filtering to a namespace reproduces
-   * true per-namespace KNN. Unset preserves the default adaptive window.
+   * Benchmark-only: exact namespace-local KNN. When true AND `namespace` is
+   * set, distances are computed over ONLY the in-namespace vectors (via
+   * vec_distance_L2) instead of the global vec0 KNN window — reproduces true
+   * per-namespace KNN with no dependence on vec0's k<=4096 ceiling. Requires
+   * `namespace`. Unset preserves the default global-KNN path.
    */
-  knnFetch?: number;
+  exactNamespaceScan?: boolean;
 }
 
 export function queryEntriesSemantic(
@@ -1748,23 +1741,51 @@ export function queryEntriesSemanticScored(
   const clampedLimit = Math.min(Math.max(limit, 1), 50);
   const now = nowUTC();
 
+  // Exact namespace-local scan (benchmark-only).
+  // When exactNamespaceScan is true and a namespace is given, compute distances
+  // over ONLY the in-namespace vectors via vec_distance_L2 — no global KNN
+  // window, no dependence on vec0's k<=4096 ceiling.  Correct for corpora of
+  // any size.  Falls through to the default global-KNN path when namespace is
+  // unset (defensive; callers should not set this without a namespace).
+  if (options.exactNamespaceScan === true && namespace) {
+    let sql = `
+      SELECT e.*, vec_distance_L2(v.embedding, ?) AS distance
+      FROM entries_vec v
+      JOIN entries e ON e.id = v.entry_id
+      WHERE `;
+    const params: unknown[] = [queryEmbedding];
+
+    if (namespace.endsWith("/")) {
+      sql += "e.namespace LIKE ? ESCAPE '\\'";
+      params.push(escapeForLike(namespace) + "%");
+    } else {
+      sql += "e.namespace = ?";
+      params.push(namespace);
+    }
+
+    sql += " ORDER BY distance";
+
+    const rows = db.prepare(sql).all(...params) as Array<Entry & { distance: number }>;
+
+    const filterOpts: SemanticFilterOptions = { namespace, entryType, tags, includeExpired, since, until, now };
+    const results: SemanticQueryResult[] = [];
+
+    for (const row of rows) {
+      if (results.length >= clampedLimit) break;
+      if (maxDistance !== undefined && row.distance > maxDistance) break;
+      const { distance, ...entry } = row;
+      if (!passesSemanticFilters(entry as Entry, filterOpts)) continue;
+      results.push({ entry: entry as Entry, distance, rank: results.length + 1 });
+    }
+
+    return results;
+  }
+
+  // Default path: global vec0 KNN then filter.
   // Fetch enough KNN candidates to satisfy clampedLimit after filtering.
   // vec0 KNN queries can't include tag/namespace predicates, so we
   // over-fetch and filter inline, stopping once we have enough matches.
-  // When knnFetch is provided (benchmark exhaustive mode), use it directly
-  // clamped to the actual vec row count AND to vec0's hard KNN ceiling
-  // (k must be <= 4096, else vec0 throws "k value in knn query too large").
-  // The 4096 cap is effectively lossless for namespace-scoped recall: an
-  // entry relevant to the query is semantically near it and so falls well
-  // within the 4096 nearest globally; the cap only truncates far candidates
-  // that would never rank in the top-K of a namespace anyway.
-  let knnFetch: number;
-  if (options.knnFetch !== undefined) {
-    const rowCount = (db.prepare("SELECT COUNT(*) AS c FROM entries_vec").get() as { c: number }).c;
-    knnFetch = Math.max(1, Math.min(options.knnFetch, rowCount, VEC_KNN_MAX_K));
-  } else {
-    knnFetch = Math.min(Math.max(clampedLimit * 10, 100), 500);
-  }
+  const knnFetch = Math.min(Math.max(clampedLimit * 10, 100), 500);
 
   // KNN query via vec0
   const vecResults = db

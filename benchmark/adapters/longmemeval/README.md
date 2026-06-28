@@ -27,7 +27,7 @@ Each LongMemEval question is scored only against its own haystack, matching the 
 
 - **Per-question namespace:** `benchmarks/longmemeval/<split>/q/<question_id>` — each question's sessions are inserted into their own namespace so retrieval can be restricted to exactly that question's corpus.
 - **`scope_namespace` on each query:** the generated `.jsonl` sets `scope_namespace` to the question's namespace so the runner restricts FTS5, semantic, and hybrid retrieval to that namespace.
-- **Exhaustive KNN for scoped semantic/hybrid:** when `scope_namespace` is set, the runner passes `knnFetch=1_000_000` (clamped to actual vec row count) into `queryEntriesSemanticScored` so no in-namespace vector is missed due to the default 500-candidate window.
+- **Exact namespace-local KNN for scoped semantic/hybrid:** when `scope_namespace` is set, the runner passes `exactNamespaceScan: true` into `queryEntriesSemanticScored`, which computes distances only over the in-namespace vectors via `vec_distance_L2` — correct at any corpus size with no dependence on vec0's k≤4096 KNN ceiling.
 
 Without this isolation, all 500 questions' sessions (~20K entries) compete in a global pool, making the task ~480× harder and producing incomparable numbers vs. the canonical LongMemEval scores.
 

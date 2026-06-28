@@ -48,20 +48,6 @@ import type {
 } from "./types.js";
 import type { SearchMode } from "../src/types.js";
 
-/**
- * Sentinel knnFetch value for namespace-scoped semantic/hybrid search.
- *
- * When a query has a scope_namespace, passing this value into
- * queryEntriesSemanticScored causes db.ts to fetch ALL vectors in
- * entries_vec (clamped to the actual row count) before filtering. This
- * reproduces true per-namespace KNN — the default adaptive window
- * (max(limit*10, 100), capped at 500) would silently miss in-namespace
- * entries that fall outside the window in a large global pool.
- *
- * Only sent when scopeNamespace is truthy; unscoped runs leave knnFetch
- * undefined so the default hot-path is unchanged.
- */
-const EXHAUSTIVE_KNN = 1_000_000;
 
 /**
  * Hash raw bytes with SHA-256, return lowercase hex.
@@ -444,7 +430,7 @@ export async function executeQuery(
       namespace: scopeNamespace,
       limit,
       includeExpired: true,
-      ...(scopeNamespace ? { knnFetch: EXHAUSTIVE_KNN } : {}),
+      ...(scopeNamespace ? { exactNamespaceScan: true } : {}),
     });
     return { entries: results.map((r) => r.entry), relaxed: false, effectiveMode: "semantic" };
   }
@@ -467,7 +453,7 @@ export async function executeQuery(
       limit,
       includeExpired: true,
       namespace: scopeNamespace,
-      ...(scopeNamespace ? { knnFetch: EXHAUSTIVE_KNN } : {}),
+      ...(scopeNamespace ? { exactNamespaceScan: true } : {}),
     },
     ftsFallbackOptions: relaxedQuery
       ? { query: relaxedQuery, limit, includeExpired: true, rawFts5: true, namespace: scopeNamespace }
