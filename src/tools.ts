@@ -286,6 +286,29 @@ function applyUntrustedEnvelope(
   response.content = UNTRUSTED_PREFIX + content + UNTRUSTED_SUFFIX;
 }
 
+/**
+ * Centralized safety helper for full-content fields in aggregate tool responses.
+ * Returns { text: safeText, untrusted: boolean }.
+ * When untrusted, wraps with UNTRUSTED_PREFIX/SUFFIX delimiters.
+ * tags is optional; when omitted only scan-based detection fires.
+ * NEVER mutates stored entries — only what is emitted in responses. (#150)
+ */
+function safenText(text: string, tags?: string[]): { text: string; untrusted: boolean } {
+  if (!shouldWrapAsUntrusted(text, tags ?? [])) return { text, untrusted: false };
+  return { text: UNTRUSTED_PREFIX + text + UNTRUSTED_SUFFIX, untrusted: true };
+}
+
+/**
+ * Preview-field variant. For short preview strings in aggregate results.
+ * When untrusted, prefixes with a compact inline marker instead of full delimiters
+ * (previews are intentionally short, so the marker stays proportionate).
+ * tags is optional; when omitted only scan-based detection fires. (#150)
+ */
+function safenPreview(preview: string, tags?: string[]): { text: string; untrusted: boolean } {
+  if (!shouldWrapAsUntrusted(preview, tags ?? [])) return { text: preview, untrusted: false };
+  return { text: "⚠ UNTRUSTED: " + preview, untrusted: true };
+}
+
 function buildRedactableEntryMetadata(entry: ReturnType<typeof parseEntry>) {
   return {
     id: entry.id,
@@ -619,11 +642,19 @@ function formatHistoryEntry(
     return response;
   }
 
-  return {
-    ...entry,
-    action,
-    provenance,
-  };
+  // Audit entries have no tags — apply scan-based detection to the detail field.
+  // The detail echoes up to 80 chars of the written content, so injection text
+  // appearing early in a write would surface here. Use safenPreview since detail
+  // is a short excerpt, not the full entry content. (#150)
+  const result = { ...entry, action, provenance };
+  if (result.detail !== null && result.detail !== undefined) {
+    const safeDetail = safenPreview(result.detail);
+    if (safeDetail.untrusted) {
+      result.detail = safeDetail.text;
+      (result as Record<string, unknown>).untrusted_detail = true;
+    }
+  }
+  return result;
 }
 
 function validateClassificationInput(
@@ -1414,16 +1445,19 @@ function buildResumeStatusCandidate(
   const reasons = buildResumeStatusReasons(assessment, inScope, includeAttention, matchedTerms);
   const suggestedAction = resolveResumeStatusAction(assessment, includeAttention);
 
+  const statusTags = parseTags(assessment.row.tags);
+  const safePreviewResult = safenPreview(contentPreview(assessment.row.content_preview, 220), statusTags);
   return {
     item: {
       namespace: assessment.row.namespace,
       key: assessment.row.key,
       entry_id: assessment.row.id,
       category: "status",
-      preview: contentPreview(assessment.row.content_preview, 220),
+      preview: safePreviewResult.text,
       updated_at: assessment.row.updated_at,
       reason: reasons.join("; "),
       suggested_action: suggestedAction,
+      ...(safePreviewResult.untrusted ? { untrusted_content: true } : {}),
     },
     score,
     openLoops: extractResumeOpenLoops(assessment),
@@ -1443,6 +1477,8 @@ function buildResumeStateCandidate(
 ): ResumeCandidate {
   const matchText = `${entry.namespace} ${entry.key ?? ""} ${entry.content}`;
   const matchedTerms = countResumeTermMatches(matchText, hintTerms);
+  const entryTags = parseTags(entry.tags);
+  const safePreviewResult = safenPreview(contentPreview(entry.content, 220), entryTags);
 
   return {
     item: {
@@ -1450,12 +1486,13 @@ function buildResumeStateCandidate(
       key: entry.key,
       entry_id: entry.id,
       category: "state",
-      preview: contentPreview(entry.content, 220),
+      preview: safePreviewResult.text,
       updated_at: entry.updated_at,
       reason: matchedTerms > 0
         ? "recent state entry in the requested scope that matched the opener"
         : "recent state entry in the requested scope",
       suggested_action: "Read this entry if you need implementation or reference context beyond the status.",
+      ...(safePreviewResult.untrusted ? { untrusted_content: true } : {}),
     },
     score: 60 + matchedTerms * 6 + getFreshnessScore(entry.updated_at) * 8 + (matchesNamespacePrefix(entry.namespace, scope) ? 20 : 0),
     openLoops: [],
@@ -1498,13 +1535,15 @@ function buildResumeLogCandidate(
   const matchedTerms = countResumeTermMatches(matchText, hintTerms);
   const inScope = scope ? matchesNamespacePrefix(entry.namespace, scope) : false;
 
+  const logTags = parseTags(entry.tags);
+  const safeLogPreview = safenPreview(contentPreview(entry.content, 220), logTags);
   return {
     item: {
       namespace: entry.namespace,
       key: entry.key,
       entry_id: entry.id,
       category: "decision_log",
-      preview: contentPreview(entry.content, 220),
+      preview: safeLogPreview.text,
       updated_at: entry.updated_at,
       reason: inScope
         ? "recent decision-style log in the requested scope"
@@ -1512,6 +1551,7 @@ function buildResumeLogCandidate(
           ? "recent decision-style log that matched the opener"
           : "recent decision-style log in a likely-relevant namespace",
       suggested_action: "Read this log before making changes that could repeat or undo an earlier decision.",
+      ...(safeLogPreview.untrusted ? { untrusted_content: true } : {}),
     },
     score: (inScope ? 85 : 35) + matchedTerms * 7 + getFreshnessScore(entry.updated_at) * 8,
     openLoops: [],
@@ -1524,15 +1564,18 @@ function buildResumeLogCandidate(
 }
 
 function buildResumeHistoryCandidate(entry: AuditHistoryEntry, scope: string): ResumeCandidate {
-  const detail = entry.detail ? contentPreview(entry.detail, 180) : `${entry.action} ${entry.key ?? "namespace"}`;
+  const rawDetail = entry.detail ? contentPreview(entry.detail, 180) : `${entry.action} ${entry.key ?? "namespace"}`;
+  // Audit entries carry no tags — scan-based detection only.
+  const safeDetail = safenPreview(rawDetail);
   return {
     item: {
       namespace: entry.namespace,
       category: "history",
-      preview: detail,
+      preview: safeDetail.text,
       updated_at: entry.timestamp,
       reason: "recent namespace mutation history",
       suggested_action: "Review recent writes and updates before continuing work in this namespace.",
+      ...(safeDetail.untrusted ? { untrusted_content: true } : {}),
     },
     score: 50 + (matchesNamespacePrefix(entry.namespace, scope) ? 15 : 0) + getFreshnessScore(entry.timestamp) * 6,
     openLoops: [],
@@ -1910,15 +1953,20 @@ function buildExtractRelatedEntries(
   );
 
   return {
-    entries: filtered.allowed.slice(0, 5).map((source) => ({
-      id: source.entry.id,
-      namespace: source.entry.namespace,
-      key: source.entry.key,
-      entry_type: source.entry.entry_type,
-      preview: contentPreview(source.entry.content, 220),
-      updated_at: source.entry.updated_at,
-      reason: source.reason,
-    })),
+    entries: filtered.allowed.slice(0, 5).map((source) => {
+      const tags = parseTags(source.entry.tags);
+      const safe = safenPreview(contentPreview(source.entry.content, 220), tags);
+      return {
+        id: source.entry.id,
+        namespace: source.entry.namespace,
+        key: source.entry.key,
+        entry_type: source.entry.entry_type,
+        preview: safe.text,
+        updated_at: source.entry.updated_at,
+        reason: source.reason,
+        ...(safe.untrusted ? { untrusted_content: true } : {}),
+      };
+    }),
     redacted: filtered.redacted,
   };
 }
@@ -2113,13 +2161,16 @@ function resolveNarrativeStatusEntry(db: Database.Database, namespace: string): 
 }
 
 function buildNarrativeSourceFromEntry(entry: Entry): NarrativeSource {
+  const tags = parseTags(entry.tags);
+  const safe = safenPreview(contentPreview(entry.content, 220), tags);
   return {
     kind: "entry",
     id: entry.id,
     namespace: entry.namespace,
     key: entry.key,
     timestamp: entry.entry_type === "log" ? entry.created_at : entry.updated_at,
-    preview: contentPreview(entry.content, 220),
+    preview: safe.text,
+    ...(safe.untrusted ? { untrusted_content: true } : {}),
   };
 }
 
@@ -2292,29 +2343,40 @@ function buildNarrativeTimeline(
   const items: NarrativeTimelineItem[] = [];
 
   if (statusEntry) {
+    const statusTags = parseTags(statusEntry.tags);
+    const statusSummary = buildNarrativeStatusSummary(statusEntry);
+    const safeSummary = safenPreview(statusSummary, statusTags);
     items.push({
       timestamp: statusEntry.updated_at,
       category: "status",
-      summary: buildNarrativeStatusSummary(statusEntry),
+      summary: safeSummary.text,
       source_entry_id: statusEntry.id,
+      ...(safeSummary.untrusted ? { untrusted_content: true } : {}),
     });
   }
 
   for (const entry of logs) {
+    const logTags = parseTags(entry.tags);
+    const safeLogSummary = safenPreview(contentPreview(entry.content, 180), logTags);
     items.push({
       timestamp: entry.created_at,
       category: "log",
-      summary: contentPreview(entry.content, 180),
+      summary: safeLogSummary.text,
       source_entry_id: entry.id,
+      ...(safeLogSummary.untrusted ? { untrusted_content: true } : {}),
     });
   }
 
   for (const entry of history) {
+    // Audit entries have no tags — apply scan-based detection only.
+    const rawDetail = contentPreview(entry.detail ?? `${entry.action} ${entry.key ?? "namespace"}`, 180);
+    const safeDetail = safenPreview(rawDetail);
     items.push({
       timestamp: entry.timestamp,
       category: "audit",
-      summary: contentPreview(entry.detail ?? `${entry.action} ${entry.key ?? "namespace"}`, 180),
+      summary: safeDetail.text,
       source_audit_id: entry.id,
+      ...(safeDetail.untrusted ? { untrusted_content: true } : {}),
     });
   }
 
@@ -2819,13 +2881,18 @@ function extractPatternTerms(text: string): string[] {
 function buildPatternSources(entries: Entry[], sourceIds: Set<string>): PatternSource[] {
   return entries
     .filter((entry) => sourceIds.has(entry.id))
-    .map((entry) => ({
-      entry_id: entry.id,
-      namespace: entry.namespace,
-      key: entry.key,
-      preview: contentPreview(entry.content, 220),
-      updated_at: entry.updated_at,
-    }));
+    .map((entry) => {
+      const tags = parseTags(entry.tags);
+      const safe = safenPreview(contentPreview(entry.content, 220), tags);
+      return {
+        entry_id: entry.id,
+        namespace: entry.namespace,
+        key: entry.key,
+        preview: safe.text,
+        updated_at: entry.updated_at,
+        ...(safe.untrusted ? { untrusted_content: true } : {}),
+      };
+    });
 }
 
 function buildHandoffCurrentState(namespace: string, statusEntry: Entry | null, fallbackEntries: Entry[]): HandoffResponse["current_state"] {
@@ -2833,21 +2900,28 @@ function buildHandoffCurrentState(namespace: string, statusEntry: Entry | null, 
     const lifecycle = getLifecycleFromEntry(statusEntry);
     const phasePart = lifecycle ? `[${lifecycle}] ` : "";
     const contentSummary = contentPreview(statusEntry.content, 300);
+    const rawSummary = `${phasePart}${contentSummary}`;
+    const statusTags = parseTags(statusEntry.tags);
+    const safe = safenPreview(rawSummary, statusTags);
     return {
       namespace,
-      summary: `${phasePart}${contentSummary}`,
+      summary: safe.text,
       updated_at: statusEntry.updated_at,
       source_entry_id: statusEntry.id,
+      ...(safe.untrusted ? { untrusted_content: true } : {}),
     };
   }
 
   const fallback = fallbackEntries.find((entry) => entry.entry_type === "state");
   if (!fallback) return null;
+  const fallbackTags = parseTags(fallback.tags);
+  const safeFallback = safenPreview(contentPreview(fallback.content, 220), fallbackTags);
   return {
     namespace,
-    summary: contentPreview(fallback.content, 220),
+    summary: safeFallback.text,
     updated_at: fallback.updated_at,
     source_entry_id: fallback.id,
+    ...(safeFallback.untrusted ? { untrusted_content: true } : {}),
   };
 }
 
@@ -3917,11 +3991,22 @@ export function registerTools(
                     const synthesisIsStale =
                       new Date(synthesis.updated_at) < new Date(assessment.row.updated_at);
 
+                    // Apply untrusted envelope to synthesis summary (#150). Synthesis
+                    // is machine-generated and could echo injection-shaped log content.
+                    const synthesisTags = parseTags(synthesis.tags);
+                    const rawSynthesisSummary = synthesisIsStale ? null : contentPreview(synthesis.content);
+                    const safeSynthesisSummary = rawSynthesisSummary !== null
+                      ? safenPreview(rawSynthesisSummary, synthesisTags)
+                      : null;
+
                     if (detail === "standard") {
                       // Standard: synthesis summary (or stale marker) + cross-ref count, no full cross-ref array
                       const crossRefCount = visibleCrossReferences(db, ctx, assessment.row.namespace).length;
                       entry.synthesis = {
-                        ...(synthesisIsStale ? { stale: true as const } : { summary: contentPreview(synthesis.content) }),
+                        ...(synthesisIsStale ? { stale: true as const } : {
+                          summary: safeSynthesisSummary!.text,
+                          ...(safeSynthesisSummary!.untrusted ? { untrusted_content: true } : {}),
+                        }),
                         updated_at: synthesis.updated_at,
                         updated_at_local: toLocalDisplay(synthesis.updated_at),
                         synthesis_age_days: synthesisAgeDays,
@@ -3934,7 +4019,10 @@ export function registerTools(
                       // Full: everything
                       const crossRefs = visibleCrossReferences(db, ctx, assessment.row.namespace);
                       entry.synthesis = {
-                        ...(synthesisIsStale ? { stale: true as const } : { summary: contentPreview(synthesis.content) }),
+                        ...(synthesisIsStale ? { stale: true as const } : {
+                          summary: safeSynthesisSummary!.text,
+                          ...(safeSynthesisSummary!.untrusted ? { untrusted_content: true } : {}),
+                        }),
                         updated_at: synthesis.updated_at,
                         updated_at_local: toLocalDisplay(synthesis.updated_at),
                         synthesis_age_days: synthesisAgeDays,
@@ -4133,9 +4221,12 @@ export function registerTools(
                   orientRedactedSources.push(...filteredTelos.redacted);
                   if (filteredTelos.allowed.length > 0) {
                     const parsedTelos = parseEntry(filteredTelos.allowed[0]);
+                    // Apply untrusted envelope to telos content (#150).
+                    const safeTelosContent = safenText(parsedTelos.content, parsedTelos.tags);
                     response.telos = {
-                      content: parsedTelos.content,
+                      content: safeTelosContent.text,
                       updated_at: parsedTelos.updated_at,
+                      ...(safeTelosContent.untrusted ? { untrusted_content: true } : {}),
                     };
                   }
                 }
@@ -4435,9 +4526,12 @@ export function registerTools(
                   resumeRedactedSources.push(...filteredTelos.redacted);
                   if (filteredTelos.allowed.length > 0) {
                     const parsedTelos = parseEntry(filteredTelos.allowed[0]);
+                    // Apply untrusted envelope to telos content (#150).
+                    const safeTelosContent = safenText(parsedTelos.content, parsedTelos.tags);
                     response.telos = {
-                      content: parsedTelos.content,
+                      content: safeTelosContent.text,
                       updated_at: parsedTelos.updated_at,
+                      ...(safeTelosContent.untrusted ? { untrusted_content: true } : {}),
                     };
                   }
                 }
@@ -5038,11 +5132,16 @@ export function registerTools(
               const recentDecisions = logs
                 .filter((entry) => isDecisionLikeLog(entry))
                 .slice(0, limit)
-                .map((entry) => ({
-                  timestamp: entry.created_at,
-                  summary: contentPreview(entry.content, 200),
-                  source_entry_id: entry.id,
-                }));
+                .map((entry) => {
+                  const decisionTags = parseTags(entry.tags);
+                  const safeDecision = safenPreview(contentPreview(entry.content, 200), decisionTags);
+                  return {
+                    timestamp: entry.created_at,
+                    summary: safeDecision.text,
+                    source_entry_id: entry.id,
+                    ...(safeDecision.untrusted ? { untrusted_content: true } : {}),
+                  };
+                });
 
               const openLoopSet = new Set<string>();
               const recommendedActionSet = new Set<string>();
@@ -6333,15 +6432,17 @@ export function registerTools(
                 if (redacted) {
                   return redacted;
                 }
+                const safePreview = safenPreview(e.preview, tags);
                 return {
                   id: e.id,
                   key: e.key,
-                  preview: e.preview,
+                  preview: safePreview.text,
                   tags,
                   updated_at: e.updated_at,
                   updated_at_local: toLocalDisplay(e.updated_at),
                   classification: e.classification,
                   provenance: buildProvenance(e.agent_id, e.owner_principal_id),
+                  ...(safePreview.untrusted ? { untrusted_content: true } : {}),
                 };
               });
               const serializedRecentLogs = logSummary.recent.map((l) => {
@@ -6358,14 +6459,16 @@ export function registerTools(
                 if (redacted) {
                   return redacted;
                 }
+                const safeLogPreview = safenPreview(l.content_preview, tags);
                 return {
                   id: l.id,
-                  content_preview: l.content_preview,
+                  content_preview: safeLogPreview.text,
                   tags,
                   created_at: l.created_at,
                   created_at_local: toLocalDisplay(l.created_at),
                   classification: l.classification,
                   provenance: buildProvenance(l.agent_id, l.owner_principal_id),
+                  ...(safeLogPreview.untrusted ? { untrusted_content: true } : {}),
                 };
               });
               return okResult("list", {
@@ -6390,8 +6493,13 @@ export function registerTools(
               if (!nsCheck.valid) {
                 return errResult("delete", "validation_error", nsCheck.error!);
               }
-              if (key) {
-                const keyCheck = validateKey(key);
+              // Normalize: key is "present" only when it's a non-null, non-undefined string.
+              // An empty string "" is treated as a validation error rather than namespace-wide
+              // delete — this prevents the truthiness check from silently routing key:""
+              // through the namespace-wide path. (#150 Finding 3)
+              const hasKey = key !== undefined && key !== null;
+              if (hasKey) {
+                const keyCheck = validateKey(key as string);
                 if (!keyCheck.valid) {
                   return errResult("delete", "validation_error", keyCheck.error!);
                 }
@@ -6408,7 +6516,7 @@ export function registerTools(
               // automated callers. Refuse the entire namespace-wide path (both preview
               // and confirm) unless the operator explicitly enables it.
               // Single-entry deletes (namespace+key) are never affected.
-              if (!key && !isNamespaceDeleteAllowed()) {
+              if (!hasKey && !isNamespaceDeleteAllowed()) {
                 return errResult(
                   "delete",
                   "namespace_delete_disabled",
