@@ -32,8 +32,8 @@ against its own ~40-session haystack.
 The global-pool numbers below are **superseded** and should not be compared to
 published LongMemEval scores or future Munin runs. The adapter now emits
 `scope_namespace` per query and inserts sessions into per-question namespaces —
-all new runs use per-question isolation automatically. Comparable numbers are
-to be regenerated.
+all new runs use per-question isolation automatically. The comparable
+per-question-isolation numbers are in the section below.
 
 ## Current Baseline (SUPERSEDED — global pool, not comparable)
 
@@ -57,9 +57,34 @@ to be regenerated.
 - `NDCG@5 = 0.1818`
 - `MRR = 0.2034`
 
-## Per-question isolation baseline
+## Per-question isolation baseline (comparable)
 
-To be regenerated after rebuilding the benchmark artifacts with the new adapter.
+`LongMemEval-S`, `session` granularity, 500 queries, raw runner mode,
+23,854 synthetic entries across 500 per-question namespaces (~48 sessions
+per question's haystack). Each query restricted to its own namespace via
+`scope_namespace`; semantic/hybrid use the exhaustive-KNN scoped path.
+Embedding model: `Xenova/all-MiniLM-L6-v2` (fp32). Generated 2026-06-28.
+
+| Mode | R@1 | R@5 | R@10 | R@20 | NDCG@5 | NDCG@20 | MRR |
+|------|-----|-----|------|------|--------|---------|-----|
+| lexical | 0.5668 | 0.8898 | 0.9202 | 0.9202 | 0.8706 | — | 0.9145 |
+| hybrid  | 0.5413 | 0.8919 | 0.9636 | 0.9636 | 0.8672 | 0.8947 | 0.9019 |
+
+Reading:
+- Hybrid ≈ lexical at R@5 — LongMemEval questions share vocabulary with their
+  evidence sessions, so FTS alone is already strong at shallow depth.
+- Hybrid lifts the recall ceiling **R@10 0.9202 → 0.9636** — the semantic arm
+  recovers ~4.4pp of harder (vocabulary-mismatch / multi-session) questions.
+- Both plateau by R@10 (R@10 == R@20): evidence not found by depth 10 is not
+  found by 20 — the genuine retrieval frontier (~3.6% of questions for hybrid).
+- Remaining gap to published hybrid figures (~98.4% R@5) is now *real*, not a
+  measurement artifact: weak MiniLM embeddings + no reranker. Closing it is the
+  scope of the #122 stretch items (stronger embeddings, optional haiku rerank).
+
+**Comparability caveat:** before citing these against another system, confirm
+the haystack scale matches the variant they report (LongMemEval-S ≈ 40–50
+sessions/question — consistent with our ~48). A different scale must be
+footnoted.
 
 ## LoCoMo
 
