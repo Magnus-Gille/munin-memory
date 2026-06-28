@@ -334,7 +334,9 @@ async function processBatch(): Promise<void> {
 
     // Atomically claim rows: UPDATE with subquery for LIMIT.
     // In addition to 'pending'/'failed' entries, also claim entries that were
-    // previously embedded with a DIFFERENT model (embedding_model != current).
+    // previously embedded with a DIFFERENT model (embedding_model != current) or
+    // have NULL embedding_model (SQL `!= ?` evaluates to UNKNOWN for NULL, so the
+    // IS NULL guard is required to reclaim legacy/partially-written rows).
     // This ensures that a MUNIN_EMBEDDINGS_MODEL change triggers a full
     // re-embedding of the corpus on the next worker pass, so stale vectors
     // from the old model are replaced and no longer served via the model filter.
@@ -344,7 +346,8 @@ async function processBatch(): Promise<void> {
          WHERE id IN (
            SELECT id FROM entries
            WHERE embedding_status IN ('pending', 'failed')
-              OR (embedding_status = 'generated' AND embedding_model != ?)
+              OR (embedding_status = 'generated'
+                  AND (embedding_model IS NULL OR embedding_model != ?))
            ORDER BY created_at ASC
            LIMIT ?
          )

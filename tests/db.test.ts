@@ -1276,5 +1276,88 @@ describe.skipIf(!vecAvailableForDbTest)(
       expect(returnedIds).toContain(aId);
       expect(returnedIds).toContain(bId);
     });
+
+    // Finding 1 (query side): NULL embedding_model must not escape the guard.
+    // An entry with embedding_status='generated' but embedding_model=NULL is
+    // invisible in results (model space unknown) — correct. The convergence fix
+    // is on the worker side; here we assert the query-side invariant holds.
+    it("drops entries with NULL embedding_model when queryEmbeddingModel is set", () => {
+      const { id } = writeState(db, "test/null-model", "x", "null model entry", []);
+      // Manually force generated+NULL (simulates a legacy row or partial write)
+      db.prepare("UPDATE entries SET embedding_status = 'generated', embedding_model = NULL WHERE id = ?").run(id);
+      db.prepare("INSERT INTO entries_vec (entry_id, embedding) VALUES (?, ?)").run(
+        id,
+        embeddingToBuffer(makeTestEmbedding(7)),
+      );
+
+      const queryEmb = embeddingToBuffer(makeTestEmbedding(7)); // same vector — nearest possible
+      const results = queryEntriesSemanticScored(db, {
+        queryEmbedding: queryEmb,
+        queryEmbeddingModel: "activeModel",
+        limit: 10,
+        includeExpired: true,
+      });
+      // NULL model must NOT appear — unknown space is not safe to serve
+      expect(results.map((r) => r.entry.id)).not.toContain(id);
+    });
+
+    // Finding 3: window starvation — when MORE than knnFetch stale-model vectors
+    // rank ahead of an active-model vector in the ANN window, the active-model
+    // vector is never fetched and the result is empty even though a valid match
+    // exists.
+    //
+    // knnFetch = Math.min(Math.max(limit*10, 100), 500). For limit=1: knnFetch=100.
+    // We insert 101 stale-model entries all closer than the 1 active-model entry.
+    it("returns active-model entry even when MORE than knnFetch stale-model vectors rank ahead", () => {
+      const STALE_COUNT = 101; // > knnFetch(limit=1) = 100
+
+      const queryEmb = embeddingToBuffer(makeTestEmbedding(1));
+      // Stale entries: all same embedding as query = distance ~0 = they rank first in KNN
+      const closeEmb = embeddingToBuffer(makeTestEmbedding(1));
+      // Active entry: far from query embedding
+      const farEmb = embeddingToBuffer(makeTestEmbedding(99));
+
+      const insertEntry = db.prepare(
+        `INSERT INTO entries
+           (id, namespace, key, entry_type, content, tags, agent_id, owner_principal_id,
+            created_at, updated_at, valid_until, classification, embedding_status)
+         VALUES (?, ?, ?, 'state', ?, '[]', NULL, NULL, ?, ?, NULL, 'internal', 'generated')`,
+      );
+      const insertVec = db.prepare("INSERT INTO entries_vec (entry_id, embedding) VALUES (?, ?)");
+      const now = new Date().toISOString();
+
+      const staleIds: string[] = [];
+      const batchInsert = db.transaction(() => {
+        for (let i = 0; i < STALE_COUNT; i++) {
+          const id = `stale-window-${i}`;
+          staleIds.push(id);
+          insertEntry.run(id, "test/window", `s${i}`, `stale entry ${i}`, now, now);
+          // Manually set stale model
+          db.prepare("UPDATE entries SET embedding_model = 'stale-model' WHERE id = ?").run(id);
+          insertVec.run(id, closeEmb);
+        }
+      });
+      batchInsert();
+
+      // Insert 1 active-model entry with FAR embedding (ranked 102nd in global KNN)
+      const activeId = "active-window-entry";
+      insertEntry.run(activeId, "test/window", "active", "active model entry", now, now);
+      db.prepare("UPDATE entries SET embedding_model = 'activeModel' WHERE id = ?").run(activeId);
+      insertVec.run(activeId, farEmb);
+
+      // Without the fix: global KNN fetches top 100 (all stale), filters to 0, returns empty.
+      // With fix: exact model-filtered scan finds the active entry.
+      const results = queryEntriesSemanticScored(db, {
+        queryEmbedding: queryEmb,
+        queryEmbeddingModel: "activeModel",
+        limit: 1,
+        includeExpired: true,
+      });
+      expect(results.map((r) => r.entry.id)).toContain(activeId);
+      // Stale entries must NOT appear
+      for (const sid of staleIds) {
+        expect(results.map((r) => r.entry.id)).not.toContain(sid);
+      }
+    });
   },
 );

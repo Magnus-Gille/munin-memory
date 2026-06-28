@@ -38,6 +38,7 @@ import {
   _setPipelineFactoryForTesting,
   getActiveEmbeddingModel,
 } from "../src/embeddings.js";
+import { executeQuery } from "../benchmark/runner.js";
 
 const TEST_DB_PATH = "/tmp/munin-memory-embeddings-test.db";
 const EMBEDDING_DIM = 384;
@@ -1093,6 +1094,72 @@ describe("worker stale-model convergence", () => {
         .get(id) as { embedding_status: string; embedding_model: string };
 
       // After convergence the entry should have the ACTIVE model and be generated.
+      expect(entry.embedding_status).toBe("generated");
+      expect(entry.embedding_model).toBe(getActiveEmbeddingModel());
+    },
+  );
+
+  // Finding 2: benchmark/runner.ts executeQuery uses the live model (generateEmbedding)
+  // but passed queryEmbeddingModel=undefined → guard disabled → mixed-space possible.
+  // Fix: auto-derive getActiveEmbeddingModel() when no frozen provider is supplied.
+  it.skipIf(!vecAvailable)(
+    "executeQuery auto-applies active model guard when no frozen provider is given",
+    async () => {
+      // Two entries: one with activeModel vectors, one with staleModel vectors.
+      const activeModel = getActiveEmbeddingModel();
+      const { id: activeId } = writeState(db, "test/runner-guard", "active", "content about cats", []);
+      const { id: staleId } = writeState(db, "test/runner-guard", "stale", "content about dogs", []);
+
+      // Store embeddings with different models
+      storeEmbedding(db, activeId, embeddingToBuffer(makeEmbedding(1)), activeModel);
+      storeEmbedding(db, staleId, embeddingToBuffer(makeEmbedding(2)), "stale-model");
+
+      // executeQuery with mode="semantic", no queryEmbeddingProvider, no queryEmbeddingModel.
+      // The mock extractor returns a deterministic embedding for "cats" (seed 1).
+      // After the fix, effectiveQueryEmbeddingModel = getActiveEmbeddingModel() is used,
+      // so only activeId (matching activeModel) should be returned.
+      const { entries } = await executeQuery(
+        db,
+        "cats",   // mock extractor maps "cat" -> seed 1
+        "semantic",
+        10,
+        undefined,   // no frozen provider → uses live generateEmbedding
+        undefined,   // no scope namespace
+        undefined,   // no explicit queryEmbeddingModel → should auto-derive
+      );
+
+      const ids = entries.map((e) => e.id);
+      // activeId (activeModel) must appear; staleId must NOT appear
+      expect(ids).toContain(activeId);
+      expect(ids).not.toContain(staleId);
+    },
+  );
+
+  // Finding 1 (NULL model): SQL `embedding_model != ?` evaluates to UNKNOWN for
+  // NULL rows. A generated entry with NULL embedding_model is permanently stale
+  // (model space unknown) and must be re-claimed by the worker.
+  it.skipIf(!vecAvailable)(
+    "re-claims generated entries with NULL embedding_model (SQL NULL != x is UNKNOWN)",
+    async () => {
+      const { id } = writeState(db, "test/null-stale", "key1", "content about dogs", []);
+      // Manually set generated + NULL model — simulates a legacy row or partial write.
+      db.prepare(
+        "UPDATE entries SET embedding_status = 'generated', embedding_model = NULL WHERE id = ?",
+      ).run(id);
+      // Insert a vec row for it (it exists in the index but model is unknown).
+      db.prepare(
+        "INSERT INTO entries_vec (entry_id, embedding) VALUES (?, ?)",
+      ).run(id, embeddingToBuffer(makeEmbedding(0)));
+
+      startEmbeddingWorker(db);
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      await stopEmbeddingWorker();
+
+      const entry = db
+        .prepare("SELECT embedding_status, embedding_model FROM entries WHERE id = ?")
+        .get(id) as { embedding_status: string; embedding_model: string };
+
+      // Worker must have re-claimed and re-embedded with the active model.
       expect(entry.embedding_status).toBe("generated");
       expect(entry.embedding_model).toBe(getActiveEmbeddingModel());
     },
