@@ -8,6 +8,12 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Security
+
+- **Defense-in-depth hardening against stored-content prompt injection (#150).** Two independent layers:
+  1. **`MUNIN_ALLOW_NAMESPACE_DELETE` gate (default `false`).** Namespace-wide deletes (`memory_delete` with a namespace but no key) are now refused by default. A stored-content injection payload can drive the full preview→token→confirm flow in a single agent loop, making the confirm-token guard useless against automated callers. Setting `MUNIN_ALLOW_NAMESPACE_DELETE=true` re-enables namespace-wide deletes. Single-entry deletes (namespace+key) are never affected.
+  2. **Read-time untrusted-content envelope.** `memory_read`, `memory_get`, and `memory_read_batch` now apply an `untrusted_content: true` flag plus `content_provenance_notice` and content-string delimiter wrapping when the returned entry is instruction-shaped (detected by `scanForInjection` at read time) or tagged `untrusted`/`source:external`. `memory_query` adds the `untrusted_content: true` flag to matching result items (no content-string wrap; results carry `content_preview` only). The scan is advisory and non-blocking — only the response is modified; stored entries are never mutated.
+
 ### Changed
 
 - **Default embedding model changed to `Xenova/bge-small-en-v1.5` (was `Xenova/all-MiniLM-L6-v2`) (#148).** bge-small is same dimensionality (384) so no schema change is required. It achieves meaningfully better recall on benchmark corpora while keeping the same memory and latency profile. Controlled by `MUNIN_EMBEDDINGS_MODEL` as before — deployments that want to pin to MiniLM can set the env var explicitly.

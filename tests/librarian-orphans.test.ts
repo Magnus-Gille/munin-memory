@@ -304,6 +304,7 @@ describe("Librarian orphan prevention", () => {
 
   describe("delete visibility reflects classification filtering", () => {
     it("consumer delete preview shows 0 for classified entries", async () => {
+      process.env.MUNIN_ALLOW_NAMESPACE_DELETE = "true";
       // Write as owner (local) — entry gets client-confidential classification
       await ownerCall("memory_write", {
         namespace: "clients/acme",
@@ -323,9 +324,11 @@ describe("Librarian orphan prevention", () => {
       const willDelete = result.will_delete as { state_count: number; log_count: number };
       expect(willDelete.state_count).toBe(0);
       expect(willDelete.log_count).toBe(0);
+      delete process.env.MUNIN_ALLOW_NAMESPACE_DELETE;
     });
 
     it("owner delete preview shows correct counts for classified entries", async () => {
+      process.env.MUNIN_ALLOW_NAMESPACE_DELETE = "true";
       await ownerCall("memory_write", {
         namespace: "clients/acme",
         key: "status",
@@ -341,6 +344,7 @@ describe("Librarian orphan prevention", () => {
       expect(result.phase).toBe("preview");
       const willDelete = result.will_delete as { state_count: number; log_count: number };
       expect(willDelete.state_count).toBe(1);
+      delete process.env.MUNIN_ALLOW_NAMESPACE_DELETE;
     });
   });
 

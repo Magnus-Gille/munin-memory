@@ -337,6 +337,8 @@ export interface QueryResult {
   synthesis_age_days?: number;
   redacted?: boolean;
   redaction_reason?: string;
+  /** True when the source entry is instruction-shaped or tagged `untrusted`/`source:external`. (#150) */
+  untrusted_content?: boolean;
   match?: {
     heuristic_score: number;
     freshness_score?: number;
