@@ -26,15 +26,30 @@ import {
   rebuildFTS,
   logToolCall,
   getToolCallAggregates,
+  queryEntriesSemanticScored,
+  storeEmbedding,
+  vecLoaded,
 } from "../src/db.js";
+import { embeddingToBuffer } from "../src/embeddings.js";
 
 const TEST_DB_PATH = "/tmp/munin-memory-test.db";
+const VEC_PROBE_PATH = "/tmp/munin-memory-test-vec-probe.db";
 
 function cleanupTestDb() {
   for (const suffix of ["", "-wal", "-shm"]) {
     const path = TEST_DB_PATH + suffix;
     if (existsSync(path)) unlinkSync(path);
   }
+}
+
+// Probe vec availability at collection time (before any tests run) so that
+// .skipIf(!vecAvailableForDbTest) evaluates correctly.
+const _vecProbeDb = initDatabase(VEC_PROBE_PATH);
+const vecAvailableForDbTest = vecLoaded();
+_vecProbeDb.close();
+for (const suffix of ["", "-wal", "-shm"]) {
+  const p = VEC_PROBE_PATH + suffix;
+  if (existsSync(p)) unlinkSync(p);
 }
 
 let db: Database.Database;
@@ -1188,3 +1203,78 @@ describe("getNamespaceTagVocabulary", () => {
     expect(getNamespaceTagVocabulary(db, "nonexistent/ns")).toEqual([]);
   });
 });
+
+// ─── queryEntriesSemanticScored — queryEmbeddingModel filter ─────────────────
+
+/**
+ * Make a deterministic 384-dim Float32Array from a seed (mirrors embeddings.test.ts).
+ */
+function makeTestEmbedding(seed: number): Float32Array {
+  const arr = new Float32Array(384);
+  for (let i = 0; i < 384; i++) {
+    arr[i] = Math.sin(seed * (i + 1) * 0.1) * 0.1;
+  }
+  let norm = 0;
+  for (let i = 0; i < 384; i++) norm += arr[i] * arr[i];
+  norm = Math.sqrt(norm);
+  if (norm > 0) {
+    for (let i = 0; i < 384; i++) arr[i] /= norm;
+  }
+  return arr;
+}
+
+describe.skipIf(!vecAvailableForDbTest)(
+  "queryEntriesSemanticScored — queryEmbeddingModel filter (mixed-space guard)",
+  () => {
+    it("drops entries whose embedding_model != queryEmbeddingModel", () => {
+      // Insert two entries with modelA vectors and two with modelB vectors.
+      const { id: aId1 } = writeState(db, "test/mixed", "a1", "entry from model A first", []);
+      const { id: aId2 } = writeState(db, "test/mixed", "a2", "entry from model A second", []);
+      const { id: bId1 } = writeState(db, "test/mixed", "b1", "entry from model B first", []);
+      const { id: bId2 } = writeState(db, "test/mixed", "b2", "entry from model B second", []);
+
+      storeEmbedding(db, aId1, embeddingToBuffer(makeTestEmbedding(1)), "modelA");
+      storeEmbedding(db, aId2, embeddingToBuffer(makeTestEmbedding(2)), "modelA");
+      storeEmbedding(db, bId1, embeddingToBuffer(makeTestEmbedding(3)), "modelB");
+      storeEmbedding(db, bId2, embeddingToBuffer(makeTestEmbedding(4)), "modelB");
+
+      // Query "in modelB space" with queryEmbeddingModel='modelB'.
+      // Only modelB entries must be returned; modelA entries MUST be dropped.
+      const queryEmb = embeddingToBuffer(makeTestEmbedding(3)); // same space as bId1
+      const results = queryEntriesSemanticScored(db, {
+        queryEmbedding: queryEmb,
+        queryEmbeddingModel: "modelB",
+        limit: 10,
+        includeExpired: true,
+      });
+
+      const returnedIds = results.map((r) => r.entry.id);
+      // modelB entries must appear
+      expect(returnedIds).toContain(bId1);
+      expect(returnedIds).toContain(bId2);
+      // modelA entries must NOT appear (different embedding space)
+      expect(returnedIds).not.toContain(aId1);
+      expect(returnedIds).not.toContain(aId2);
+    });
+
+    it("returns all entries when queryEmbeddingModel is not provided (backward compat)", () => {
+      const { id: aId } = writeState(db, "test/compat", "a", "entry from model A", []);
+      const { id: bId } = writeState(db, "test/compat", "b", "entry from model B", []);
+
+      storeEmbedding(db, aId, embeddingToBuffer(makeTestEmbedding(1)), "modelA");
+      storeEmbedding(db, bId, embeddingToBuffer(makeTestEmbedding(2)), "modelB");
+
+      const queryEmb = embeddingToBuffer(makeTestEmbedding(1));
+      const results = queryEntriesSemanticScored(db, {
+        queryEmbedding: queryEmb,
+        limit: 10,
+        includeExpired: true,
+      });
+
+      const returnedIds = results.map((r) => r.entry.id);
+      // Without queryEmbeddingModel, both entries returned (no filter)
+      expect(returnedIds).toContain(aId);
+      expect(returnedIds).toContain(bId);
+    });
+  },
+);

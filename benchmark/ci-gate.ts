@@ -314,6 +314,10 @@ export async function runCiGate(
       querySetSources: [source],
       manifestPath: null,
       queryEmbeddingProvider,
+      // Pass the frozen fixture's model so the mixed-space guard matches the
+      // committed corpus vectors. In lexical mode frozenCorpus is undefined and
+      // the field is absent — no model filter applied (correct, no vectors).
+      ...(frozenCorpus ? { queryEmbeddingModel: frozenCorpus.model } : {}),
     });
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });

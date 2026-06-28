@@ -36,7 +36,7 @@ const config = {
     (resolveKnob("MUNIN_EMBEDDINGS_ENABLED", "true") ?? "true") === "true",
   semanticEnabled: (process.env.MUNIN_SEMANTIC_ENABLED ?? "true") === "true",
   hybridEnabled: (process.env.MUNIN_HYBRID_ENABLED ?? "true") === "true",
-  model: process.env.MUNIN_EMBEDDINGS_MODEL ?? "Xenova/all-MiniLM-L6-v2",
+  model: process.env.MUNIN_EMBEDDINGS_MODEL ?? "Xenova/bge-small-en-v1.5",
   // ONNX weight precision for the embedding model. Unset = library default
   // (fp32 for all-MiniLM). Lower precision (e.g. "q8"/"int8") cuts resident
   // model memory ~3-4x, the primary lever for fitting embeddings on
@@ -244,6 +244,17 @@ export function isEmbeddingAvailable(): boolean {
   return extractor !== null && !circuitBreakerDisabled && vecLoaded();
 }
 
+/**
+ * Return the embedding model name that is currently active (i.e. the model
+ * whose vectors must match the `queryEmbeddingModel` filter on retrieval and
+ * whose name is stored on `entries.embedding_model` when the worker writes a
+ * new embedding). Callers that build a query embedding use the same model name
+ * as the corpus filter so that mixed-space vectors are always rejected.
+ */
+export function getActiveEmbeddingModel(): string {
+  return config.model;
+}
+
 export function isSemanticEnabled(): boolean {
   return config.semanticEnabled && isEmbeddingAvailable();
 }
@@ -321,19 +332,25 @@ async function processBatch(): Promise<void> {
   try {
     const db = workerDb;
 
-    // Atomically claim rows: UPDATE with subquery for LIMIT
+    // Atomically claim rows: UPDATE with subquery for LIMIT.
+    // In addition to 'pending'/'failed' entries, also claim entries that were
+    // previously embedded with a DIFFERENT model (embedding_model != current).
+    // This ensures that a MUNIN_EMBEDDINGS_MODEL change triggers a full
+    // re-embedding of the corpus on the next worker pass, so stale vectors
+    // from the old model are replaced and no longer served via the model filter.
     const claimed = db
       .prepare(
         `UPDATE entries SET embedding_status = 'processing'
          WHERE id IN (
            SELECT id FROM entries
            WHERE embedding_status IN ('pending', 'failed')
+              OR (embedding_status = 'generated' AND embedding_model != ?)
            ORDER BY created_at ASC
            LIMIT ?
          )
          RETURNING id, content, updated_at`,
       )
-      .all(config.batchSize) as Array<{ id: string; content: string; updated_at: string }>;
+      .all(config.model, config.batchSize) as Array<{ id: string; content: string; updated_at: string }>;
 
     if (claimed.length === 0) return;
 

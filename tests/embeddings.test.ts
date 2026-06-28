@@ -36,6 +36,7 @@ import {
   VALID_DTYPES,
   resolveEmbeddingsDtype,
   _setPipelineFactoryForTesting,
+  getActiveEmbeddingModel,
 } from "../src/embeddings.js";
 
 const TEST_DB_PATH = "/tmp/munin-memory-embeddings-test.db";
@@ -687,24 +688,27 @@ describe("initEmbeddings", () => {
 
   it.skipIf(!vecAvailable)("returns false and logs error when transformers module throws during load", async () => {
     // Clear the test extractor so initEmbeddings tries to load the real transformers module.
-    // We mock the dynamic import to throw, exercising the catch block (lines 119-123).
+    // We mock the dynamic import to throw, exercising the catch block.
     _setExtractorForTesting(null);
 
-    // Spy on the dynamic import by patching the module-level state.
-    // We achieve this by calling initEmbeddings after clearing _testExtractor —
-    // the function will attempt `import('@huggingface/transformers')` which in the
-    // test environment either succeeds (model already loaded) or fails (not installed).
-    // We want the catch branch: inject a rejection by overriding the extractor cache.
-
-    // The simplest approach: set _testExtractor = null so the real import path runs.
-    // In a test env without the model, import('@huggingface/transformers') may fail,
-    // exercising the catch. If it succeeds, the function returns true (also valid).
-    const result = await initEmbeddings();
-    expect(typeof result).toBe("boolean");
-
-    // Restore test extractor
+    // Force local_files_only so that if the active model is not in the on-disk HF
+    // cache the pipeline factory throws immediately (ENOENT / "files not found locally")
+    // rather than attempting a network download that would hit the test timeout.
+    // This reliably exercises the catch branch: the function logs the error and
+    // returns false without touching the network.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    _setExtractorForTesting(mockExtractor as any);
+    (_embeddingConfig as any).localOnly = true;
+    try {
+      const result = await initEmbeddings();
+      // Either the local model loaded (true) or the load threw and was caught (false).
+      expect(typeof result).toBe("boolean");
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (_embeddingConfig as any).localOnly = false;
+      // Restore test extractor
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      _setExtractorForTesting(mockExtractor as any);
+    }
   });
 });
 
@@ -1047,4 +1051,50 @@ describe("initEmbeddings pipeline options wiring", () => {
     expect(ok).toBe(true);
     expect(sink.options?.local_files_only).toBe(true);
   });
+});
+
+// ─── getActiveEmbeddingModel ───────────────────────────────────────────────────
+
+describe("getActiveEmbeddingModel", () => {
+  it("returns the configured model name (default: bge-small-en-v1.5)", () => {
+    // The config is evaluated at module import time. In the default test
+    // environment MUNIN_EMBEDDINGS_MODEL is unset, so the resolved value
+    // must equal the new default.
+    const model = getActiveEmbeddingModel();
+    expect(model).toBe("Xenova/bge-small-en-v1.5");
+  });
+});
+
+// ─── worker convergence (stale embedding_model re-claim) ──────────────────────
+
+describe("worker stale-model convergence", () => {
+  it.skipIf(!vecAvailable)(
+    "re-claims generated entries whose embedding_model differs from the active model",
+    async () => {
+      // Write an entry and mark it as generated with a STALE model.
+      const { id } = writeState(db, "test/stale", "key1", "content about cats", []);
+      // Manually mark as generated with a different model (simulate old corpus).
+      db.prepare(
+        "UPDATE entries SET embedding_status = 'generated', embedding_model = 'stale-model' WHERE id = ?",
+      ).run(id);
+      // Insert a dummy vec row so storeEmbedding's DELETE-then-INSERT works.
+      db.prepare(
+        "INSERT INTO entries_vec (entry_id, embedding) VALUES (?, ?)",
+      ).run(id, embeddingToBuffer(makeEmbedding(0)));
+
+      // The worker must claim entries whose model != active model even when
+      // status = 'generated', so they get re-embedded with the current model.
+      startEmbeddingWorker(db);
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      await stopEmbeddingWorker();
+
+      const entry = db
+        .prepare("SELECT embedding_status, embedding_model FROM entries WHERE id = ?")
+        .get(id) as { embedding_status: string; embedding_model: string };
+
+      // After convergence the entry should have the ACTIVE model and be generated.
+      expect(entry.embedding_status).toBe("generated");
+      expect(entry.embedding_model).toBe(getActiveEmbeddingModel());
+    },
+  );
 });

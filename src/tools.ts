@@ -101,6 +101,7 @@ import {
   isHybridEnabled,
   getSearchModeUnavailableReason,
   getSemanticMaxDistance,
+  getActiveEmbeddingModel,
 } from "./embeddings.js";
 import {
   consolidateNamespace,
@@ -5800,6 +5801,7 @@ export function registerTools(
                   const buf = embeddingToBuffer(queryEmb);
                   semanticResults = queryEntriesSemanticScored(db, {
                     queryEmbedding: buf,
+                    queryEmbeddingModel: getActiveEmbeddingModel(),
                     namespace,
                     entryType: entry_type,
                     tags,
@@ -5827,7 +5829,7 @@ export function registerTools(
                   const relaxedQuery = buildRelaxedLexicalQuery(query);
                   const hybridScored = queryEntriesHybridScored(db, {
                     ftsOptions: { query, namespace, entryType: entry_type, tags, limit: internalLimit, includeExpired: true, since, until },
-                    semanticOptions: { queryEmbedding: buf, namespace, entryType: entry_type, tags, limit: internalLimit, includeExpired: true, since, until, maxDistance: getSemanticMaxDistance() },
+                    semanticOptions: { queryEmbedding: buf, queryEmbeddingModel: getActiveEmbeddingModel(), namespace, entryType: entry_type, tags, limit: internalLimit, includeExpired: true, since, until, maxDistance: getSemanticMaxDistance() },
                     ftsFallbackOptions: relaxedQuery
                       ? { query: relaxedQuery, namespace, entryType: entry_type, tags, limit: internalLimit, includeExpired: true, since, until, rawFts5: true }
                       : undefined,

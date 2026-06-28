@@ -340,6 +340,19 @@ export interface RunBenchmarkOptions {
    * validate that every query text resolves before relying on the report.
    */
   queryEmbeddingProvider?: (queryText: string) => Float32Array | null;
+  /**
+   * The name of the embedding model that generated the query embeddings
+   * supplied by `queryEmbeddingProvider` (or, for live-model runs, the model
+   * currently active). Passed as `queryEmbeddingModel` to
+   * `queryEntriesSemanticScored` so the mixed-space guard can drop corpus
+   * entries that were embedded by a different model.
+   *
+   * For the CI hybrid gate this MUST be set to `frozenCorpus.model` (the
+   * model recorded in the frozen-embeddings fixture) so the filter matches the
+   * committed vectors. Unset = no model filter (backward-compatible with
+   * callers that pre-date the guard).
+   */
+  queryEmbeddingModel?: string;
 }
 
 /**
@@ -400,6 +413,7 @@ export async function executeQuery(
   limit: number = 10,
   queryEmbeddingProvider?: (queryText: string) => Float32Array | null,
   scopeNamespace?: string,
+  queryEmbeddingModel?: string,
 ): Promise<{ entries: Entry[]; relaxed: boolean; effectiveMode: SearchMode }> {
   if (mode === "lexical") {
     return runLexical(db, query, limit, scopeNamespace);
@@ -427,6 +441,7 @@ export async function executeQuery(
     const buf = embeddingToBuffer(emb);
     const results = queryEntriesSemanticScored(db, {
       queryEmbedding: buf,
+      queryEmbeddingModel,
       namespace: scopeNamespace,
       limit,
       includeExpired: true,
@@ -450,6 +465,7 @@ export async function executeQuery(
     ftsOptions: { query, limit, includeExpired: true, namespace: scopeNamespace },
     semanticOptions: {
       queryEmbedding: buf,
+      queryEmbeddingModel,
       limit,
       includeExpired: true,
       namespace: scopeNamespace,
@@ -779,6 +795,7 @@ async function runBenchmarkInner(
         internalLimit,
         options.queryEmbeddingProvider,
         query.scope_namespace,
+        options.queryEmbeddingModel,
       );
       const actualMode = effectiveMode;
 
