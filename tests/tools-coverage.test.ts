@@ -618,16 +618,19 @@ describe("memory_delete token flows", () => {
     expect(res.error).toBe("validation_error");
   });
 
-  it("rejects an unknown delete token", async () => {
+  it("rejects an unknown delete token (namespace-wide, flag enabled)", async () => {
+    process.env.MUNIN_ALLOW_NAMESPACE_DELETE = "true";
     const res = parseToolResponse(await callTool("memory_delete", {
       namespace: "projects/x",
       delete_token: "deadbeefdeadbeef",
     }));
     expect(res.ok).toBe(false);
     expect(res.error).toBe("invalid_token");
+    delete process.env.MUNIN_ALLOW_NAMESPACE_DELETE;
   });
 
   it("rejects a token issued for a different namespace", async () => {
+    process.env.MUNIN_ALLOW_NAMESPACE_DELETE = "true";
     await callTool("memory_write", { namespace: "projects/a", key: "k", content: "x" });
     await callTool("memory_write", { namespace: "projects/b", key: "k", content: "x" });
     const preview = parseToolResponse(await callTool("memory_delete", { namespace: "projects/a" }));
@@ -638,9 +641,11 @@ describe("memory_delete token flows", () => {
     }));
     expect(res.ok).toBe(false);
     expect(res.error).toBe("invalid_token");
+    delete process.env.MUNIN_ALLOW_NAMESPACE_DELETE;
   });
 
   it("rejects a token issued for a specific key when confirming without the key", async () => {
+    process.env.MUNIN_ALLOW_NAMESPACE_DELETE = "true";
     await callTool("memory_write", { namespace: "projects/a", key: "k", content: "x" });
     const preview = parseToolResponse(await callTool("memory_delete", { namespace: "projects/a", key: "k" }));
     const res = parseToolResponse(await callTool("memory_delete", {
@@ -649,9 +654,11 @@ describe("memory_delete token flows", () => {
     }));
     expect(res.ok).toBe(false);
     expect(res.error).toBe("invalid_token");
+    delete process.env.MUNIN_ALLOW_NAMESPACE_DELETE;
   });
 
   it("rejects an expired delete token", async () => {
+    process.env.MUNIN_ALLOW_NAMESPACE_DELETE = "true";
     await callTool("memory_write", { namespace: "projects/exp", key: "k", content: "x" });
     vi.useFakeTimers();
     try {
@@ -665,6 +672,7 @@ describe("memory_delete token flows", () => {
       expect(res.error).toBe("invalid_token");
     } finally {
       vi.useRealTimers();
+      delete process.env.MUNIN_ALLOW_NAMESPACE_DELETE;
     }
   });
 });

@@ -121,6 +121,17 @@ export function injectionWarning(content: string): string | null {
   );
 }
 
+/**
+ * Gate for bulk namespace-wide deletes (memory_delete with namespace but no key).
+ * Defaults to DISABLED (false) for safety — a stored-content prompt-injection payload
+ * can drive the full preview→token→confirm flow in a single agent loop, making the
+ * token guard useless. Set MUNIN_ALLOW_NAMESPACE_DELETE=true to re-enable.
+ * Single-entry deletes (namespace+key) are never gated. (#150)
+ */
+export function isNamespaceDeleteAllowed(): boolean {
+  return (process.env.MUNIN_ALLOW_NAMESPACE_DELETE ?? "false") === "true";
+}
+
 export function validateNamespace(namespace: string): SecurityResult {
   if (!namespace || typeof namespace !== "string") {
     return { valid: false, error: "Namespace is required and must be a non-empty string." };

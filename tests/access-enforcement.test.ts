@@ -1114,6 +1114,7 @@ describe("memory_delete — access enforcement", () => {
   });
 
   it("family namespace-wide delete on shared/family/board → previews only caller-owned entries", async () => {
+    process.env.MUNIN_ALLOW_NAMESPACE_DELETE = "true";
     const previewRaw = await familyCall("memory_delete", {
       namespace: "shared/family/board",
     });
@@ -1148,9 +1149,11 @@ describe("memory_delete — access enforcement", () => {
     });
     const saraGone = parse(saraGoneRaw) as { found: boolean };
     expect(saraGone.found).toBe(false);
+    delete process.env.MUNIN_ALLOW_NAMESPACE_DELETE;
   });
 
   it("owner namespace-wide delete on shared/family/board → deletes all owners' entries", async () => {
+    process.env.MUNIN_ALLOW_NAMESPACE_DELETE = "true";
     const previewRaw = await ownerCall("memory_delete", {
       namespace: "shared/family/board",
     });
@@ -1184,6 +1187,7 @@ describe("memory_delete — access enforcement", () => {
     });
     const saraGone = parse(saraGoneRaw) as { found: boolean };
     expect(saraGone.found).toBe(false);
+    delete process.env.MUNIN_ALLOW_NAMESPACE_DELETE;
   });
 
   it("family specific delete on owner-owned shared entry → previews zero deletions", async () => {

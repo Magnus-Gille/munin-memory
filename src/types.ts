@@ -296,6 +296,10 @@ export interface ReadResponse {
   redaction_reason?: string;
   message?: string;
   hint?: string;
+  /** Set when stored content is instruction-shaped or tagged `untrusted`/`source:external`. (#150) */
+  untrusted_content?: boolean;
+  /** Human-readable provenance notice when untrusted_content is true. (#150) */
+  content_provenance_notice?: string;
 }
 
 export interface GetResponse {
@@ -315,6 +319,10 @@ export interface GetResponse {
   redacted?: boolean;
   redaction_reason?: string;
   message?: string;
+  /** Set when stored content is instruction-shaped or tagged `untrusted`/`source:external`. (#150) */
+  untrusted_content?: boolean;
+  /** Human-readable provenance notice when untrusted_content is true. (#150) */
+  content_provenance_notice?: string;
 }
 
 export interface QueryResult {
@@ -337,6 +345,8 @@ export interface QueryResult {
   synthesis_age_days?: number;
   redacted?: boolean;
   redaction_reason?: string;
+  /** True when the source entry is instruction-shaped or tagged `untrusted`/`source:external`. (#150) */
+  untrusted_content?: boolean;
   match?: {
     heuristic_score: number;
     freshness_score?: number;
@@ -495,6 +505,8 @@ export interface ResumeItem {
   updated_at: string;
   reason: string;
   suggested_action: string;
+  /** Set when the source entry is instruction-shaped or tagged `untrusted`/`source:external`. (#150) */
+  untrusted_content?: boolean;
 }
 
 export interface ResumeOpenLoop {
@@ -548,6 +560,8 @@ export interface ExtractRelatedEntry {
   preview: string;
   updated_at: string;
   reason: string;
+  /** Set when the source entry is instruction-shaped or tagged `untrusted`/`source:external`. (#150) */
+  untrusted_content?: boolean;
 }
 
 export interface ExtractResponse {
@@ -573,6 +587,8 @@ export interface NarrativeTimelineItem {
   summary: string;
   source_entry_id?: string;
   source_audit_id?: number;
+  /** Set when the source entry is instruction-shaped or tagged `untrusted`/`source:external`. (#150) */
+  untrusted_content?: boolean;
 }
 
 export interface NarrativeSource {
@@ -582,6 +598,8 @@ export interface NarrativeSource {
   key?: string | null;
   timestamp: string;
   preview: string;
+  /** Set when the source entry is instruction-shaped or tagged `untrusted`/`source:external`. (#150) */
+  untrusted_content?: boolean;
 }
 
 export interface NarrativeResponse {
@@ -639,6 +657,8 @@ export interface PatternSource {
   key: string | null;
   preview: string;
   updated_at: string;
+  /** Set when the source entry is instruction-shaped or tagged `untrusted`/`source:external`. (#150) */
+  untrusted_content?: boolean;
 }
 
 export interface PatternsResponse {
@@ -652,6 +672,8 @@ export interface HandoffDecision {
   timestamp: string;
   summary: string;
   source_entry_id: string;
+  /** Set when the source entry is instruction-shaped or tagged `untrusted`/`source:external`. (#150) */
+  untrusted_content?: boolean;
 }
 
 export interface HandoffActor {
@@ -665,6 +687,8 @@ export interface HandoffState {
   summary: string;
   updated_at: string;
   source_entry_id?: string;
+  /** Set when the source entry is instruction-shaped or tagged `untrusted`/`source:external`. (#150) */
+  untrusted_content?: boolean;
 }
 
 export interface HandoffResponse {
@@ -881,6 +905,8 @@ export interface AuditEntry {
   redacted?: boolean;
   redaction_reason?: string;
   provenance?: EntryProvenance;
+  /** Set when the audit detail echoes instruction-shaped stored content. (#150) */
+  untrusted_detail?: boolean;
 }
 
 export interface AuditHistoryResponse {
