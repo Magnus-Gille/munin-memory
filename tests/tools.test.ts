@@ -3,10 +3,11 @@ import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { initDatabase, upsertConsolidationMetadata, writeState } from "../src/db.js";
-import { registerTools, computeCommitmentConfidence } from "../src/tools.js";
+import { registerTools, computeCommitmentConfidence, _setHealthSectionOverridesForTesting } from "../src/tools.js";
 import { ownerContext } from "../src/access.js";
 import type { AccessContext } from "../src/access.js";
 import { _setApiKey, _consolidationConfig, resetConsolidationCircuitBreaker, getConsolidationHealth, _resetHealthState } from "../src/consolidation.js";
+import { _embeddingConfig, isEmbeddingCircuitBreakerTripped, getActiveEmbeddingDtype, _forceCircuitBreakerTrippedForTesting, resetCircuitBreaker } from "../src/embeddings.js";
 import type { LibrarianRuntimeConfig } from "../src/librarian.js";
 
 const TEST_DB_PATH = "/tmp/munin-memory-tools-test.db";
@@ -6870,5 +6871,297 @@ describe("read-time untrusted-content envelope (#150)", () => {
     expect(result.results[0].untrusted_content).toBe(true);
     expect(result.results[0].content).toContain("UNTRUSTED STORED DATA");
     expect(result.results[1].untrusted_content).toBeUndefined();
+  });
+});
+
+// --- memory_health tests ---
+
+describe("memory_health", () => {
+  it("owner receives full payload with all required sections and top-level fields", async () => {
+    // Write some state entries so the response is meaningful
+    await callTool("memory_write", { namespace: "projects/health-test", key: "status", content: "Active project", tags: ["active"] });
+    await callTool("memory_log", { namespace: "projects/health-test", content: "A log entry", tags: ["decision"] });
+
+    const raw = await callTool("memory_health", {});
+    const result = parseToolResponse(raw) as Record<string, unknown>;
+
+    // Top-level shape
+    expect(result.ok).toBe(true);
+    expect(result.action).toBe("health");
+    expect(result.schema_version).toBe(1);
+    expect(typeof result.generated_at).toBe("string");
+    expect(typeof result.partial).toBe("boolean");
+
+    // All sections must be present
+    const sections = result.sections as Record<string, unknown>;
+    expect(sections).toBeDefined();
+    expect(sections.embedding_queue).toBeDefined();
+    expect(sections.memory_size).toBeDefined();
+    expect(sections.retrieval).toBeDefined();
+    expect(sections.classification).toBeDefined();
+    expect(sections.maintenance).toBeDefined();
+    expect(sections.security_events).toBeDefined();
+    // consolidation section may or may not be present (gated on availability)
+    // but if present, it must have ok
+    if (sections.consolidation !== undefined) {
+      const consol = sections.consolidation as Record<string, unknown>;
+      expect(typeof consol.ok).toBe("boolean");
+    }
+
+    // embedding_queue section shape
+    const eq = sections.embedding_queue as Record<string, unknown>;
+    expect(eq.ok).toBe(true);
+    expect(typeof eq.pending).toBe("number");
+    expect(typeof eq.generated_current).toBe("number");
+    expect(typeof eq.generated_stale).toBe("number");
+    expect(typeof eq.generated_null).toBe("number");
+    expect(typeof eq.reembedding_backlog).toBe("number");
+    expect(typeof eq.coverage_pct).toBe("number");
+    expect(typeof eq.embedding_available).toBe("boolean");
+    expect(typeof eq.stuck_note).toBe("string");
+
+    // memory_size section shape
+    const ms = sections.memory_size as Record<string, unknown>;
+    expect(ms.ok).toBe(true);
+    expect(typeof ms.total_state_entries).toBe("number");
+    expect(typeof ms.total_log_entries).toBe("number");
+    expect(ms.total_state_entries).toBeGreaterThan(0);
+    expect(ms.total_log_entries).toBeGreaterThan(0);
+
+    // retrieval section shape
+    const ret = sections.retrieval as Record<string, unknown>;
+    expect(ret.ok).toBe(true);
+    expect(typeof ret.query_volume_7d).toBe("number");
+    expect(typeof ret.query_volume_30d).toBe("number");
+    expect(ret.mode_mix_7d).toBeDefined();
+
+    // classification section shape
+    const cls = sections.classification as Record<string, unknown>;
+    expect(cls.ok).toBe(true);
+    expect(typeof (cls.distribution as Record<string, unknown>).internal).toBe("number");
+
+    // maintenance section shape
+    const maint = sections.maintenance as Record<string, unknown>;
+    expect(maint.ok).toBe(true);
+    const counts = maint.counts as Record<string, unknown>;
+    expect(typeof counts.active_but_stale).toBe("number");
+    expect(typeof counts.missing_status).toBe("number");
+    expect(typeof counts.temporal_stale).toBe("number");
+
+    // security_events section shape
+    const sec = sections.security_events as Record<string, unknown>;
+    expect(sec.ok).toBe(true);
+    expect(typeof sec.redaction_events_7d).toBe("number");
+    expect(typeof sec.cross_zone_blocks_7d).toBe("number");
+  });
+
+  it("agent non-owner gets access_denied error (zero metadata)", async () => {
+    const agentCtx: AccessContext = {
+      principalId: "agent:test",
+      principalType: "agent",
+      namespaceRules: [],
+    };
+    const agentCall = makeContextCallTool(agentCtx);
+    const raw = await agentCall("memory_health", {});
+    const result = parseToolResponse(raw) as Record<string, unknown>;
+
+    // Agent → access_denied error, no health data
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("access_denied");
+    // Must NOT have sections or health data
+    expect(result.sections).toBeUndefined();
+    expect(result.schema_version).toBeUndefined();
+    expect(result.partial).toBeUndefined();
+  });
+
+  it("family (non-owner) principal gets invisible denial (found: false, zero metadata)", async () => {
+    const familyCtx: AccessContext = {
+      principalId: "principal:sara",
+      principalType: "family",
+      namespaceRules: [{ pattern: "shared/*", permissions: "rw" }],
+    };
+    const familyCall = makeContextCallTool(familyCtx);
+    const raw = await familyCall("memory_health", {});
+    const result = parseToolResponse(raw) as Record<string, unknown>;
+    // Family → invisible denial
+    expect(result.ok).toBe(true);
+    expect(result.found).toBe(false);
+    expect(result.sections).toBeUndefined();
+    expect(result.schema_version).toBeUndefined();
+  });
+
+  it("per-section degradation: one section failing → partial=true, other sections ok", async () => {
+    // We can't easily make one DB call fail without mocking, so we test the shape
+    // by verifying partial starts as false and that each section has an ok field.
+    const raw = await callTool("memory_health", {});
+    const result = parseToolResponse(raw) as Record<string, unknown>;
+
+    // In a clean test env, no section should fail → partial = false
+    expect(result.partial).toBe(false);
+
+    // Each present section must have ok: true in healthy conditions
+    const sections = result.sections as Record<string, Record<string, unknown>>;
+    for (const [name, section] of Object.entries(sections)) {
+      expect(
+        section.ok,
+        `Section "${name}" should have ok: true in a healthy environment`,
+      ).toBe(true);
+    }
+  });
+
+  it("degradation: injected throwing section → partial=true, error='section_unavailable', no secrets leak, siblings ok", async () => {
+    // M2: inject one failing section that throws a secret-bearing error.
+    _setHealthSectionOverridesForTesting({
+      embedding_queue: () => { throw new Error("failed /Users/x/secret OPENROUTER_API_KEY=sk-or-v1-abc123"); },
+    });
+    try {
+      const raw = await callTool("memory_health", {});
+      const result = parseToolResponse(raw) as Record<string, unknown>;
+      const text = (raw as { content: Array<{ text: string }> }).content[0].text;
+
+      // partial must be true
+      expect(result.partial).toBe(true);
+
+      const sections = result.sections as Record<string, Record<string, unknown>>;
+
+      // Failing section: ok=false, error is stable opaque string
+      expect(sections.embedding_queue.ok).toBe(false);
+      expect(sections.embedding_queue.error).toBe("section_unavailable");
+
+      // Raw error text, path, and secret must NOT appear in the serialized payload
+      expect(text).not.toContain("/Users/x/secret");
+      expect(text).not.toContain("sk-or-v1-");
+      expect(text).not.toContain("failed /Users");
+
+      // Sibling sections must remain ok
+      expect(sections.memory_size?.ok).toBe(true);
+      expect(sections.retrieval?.ok).toBe(true);
+      expect(sections.classification?.ok).toBe(true);
+      expect(sections.maintenance?.ok).toBe(true);
+      expect(sections.security_events?.ok).toBe(true);
+    } finally {
+      _setHealthSectionOverridesForTesting(null);
+    }
+  });
+
+  it("error sanitization: section error must not expose secrets", async () => {
+    // This test verifies the sanitization path works. Since we can't inject
+    // a real secret-bearing error easily here, we verify the tool runs without
+    // leaking raw exception text (the sanitization unit is tested at the handler level).
+    const raw = await callTool("memory_health", {});
+    const text = (raw as { content: Array<{ text: string }> }).content[0].text;
+    // No raw "Error:" prefixed exception text should appear in the payload
+    expect(text).not.toMatch(/Error: .+at .+\n/);
+    // sk-or type keys must not appear (consolidation health sanitizes these)
+    expect(text).not.toMatch(/sk-or-v1-/);
+  });
+
+  it("circuit_breaker_tripped: false when embeddings not loaded (config-disabled state)", async () => {
+    // M4: In test env, embeddings aren't loaded (no real model). The circuit breaker
+    // should NOT be tripped — it's simply unloaded.
+    resetCircuitBreaker();
+    const raw = await callTool("memory_health", {});
+    const result = parseToolResponse(raw) as Record<string, unknown>;
+    const eq = (result.sections as Record<string, Record<string, unknown>>).embedding_queue;
+    expect(eq.ok).toBe(true);
+    // embedding_available = false (not loaded) but circuit_breaker_tripped must be false
+    expect(eq.circuit_breaker_tripped).toBe(false);
+  });
+
+  it("circuit_breaker_tripped: true when breaker actually tripped", async () => {
+    // M4: Force the circuit breaker tripped state and verify it's reflected.
+    _forceCircuitBreakerTrippedForTesting(true);
+    try {
+      const raw = await callTool("memory_health", {});
+      const result = parseToolResponse(raw) as Record<string, unknown>;
+      const eq = (result.sections as Record<string, Record<string, unknown>>).embedding_queue;
+      expect(eq.ok).toBe(true);
+      expect(eq.circuit_breaker_tripped).toBe(true);
+    } finally {
+      _forceCircuitBreakerTrippedForTesting(false);
+      resetCircuitBreaker();
+    }
+  });
+
+  it("active_model_dtype comes from profile-resolved config (not raw env)", async () => {
+    // L5: active_model_dtype must reflect the resolved dtype (including profile defaults).
+    // Simulate zero-appliance: dtype resolved to "q8".
+    const savedDtype = _embeddingConfig.dtype;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (_embeddingConfig as any).dtype = "q8";
+    try {
+      const raw = await callTool("memory_health", {});
+      const result = parseToolResponse(raw) as Record<string, unknown>;
+      const eq = (result.sections as Record<string, Record<string, unknown>>).embedding_queue;
+      expect(eq.active_model_dtype).toBe("q8");
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (_embeddingConfig as any).dtype = savedDtype;
+    }
+  });
+
+  it("active_model_dtype is null when dtype unset (no profile, no env var)", async () => {
+    // L5: With no profile and no MUNIN_EMBEDDINGS_DTYPE, dtype resolves to undefined → null.
+    const savedDtype = _embeddingConfig.dtype;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (_embeddingConfig as any).dtype = undefined;
+    try {
+      const raw = await callTool("memory_health", {});
+      const result = parseToolResponse(raw) as Record<string, unknown>;
+      const eq = (result.sections as Record<string, Record<string, unknown>>).embedding_queue;
+      expect(eq.active_model_dtype).toBeNull();
+      // Verify getActiveEmbeddingDtype() also returns null (export consistent)
+      expect(getActiveEmbeddingDtype()).toBeNull();
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (_embeddingConfig as any).dtype = savedDtype;
+    }
+  });
+
+  it("isEmbeddingCircuitBreakerTripped is false by default (no real trips in test env)", () => {
+    // M4: Direct export sanity check.
+    resetCircuitBreaker();
+    expect(isEmbeddingCircuitBreakerTripped()).toBe(false);
+  });
+
+  it("maintenance counts parity: memory_health matches memory_orient on same fixture", async () => {
+    // Seed a tracked namespace with status and logs (creates active_but_stale candidate if old enough,
+    // but we primarily care that the counts are computed the same way).
+    await callTool("memory_write", {
+      namespace: "projects/parity-test",
+      key: "status",
+      content: "Active parity test project",
+      tags: ["active"],
+    });
+    await callTool("memory_log", { namespace: "projects/parity-test", content: "Parity log 1", tags: [] });
+
+    const healthRaw = await callTool("memory_health", {});
+    const healthResult = parseToolResponse(healthRaw) as Record<string, unknown>;
+    const healthSections = healthResult.sections as Record<string, Record<string, unknown>>;
+    const healthMaintenance = healthSections.maintenance as Record<string, unknown>;
+    const healthCounts = healthMaintenance.counts as Record<string, number>;
+
+    // Fetch memory_orient at detail:full to get maintenance items
+    const orientRaw = await callTool("memory_orient", { detail: "full" });
+    const orientResult = parseToolResponse(orientRaw) as { maintenance_needed?: Array<{ issue: string }> };
+    const maintItems = orientResult.maintenance_needed ?? [];
+
+    // Count orient maintenance items by issue type
+    const orientCounts: Record<string, number> = {};
+    for (const item of maintItems) {
+      orientCounts[item.issue] = (orientCounts[item.issue] ?? 0) + 1;
+    }
+
+    // Parity: each tracked kind must match orient's maintenance item count.
+    // consolidation_backlog: orient emits one item per namespace; health uses getConsolidationBacklog().length.
+    // retrieved_unused: both use getInsightsByEntry with identical params — they agree on 0 in a clean DB.
+    for (const kind of ["active_but_stale", "missing_status", "temporal_stale", "consolidation_backlog", "retrieved_unused"] as const) {
+      const orientCount = orientCounts[kind] ?? 0;
+      const healthCount = healthCounts[kind] ?? 0;
+      expect(
+        healthCount,
+        `memory_health.maintenance.counts.${kind} (${healthCount}) should equal memory_orient count (${orientCount})`,
+      ).toBe(orientCount);
+    }
   });
 });

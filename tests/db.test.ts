@@ -29,6 +29,11 @@ import {
   queryEntriesSemanticScored,
   storeEmbedding,
   vecLoaded,
+  getEmbeddingQueueCounts,
+  getMemorySizeCounts,
+  getHealthRetrievalMetrics,
+  getClassificationDistribution,
+  getSecurityEventCounts,
 } from "../src/db.js";
 import { embeddingToBuffer } from "../src/embeddings.js";
 
@@ -1361,3 +1366,322 @@ describe.skipIf(!vecAvailableForDbTest)(
     });
   },
 );
+
+// --- memory_health DB helpers ---
+
+describe("getEmbeddingQueueCounts", () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const p = "/tmp/munin-health-embed-test.db" + suffix;
+      if (existsSync(p)) unlinkSync(p);
+    }
+    db = initDatabase("/tmp/munin-health-embed-test.db");
+  });
+
+  afterEach(() => {
+    db.close();
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const p = "/tmp/munin-health-embed-test.db" + suffix;
+      if (existsSync(p)) unlinkSync(p);
+    }
+  });
+
+  it("returns zeroes on empty database", () => {
+    const counts = getEmbeddingQueueCounts(db, "model-a", true);
+    expect(counts.pending).toBe(0);
+    expect(counts.processing).toBe(0);
+    expect(counts.generated).toBe(0);
+    expect(counts.failed).toBe(0);
+    expect(counts.generated_current).toBe(0);
+    expect(counts.generated_stale).toBe(0);
+    expect(counts.generated_null).toBe(0);
+    expect(counts.reembedding_backlog).toBe(0);
+    expect(counts.total).toBe(0);
+    expect(counts.coverage_pct).toBe(0);
+  });
+
+  it("counts pending, failed, and generated correctly", () => {
+    writeState(db, "projects/a", "status", "pending entry", ["active"]);
+    writeState(db, "projects/b", "status", "another pending", ["active"]);
+    appendLog(db, "projects/c", "a log entry", []);
+
+    // Force one to failed, one to processing
+    db.prepare("UPDATE entries SET embedding_status = 'failed' LIMIT 1").run();
+    db.prepare("UPDATE entries SET embedding_status = 'processing' WHERE embedding_status = 'pending' LIMIT 1").run();
+
+    const counts = getEmbeddingQueueCounts(db, "model-a", true);
+    expect(counts.total).toBe(3);
+    expect(counts.failed).toBe(1);
+    expect(counts.processing).toBe(1);
+    expect(counts.pending).toBe(1);
+    expect(counts.generated).toBe(0);
+    expect(counts.coverage_pct).toBe(0);
+  });
+
+  it("separates generated_current, generated_stale, generated_null", () => {
+    writeState(db, "projects/a", "status", "current model entry", ["active"]);
+    writeState(db, "projects/b", "status", "stale model entry", ["active"]);
+    writeState(db, "projects/c", "status", "null model entry", ["active"]);
+    writeState(db, "projects/d", "status", "pending entry", ["active"]);
+
+    // Set statuses and models
+    const rows = db.prepare("SELECT id FROM entries ORDER BY created_at ASC").all() as Array<{ id: string }>;
+    const [aId, bId, cId] = rows.map(r => r.id);
+    db.prepare("UPDATE entries SET embedding_status = 'generated', embedding_model = 'model-a' WHERE id = ?").run(aId);
+    db.prepare("UPDATE entries SET embedding_status = 'generated', embedding_model = 'model-old' WHERE id = ?").run(bId);
+    db.prepare("UPDATE entries SET embedding_status = 'generated', embedding_model = NULL WHERE id = ?").run(cId);
+    // dId stays pending
+
+    const counts = getEmbeddingQueueCounts(db, "model-a", true);
+    expect(counts.generated).toBe(3);
+    expect(counts.generated_current).toBe(1);  // model-a
+    expect(counts.generated_stale).toBe(1);     // model-old
+    expect(counts.generated_null).toBe(1);       // null model
+    expect(counts.pending).toBe(1);
+    // reembedding_backlog = stale + null + pending = 1+1+1 = 3
+    expect(counts.reembedding_backlog).toBe(3);
+    expect(counts.total).toBe(4);
+    // coverage_pct = 3/4 * 100 = 75
+    expect(counts.coverage_pct).toBeCloseTo(75, 1);
+  });
+
+  it("throws when called with isOwner=false (owner-only defense-in-depth)", () => {
+    expect(() => getEmbeddingQueueCounts(db, "model-a", false)).toThrow("memory_health helpers are owner-only");
+  });
+});
+
+describe("getMemorySizeCounts", () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const p = "/tmp/munin-health-size-test.db" + suffix;
+      if (existsSync(p)) unlinkSync(p);
+    }
+    db = initDatabase("/tmp/munin-health-size-test.db");
+  });
+
+  afterEach(() => {
+    db.close();
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const p = "/tmp/munin-health-size-test.db" + suffix;
+      if (existsSync(p)) unlinkSync(p);
+    }
+  });
+
+  it("returns zeroes on empty database", () => {
+    const counts = getMemorySizeCounts(db, true);
+    expect(counts.total_state_entries).toBe(0);
+    expect(counts.total_log_entries).toBe(0);
+    expect(counts.total_entries).toBe(0);
+    expect(counts.namespace_count).toBe(0);
+  });
+
+  it("counts state, log, and namespaces correctly", () => {
+    writeState(db, "projects/a", "status", "state entry 1", ["active"]);
+    writeState(db, "projects/b", "status", "state entry 2", ["active"]);
+    appendLog(db, "projects/a", "log entry 1", []);
+    appendLog(db, "projects/a", "log entry 2", []);
+
+    const counts = getMemorySizeCounts(db, true);
+    expect(counts.total_state_entries).toBe(2);
+    expect(counts.total_log_entries).toBe(2);
+    expect(counts.total_entries).toBe(4);
+    expect(counts.namespace_count).toBe(2); // projects/a and projects/b
+  });
+
+  it("throws when called with isOwner=false (owner-only defense-in-depth)", () => {
+    expect(() => getMemorySizeCounts(db, false)).toThrow("memory_health helpers are owner-only");
+  });
+});
+
+describe("getHealthRetrievalMetrics", () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const p = "/tmp/munin-health-retrieval-test.db" + suffix;
+      if (existsSync(p)) unlinkSync(p);
+    }
+    db = initDatabase("/tmp/munin-health-retrieval-test.db");
+  });
+
+  afterEach(() => {
+    db.close();
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const p = "/tmp/munin-health-retrieval-test.db" + suffix;
+      if (existsSync(p)) unlinkSync(p);
+    }
+  });
+
+  it("returns zeroes on empty database", () => {
+    const agg = getHealthRetrievalMetrics(db, true);
+    expect(agg.query_volume_7d).toBe(0);
+    expect(agg.query_volume_30d).toBe(0);
+    expect(agg.mode_mix_7d).toEqual({ lexical: 0, semantic: 0, hybrid: 0 });
+    expect(agg.retrieved_unused_count).toBe(0);
+  });
+
+  it("counts query volume and mode mix correctly", () => {
+    const now = new Date().toISOString();
+    const recent = new Date(Date.now() - 3 * 86400000).toISOString(); // 3 days ago
+    const old = new Date(Date.now() - 20 * 86400000).toISOString();  // 20 days ago
+
+    db.prepare(
+      "INSERT INTO retrieval_events (id, session_id, timestamp, tool_name, query_text, actual_mode, result_ids, result_namespaces, result_ranks) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run("ev1", "s1", recent, "memory_query", "query1", "lexical", "[]", "[]", "[]");
+    db.prepare(
+      "INSERT INTO retrieval_events (id, session_id, timestamp, tool_name, query_text, actual_mode, result_ids, result_namespaces, result_ranks) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run("ev2", "s1", recent, "memory_query", "query2", "semantic", "[]", "[]", "[]");
+    db.prepare(
+      "INSERT INTO retrieval_events (id, session_id, timestamp, tool_name, query_text, actual_mode, result_ids, result_namespaces, result_ranks) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run("ev3", "s1", old, "memory_query", "query3", "lexical", "[]", "[]", "[]");
+    void now;
+
+    const agg = getHealthRetrievalMetrics(db, true);
+    expect(agg.query_volume_7d).toBe(2);   // only recent ones
+    expect(agg.query_volume_30d).toBe(3);  // all three
+    expect(agg.mode_mix_7d.lexical).toBe(1);
+    expect(agg.mode_mix_7d.semantic).toBe(1);
+    expect(agg.mode_mix_7d.hybrid).toBe(0);
+  });
+
+  it("throws when called with isOwner=false (owner-only defense-in-depth)", () => {
+    expect(() => getHealthRetrievalMetrics(db, false)).toThrow("memory_health helpers are owner-only");
+  });
+
+  it("retrieved_unused_count uses event-scoped joins (not broad entry_id join)", () => {
+    // Seed an entry in a tracked namespace
+    writeState(db, "projects/unused-test", "status", "active project", ["active"]);
+    const entry = db.prepare("SELECT id FROM entries WHERE namespace='projects/unused-test' LIMIT 1").get() as { id: string };
+
+    // Insert 5 retrieval events that returned this entry (≥5 impressions)
+    const since30d = new Date(Date.now() - 30 * 86400000).toISOString();
+    const recent = new Date(Date.now() - 2 * 86400000).toISOString();
+    for (let i = 0; i < 5; i++) {
+      db.prepare(
+        "INSERT INTO retrieval_events (id, session_id, timestamp, tool_name, query_text, actual_mode, result_ids, result_namespaces, result_ranks) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run(`ev-unused-${i}`, "s1", recent, "memory_query", "query", "lexical", JSON.stringify([entry.id]), '["projects/unused-test"]', "[0]");
+    }
+
+    // No outcomes → followthrough_events = 0 → should be counted as unused
+    const agg = getHealthRetrievalMetrics(db, true);
+    expect(agg.retrieved_unused_count).toBe(1);
+    void since30d;
+  });
+});
+
+describe("getClassificationDistribution", () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const p = "/tmp/munin-health-class-test.db" + suffix;
+      if (existsSync(p)) unlinkSync(p);
+    }
+    db = initDatabase("/tmp/munin-health-class-test.db");
+  });
+
+  afterEach(() => {
+    db.close();
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const p = "/tmp/munin-health-class-test.db" + suffix;
+      if (existsSync(p)) unlinkSync(p);
+    }
+  });
+
+  it("returns zeroes on empty database", () => {
+    const dist = getClassificationDistribution(db, true);
+    expect(dist.public).toBe(0);
+    expect(dist.internal).toBe(0);
+    expect(dist["client-confidential"]).toBe(0);
+    expect(dist["client-restricted"]).toBe(0);
+  });
+
+  it("counts entries by classification level", () => {
+    writeState(db, "projects/a", "status", "internal entry 1", ["active"]);
+    writeState(db, "projects/b", "status", "internal entry 2", ["active"]);
+    appendLog(db, "projects/a", "internal log", []);
+
+    const dist = getClassificationDistribution(db, true);
+    // Default classification is 'internal'
+    expect(dist.internal).toBe(3);
+    expect(dist.public).toBe(0);
+    expect(dist["client-confidential"]).toBe(0);
+    expect(dist["client-restricted"]).toBe(0);
+  });
+
+  it("throws when called with isOwner=false (owner-only defense-in-depth)", () => {
+    expect(() => getClassificationDistribution(db, false)).toThrow("memory_health helpers are owner-only");
+  });
+});
+
+describe("getSecurityEventCounts", () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const p = "/tmp/munin-health-security-test.db" + suffix;
+      if (existsSync(p)) unlinkSync(p);
+    }
+    db = initDatabase("/tmp/munin-health-security-test.db");
+  });
+
+  afterEach(() => {
+    db.close();
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const p = "/tmp/munin-health-security-test.db" + suffix;
+      if (existsSync(p)) unlinkSync(p);
+    }
+  });
+
+  it("returns zeroes on empty database", () => {
+    const counts = getSecurityEventCounts(db, true);
+    expect(counts.redaction_events_7d).toBe(0);
+    expect(counts.redaction_events_30d).toBe(0);
+    expect(counts.cross_zone_blocks_7d).toBe(0);
+    expect(counts.cross_zone_blocks_30d).toBe(0);
+  });
+
+  it("counts redaction log entries by time window", () => {
+    const recent = new Date(Date.now() - 3 * 86400000).toISOString();
+    const old = new Date(Date.now() - 20 * 86400000).toISOString();
+
+    // Insert redaction log entries
+    const uuid = () => Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+    db.prepare(
+      "INSERT INTO redaction_log (id, session_id, principal_id, transport_type, entry_id, entry_namespace, entry_classification, connection_max_classification, tool_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run(uuid(), "s1", "owner", "stdio", "entry1", "clients/secret", "client-restricted", "internal", "memory_query", recent);
+    db.prepare(
+      "INSERT INTO redaction_log (id, session_id, principal_id, transport_type, entry_id, entry_namespace, entry_classification, connection_max_classification, tool_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run(uuid(), "s1", "owner", "stdio", "entry2", "clients/secret", "client-restricted", "internal", "memory_orient", old);
+
+    const counts = getSecurityEventCounts(db, true);
+    expect(counts.redaction_events_7d).toBe(1);
+    expect(counts.redaction_events_30d).toBe(2);
+    expect(counts.cross_zone_blocks_7d).toBe(0);
+    expect(counts.cross_zone_blocks_30d).toBe(0);
+  });
+
+  it("counts cross_zone_block audit events by time window", () => {
+    const recent = new Date(Date.now() - 2 * 86400000).toISOString();
+    const old = new Date(Date.now() - 25 * 86400000).toISOString();
+
+    db.prepare(
+      "INSERT INTO audit_log (timestamp, agent_id, action, namespace, key, detail) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run(recent, "consolidation-worker", "cross_zone_block", "projects/a", "clients/secret", "blocked");
+    db.prepare(
+      "INSERT INTO audit_log (timestamp, agent_id, action, namespace, key, detail) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run(old, "consolidation-worker", "cross_zone_block", "projects/b", "clients/other", "blocked");
+
+    const counts = getSecurityEventCounts(db, true);
+    expect(counts.cross_zone_blocks_7d).toBe(1);
+    expect(counts.cross_zone_blocks_30d).toBe(2);
+  });
+
+  it("throws when called with isOwner=false (owner-only defense-in-depth)", () => {
+    expect(() => getSecurityEventCounts(db, false)).toThrow("memory_health helpers are owner-only");
+  });
+});
