@@ -3059,6 +3059,31 @@ export function getConsolidationMetadata(
 }
 
 /**
+ * Most recent successful synthesis timestamp across all namespaces, or null if
+ * the worker has never run. Drives `memory_health.consolidation.last_synthesis_at`.
+ */
+export function getLastSynthesisAt(db: Database.Database): string | null {
+  const row = db
+    .prepare("SELECT MAX(last_consolidated_at) AS ts FROM consolidation_metadata")
+    .get() as { ts: string | null };
+  return row.ts ?? null;
+}
+
+/**
+ * Average synthesis run duration (ms) across namespaces that recorded a duration,
+ * rounded to the nearest integer, or null when no durations are recorded. Drives
+ * `memory_health.consolidation.avg_latency_ms`.
+ */
+export function getAvgConsolidationLatencyMs(db: Database.Database): number | null {
+  const row = db
+    .prepare(
+      "SELECT AVG(run_duration_ms) AS avg_ms FROM consolidation_metadata WHERE run_duration_ms IS NOT NULL",
+    )
+    .get() as { avg_ms: number | null };
+  return row.avg_ms == null ? null : Math.round(row.avg_ms);
+}
+
+/**
  * Insert or update consolidation metadata for a namespace.
  * created_at is set on first insert; updated_at is always set to nowUTC().
  */
@@ -3258,8 +3283,12 @@ export interface EmbeddingQueueCounts {
    */
   reembedding_backlog: number;
   total: number;
-  /** Percentage of total entries with generated embeddings (0–100). */
-  coverage_pct: number;
+  /**
+   * Percentage of total entries with generated embeddings (0–100), or `null`
+   * when there are no entries at all (total == 0). `null` (not 0) so consumers
+   * can distinguish "nothing to cover" from "0% covered".
+   */
+  coverage_pct: number | null;
 }
 
 export function getEmbeddingQueueCounts(
@@ -3299,7 +3328,7 @@ export function getEmbeddingQueueCounts(
   const generated_null = rows.generated_null ?? 0;
   const total = rows.total ?? 0;
   const reembedding_backlog = generated_stale + generated_null + pending;
-  const coverage_pct = total > 0 ? Math.round((generated / total) * 1000) / 10 : 0;
+  const coverage_pct = total > 0 ? Math.round((generated / total) * 1000) / 10 : null;
 
   return {
     pending,

@@ -34,6 +34,9 @@ import {
   getHealthRetrievalMetrics,
   getClassificationDistribution,
   getSecurityEventCounts,
+  getLastSynthesisAt,
+  getAvgConsolidationLatencyMs,
+  upsertConsolidationMetadata,
 } from "../src/db.js";
 import { embeddingToBuffer } from "../src/embeddings.js";
 
@@ -1399,7 +1402,9 @@ describe("getEmbeddingQueueCounts", () => {
     expect(counts.generated_null).toBe(0);
     expect(counts.reembedding_backlog).toBe(0);
     expect(counts.total).toBe(0);
-    expect(counts.coverage_pct).toBe(0);
+    // coverage_pct is null (not 0) when there are no entries — 0% would falsely
+    // imply "0% covered" when the true answer is "undefined / nothing to cover".
+    expect(counts.coverage_pct).toBeNull();
   });
 
   it("counts pending, failed, and generated correctly", () => {
@@ -1683,5 +1688,74 @@ describe("getSecurityEventCounts", () => {
 
   it("throws when called with isOwner=false (owner-only defense-in-depth)", () => {
     expect(() => getSecurityEventCounts(db, false)).toThrow("memory_health helpers are owner-only");
+  });
+});
+
+describe("getLastSynthesisAt / getAvgConsolidationLatencyMs", () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const p = "/tmp/munin-health-consol-test.db" + suffix;
+      if (existsSync(p)) unlinkSync(p);
+    }
+    db = initDatabase("/tmp/munin-health-consol-test.db");
+  });
+
+  afterEach(() => {
+    db.close();
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const p = "/tmp/munin-health-consol-test.db" + suffix;
+      if (existsSync(p)) unlinkSync(p);
+    }
+  });
+
+  it("returns null on an empty consolidation_metadata table", () => {
+    expect(getLastSynthesisAt(db)).toBeNull();
+    expect(getAvgConsolidationLatencyMs(db)).toBeNull();
+  });
+
+  it("getLastSynthesisAt returns MAX(last_consolidated_at)", () => {
+    upsertConsolidationMetadata(db, {
+      namespace: "projects/a",
+      last_consolidated_at: "2026-06-01T10:00:00.000Z",
+      synthesis_model: "m",
+      run_duration_ms: 100,
+      drain_in_progress: false,
+    });
+    upsertConsolidationMetadata(db, {
+      namespace: "projects/b",
+      last_consolidated_at: "2026-06-03T10:00:00.000Z",
+      synthesis_model: "m",
+      run_duration_ms: 300,
+      drain_in_progress: false,
+    });
+    expect(getLastSynthesisAt(db)).toBe("2026-06-03T10:00:00.000Z");
+  });
+
+  it("getAvgConsolidationLatencyMs averages non-null run_duration_ms (rounded)", () => {
+    upsertConsolidationMetadata(db, {
+      namespace: "projects/a",
+      last_consolidated_at: "2026-06-01T10:00:00.000Z",
+      synthesis_model: "m",
+      run_duration_ms: 100,
+      drain_in_progress: false,
+    });
+    upsertConsolidationMetadata(db, {
+      namespace: "projects/b",
+      last_consolidated_at: "2026-06-02T10:00:00.000Z",
+      synthesis_model: "m",
+      run_duration_ms: 201,
+      drain_in_progress: false,
+    });
+    // null run_duration_ms must be excluded from the average
+    upsertConsolidationMetadata(db, {
+      namespace: "projects/c",
+      last_consolidated_at: "2026-06-03T10:00:00.000Z",
+      synthesis_model: "m",
+      run_duration_ms: null,
+      drain_in_progress: false,
+    });
+    expect(getAvgConsolidationLatencyMs(db)).toBe(151); // round((100+201)/2) = round(150.5)
   });
 });

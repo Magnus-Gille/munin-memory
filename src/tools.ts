@@ -70,6 +70,8 @@ import {
   getHealthRetrievalMetrics,
   getClassificationDistribution,
   getSecurityEventCounts,
+  getLastSynthesisAt,
+  getAvgConsolidationLatencyMs,
 } from "./db.js";
 import {
   CLASSIFICATION_LEVELS,
@@ -3772,7 +3774,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_health",
     description:
-      "Owner-only. Returns a read-only memory-engine health snapshot for operator dashboards (e.g. Heimdall). Sections: embedding queue (including model-relative stale counts), memory size, retrieval metrics, classification distribution, maintenance item counts, consolidation health, and security event counts. Each section degrades independently — a failing sub-query yields `section.ok: false` without aborting the payload. Top-level `partial: true` when any section failed. Versioned contract via `schema_version`.",
+      "Owner-only. Returns a read-only memory-engine health snapshot for operator dashboards (e.g. Heimdall). Sections: `embedding` (queue counts, model-relative stuck count, coverage), `size`, `retrieval` (volume + mode-mix fractions), `classification` (by_level), `maintenance`, `consolidation` (worker + circuit-breaker enums, backlog), and `security_events`. Each section degrades independently — a failing sub-query yields `section.ok: false` without aborting the payload. Top-level `partial: true` when any section failed. Canonical contract: `docs/memory-health.schema.json` (`schema_version: 2`).",
     inputSchema: {
       type: "object" as const,
       properties: {},
@@ -3893,10 +3895,13 @@ function computeEntryInsight(row: {
 /** A function that returns section data or throws to trigger degraded state. */
 type HealthSectionLoader = () => Record<string, unknown>;
 
-/** Per-section overrides for memory_health — set via _setHealthSectionOverridesForTesting. */
+/**
+ * Per-section overrides for memory_health — set via _setHealthSectionOverridesForTesting.
+ * Keys are the canonical (contract) section names.
+ */
 interface HealthSectionOverrides {
-  embedding_queue?: HealthSectionLoader;
-  memory_size?: HealthSectionLoader;
+  embedding?: HealthSectionLoader;
+  size?: HealthSectionLoader;
   retrieval?: HealthSectionLoader;
   classification?: HealthSectionLoader;
   maintenance?: HealthSectionLoader;
@@ -6935,39 +6940,72 @@ export function registerTools(
                 }
               }
 
-              // --- Section 1: embedding_queue ---
-              buildSection("embedding_queue", () => {
+              // --- Section 1: embedding (canonical contract name) ---
+              buildSection("embedding", () => {
                 const activeModel = getActiveEmbeddingModel();
-                const counts = getEmbeddingQueueCounts(db, activeModel, isOwner);
+                const c = getEmbeddingQueueCounts(db, activeModel, isOwner);
                 return {
-                  ...counts,
-                  active_model: activeModel,
+                  model: activeModel,
                   // Use getActiveEmbeddingDtype() so profile-resolved defaults (e.g.
                   // zero-appliance → "q8") are reflected even when the env var is unset.
-                  active_model_dtype: getActiveEmbeddingDtype(),
+                  dtype: getActiveEmbeddingDtype(),
+                  counts: {
+                    pending: c.pending,
+                    processing: c.processing,
+                    generated: c.generated,
+                    failed: c.failed,
+                    total: c.total,
+                  },
+                  // null when there are no entries (total == 0) — see getEmbeddingQueueCounts.
+                  coverage_pct: c.coverage_pct,
+                  // A re-embedding pass has outstanding work (stale-model + null-model + pending).
+                  reembed_in_progress: c.reembedding_backlog > 0,
+                  // Stuck = entries marked generated but not against the active model
+                  // (model-identity-based; no embedding_claimed_at column for time-based detection).
+                  stuck: c.generated_stale + c.generated_null,
+                  stuck_note: "Stuck entries are defined as model-identity-based (generated_stale + generated_null); no embedding_claimed_at column exists for time-based detection.",
+                  // Real circuit-breaker accessor → enum. Distinct from config-disabled or
+                  // model-not-loaded (embedding_available covers all three; breaker only covers trips).
+                  circuit_breaker: isEmbeddingCircuitBreakerTripped() ? "tripped" : "healthy",
                   embedding_available: isEmbeddingAvailable(),
                   status_reason: getEmbeddingStatusReason(),
-                  // Use real circuit-breaker accessor — distinct from config-disabled or
-                  // model-not-loaded (available=false covers all three; breaker only covers trips).
-                  circuit_breaker_tripped: isEmbeddingCircuitBreakerTripped(),
-                  // No embedding_claimed_at column in schema → stuck is model-identity-based only.
-                  stuck_note: "Stuck entries are defined as model-identity-based (generated_stale + generated_null); no embedding_claimed_at column exists for time-based detection.",
                 };
               });
 
-              // --- Section 2: memory_size ---
-              buildSection("memory_size", () => {
-                return { ...getMemorySizeCounts(db, isOwner) };
+              // --- Section 2: size (renamed from memory_size) ---
+              buildSection("size", () => {
+                const s = getMemorySizeCounts(db, isOwner);
+                return {
+                  entries_total: s.total_entries,
+                  entries_state: s.total_state_entries,
+                  entries_log: s.total_log_entries,
+                  namespace_count: s.namespace_count,
+                };
               });
 
               // --- Section 3: retrieval ---
               buildSection("retrieval", () => {
-                return { ...getHealthRetrievalMetrics(db, isOwner) };
+                const r = getHealthRetrievalMetrics(db, isOwner);
+                // mode_mix: convert raw counts → fractions of total 7d query volume.
+                // Guard divide-by-zero → all 0. Rounded to 4dp to avoid float noise.
+                const vol = r.query_volume_7d;
+                const frac = (n: number): number =>
+                  vol > 0 ? Math.round((n / vol) * 10000) / 10000 : 0;
+                return {
+                  query_volume_7d: r.query_volume_7d,
+                  query_volume_30d: r.query_volume_30d,
+                  mode_mix: {
+                    lexical: frac(r.mode_mix_7d.lexical),
+                    semantic: frac(r.mode_mix_7d.semantic),
+                    hybrid: frac(r.mode_mix_7d.hybrid),
+                  },
+                  unused_surface_count: r.retrieved_unused_count,
+                };
               });
 
               // --- Section 4: classification ---
               buildSection("classification", () => {
-                return { distribution: getClassificationDistribution(db, isOwner) };
+                return { by_level: getClassificationDistribution(db, isOwner) };
               });
 
               // --- Section 5: maintenance ---
@@ -7005,8 +7043,8 @@ export function registerTools(
                 // event-scoped joins via getInsightsByEntry, matching memory_orient's approach).
                 let retrievedUnused = 0;
                 const rm = sections.retrieval as Record<string, unknown> | undefined;
-                if (rm?.ok === true && typeof rm.retrieved_unused_count === "number") {
-                  retrievedUnused = rm.retrieved_unused_count as number;
+                if (rm?.ok === true && typeof rm.unused_surface_count === "number") {
+                  retrievedUnused = rm.unused_surface_count as number;
                 } else {
                   try {
                     retrievedUnused = getHealthRetrievalMetrics(db, isOwner).retrieved_unused_count;
@@ -7015,35 +7053,46 @@ export function registerTools(
                   }
                 }
 
+                // Flat per the canonical contract — no `counts` nesting.
                 return {
-                  counts: {
-                    active_but_stale: activeButStale,
-                    missing_status: missingStatus,
-                    temporal_stale: temporalStale,
-                    consolidation_backlog: consolidationBacklog,
-                    retrieved_unused: retrievedUnused,
-                  },
+                  active_but_stale: activeButStale,
+                  missing_status: missingStatus,
+                  temporal_stale: temporalStale,
+                  consolidation_backlog: consolidationBacklog,
+                  retrieved_unused: retrievedUnused,
                 };
               });
 
               // --- Section 6: consolidation ---
-              // Gated behind isConsolidationAvailable() per spec — always include
-              // the section but populate health detail only when consolidation is configured.
+              // Always included. The `worker` enum communicates whether the worker is
+              // disabled (config off), available (configured + ready), or unavailable
+              // (configured but missing key / circuit-broken).
               buildSection("consolidation", () => {
                 const health = getConsolidationHealth();
+                const worker = !health.enabled
+                  ? "disabled"
+                  : health.available
+                    ? "available"
+                    : "unavailable";
                 const backlog = getConsolidationBacklog(db).map((c) => ({
                   namespace: c.namespace,
-                  unincorporated_log_count: c.unincorporated_log_count,
+                  unincorporated: c.unincorporated_log_count,
                 }));
                 return {
-                  available: health.available,
-                  circuit_breaker_tripped: health.circuit_breaker_tripped,
+                  worker,
+                  circuit_breaker: health.circuit_breaker_tripped ? "tripped" : "healthy",
                   failures: health.failures,
                   max_failures: health.max_failures,
+                  min_logs: health.min_logs,
+                  last_synthesis_at: getLastSynthesisAt(db),
+                  avg_latency_ms: getAvgConsolidationLatencyMs(db),
+                  // getConsolidationBacklog applies no cap → the backlog is always complete.
+                  backlog_complete: true,
+                  backlog_namespace_count: backlog.length,
+                  api_key_present: health.api_key_present,
                   // last_error already sanitized in consolidation.ts (redactSecrets applied there)
                   last_error: health.last_error,
                   last_error_at: health.last_error_at,
-                  api_key_present: health.api_key_present,
                   backlog,
                 };
               });
@@ -7057,7 +7106,7 @@ export function registerTools(
 
               return okResult("health", {
                 partial,
-                schema_version: 1,
+                schema_version: 2,
                 generated_at: new Date().toISOString(),
                 sections,
               });
