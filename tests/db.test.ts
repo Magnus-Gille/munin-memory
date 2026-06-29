@@ -1711,8 +1711,8 @@ describe("getLastSynthesisAt / getAvgConsolidationLatencyMs", () => {
   });
 
   it("returns null on an empty consolidation_metadata table", () => {
-    expect(getLastSynthesisAt(db)).toBeNull();
-    expect(getAvgConsolidationLatencyMs(db)).toBeNull();
+    expect(getLastSynthesisAt(db, true)).toBeNull();
+    expect(getAvgConsolidationLatencyMs(db, true)).toBeNull();
   });
 
   it("getLastSynthesisAt returns MAX(last_consolidated_at)", () => {
@@ -1730,7 +1730,7 @@ describe("getLastSynthesisAt / getAvgConsolidationLatencyMs", () => {
       run_duration_ms: 300,
       drain_in_progress: false,
     });
-    expect(getLastSynthesisAt(db)).toBe("2026-06-03T10:00:00.000Z");
+    expect(getLastSynthesisAt(db, true)).toBe("2026-06-03T10:00:00.000Z");
   });
 
   it("getAvgConsolidationLatencyMs averages non-null run_duration_ms (rounded)", () => {
@@ -1756,6 +1756,11 @@ describe("getLastSynthesisAt / getAvgConsolidationLatencyMs", () => {
       run_duration_ms: null,
       drain_in_progress: false,
     });
-    expect(getAvgConsolidationLatencyMs(db)).toBe(151); // round((100+201)/2) = round(150.5)
+    expect(getAvgConsolidationLatencyMs(db, true)).toBe(151); // round((100+201)/2) = round(150.5)
+  });
+
+  it("throws for a non-owner caller (owner-only defense-in-depth)", () => {
+    expect(() => getLastSynthesisAt(db, false)).toThrow(/owner-only/);
+    expect(() => getAvgConsolidationLatencyMs(db, false)).toThrow(/owner-only/);
   });
 });

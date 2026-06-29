@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -7170,6 +7170,7 @@ describe("memory_health", () => {
     _setHealthSectionOverridesForTesting({
       embedding: () => { throw new Error("failed /Users/x/secret OPENROUTER_API_KEY=sk-or-v1-abc123"); },
     });
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
     try {
       const raw = await callTool("memory_health", {});
       const result = parseToolResponse(raw) as Record<string, unknown>;
@@ -7189,6 +7190,13 @@ describe("memory_health", () => {
       expect(text).not.toContain("sk-or-v1-");
       expect(text).not.toContain("failed /Users");
 
+      // ...nor in the stderr health log — it is opaque (section name + error class only).
+      const log = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(log).toContain('memory_health section "embedding" failed');
+      expect(log).not.toContain("/Users/x/secret");
+      expect(log).not.toContain("sk-or-v1-");
+      expect(log).not.toContain("OPENROUTER_API_KEY");
+
       // Sibling sections must remain ok
       expect(sections.size?.ok).toBe(true);
       expect(sections.retrieval?.ok).toBe(true);
@@ -7196,6 +7204,7 @@ describe("memory_health", () => {
       expect(sections.maintenance?.ok).toBe(true);
       expect(sections.security_events?.ok).toBe(true);
     } finally {
+      stderrSpy.mockRestore();
       _setHealthSectionOverridesForTesting(null);
     }
   });

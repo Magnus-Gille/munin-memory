@@ -104,20 +104,25 @@ async function callHealth(db: Database.Database): Promise<Record<string, unknown
 // as value leaves). Returns a sorted array.
 // ---------------------------------------------------------------------------
 function collectKeyPaths(obj: unknown, prefix = ""): string[] {
-  if (obj === null || typeof obj !== "object" || Array.isArray(obj)) {
+  if (obj === null || typeof obj !== "object") {
     return prefix ? [prefix] : [];
+  }
+  if (Array.isArray(obj)) {
+    // Recurse into array ITEMS with a "[]" wildcard so item-internal key
+    // renames (e.g. backlog[].unincorporated -> ...unincorporated_log_count)
+    // are pinned too. Empty arrays record the array path itself as a leaf.
+    if (obj.length === 0) return prefix ? [prefix] : [];
+    const paths: string[] = [];
+    for (const item of obj) paths.push(...collectKeyPaths(item, `${prefix}[]`));
+    return [...new Set(paths)].sort();
   }
   const paths: string[] = [];
   for (const key of Object.keys(obj as Record<string, unknown>)) {
     const child = (obj as Record<string, unknown>)[key];
     const path = prefix ? `${prefix}.${key}` : key;
-    if (child !== null && typeof child === "object" && !Array.isArray(child)) {
-      paths.push(...collectKeyPaths(child, path));
-    } else {
-      paths.push(path);
-    }
+    paths.push(...collectKeyPaths(child, path));
   }
-  return paths.sort();
+  return [...new Set(paths)].sort();
 }
 
 // ---------------------------------------------------------------------------

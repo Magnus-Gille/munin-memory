@@ -101,7 +101,6 @@ import {
   injectionWarning,
   scanForInjection,
   isNamespaceDeleteAllowed,
-  redactSecrets,
 } from "./security.js";
 import {
   generateEmbedding,
@@ -6918,9 +6917,13 @@ export function registerTools(
                * secret patterns from leaking through the health response.
                */
               function logHealthError(section: string, err: unknown): void {
-                const raw = err instanceof Error ? err.message : String(err);
-                const redacted = redactSecrets(raw).slice(0, 200);
-                process.stderr.write(`[munin] memory_health section "${section}" failed: ${redacted}\n`);
+                // Opaque by construction: log only the section name + the error
+                // CLASS, never the message. Error messages can carry local paths
+                // or secret-shaped values that redactSecrets may not fully catch,
+                // and health is an owner-only diagnostic — the section + class is
+                // enough to investigate (reproduce locally) without log leakage.
+                const errClass = err instanceof Error ? err.constructor.name : typeof err;
+                process.stderr.write(`[munin] memory_health section "${section}" failed (${errClass})\n`);
               }
 
               /**
@@ -7084,8 +7087,8 @@ export function registerTools(
                   failures: health.failures,
                   max_failures: health.max_failures,
                   min_logs: health.min_logs,
-                  last_synthesis_at: getLastSynthesisAt(db),
-                  avg_latency_ms: getAvgConsolidationLatencyMs(db),
+                  last_synthesis_at: getLastSynthesisAt(db, isOwner),
+                  avg_latency_ms: getAvgConsolidationLatencyMs(db, isOwner),
                   // getConsolidationBacklog applies no cap → the backlog is always complete.
                   backlog_complete: true,
                   backlog_namespace_count: backlog.length,

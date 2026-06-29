@@ -3062,7 +3062,8 @@ export function getConsolidationMetadata(
  * Most recent successful synthesis timestamp across all namespaces, or null if
  * the worker has never run. Drives `memory_health.consolidation.last_synthesis_at`.
  */
-export function getLastSynthesisAt(db: Database.Database): string | null {
+export function getLastSynthesisAt(db: Database.Database, isOwner: boolean): string | null {
+  if (!isOwner) throw new Error("memory_health helpers are owner-only");
   const row = db
     .prepare("SELECT MAX(last_consolidated_at) AS ts FROM consolidation_metadata")
     .get() as { ts: string | null };
@@ -3074,7 +3075,8 @@ export function getLastSynthesisAt(db: Database.Database): string | null {
  * rounded to the nearest integer, or null when no durations are recorded. Drives
  * `memory_health.consolidation.avg_latency_ms`.
  */
-export function getAvgConsolidationLatencyMs(db: Database.Database): number | null {
+export function getAvgConsolidationLatencyMs(db: Database.Database, isOwner: boolean): number | null {
+  if (!isOwner) throw new Error("memory_health helpers are owner-only");
   const row = db
     .prepare(
       "SELECT AVG(run_duration_ms) AS avg_ms FROM consolidation_metadata WHERE run_duration_ms IS NOT NULL",
