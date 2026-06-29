@@ -368,9 +368,8 @@ export function filterByAccess<T extends { namespace: string }>(
  *   - the owner (owner uses the global meta/* namespaces, not a personal home)
  *   - any principal with no writable "prefix/*" rule
  */
-export function principalHomePrefix(ctx: AccessContext): string | null {
-  if (ctx.principalType === "owner") return null;
-  for (const rule of ctx.accessibleNamespaces) {
+export function homePrefixFromRules(rules: NamespaceRule[]): string | null {
+  for (const rule of rules) {
     if (rule.permissions !== "write" && rule.permissions !== "rw") continue;
     if (rule.pattern === "*") continue;
     if (rule.pattern.endsWith("/*")) {
@@ -378,6 +377,11 @@ export function principalHomePrefix(ctx: AccessContext): string | null {
     }
   }
   return null;
+}
+
+export function principalHomePrefix(ctx: AccessContext): string | null {
+  if (ctx.principalType === "owner") return null;
+  return homePrefixFromRules(ctx.accessibleNamespaces);
 }
 
 /**
