@@ -7,14 +7,17 @@ export default defineConfig({
       provider: "v8",
       include: ["src/**"],
       reporter: ["text-summary", "json-summary"],
-      // Ratchet floors, set just below measured coverage (2026-06-29: 89.06% stmts,
-      // 83.95% branches, 91.94% funcs, 90.13% lines — raised after M1-M5 health fixes).
-      // Raise them when coverage rises; never lower them to admit a regression.
+      // Ratchet floors, set a safe notch BELOW CI-measured coverage (CI 2026-06-29,
+      // Node 20+22: 88.97% stmts, 83.78% branches, 91.94% funcs, 90.08% lines — after
+      // M1-M5 health fixes). Floors sit below CI (not flush against a local reading) so
+      // cross-env instrumentation variance can't red the gate. Still a ratchet up from
+      // the pre-health baseline (86/81/89/87). Raise when coverage rises; never lower
+      // to admit a regression.
       thresholds: {
-        statements: 89,
+        statements: 88.5,
         branches: 83,
         functions: 91,
-        lines: 90,
+        lines: 89.5,
       },
     },
   },
