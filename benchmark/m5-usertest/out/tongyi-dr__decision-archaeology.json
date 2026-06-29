@@ -1,0 +1,20 @@
+{
+  "model": "tongyi-dr",
+  "steps": 1,
+  "tool_calls": 0,
+  "tools_used": [],
+  "tool_calling_supported": false,
+  "final_report": null,
+  "transcript": [
+    {
+      "step": 0,
+      "type": "error",
+      "error": "LLM API 429: {\"error\":{\"message\":\"Rate limit reached for the tpm window. Retry after 3s.\",\"type\":\"rate_limit_error\",\"code\":\"rate_limit_exceeded\",\"param\":null}}"
+    }
+  ],
+  "duration_ms": 19,
+  "grade": {
+    "pass": false,
+    "signal": "no-query"
+  }
+}

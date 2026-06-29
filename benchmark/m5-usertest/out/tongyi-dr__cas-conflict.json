@@ -1,0 +1,28 @@
+{
+  "model": "tongyi-dr",
+  "steps": 3,
+  "tool_calls": 0,
+  "tools_used": [],
+  "tool_calling_supported": false,
+  "final_report": null,
+  "transcript": [
+    {
+      "step": 0,
+      "type": "empty"
+    },
+    {
+      "step": 1,
+      "type": "empty"
+    },
+    {
+      "step": 2,
+      "type": "error",
+      "error": "LLM API 502: {\"error\":{\"message\":\"The model backend is unavailable — please retry shortly.\",\"type\":\"server_error\",\"code\":\"upstream_unavailable\",\"param\":null}}"
+    }
+  ],
+  "duration_ms": 44758,
+  "grade": {
+    "pass": false,
+    "signal": "no-conflict-hit"
+  }
+}
