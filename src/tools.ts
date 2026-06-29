@@ -982,6 +982,7 @@ import {
   getFreshnessScore,
   getDaysUntil,
   isTrackedNamespace,
+  DEFAULT_TRACKED_PATTERNS,
   canonicalizeTags,
   stripReservedTags,
   getLifecycleTags,
@@ -1171,13 +1172,58 @@ function filterExpiredEntries<T extends Entry | { entry: Entry }>(
   return { items: filtered, expiredFilteredCount };
 }
 
+/**
+ * Parse tracked-namespace patterns from a meta/config entry's JSON content
+ * (shape: `{ "tracked_patterns": ["projects/*", ...] }`). Returns `fallback`
+ * for a missing entry or malformed/empty config. Malformed JSON degrades to the
+ * fallback — an expected user-input condition on the orient hot path — rather
+ * than throwing.
+ */
+function parseTrackedPatterns(
+  entry: ReturnType<typeof readState>,
+  fallback: string[],
+): string[] {
+  if (!entry) return fallback;
+  try {
+    const parsed = JSON.parse(parseEntry(entry).content) as { tracked_patterns?: unknown };
+    const tp = parsed?.tracked_patterns;
+    if (Array.isArray(tp) && tp.length > 0 && tp.every((p) => typeof p === "string" && p.length > 0)) {
+      return tp as string[];
+    }
+  } catch {
+    // Malformed config JSON — fall back to default; do not crash orient.
+  }
+  return fallback;
+}
+
+/**
+ * Resolve the tracked-namespace patterns for the calling principal:
+ *  - owner     → meta/config (key "config"), default DEFAULT_TRACKED_PATTERNS.
+ *  - non-owner → their personal <home>/meta config (key "config"), also
+ *                defaulting to DEFAULT_TRACKED_PATTERNS — then canRead-filtered
+ *                downstream to the namespaces they can actually see. A principal
+ *                personalizes their taxonomy by seeding a config (Phase 3
+ *                profiles); absent that, behavior is backward-compatible.
+ * The single de-hardcoding seam for the projects/*|clients/* taxonomy
+ * (#157 / ADR 0001). Every principal with no meta/config behaves exactly as
+ * before this change.
+ */
+function resolveTrackedPatterns(db: Database.Database, ctx: AccessContext): string[] {
+  if (ctx.principalType === "owner") {
+    return parseTrackedPatterns(readState(db, "meta/config", "config"), [...DEFAULT_TRACKED_PATTERNS]);
+  }
+  const ns = principalMetaNamespace(ctx);
+  return parseTrackedPatterns(ns ? readState(db, ns, "config") : null, [...DEFAULT_TRACKED_PATTERNS]);
+}
+
 function getVisibleTrackedStatusAssessments(
   db: Database.Database,
   ctx: AccessContext,
   toolName: string,
   sessionId?: string,
 ): { allowed: TrackedStatusAssessment[]; redacted: RedactableEntryMetadata[] } {
-  const accessible = [...getTrackedStatusAssessments(db).values()]
+  const patterns = resolveTrackedPatterns(db, ctx);
+  const accessible = [...getTrackedStatusAssessments(db, patterns).values()]
     .filter((assessment) => canRead(ctx, assessment.row.namespace));
   return filterDerivedSources(
     db,
@@ -4112,6 +4158,7 @@ export function registerTools(
               // Namespace list and tracked statuses (conventions resolved below)
               const namespaces = listVisibleNamespaces(db, ctx).filter(ns => canRead(ctx, ns.namespace));
               const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_orient", sessionId);
+              const orientTrackedPatterns = resolveTrackedPatterns(db, ctx);
               const orientRedactedSources: RedactableEntryMetadata[] = [...visibleTrackedStatuses.redacted];
 
               const response: Record<string, unknown> = {};
@@ -4225,7 +4272,7 @@ export function registerTools(
                 ...visibleTrackedStatuses.redacted.map((entry) => entry.namespace),
               ]);
               for (const ns of namespaces) {
-                if (isTrackedNamespace(ns.namespace) && !trackedNsWithStatus.has(ns.namespace)) {
+                if (isTrackedNamespace(ns.namespace, orientTrackedPatterns) && !trackedNsWithStatus.has(ns.namespace)) {
                   const missingItem: MaintenanceItem = {
                     namespace: ns.namespace,
                     issue: "missing_status",
@@ -4255,7 +4302,7 @@ export function registerTools(
                 // breaker is not yet tripped, the worker IS still available — show both
                 // the backlog AND the circuit_breaker warning (Block 2 below).
                 if (health.enabled && health.available) {
-                  for (const candidate of getConsolidationBacklog(db)) {
+                  for (const candidate of getConsolidationBacklog(db, orientTrackedPatterns)) {
                     const backlogItem: MaintenanceItem = {
                       namespace: candidate.namespace,
                       issue: "consolidation_backlog",
@@ -4296,7 +4343,7 @@ export function registerTools(
                   const sinceWindowOrient = new Date(Date.now() - RETRIEVED_UNUSED_SINCE_DAYS * 86400000).toISOString();
                   const hasRecent = db.prepare("SELECT 1 FROM retrieval_events WHERE timestamp >= ? LIMIT 1").get(sinceWindowOrient);
                   const unusedOrient = hasRecent
-                    ? getInsightsByEntry(db, undefined, RETRIEVED_UNUSED_MIN_IMPRESSIONS, 10, sinceWindowOrient, true)
+                    ? getInsightsByEntry(db, undefined, RETRIEVED_UNUSED_MIN_IMPRESSIONS, 10, sinceWindowOrient, true, orientTrackedPatterns)
                         .filter((r) => r.followthrough_events === 0)
                     : [];
                   if (unusedOrient.length >= RETRIEVED_UNUSED_ORIENT_MIN) {
@@ -5098,6 +5145,7 @@ export function registerTools(
               }
 
               const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_patterns", sessionId);
+              const patternsTrackedPatterns = resolveTrackedPatterns(db, ctx);
               const trackedStatusByNamespace = mapTrackedStatusAssessmentsByNamespace(visibleTrackedStatuses.allowed);
               const { rows: commitmentRows, redacted: redactedCommitmentSources } = listFreshCommitmentRows(db, ctx, "memory_patterns", {
                 namespace,
@@ -5159,7 +5207,7 @@ export function registerTools(
               // avoid false positives from reference namespaces (meta/*, documents/*, etc.).
               if (ctx.principalType === "owner") {
                 const sinceWindow = new Date(Date.now() - RETRIEVED_UNUSED_SINCE_DAYS * 86400000).toISOString();
-                const unused = getInsightsByEntry(db, namespace, RETRIEVED_UNUSED_MIN_IMPRESSIONS, 20, sinceWindow, true)
+                const unused = getInsightsByEntry(db, namespace, RETRIEVED_UNUSED_MIN_IMPRESSIONS, 20, sinceWindow, true, patternsTrackedPatterns)
                   .filter((r) => r.followthrough_events === 0);
                 if (unused.length >= RETRIEVED_UNUSED_PATTERN_MIN) {
                   const unusedIds = unused.slice(0, 6).map((r) => r.entry_id);
@@ -6387,6 +6435,7 @@ export function registerTools(
               const limit = clampOptionalLimit(attentionArgs.limit, 50) ?? 20;
 
               const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_attention", sessionId);
+              const attentionTrackedPatterns = resolveTrackedPatterns(db, ctx);
               const trackedStatusAssessments = visibleTrackedStatuses.allowed;
               const namespaces = listVisibleNamespaces(db, ctx).filter(ns => canRead(ctx, ns.namespace));
               const attentionItems: AttentionItem[] = [];
@@ -6430,7 +6479,7 @@ export function registerTools(
                   ...visibleTrackedStatuses.redacted.map((entry) => entry.namespace),
                 ]);
                 for (const ns of namespaces) {
-                  if (!isTrackedNamespace(ns.namespace)) continue;
+                  if (!isTrackedNamespace(ns.namespace, attentionTrackedPatterns)) continue;
                   if (trackedNsWithStatus.has(ns.namespace)) continue;
                   if (!matchesNamespacePrefix(ns.namespace, attentionArgs.namespace_prefix)) continue;
 

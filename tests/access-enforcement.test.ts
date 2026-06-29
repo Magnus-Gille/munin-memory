@@ -1476,3 +1476,80 @@ describe("meta: all registered tools are covered", () => {
     ).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Configurable + per-principal tracked-namespace patterns (#157 / ADR 0001)
+// ---------------------------------------------------------------------------
+
+describe("memory_orient — configurable tracked patterns (#157)", () => {
+  function dashboardNamespaces(result: unknown): string[] {
+    const r = result as { dashboard: Record<string, Array<{ namespace: string }>> };
+    return Object.values(r.dashboard).flat().map((e) => e.namespace);
+  }
+
+  it("owner with no meta/config still tracks projects/* and clients/* (unchanged)", async () => {
+    await ownerCall("memory_write", {
+      namespace: "projects/foo",
+      key: "status",
+      content: "Foo",
+      tags: ["active"],
+    });
+    const ns = dashboardNamespaces(parse(await ownerCall("memory_orient")));
+    expect(ns).toContain("projects/foo");
+  });
+
+  it("owner meta/config overrides which namespaces are tracked", async () => {
+    await ownerCall("memory_write", {
+      namespace: "meta/config",
+      key: "config",
+      content: JSON.stringify({ tracked_patterns: ["papers/*"] }),
+    });
+    await ownerCall("memory_write", {
+      namespace: "papers/p1",
+      key: "status",
+      content: "A paper",
+      tags: ["active"],
+    });
+    await ownerCall("memory_write", {
+      namespace: "projects/foo",
+      key: "status",
+      content: "A project",
+      tags: ["active"],
+    });
+    const ns = dashboardNamespaces(parse(await ownerCall("memory_orient")));
+    expect(ns).toContain("papers/p1");
+    expect(ns).not.toContain("projects/foo");
+  });
+
+  it("family with personal config sees their own tracked namespaces in the dashboard", async () => {
+    await ownerCall("memory_write", {
+      namespace: "users/sara/meta",
+      key: "config",
+      content: JSON.stringify({ tracked_patterns: ["users/sara/projects/*"] }),
+    });
+    await ownerCall("memory_write", {
+      namespace: "users/sara/projects/garden",
+      key: "status",
+      content: "Garden redesign",
+      tags: ["active"],
+    });
+    const ns = dashboardNamespaces(parse(await familyCall("memory_orient")));
+    expect(ns).toContain("users/sara/projects/garden");
+    // Owner's projects/foo (from beforeEach) is not Sara's and not readable by her.
+    expect(ns).not.toContain("projects/foo");
+  });
+
+  it("family without personal config does not auto-track its own sub-namespaces (must opt in)", async () => {
+    // No users/sara/meta config written. The default patterns (projects/*, clients/*)
+    // do NOT match users/sara/projects/*, so Sara's own project is not tracked until
+    // she (or a profile) seeds a config selecting it.
+    await ownerCall("memory_write", {
+      namespace: "users/sara/projects/garden",
+      key: "status",
+      content: "Garden",
+      tags: ["active"],
+    });
+    const ns = dashboardNamespaces(parse(await familyCall("memory_orient")));
+    expect(ns).not.toContain("users/sara/projects/garden");
+  });
+});

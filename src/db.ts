@@ -16,6 +16,10 @@ import type {
   ConsolidationCandidate,
   CrossReference,
 } from "./types.js";
+import {
+  DEFAULT_TRACKED_PATTERNS,
+  trackedPatternsToSqlLike,
+} from "./internal/retrieval-shared.js";
 import { runMigrations } from "./migrations.js";
 import { resolveKnob } from "./profiles.js";
 import { scanForSecrets } from "./security.js";
@@ -204,7 +208,11 @@ export function rebuildFTS(db: Database.Database): void {
 
 // --- Tracked status queries ---
 
-export function getTrackedStatuses(db: Database.Database): TrackedStatusRow[] {
+export function getTrackedStatuses(
+  db: Database.Database,
+  patterns: readonly string[] = DEFAULT_TRACKED_PATTERNS,
+): TrackedStatusRow[] {
+  const { clause, params } = trackedPatternsToSqlLike(patterns, "namespace");
   // `updated_at` ties are common (entries written in the same millisecond,
   // e.g. test fixtures or bulk seeds). SQL does not guarantee a stable order
   // for equal sort keys, so two different connections can return tied rows in
@@ -218,10 +226,10 @@ export function getTrackedStatuses(db: Database.Database): TrackedStatusRow[] {
       `SELECT id, namespace, key, substr(content, 1, 300) as content_preview, content, tags, agent_id, owner_principal_id, created_at, updated_at, valid_until, classification
        FROM entries
        WHERE entry_type = 'state' AND key = 'status'
-         AND (namespace LIKE 'projects/%' ESCAPE '\\' OR namespace LIKE 'clients/%' ESCAPE '\\')
+         AND ${clause}
        ORDER BY updated_at DESC, rowid`,
     )
-    .all() as TrackedStatusRow[];
+    .all(...params) as TrackedStatusRow[];
 }
 
 // --- State entry operations ---
@@ -2285,6 +2293,7 @@ export function getInsightsByEntry(
   limit = 20,
   since?: string,
   restrictToTracked?: boolean,
+  trackedPatterns: readonly string[] = DEFAULT_TRACKED_PATTERNS,
 ): EntryInsightRow[] {
   const clampedLimit = Math.min(Math.max(limit, 1), 50);
 
@@ -2301,10 +2310,11 @@ export function getInsightsByEntry(
     }
   }
 
-  // Restrict to tracked (operational) namespaces — literal LIKE patterns, no extra params.
-  const trackedFilter = restrictToTracked
-    ? "AND (e.namespace LIKE 'projects/%' OR e.namespace LIKE 'clients/%')"
-    : "";
+  // Restrict to tracked (operational) namespaces — patterns resolved by caller.
+  const tracked = restrictToTracked
+    ? trackedPatternsToSqlLike(trackedPatterns, "e.namespace")
+    : { clause: "", params: [] as string[] };
+  const trackedFilter = tracked.clause ? `AND ${tracked.clause}` : "";
 
   // Optional rolling-window filter on impression event timestamp
   const sinceFilter = since ? "AND rev.timestamp >= ?" : "";
@@ -2375,7 +2385,7 @@ export function getInsightsByEntry(
 
   return db
     .prepare(sql)
-    .all(...sinceParams, ...nsParams, minImpressions, clampedLimit) as EntryInsightRow[];
+    .all(...sinceParams, ...nsParams, ...tracked.params, minImpressions, clampedLimit) as EntryInsightRow[];
 }
 
 /**
@@ -2943,7 +2953,9 @@ export function getNamespaceTagVocabulary(
 export function getNamespacesNeedingConsolidation(
   db: Database.Database,
   minLogs: number = 3,
+  patterns: readonly string[] = DEFAULT_TRACKED_PATTERNS,
 ): ConsolidationCandidate[] {
+  const { clause: trackedClause, params: trackedParams } = trackedPatternsToSqlLike(patterns, "e.namespace");
   // A namespace is a candidate when it has >= minLogs unincorporated logs, OR
   // it is mid-drain (drain_in_progress = 1) and has any unincorporated logs
   // at all — so a backlog tail below minLogs still gets flushed (#51, finding 1).
@@ -2958,7 +2970,7 @@ export function getNamespacesNeedingConsolidation(
     FROM entries e
     LEFT JOIN consolidation_metadata cm ON cm.namespace = e.namespace
     WHERE e.entry_type = 'log'
-      AND (e.namespace LIKE 'projects/%' ESCAPE '\\' OR e.namespace LIKE 'clients/%' ESCAPE '\\')
+      AND ${trackedClause}
       AND (
         cm.last_log_created_at IS NULL
         OR e.created_at > cm.last_log_created_at
@@ -2971,7 +2983,7 @@ export function getNamespacesNeedingConsolidation(
         OR (COALESCE(cm.drain_in_progress, 0) = 1 AND COUNT(*) >= 1)
     ORDER BY unincorporated_log_count DESC
   `;
-  return db.prepare(sql).all(minLogs) as ConsolidationCandidate[];
+  return db.prepare(sql).all(...trackedParams, minLogs) as ConsolidationCandidate[];
 }
 
 /**
