@@ -1354,6 +1354,33 @@ describe("memory_retrieval_feedback — access enforcement", () => {
   });
 });
 
+// memory_health
+// ---------------------------------------------------------------------------
+
+describe("memory_health — access enforcement", () => {
+  it("owner memory_health → returns full payload with sections", async () => {
+    const raw = await ownerCall("memory_health");
+    const result = parse(raw) as { ok: boolean; schema_version: number; sections: Record<string, unknown> };
+    expect(result.ok).toBe(true);
+    expect(result.schema_version).toBe(1);
+    expect(result.sections).toBeDefined();
+    expect(result.sections.memory_size).toBeDefined();
+  });
+
+  it("family memory_health → denied (invisible, found: false)", async () => {
+    const raw = await familyCall("memory_health");
+    const result = parse(raw) as { ok: boolean; found: boolean };
+    expect(result.ok).toBe(true);
+    expect(result.found).toBe(false);
+  });
+
+  it("agent memory_health → denied (access_denied error)", async () => {
+    const raw = await agentCall("memory_health");
+    const result = parse(raw) as { error: string };
+    expect(result.error).toBe("access_denied");
+  });
+});
+
 describe("meta: all registered tools are covered", () => {
   it("every tool returned by ListTools has at least one access enforcement test", async () => {
     const server = new Server(
@@ -1396,6 +1423,7 @@ describe("meta: all registered tools are covered", () => {
       "memory_consolidate",
       "memory_retrieval_feedback",
       "memory_status",
+      "memory_health",
     ]);
 
     const untestedTools = registeredTools.filter((name) => !testedTools.has(name));

@@ -25,7 +25,7 @@ Part of the Hugin & Munin personal AI system. See `prd.md` for full product cont
 
 ### MCP tools exposed
 
-All 22 tools registered in `TOOL_DEFINITIONS` (`src/tools.ts`) are listed below. `tests/claude-md-tool-inventory.test.ts` asserts every name appears here exactly once.
+All 23 tools registered in `TOOL_DEFINITIONS` (`src/tools.ts`) are listed below. `tests/claude-md-tool-inventory.test.ts` asserts every name appears here exactly once.
 
 | Tool | Purpose |
 |------|---------|
@@ -51,6 +51,7 @@ All 22 tools registered in `TOOL_DEFINITIONS` (`src/tools.ts`) are listed below.
 | `memory_retrieval_feedback` | Submit explicit retrieval feedback. Owner-only. |
 | `memory_consolidate` | Synthesize unincorporated logs into `synthesis` key via OpenRouter. Owner-only. |
 | `memory_status` | Server capabilities, version, feature availability. |
+| `memory_health` | Owner-only. Memory-engine health snapshot: embedding queue (incl. model-relative stale counts), memory size, retrieval metrics, classification distribution, maintenance counts, consolidation health, security events. Per-section graceful degradation. |
 
 ## Project structure
 

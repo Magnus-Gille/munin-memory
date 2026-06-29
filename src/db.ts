@@ -3230,3 +3230,267 @@ export function getCrossReferences(
     )
     .all(namespace, namespace) as CrossReference[];
 }
+
+// --- memory_health DB helpers (owner-only) ---
+
+/**
+ * Counts of entries by embedding_status, plus model-relative counts for the
+ * active model. Used by the memory_health tool to surface the embedding queue
+ * state, including the "stale model" case that raw status counts hide.
+ *
+ * `embedding_claimed_at` does not exist in the schema, so "stuck" is defined
+ * as model-identity-based only (generated_stale + generated_null), not time-based.
+ */
+export interface EmbeddingQueueCounts {
+  pending: number;
+  processing: number;
+  generated: number;
+  failed: number;
+  /** Entries with embedding_status='generated' whose model matches activeModel. */
+  generated_current: number;
+  /** Entries with embedding_status='generated' whose model is set but != activeModel. */
+  generated_stale: number;
+  /** Entries with embedding_status='generated' whose model is NULL. */
+  generated_null: number;
+  /**
+   * Entries that need re-embedding: generated_stale + generated_null + pending.
+   * Does NOT include processing (those are in-flight).
+   */
+  reembedding_backlog: number;
+  total: number;
+  /** Percentage of total entries with generated embeddings (0–100). */
+  coverage_pct: number;
+}
+
+export function getEmbeddingQueueCounts(
+  db: Database.Database,
+  activeModel: string,
+): EmbeddingQueueCounts {
+  const rows = db.prepare(
+    `SELECT
+       SUM(CASE WHEN embedding_status = 'pending'    THEN 1 ELSE 0 END) AS pending,
+       SUM(CASE WHEN embedding_status = 'processing' THEN 1 ELSE 0 END) AS processing,
+       SUM(CASE WHEN embedding_status = 'generated'  THEN 1 ELSE 0 END) AS generated,
+       SUM(CASE WHEN embedding_status = 'failed'     THEN 1 ELSE 0 END) AS failed,
+       SUM(CASE WHEN embedding_status = 'generated' AND embedding_model = ?    THEN 1 ELSE 0 END) AS generated_current,
+       SUM(CASE WHEN embedding_status = 'generated' AND embedding_model != ? AND embedding_model IS NOT NULL THEN 1 ELSE 0 END) AS generated_stale,
+       SUM(CASE WHEN embedding_status = 'generated' AND embedding_model IS NULL THEN 1 ELSE 0 END) AS generated_null,
+       COUNT(*) AS total
+     FROM entries`,
+  ).get(activeModel, activeModel) as {
+    pending: number | null;
+    processing: number | null;
+    generated: number | null;
+    failed: number | null;
+    generated_current: number | null;
+    generated_stale: number | null;
+    generated_null: number | null;
+    total: number | null;
+  };
+
+  const pending = rows.pending ?? 0;
+  const processing = rows.processing ?? 0;
+  const generated = rows.generated ?? 0;
+  const failed = rows.failed ?? 0;
+  const generated_current = rows.generated_current ?? 0;
+  const generated_stale = rows.generated_stale ?? 0;
+  const generated_null = rows.generated_null ?? 0;
+  const total = rows.total ?? 0;
+  const reembedding_backlog = generated_stale + generated_null + pending;
+  const coverage_pct = total > 0 ? Math.round((generated / total) * 1000) / 10 : 0;
+
+  return {
+    pending,
+    processing,
+    generated,
+    failed,
+    generated_current,
+    generated_stale,
+    generated_null,
+    reembedding_backlog,
+    total,
+    coverage_pct,
+  };
+}
+
+/** Total entry counts and namespace count for the memory_health memory_size section. */
+export interface MemorySizeCounts {
+  total_state_entries: number;
+  total_log_entries: number;
+  total_entries: number;
+  namespace_count: number;
+}
+
+export function getMemorySizeCounts(db: Database.Database): MemorySizeCounts {
+  const row = db.prepare(
+    `SELECT
+       SUM(CASE WHEN entry_type = 'state' THEN 1 ELSE 0 END) AS state_count,
+       SUM(CASE WHEN entry_type = 'log'   THEN 1 ELSE 0 END) AS log_count,
+       COUNT(*) AS total,
+       COUNT(DISTINCT namespace) AS ns_count
+     FROM entries`,
+  ).get() as {
+    state_count: number | null;
+    log_count: number | null;
+    total: number | null;
+    ns_count: number | null;
+  };
+
+  return {
+    total_state_entries: row.state_count ?? 0,
+    total_log_entries: row.log_count ?? 0,
+    total_entries: row.total ?? 0,
+    namespace_count: row.ns_count ?? 0,
+  };
+}
+
+/**
+ * Bounded retrieval metrics for the memory_health retrieval section.
+ * Uses direct SQL aggregates (NOT getInsightsByEntry) to avoid O(N) iteration.
+ */
+export interface HealthRetrievalMetrics {
+  query_volume_7d: number;
+  query_volume_30d: number;
+  mode_mix_7d: { lexical: number; semantic: number; hybrid: number };
+  retrieved_unused_count: number;
+}
+
+export function getHealthRetrievalMetrics(db: Database.Database): HealthRetrievalMetrics {
+  const since7d = new Date(Date.now() - 7 * 86400000).toISOString();
+  const since30d = new Date(Date.now() - 30 * 86400000).toISOString();
+
+  const vol7d = (db.prepare(
+    "SELECT COUNT(*) AS cnt FROM retrieval_events WHERE tool_name = 'memory_query' AND timestamp >= ?",
+  ).get(since7d) as { cnt: number }).cnt;
+
+  const vol30d = (db.prepare(
+    "SELECT COUNT(*) AS cnt FROM retrieval_events WHERE tool_name = 'memory_query' AND timestamp >= ?",
+  ).get(since30d) as { cnt: number }).cnt;
+
+  const modeRows = db.prepare(
+    `SELECT actual_mode, COUNT(*) AS cnt
+     FROM retrieval_events
+     WHERE tool_name = 'memory_query' AND timestamp >= ? AND actual_mode IS NOT NULL
+     GROUP BY actual_mode`,
+  ).all(since7d) as Array<{ actual_mode: string; cnt: number }>;
+
+  const modeMix: { lexical: number; semantic: number; hybrid: number } = { lexical: 0, semantic: 0, hybrid: 0 };
+  for (const row of modeRows) {
+    if (row.actual_mode === "lexical" || row.actual_mode === "semantic" || row.actual_mode === "hybrid") {
+      modeMix[row.actual_mode] = row.cnt;
+    }
+  }
+
+  // Bounded retrieved-unused count: tracked entries with ≥5 impressions in 30d, zero follow-through.
+  // LIMIT 50 cap so this never materializes the full table.
+  let unusedCount = 0;
+  try {
+    const unusedRow = db.prepare(
+      `WITH impressions_w AS (
+         SELECT e_json.value AS entry_id, rev.id AS event_id
+         FROM retrieval_events rev,
+              json_each(rev.result_ids) AS e_json
+         WHERE rev.tool_name IN ('memory_query', 'memory_attention')
+           AND json_array_length(rev.result_ids) > 0
+           AND rev.timestamp >= ?
+       ),
+       per_entry AS (
+         SELECT
+           imp.entry_id,
+           COUNT(DISTINCT imp.event_id) AS impressions,
+           COUNT(DISTINCT CASE
+             WHEN ro.outcome_type IN ('opened_result','write_in_result_namespace','log_in_result_namespace')
+             THEN ro.retrieval_event_id
+           END) AS followthrough
+         FROM impressions_w imp
+         INNER JOIN entries e ON e.id = imp.entry_id
+           AND (e.namespace LIKE 'projects/%' OR e.namespace LIKE 'clients/%')
+         LEFT JOIN retrieval_outcomes ro ON ro.entry_id = imp.entry_id
+         GROUP BY imp.entry_id
+         HAVING impressions >= 5 AND followthrough = 0
+         LIMIT 50
+       )
+       SELECT COUNT(*) AS cnt FROM per_entry`,
+    ).get(since30d) as { cnt: number };
+    unusedCount = unusedRow.cnt;
+  } catch {
+    // retrieval_events may not exist in very old DBs; treat as 0
+    unusedCount = 0;
+  }
+
+  return {
+    query_volume_7d: vol7d,
+    query_volume_30d: vol30d,
+    mode_mix_7d: modeMix,
+    retrieved_unused_count: unusedCount,
+  };
+}
+
+/** Distribution of all entries by classification level. */
+export interface ClassificationDistribution {
+  public: number;
+  internal: number;
+  "client-confidential": number;
+  "client-restricted": number;
+}
+
+export function getClassificationDistribution(db: Database.Database): ClassificationDistribution {
+  const rows = db.prepare(
+    `SELECT classification, COUNT(*) AS cnt FROM entries GROUP BY classification`,
+  ).all() as Array<{ classification: string; cnt: number }>;
+
+  const dist: ClassificationDistribution = {
+    public: 0,
+    internal: 0,
+    "client-confidential": 0,
+    "client-restricted": 0,
+  };
+  for (const row of rows) {
+    if (row.classification === "public" || row.classification === "internal" ||
+        row.classification === "client-confidential" || row.classification === "client-restricted") {
+      dist[row.classification] = row.cnt;
+    }
+  }
+  return dist;
+}
+
+/**
+ * Security event counts for the memory_health security_events section.
+ * Reads from redaction_log (Librarian redaction events) and audit_log
+ * (cross_zone_block containment events). Never reads audit_log for
+ * access-denied counts — that metric is unsupported by the current schema.
+ */
+export interface SecurityEventCounts {
+  redaction_events_7d: number;
+  redaction_events_30d: number;
+  cross_zone_blocks_7d: number;
+  cross_zone_blocks_30d: number;
+}
+
+export function getSecurityEventCounts(db: Database.Database): SecurityEventCounts {
+  const since7d = new Date(Date.now() - 7 * 86400000).toISOString();
+  const since30d = new Date(Date.now() - 30 * 86400000).toISOString();
+
+  const red7 = (db.prepare(
+    "SELECT COUNT(*) AS cnt FROM redaction_log WHERE created_at >= ?",
+  ).get(since7d) as { cnt: number }).cnt;
+
+  const red30 = (db.prepare(
+    "SELECT COUNT(*) AS cnt FROM redaction_log WHERE created_at >= ?",
+  ).get(since30d) as { cnt: number }).cnt;
+
+  const cross7 = (db.prepare(
+    "SELECT COUNT(*) AS cnt FROM audit_log WHERE action = 'cross_zone_block' AND timestamp >= ?",
+  ).get(since7d) as { cnt: number }).cnt;
+
+  const cross30 = (db.prepare(
+    "SELECT COUNT(*) AS cnt FROM audit_log WHERE action = 'cross_zone_block' AND timestamp >= ?",
+  ).get(since30d) as { cnt: number }).cnt;
+
+  return {
+    redaction_events_7d: red7,
+    redaction_events_30d: red30,
+    cross_zone_blocks_7d: cross7,
+    cross_zone_blocks_30d: cross30,
+  };
+}

@@ -65,6 +65,11 @@ import {
   getCrossReferences,
   countLogsIncorporated,
   getConsolidationMetadata,
+  getEmbeddingQueueCounts,
+  getMemorySizeCounts,
+  getHealthRetrievalMetrics,
+  getClassificationDistribution,
+  getSecurityEventCounts,
 } from "./db.js";
 import {
   CLASSIFICATION_LEVELS,
@@ -94,6 +99,7 @@ import {
   injectionWarning,
   scanForInjection,
   isNamespaceDeleteAllowed,
+  redactSecrets,
 } from "./security.js";
 import {
   generateEmbedding,
@@ -104,6 +110,7 @@ import {
   getSearchModeUnavailableReason,
   getSemanticMaxDistance,
   getActiveEmbeddingModel,
+  getEmbeddingStatusReason,
 } from "./embeddings.js";
 import {
   consolidateNamespace,
@@ -3760,6 +3767,16 @@ const TOOL_DEFINITIONS = [
       required: [],
     },
   },
+  {
+    name: "memory_health",
+    description:
+      "Owner-only. Returns a read-only memory-engine health snapshot for operator dashboards (e.g. Heimdall). Sections: embedding queue (including model-relative stale counts), memory size, retrieval metrics, classification distribution, maintenance item counts, consolidation health, and security event counts. Each section degrades independently — a failing sub-query yields `section.ok: false` without aborting the payload. Top-level `partial: true` when any section failed. Versioned contract via `schema_version`.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+  },
 ];
 
 /**
@@ -6841,6 +6858,184 @@ export function registerTools(
               return okResult("status", statusResponse);
             };
             return handleMemoryStatus();
+          }
+
+          case "memory_health": {
+            const handleMemoryHealth = async () => {
+              // Owner-only: total gate before any query.
+              // Use the repo's standard denial idiom:
+              //   - agent principals → { error: "access_denied" } (machine-readable rejection)
+              //   - all other non-owner principals → { found: false } (invisible denial)
+              // This matches the pattern in memory_consolidate, memory_retrieval_feedback, etc.
+              if (ctx.principalType !== "owner") {
+                return accessDeniedResponse(ctx, "health");
+              }
+
+              /**
+               * Sanitize an error for inclusion in a health payload.
+               * Redacts known secret patterns and truncates to prevent
+               * raw exception text from leaking credentials or stack traces.
+               */
+              function sanitizeHealthError(err: unknown): string {
+                const raw = err instanceof Error ? err.message : String(err);
+                return redactSecrets(raw).slice(0, 200);
+              }
+
+              const sections: Record<string, unknown> = {};
+              let partial = false;
+
+              // --- Section 1: embedding_queue ---
+              try {
+                const activeModel = getActiveEmbeddingModel();
+                const counts = getEmbeddingQueueCounts(db, activeModel);
+                sections.embedding_queue = {
+                  ok: true,
+                  ...counts,
+                  active_model: activeModel,
+                  active_model_dtype: process.env.MUNIN_EMBEDDINGS_DTYPE ?? null,
+                  embedding_available: isEmbeddingAvailable(),
+                  status_reason: getEmbeddingStatusReason(),
+                  circuit_breaker_tripped: !isEmbeddingAvailable() && !isEmbeddingAvailable(),
+                  // No embedding_claimed_at column in schema → stuck is model-identity-based only.
+                  stuck_note: "Stuck entries are defined as model-identity-based (generated_stale + generated_null); no embedding_claimed_at column exists for time-based detection.",
+                };
+              } catch (err) {
+                sections.embedding_queue = { ok: false, error: sanitizeHealthError(err) };
+                partial = true;
+              }
+
+              // --- Section 2: memory_size ---
+              try {
+                const sizeCounts = getMemorySizeCounts(db);
+                sections.memory_size = { ok: true, ...sizeCounts };
+              } catch (err) {
+                sections.memory_size = { ok: false, error: sanitizeHealthError(err) };
+                partial = true;
+              }
+
+              // --- Section 3: retrieval ---
+              try {
+                const retMetrics = getHealthRetrievalMetrics(db);
+                sections.retrieval = { ok: true, ...retMetrics };
+              } catch (err) {
+                sections.retrieval = { ok: false, error: sanitizeHealthError(err) };
+                partial = true;
+              }
+
+              // --- Section 4: classification ---
+              try {
+                const dist = getClassificationDistribution(db);
+                sections.classification = { ok: true, distribution: dist };
+              } catch (err) {
+                sections.classification = { ok: false, error: sanitizeHealthError(err) };
+                partial = true;
+              }
+
+              // --- Section 5: maintenance ---
+              // Option B: compute read-only counts from the same source helpers used by
+              // memory_orient, WITHOUT extracting anything from that hot path.
+              // A parity test in tests/tools.test.ts asserts these counts match
+              // memory_orient(detail:"full") on a shared fixture.
+              try {
+                const trackedAssessments = [...getTrackedStatusAssessments(db).values()];
+                let activeButStale = 0;
+                let temporalStale = 0;
+                for (const assessment of trackedAssessments) {
+                  for (const item of assessment.maintenanceItems) {
+                    if (item.issue === "active_but_stale") activeButStale++;
+                    if (item.issue === "temporal_stale") temporalStale++;
+                  }
+                }
+
+                // missing_status: tracked namespaces with entries but no status key
+                const allNamespaces = listNamespaces(db);
+                const trackedNsWithStatus = new Set(trackedAssessments.map((a) => a.row.namespace));
+                let missingStatus = 0;
+                for (const ns of allNamespaces) {
+                  if (isTrackedNamespace(ns.namespace) && !trackedNsWithStatus.has(ns.namespace)) {
+                    missingStatus++;
+                  }
+                }
+
+                // consolidation_backlog: namespaces with unincorporated logs (when worker available)
+                const consolidationBacklog = isConsolidationAvailable()
+                  ? getConsolidationBacklog(db).length
+                  : 0;
+
+                // retrieved_unused: bounded count from health retrieval metrics (already computed)
+                // Re-use if available, else compute fresh
+                let retrievedUnused = 0;
+                try {
+                  const rm = sections.retrieval as Record<string, unknown> | undefined;
+                  if (rm?.ok === true && typeof rm.retrieved_unused_count === "number") {
+                    retrievedUnused = rm.retrieved_unused_count as number;
+                  } else {
+                    retrievedUnused = getHealthRetrievalMetrics(db).retrieved_unused_count;
+                  }
+                } catch {
+                  // leave as 0
+                }
+
+                sections.maintenance = {
+                  ok: true,
+                  counts: {
+                    active_but_stale: activeButStale,
+                    missing_status: missingStatus,
+                    temporal_stale: temporalStale,
+                    consolidation_backlog: consolidationBacklog,
+                    retrieved_unused: retrievedUnused,
+                  },
+                };
+              } catch (err) {
+                sections.maintenance = { ok: false, error: sanitizeHealthError(err) };
+                partial = true;
+              }
+
+              // --- Section 6: consolidation ---
+              // Gated behind isConsolidationAvailable() per spec — always include
+              // the section but populate health detail only when consolidation is configured.
+              try {
+                const health = getConsolidationHealth();
+                const backlog = getConsolidationBacklog(db).map((c) => ({
+                  namespace: c.namespace,
+                  unincorporated_log_count: c.unincorporated_log_count,
+                }));
+                sections.consolidation = {
+                  ok: true,
+                  available: health.available,
+                  circuit_breaker_tripped: health.circuit_breaker_tripped,
+                  failures: health.failures,
+                  max_failures: health.max_failures,
+                  // last_error already sanitized in consolidation.ts (redactSecrets applied there)
+                  last_error: health.last_error,
+                  last_error_at: health.last_error_at,
+                  api_key_present: health.api_key_present,
+                  backlog,
+                };
+              } catch (err) {
+                sections.consolidation = { ok: false, error: sanitizeHealthError(err) };
+                partial = true;
+              }
+
+              // --- Section 7: security_events ---
+              // Only exposes what real queries support: redaction_log + cross_zone_block in audit_log.
+              // access-denied count from audit_log is NOT included (unsupported by schema).
+              try {
+                const secCounts = getSecurityEventCounts(db);
+                sections.security_events = { ok: true, ...secCounts };
+              } catch (err) {
+                sections.security_events = { ok: false, error: sanitizeHealthError(err) };
+                partial = true;
+              }
+
+              return okResult("health", {
+                partial,
+                schema_version: 1,
+                generated_at: new Date().toISOString(),
+                sections,
+              });
+            };
+            return handleMemoryHealth();
           }
 
           default:

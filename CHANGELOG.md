@@ -8,6 +8,10 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Added
+
+- **`memory_health` MCP tool — owner-only memory-engine health snapshot (#156).** Designed for operator dashboards (Heimdall). Returns a versioned (`schema_version: 1`), timestamped payload with seven independently-degrading sections: `embedding_queue` (status counts plus model-relative `generated_current/stale/null` and `reembedding_backlog` — surfaces the motivating incident of 16 stale-model entries hidden by raw status counts); `memory_size` (total state/log entries, namespace count); `retrieval` (query volume 7d/30d, mode mix, retrieved-unused count via bounded SQL aggregate); `classification` (entry distribution by classification level); `maintenance` (counts per kind: `active_but_stale`, `missing_status`, `temporal_stale`, `consolidation_backlog`, `retrieved_unused` — parity-tested against `memory_orient`); `consolidation` (health and per-namespace backlog); `security_events` (redaction events and cross-zone blocks, 7d/30d). Auth: owner-only at handler and helper level; non-owner family principals receive invisible denial (`found: false`), agent principals receive `access_denied`. Section errors are sanitized (no raw exception text, token prefixes, or credential paths). No `embedding_claimed_at` column exists — stuck is defined as model-identity-based (`generated_stale + generated_null`), documented in the payload.
+
 ### Security
 
 - **Defense-in-depth hardening against stored-content prompt injection (#150).** Three independent layers:
