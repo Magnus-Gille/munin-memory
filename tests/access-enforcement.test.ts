@@ -14,6 +14,7 @@ import { initDatabase, writeState, replaceCrossReferences } from "../src/db.js";
 import { registerTools } from "../src/tools.js";
 import type { AccessContext } from "../src/access.js";
 import { ownerContext } from "../src/access.js";
+import { addPrincipal } from "../src/admin-cli.js";
 
 // ---------------------------------------------------------------------------
 // Infrastructure
@@ -1551,5 +1552,46 @@ describe("memory_orient — configurable tracked patterns (#157)", () => {
     });
     const ns = dashboardNamespaces(parse(await familyCall("memory_orient")));
     expect(ns).not.toContain("users/sara/projects/garden");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// End-to-end: profile onboarding → per-principal orient (Phase 1 + 2 + 3)
+// ---------------------------------------------------------------------------
+
+describe("end-to-end: profile onboarding → per-principal orient", () => {
+  it("a household-profile onboarding gives the principal their own conventions + dashboard", async () => {
+    // Onboard Sara with the household profile — seeds users/sara/meta conventions + config.
+    addPrincipal(db, {
+      principalId: "sara",
+      principalType: "family",
+      rules: [{ pattern: "users/sara/*", permissions: "rw" }],
+      profile: "household",
+    });
+    // She records a tracked item within her seeded taxonomy.
+    await ownerCall("memory_write", {
+      namespace: "users/sara/home/garden",
+      key: "status",
+      content: "Replant the back beds",
+      tags: ["active"],
+    });
+
+    // Full orient → her personal household conventions, not the owner's.
+    const full = parse(await familyCall("memory_orient", { include_full_conventions: true })) as {
+      conventions: { content: string; source?: string };
+    };
+    expect(full.conventions.source).toBe("principal");
+    expect(full.conventions.content).toContain("Household");
+    expect(full.conventions.content).toContain("users/sara/home");
+
+    // Dashboard tracks her seeded namespace (config-driven, canRead-filtered).
+    const ns = Object.values(
+      (parse(await familyCall("memory_orient")) as {
+        dashboard: Record<string, Array<{ namespace: string }>>;
+      }).dashboard,
+    )
+      .flat()
+      .map((e) => e.namespace);
+    expect(ns).toContain("users/sara/home/garden");
   });
 });
