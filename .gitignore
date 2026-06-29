@@ -30,6 +30,8 @@ docs/*
 !docs/memory-health-spec.md
 !docs/memory-health.schema.json
 !docs/adr/
+!docs/examples/
+!docs/examples/memory-health.json
 
 # Debate files — keep only summaries and resolutions
 debate/*
