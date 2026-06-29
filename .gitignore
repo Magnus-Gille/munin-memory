@@ -27,6 +27,7 @@ docs/*
 !docs/librarian-architecture.md
 !docs/librarian-engineering-plan.md
 !docs/state-of-memory-systems-2026.md
+!docs/adr/
 
 # Debate files — keep only summaries and resolutions
 debate/*

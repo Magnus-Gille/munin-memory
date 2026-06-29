@@ -1,0 +1,101 @@
+[
+  {
+    "id": "memory-health-C01",
+    "source": "codex-round-1",
+    "text": "'Owner-only' is not the same as 'owner/local-only'; the draft conflates them. Owner credential does not enforce locality.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "memory-health-C02",
+    "source": "codex-round-1",
+    "text": "Option A (extract computeMaintenanceItems from hot memory_orient path) is under-de-risked; a byte snapshot cannot catch latency, access-control, or detail-mode regressions. Prefer Option B with a parity test against memory_orient(detail:full).",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "memory-health-C03",
+    "source": "codex-round-1",
+    "text": "Per-section graceful degradation is required, not optional: one failing sub-query must not 500 the whole health payload. Shape: total auth gate, then top-level ok + per-section ok + sanitized errors.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "memory-health-C04",
+    "source": "codex-round-1",
+    "text": "Embedding-queue design (raw status counts + time-based stuck) cannot diagnose the motivating incident (16 stale-model entries). Needs model-relative counts (generated_current/stale/null, reembedding_backlog), worker telemetry, and no time-based stuck claim without a real claim timestamp.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "critical",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "memory-health-C05",
+    "source": "codex-round-1",
+    "text": "Metadata leakage (namespace/classification counts) is real; owner-only is the right boundary only if truly owner/local. Add defense-in-depth: new aggregate helpers take ctx/owner scope, not just a handler gate.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "memory-health-C06",
+    "source": "codex-round-1",
+    "text": "'access-denied count (audit_log)' is unsupported by the code. Replace with measurable cross_zone_blocks and redaction_events, or add real denial telemetry first.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "memory-health-C07",
+    "source": "codex-round-1",
+    "text": "Retrieval metrics should use bounded aggregate helpers, not an unbounded O(N) iteration of getInsightsByEntry across all entries.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": true
+  },
+  {
+    "id": "memory-health-C08",
+    "source": "codex-round-1",
+    "text": "Draft's {error:'access_denied'} denial semantics do not match the repo's local non-owner idiom (owner-only fields nulled). Mirror memory_status's non-owner path.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "minor",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "memory-health-C09",
+    "source": "codex-round-1",
+    "text": "Payload contract/versioning missing. Add schema_version + generated_at; treat sections as add-only stable contracts since Heimdall couples to them.",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "memory-health-C10",
+    "source": "codex-round-1",
+    "text": "Section error strings must be sanitized like consolidation last_error (redact API-key-shaped content; no raw exception text, token prefixes, or credential paths).",
+    "classification": "valid",
+    "impact": "changed",
+    "severity": "major",
+    "caught_by_self_review": false
+  },
+  {
+    "id": "memory-health-C11",
+    "source": "codex-round-1",
+    "text": "Heimdall auth identity resolved against live memory: deployed Heimdall uses an owner-scoped MCP client at 127.0.0.1:3030, so an owner-only tool returns it data — provided its credential resolves to principalType 'owner' (a service/agent principal would get nothing).",
+    "classification": "valid",
+    "impact": "acknowledged",
+    "severity": "major",
+    "caught_by_self_review": true
+  }
+]
