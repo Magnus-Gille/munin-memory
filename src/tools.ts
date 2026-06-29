@@ -111,6 +111,8 @@ import {
   getSemanticMaxDistance,
   getActiveEmbeddingModel,
   getEmbeddingStatusReason,
+  isEmbeddingCircuitBreakerTripped,
+  getActiveEmbeddingDtype,
 } from "./embeddings.js";
 import {
   consolidateNamespace,
@@ -3884,6 +3886,33 @@ function computeEntryInsight(row: {
   };
 }
 
+// ---------------------------------------------------------------------------
+// memory_health — injectable section overrides for testing (M2)
+// ---------------------------------------------------------------------------
+
+/** A function that returns section data or throws to trigger degraded state. */
+type HealthSectionLoader = () => Record<string, unknown>;
+
+/** Per-section overrides for memory_health — set via _setHealthSectionOverridesForTesting. */
+interface HealthSectionOverrides {
+  embedding_queue?: HealthSectionLoader;
+  memory_size?: HealthSectionLoader;
+  retrieval?: HealthSectionLoader;
+  classification?: HealthSectionLoader;
+  maintenance?: HealthSectionLoader;
+  consolidation?: HealthSectionLoader;
+  security_events?: HealthSectionLoader;
+}
+
+let _healthSectionOverrides: HealthSectionOverrides | null = null;
+
+/** Test hook: inject per-section overrides for memory_health degradation tests. */
+export function _setHealthSectionOverridesForTesting(overrides: HealthSectionOverrides | null): void {
+  if (process.env.VITEST) {
+    _healthSectionOverrides = overrides;
+  }
+}
+
 export function registerTools(
   server: Server,
   db: Database.Database,
@@ -6871,72 +6900,82 @@ export function registerTools(
                 return accessDeniedResponse(ctx, "health");
               }
 
-              /**
-               * Sanitize an error for inclusion in a health payload.
-               * Redacts known secret patterns and truncates to prevent
-               * raw exception text from leaking credentials or stack traces.
-               */
-              function sanitizeHealthError(err: unknown): string {
-                const raw = err instanceof Error ? err.message : String(err);
-                return redactSecrets(raw).slice(0, 200);
-              }
-
+              const isOwner = true; // checked above — defense-in-depth gate for DB helpers
               const sections: Record<string, unknown> = {};
               let partial = false;
+              const ovrds = _healthSectionOverrides;
+
+              /**
+               * Log a section failure to stderr with the redacted diagnostic.
+               * The raw error text is NEVER returned in the payload — only the
+               * stable opaque string "section_unavailable" is sent to the caller.
+               * This prevents raw exception text, schema names, local paths, and
+               * secret patterns from leaking through the health response.
+               */
+              function logHealthError(section: string, err: unknown): void {
+                const raw = err instanceof Error ? err.message : String(err);
+                const redacted = redactSecrets(raw).slice(0, 200);
+                process.stderr.write(`[munin] memory_health section "${section}" failed: ${redacted}\n`);
+              }
+
+              /**
+               * Run a section loader (real or injected override), catching any
+               * thrown error. On success: sections[name] = { ok: true, ...data }.
+               * On failure: sections[name] = { ok: false, error: "section_unavailable" }
+               * and partial is set to true.
+               */
+              function buildSection(name: string, loader: HealthSectionLoader): void {
+                const actualLoader = (ovrds as Record<string, HealthSectionLoader | undefined> | null)?.[name] ?? loader;
+                try {
+                  sections[name] = { ok: true, ...actualLoader() };
+                } catch (err) {
+                  logHealthError(name, err);
+                  sections[name] = { ok: false, error: "section_unavailable" };
+                  partial = true;
+                }
+              }
 
               // --- Section 1: embedding_queue ---
-              try {
+              buildSection("embedding_queue", () => {
                 const activeModel = getActiveEmbeddingModel();
-                const counts = getEmbeddingQueueCounts(db, activeModel);
-                sections.embedding_queue = {
-                  ok: true,
+                const counts = getEmbeddingQueueCounts(db, activeModel, isOwner);
+                return {
                   ...counts,
                   active_model: activeModel,
-                  active_model_dtype: process.env.MUNIN_EMBEDDINGS_DTYPE ?? null,
+                  // Use getActiveEmbeddingDtype() so profile-resolved defaults (e.g.
+                  // zero-appliance → "q8") are reflected even when the env var is unset.
+                  active_model_dtype: getActiveEmbeddingDtype(),
                   embedding_available: isEmbeddingAvailable(),
                   status_reason: getEmbeddingStatusReason(),
-                  circuit_breaker_tripped: !isEmbeddingAvailable() && !isEmbeddingAvailable(),
+                  // Use real circuit-breaker accessor — distinct from config-disabled or
+                  // model-not-loaded (available=false covers all three; breaker only covers trips).
+                  circuit_breaker_tripped: isEmbeddingCircuitBreakerTripped(),
                   // No embedding_claimed_at column in schema → stuck is model-identity-based only.
                   stuck_note: "Stuck entries are defined as model-identity-based (generated_stale + generated_null); no embedding_claimed_at column exists for time-based detection.",
                 };
-              } catch (err) {
-                sections.embedding_queue = { ok: false, error: sanitizeHealthError(err) };
-                partial = true;
-              }
+              });
 
               // --- Section 2: memory_size ---
-              try {
-                const sizeCounts = getMemorySizeCounts(db);
-                sections.memory_size = { ok: true, ...sizeCounts };
-              } catch (err) {
-                sections.memory_size = { ok: false, error: sanitizeHealthError(err) };
-                partial = true;
-              }
+              buildSection("memory_size", () => {
+                return { ...getMemorySizeCounts(db, isOwner) };
+              });
 
               // --- Section 3: retrieval ---
-              try {
-                const retMetrics = getHealthRetrievalMetrics(db);
-                sections.retrieval = { ok: true, ...retMetrics };
-              } catch (err) {
-                sections.retrieval = { ok: false, error: sanitizeHealthError(err) };
-                partial = true;
-              }
+              buildSection("retrieval", () => {
+                return { ...getHealthRetrievalMetrics(db, isOwner) };
+              });
 
               // --- Section 4: classification ---
-              try {
-                const dist = getClassificationDistribution(db);
-                sections.classification = { ok: true, distribution: dist };
-              } catch (err) {
-                sections.classification = { ok: false, error: sanitizeHealthError(err) };
-                partial = true;
-              }
+              buildSection("classification", () => {
+                return { distribution: getClassificationDistribution(db, isOwner) };
+              });
 
               // --- Section 5: maintenance ---
-              // Option B: compute read-only counts from the same source helpers used by
-              // memory_orient, WITHOUT extracting anything from that hot path.
+              // Compute read-only counts from the same source helpers used by memory_orient,
+              // WITHOUT extracting anything from that hot path.
               // A parity test in tests/tools.test.ts asserts these counts match
-              // memory_orient(detail:"full") on a shared fixture.
-              try {
+              // memory_orient(detail:"full") on a shared fixture (all 5 kinds: M3).
+              buildSection("maintenance", () => {
                 const trackedAssessments = [...getTrackedStatusAssessments(db).values()];
                 let activeButStale = 0;
                 let temporalStale = 0;
@@ -6962,22 +7001,21 @@ export function registerTools(
                   ? getConsolidationBacklog(db).length
                   : 0;
 
-                // retrieved_unused: bounded count from health retrieval metrics (already computed)
-                // Re-use if available, else compute fresh
+                // retrieved_unused: reuse count from retrieval section (already computed with
+                // event-scoped joins via getInsightsByEntry, matching memory_orient's approach).
                 let retrievedUnused = 0;
-                try {
-                  const rm = sections.retrieval as Record<string, unknown> | undefined;
-                  if (rm?.ok === true && typeof rm.retrieved_unused_count === "number") {
-                    retrievedUnused = rm.retrieved_unused_count as number;
-                  } else {
-                    retrievedUnused = getHealthRetrievalMetrics(db).retrieved_unused_count;
+                const rm = sections.retrieval as Record<string, unknown> | undefined;
+                if (rm?.ok === true && typeof rm.retrieved_unused_count === "number") {
+                  retrievedUnused = rm.retrieved_unused_count as number;
+                } else {
+                  try {
+                    retrievedUnused = getHealthRetrievalMetrics(db, isOwner).retrieved_unused_count;
+                  } catch {
+                    // leave as 0
                   }
-                } catch {
-                  // leave as 0
                 }
 
-                sections.maintenance = {
-                  ok: true,
+                return {
                   counts: {
                     active_but_stale: activeButStale,
                     missing_status: missingStatus,
@@ -6986,22 +7024,18 @@ export function registerTools(
                     retrieved_unused: retrievedUnused,
                   },
                 };
-              } catch (err) {
-                sections.maintenance = { ok: false, error: sanitizeHealthError(err) };
-                partial = true;
-              }
+              });
 
               // --- Section 6: consolidation ---
               // Gated behind isConsolidationAvailable() per spec — always include
               // the section but populate health detail only when consolidation is configured.
-              try {
+              buildSection("consolidation", () => {
                 const health = getConsolidationHealth();
                 const backlog = getConsolidationBacklog(db).map((c) => ({
                   namespace: c.namespace,
                   unincorporated_log_count: c.unincorporated_log_count,
                 }));
-                sections.consolidation = {
-                  ok: true,
+                return {
                   available: health.available,
                   circuit_breaker_tripped: health.circuit_breaker_tripped,
                   failures: health.failures,
@@ -7012,21 +7046,14 @@ export function registerTools(
                   api_key_present: health.api_key_present,
                   backlog,
                 };
-              } catch (err) {
-                sections.consolidation = { ok: false, error: sanitizeHealthError(err) };
-                partial = true;
-              }
+              });
 
               // --- Section 7: security_events ---
               // Only exposes what real queries support: redaction_log + cross_zone_block in audit_log.
               // access-denied count from audit_log is NOT included (unsupported by schema).
-              try {
-                const secCounts = getSecurityEventCounts(db);
-                sections.security_events = { ok: true, ...secCounts };
-              } catch (err) {
-                sections.security_events = { ok: false, error: sanitizeHealthError(err) };
-                partial = true;
-              }
+              buildSection("security_events", () => {
+                return { ...getSecurityEventCounts(db, isOwner) };
+              });
 
               return okResult("health", {
                 partial,

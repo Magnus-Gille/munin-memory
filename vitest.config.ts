@@ -7,14 +7,14 @@ export default defineConfig({
       provider: "v8",
       include: ["src/**"],
       reporter: ["text-summary", "json-summary"],
-      // Ratchet floors, set just below measured coverage (2026-06-29: 88.69% stmts,
-      // 83.7% branches, 91.74% funcs, 89.78% lines). Raise them when coverage
-      // rises; never lower them to admit a regression.
+      // Ratchet floors, set just below measured coverage (2026-06-29: 89.06% stmts,
+      // 83.95% branches, 91.94% funcs, 90.13% lines — raised after M1-M5 health fixes).
+      // Raise them when coverage rises; never lower them to admit a regression.
       thresholds: {
-        statements: 87,
-        branches: 82,
-        functions: 90,
-        lines: 88,
+        statements: 89,
+        branches: 83,
+        functions: 91,
+        lines: 90,
       },
     },
   },

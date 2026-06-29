@@ -3265,7 +3265,9 @@ export interface EmbeddingQueueCounts {
 export function getEmbeddingQueueCounts(
   db: Database.Database,
   activeModel: string,
+  isOwner: boolean,
 ): EmbeddingQueueCounts {
+  if (!isOwner) throw new Error("memory_health helpers are owner-only");
   const rows = db.prepare(
     `SELECT
        SUM(CASE WHEN embedding_status = 'pending'    THEN 1 ELSE 0 END) AS pending,
@@ -3321,7 +3323,8 @@ export interface MemorySizeCounts {
   namespace_count: number;
 }
 
-export function getMemorySizeCounts(db: Database.Database): MemorySizeCounts {
+export function getMemorySizeCounts(db: Database.Database, isOwner: boolean): MemorySizeCounts {
+  if (!isOwner) throw new Error("memory_health helpers are owner-only");
   const row = db.prepare(
     `SELECT
        SUM(CASE WHEN entry_type = 'state' THEN 1 ELSE 0 END) AS state_count,
@@ -3355,7 +3358,9 @@ export interface HealthRetrievalMetrics {
   retrieved_unused_count: number;
 }
 
-export function getHealthRetrievalMetrics(db: Database.Database): HealthRetrievalMetrics {
+export function getHealthRetrievalMetrics(db: Database.Database, isOwner: boolean): HealthRetrievalMetrics {
+  if (!isOwner) throw new Error("memory_health helpers are owner-only");
+
   const since7d = new Date(Date.now() - 7 * 86400000).toISOString();
   const since30d = new Date(Date.now() - 30 * 86400000).toISOString();
 
@@ -3381,38 +3386,21 @@ export function getHealthRetrievalMetrics(db: Database.Database): HealthRetrieva
     }
   }
 
-  // Bounded retrieved-unused count: tracked entries with ≥5 impressions in 30d, zero follow-through.
-  // LIMIT 50 cap so this never materializes the full table.
+  // retrieved_unused_count: reuse getInsightsByEntry with the same event-scoped joins
+  // as memory_orient to avoid (a) stale-outcome false suppression (broad entry_id join
+  // across all time) and (b) LIMIT-inside-CTE capping the COUNT rather than the results.
+  // Limit matches memory_orient (10); count of entries with zero followthrough events.
+  const UNUSED_MIN_IMPRESSIONS = 5;
+  const UNUSED_LIMIT = 10;
   let unusedCount = 0;
   try {
-    const unusedRow = db.prepare(
-      `WITH impressions_w AS (
-         SELECT e_json.value AS entry_id, rev.id AS event_id
-         FROM retrieval_events rev,
-              json_each(rev.result_ids) AS e_json
-         WHERE rev.tool_name IN ('memory_query', 'memory_attention')
-           AND json_array_length(rev.result_ids) > 0
-           AND rev.timestamp >= ?
-       ),
-       per_entry AS (
-         SELECT
-           imp.entry_id,
-           COUNT(DISTINCT imp.event_id) AS impressions,
-           COUNT(DISTINCT CASE
-             WHEN ro.outcome_type IN ('opened_result','write_in_result_namespace','log_in_result_namespace')
-             THEN ro.retrieval_event_id
-           END) AS followthrough
-         FROM impressions_w imp
-         INNER JOIN entries e ON e.id = imp.entry_id
-           AND (e.namespace LIKE 'projects/%' OR e.namespace LIKE 'clients/%')
-         LEFT JOIN retrieval_outcomes ro ON ro.entry_id = imp.entry_id
-         GROUP BY imp.entry_id
-         HAVING impressions >= 5 AND followthrough = 0
-         LIMIT 50
-       )
-       SELECT COUNT(*) AS cnt FROM per_entry`,
-    ).get(since30d) as { cnt: number };
-    unusedCount = unusedRow.cnt;
+    const hasRecent = !!db.prepare(
+      "SELECT 1 FROM retrieval_events WHERE timestamp >= ? LIMIT 1",
+    ).get(since30d);
+    if (hasRecent) {
+      unusedCount = getInsightsByEntry(db, undefined, UNUSED_MIN_IMPRESSIONS, UNUSED_LIMIT, since30d, true)
+        .filter((r) => r.followthrough_events === 0).length;
+    }
   } catch {
     // retrieval_events may not exist in very old DBs; treat as 0
     unusedCount = 0;
@@ -3434,7 +3422,8 @@ export interface ClassificationDistribution {
   "client-restricted": number;
 }
 
-export function getClassificationDistribution(db: Database.Database): ClassificationDistribution {
+export function getClassificationDistribution(db: Database.Database, isOwner: boolean): ClassificationDistribution {
+  if (!isOwner) throw new Error("memory_health helpers are owner-only");
   const rows = db.prepare(
     `SELECT classification, COUNT(*) AS cnt FROM entries GROUP BY classification`,
   ).all() as Array<{ classification: string; cnt: number }>;
@@ -3467,7 +3456,8 @@ export interface SecurityEventCounts {
   cross_zone_blocks_30d: number;
 }
 
-export function getSecurityEventCounts(db: Database.Database): SecurityEventCounts {
+export function getSecurityEventCounts(db: Database.Database, isOwner: boolean): SecurityEventCounts {
+  if (!isOwner) throw new Error("memory_health helpers are owner-only");
   const since7d = new Date(Date.now() - 7 * 86400000).toISOString();
   const since30d = new Date(Date.now() - 30 * 86400000).toISOString();
 

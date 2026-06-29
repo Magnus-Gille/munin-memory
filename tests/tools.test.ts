@@ -3,10 +3,11 @@ import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { initDatabase, upsertConsolidationMetadata, writeState } from "../src/db.js";
-import { registerTools, computeCommitmentConfidence } from "../src/tools.js";
+import { registerTools, computeCommitmentConfidence, _setHealthSectionOverridesForTesting } from "../src/tools.js";
 import { ownerContext } from "../src/access.js";
 import type { AccessContext } from "../src/access.js";
 import { _setApiKey, _consolidationConfig, resetConsolidationCircuitBreaker, getConsolidationHealth, _resetHealthState } from "../src/consolidation.js";
+import { _embeddingConfig, isEmbeddingCircuitBreakerTripped, getActiveEmbeddingDtype, _forceCircuitBreakerTrippedForTesting, resetCircuitBreaker } from "../src/embeddings.js";
 import type { LibrarianRuntimeConfig } from "../src/librarian.js";
 
 const TEST_DB_PATH = "/tmp/munin-memory-tools-test.db";
@@ -7008,6 +7009,41 @@ describe("memory_health", () => {
     }
   });
 
+  it("degradation: injected throwing section → partial=true, error='section_unavailable', no secrets leak, siblings ok", async () => {
+    // M2: inject one failing section that throws a secret-bearing error.
+    _setHealthSectionOverridesForTesting({
+      embedding_queue: () => { throw new Error("failed /Users/x/secret OPENROUTER_API_KEY=sk-or-v1-abc123"); },
+    });
+    try {
+      const raw = await callTool("memory_health", {});
+      const result = parseToolResponse(raw) as Record<string, unknown>;
+      const text = (raw as { content: Array<{ text: string }> }).content[0].text;
+
+      // partial must be true
+      expect(result.partial).toBe(true);
+
+      const sections = result.sections as Record<string, Record<string, unknown>>;
+
+      // Failing section: ok=false, error is stable opaque string
+      expect(sections.embedding_queue.ok).toBe(false);
+      expect(sections.embedding_queue.error).toBe("section_unavailable");
+
+      // Raw error text, path, and secret must NOT appear in the serialized payload
+      expect(text).not.toContain("/Users/x/secret");
+      expect(text).not.toContain("sk-or-v1-");
+      expect(text).not.toContain("failed /Users");
+
+      // Sibling sections must remain ok
+      expect(sections.memory_size?.ok).toBe(true);
+      expect(sections.retrieval?.ok).toBe(true);
+      expect(sections.classification?.ok).toBe(true);
+      expect(sections.maintenance?.ok).toBe(true);
+      expect(sections.security_events?.ok).toBe(true);
+    } finally {
+      _setHealthSectionOverridesForTesting(null);
+    }
+  });
+
   it("error sanitization: section error must not expose secrets", async () => {
     // This test verifies the sanitization path works. Since we can't inject
     // a real secret-bearing error easily here, we verify the tool runs without
@@ -7018,6 +7054,74 @@ describe("memory_health", () => {
     expect(text).not.toMatch(/Error: .+at .+\n/);
     // sk-or type keys must not appear (consolidation health sanitizes these)
     expect(text).not.toMatch(/sk-or-v1-/);
+  });
+
+  it("circuit_breaker_tripped: false when embeddings not loaded (config-disabled state)", async () => {
+    // M4: In test env, embeddings aren't loaded (no real model). The circuit breaker
+    // should NOT be tripped — it's simply unloaded.
+    resetCircuitBreaker();
+    const raw = await callTool("memory_health", {});
+    const result = parseToolResponse(raw) as Record<string, unknown>;
+    const eq = (result.sections as Record<string, Record<string, unknown>>).embedding_queue;
+    expect(eq.ok).toBe(true);
+    // embedding_available = false (not loaded) but circuit_breaker_tripped must be false
+    expect(eq.circuit_breaker_tripped).toBe(false);
+  });
+
+  it("circuit_breaker_tripped: true when breaker actually tripped", async () => {
+    // M4: Force the circuit breaker tripped state and verify it's reflected.
+    _forceCircuitBreakerTrippedForTesting(true);
+    try {
+      const raw = await callTool("memory_health", {});
+      const result = parseToolResponse(raw) as Record<string, unknown>;
+      const eq = (result.sections as Record<string, Record<string, unknown>>).embedding_queue;
+      expect(eq.ok).toBe(true);
+      expect(eq.circuit_breaker_tripped).toBe(true);
+    } finally {
+      _forceCircuitBreakerTrippedForTesting(false);
+      resetCircuitBreaker();
+    }
+  });
+
+  it("active_model_dtype comes from profile-resolved config (not raw env)", async () => {
+    // L5: active_model_dtype must reflect the resolved dtype (including profile defaults).
+    // Simulate zero-appliance: dtype resolved to "q8".
+    const savedDtype = _embeddingConfig.dtype;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (_embeddingConfig as any).dtype = "q8";
+    try {
+      const raw = await callTool("memory_health", {});
+      const result = parseToolResponse(raw) as Record<string, unknown>;
+      const eq = (result.sections as Record<string, Record<string, unknown>>).embedding_queue;
+      expect(eq.active_model_dtype).toBe("q8");
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (_embeddingConfig as any).dtype = savedDtype;
+    }
+  });
+
+  it("active_model_dtype is null when dtype unset (no profile, no env var)", async () => {
+    // L5: With no profile and no MUNIN_EMBEDDINGS_DTYPE, dtype resolves to undefined → null.
+    const savedDtype = _embeddingConfig.dtype;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (_embeddingConfig as any).dtype = undefined;
+    try {
+      const raw = await callTool("memory_health", {});
+      const result = parseToolResponse(raw) as Record<string, unknown>;
+      const eq = (result.sections as Record<string, Record<string, unknown>>).embedding_queue;
+      expect(eq.active_model_dtype).toBeNull();
+      // Verify getActiveEmbeddingDtype() also returns null (export consistent)
+      expect(getActiveEmbeddingDtype()).toBeNull();
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (_embeddingConfig as any).dtype = savedDtype;
+    }
+  });
+
+  it("isEmbeddingCircuitBreakerTripped is false by default (no real trips in test env)", () => {
+    // M4: Direct export sanity check.
+    resetCircuitBreaker();
+    expect(isEmbeddingCircuitBreakerTripped()).toBe(false);
   });
 
   it("maintenance counts parity: memory_health matches memory_orient on same fixture", async () => {
@@ -7048,8 +7152,10 @@ describe("memory_health", () => {
       orientCounts[item.issue] = (orientCounts[item.issue] ?? 0) + 1;
     }
 
-    // Parity: each tracked kind must match
-    for (const kind of ["active_but_stale", "missing_status", "temporal_stale"] as const) {
+    // Parity: each tracked kind must match orient's maintenance item count.
+    // consolidation_backlog: orient emits one item per namespace; health uses getConsolidationBacklog().length.
+    // retrieved_unused: both use getInsightsByEntry with identical params — they agree on 0 in a clean DB.
+    for (const kind of ["active_but_stale", "missing_status", "temporal_stale", "consolidation_backlog", "retrieved_unused"] as const) {
       const orientCount = orientCounts[kind] ?? 0;
       const healthCount = healthCounts[kind] ?? 0;
       expect(

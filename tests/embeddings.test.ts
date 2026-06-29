@@ -37,6 +37,9 @@ import {
   resolveEmbeddingsDtype,
   _setPipelineFactoryForTesting,
   getActiveEmbeddingModel,
+  isEmbeddingCircuitBreakerTripped,
+  getActiveEmbeddingDtype,
+  _forceCircuitBreakerTrippedForTesting,
 } from "../src/embeddings.js";
 import { executeQuery } from "../benchmark/runner.js";
 
@@ -1164,4 +1167,74 @@ describe("worker stale-model convergence", () => {
       expect(entry.embedding_model).toBe(getActiveEmbeddingModel());
     },
   );
+});
+
+// ─── isEmbeddingCircuitBreakerTripped (M4) ───────────────────────────────────
+
+describe("isEmbeddingCircuitBreakerTripped", () => {
+  afterEach(() => {
+    resetCircuitBreaker();
+  });
+
+  it("returns false when breaker is not tripped (extractor not loaded, config-disabled)", () => {
+    // In test env extractor is set via mock; reset to simulate cold start.
+    resetCircuitBreaker();
+    expect(isEmbeddingCircuitBreakerTripped()).toBe(false);
+  });
+
+  it("returns true after _forceCircuitBreakerTrippedForTesting(true)", () => {
+    _forceCircuitBreakerTrippedForTesting(true);
+    expect(isEmbeddingCircuitBreakerTripped()).toBe(true);
+  });
+
+  it("returns false after reset", () => {
+    _forceCircuitBreakerTrippedForTesting(true);
+    resetCircuitBreaker();
+    expect(isEmbeddingCircuitBreakerTripped()).toBe(false);
+  });
+
+  it("is distinct from isEmbeddingAvailable: available=false does not imply breaker tripped", () => {
+    // With a null extractor, available=false but breaker is not tripped.
+    _setExtractorForTesting(null);
+    resetCircuitBreaker();
+    expect(isEmbeddingAvailable()).toBe(false);
+    expect(isEmbeddingCircuitBreakerTripped()).toBe(false);
+    // Restore mock extractor for subsequent tests.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    _setExtractorForTesting(mockExtractor as any);
+  });
+});
+
+// ─── getActiveEmbeddingDtype (L5) ────────────────────────────────────────────
+
+describe("getActiveEmbeddingDtype", () => {
+  const originalDtype = _embeddingConfig.dtype;
+
+  afterEach(() => {
+    // Restore original dtype after each test.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (_embeddingConfig as any).dtype = originalDtype;
+  });
+
+  it("returns null when dtype is unset (library default)", () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (_embeddingConfig as any).dtype = undefined;
+    expect(getActiveEmbeddingDtype()).toBeNull();
+  });
+
+  it("returns the configured dtype string when set", () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (_embeddingConfig as any).dtype = "q8";
+    expect(getActiveEmbeddingDtype()).toBe("q8");
+  });
+
+  it("simulates zero-appliance profile: dtype=q8 resolves to 'q8'", () => {
+    // Under MUNIN_PROFILE=zero-appliance with MUNIN_EMBEDDINGS_DTYPE unset,
+    // resolveKnob yields "q8" from the profile default. config.dtype is set
+    // at module load time; we simulate the resolved state by directly setting
+    // _embeddingConfig.dtype = "q8" and confirming getActiveEmbeddingDtype returns it.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (_embeddingConfig as any).dtype = "q8";
+    expect(getActiveEmbeddingDtype()).toBe("q8");
+  });
 });

@@ -291,6 +291,34 @@ export function resetCircuitBreaker(): void {
   circuitBreakerDisabled = false;
 }
 
+/**
+ * Returns true if the embedding circuit breaker has tripped (consecutive
+ * failures ≥ MUNIN_EMBEDDINGS_MAX_FAILURES). Distinct from
+ * `isEmbeddingAvailable()`: available=false covers config-disabled,
+ * sqlite-vec missing, and model-not-loaded — none of which are a trip.
+ */
+export function isEmbeddingCircuitBreakerTripped(): boolean {
+  return circuitBreakerDisabled;
+}
+
+/**
+ * Returns the ONNX dtype resolved for the embedding model (explicit env var
+ * > MUNIN_PROFILE default > hard default). Returns null when no dtype was
+ * configured (library default, typically fp32). Use this instead of reading
+ * process.env.MUNIN_EMBEDDINGS_DTYPE directly so that profile-resolved
+ * defaults (e.g. zero-appliance → "q8") are reflected.
+ */
+export function getActiveEmbeddingDtype(): string | null {
+  return config.dtype ?? null;
+}
+
+/** Test hook: directly set circuitBreakerDisabled for state testing. */
+export function _forceCircuitBreakerTrippedForTesting(tripped: boolean): void {
+  if (process.env.VITEST) {
+    circuitBreakerDisabled = tripped;
+  }
+}
+
 // --- Background worker ---
 
 export function startEmbeddingWorker(db: Database.Database): void {
