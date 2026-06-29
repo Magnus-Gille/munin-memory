@@ -3530,7 +3530,7 @@ const TOOL_DEFINITIONS = [
       properties: {
         namespace: {
           type: "string",
-          description: "Tracked namespace to update. Must be under `projects/` or `clients/`.",
+          description: "Tracked namespace to update. Must be one of the caller's configured tracked namespaces (default `projects/` or `clients/`).",
         },
         phase: {
           type: "string",
@@ -5583,7 +5583,7 @@ export function registerTools(
                 normalizedValidUntil = timestampCheck.value;
               }
 
-              const isTrackedStatus = key === "status" && isTrackedNamespace(namespace);
+              const isTrackedStatus = key === "status" && isTrackedNamespace(namespace, resolveTrackedPatterns(db, ctx));
               const warnings: string[] = [];
 
               // Advisory: flag instruction-shaped content (prompt-injection / memory-poisoning).
@@ -5724,8 +5724,8 @@ export function registerTools(
               if (!nsCheck.valid) {
                 return errResult("update_status", "validation_error", nsCheck.error!);
               }
-              if (!isTrackedNamespace(namespace)) {
-                return errResult("update_status", "validation_error", "memory_update_status only supports tracked namespaces under projects/* or clients/*.");
+              if (!isTrackedNamespace(namespace, resolveTrackedPatterns(db, ctx))) {
+                return errResult("update_status", "validation_error", "memory_update_status only supports the caller's configured tracked namespaces (default projects/* or clients/*).");
               }
               if (!canWrite(ctx, namespace)) {
                 return accessDeniedResponse(ctx, "update_status");

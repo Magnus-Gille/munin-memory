@@ -421,29 +421,38 @@ export function addPrincipal(
     const profile = getTaxonomyProfile(opts.profile)!;
     const metaNs = `${profileHome}/meta`;
     const { conventions, trackedPatterns } = materializeProfile(profile, profileHome);
-    writeState(
-      db,
-      metaNs,
-      "conventions",
-      conventions,
-      ["conventions", `profile:${profile.name}`],
-      opts.principalId,
-    );
-    writeState(
-      db,
-      metaNs,
-      "config",
-      JSON.stringify({ tracked_patterns: trackedPatterns }, null, 2),
-      ["config", `profile:${profile.name}`],
-      opts.principalId,
-    );
-    auditLog(
-      db,
-      "principal_profile_seed",
-      opts.principalId,
-      `profile=${profile.name}, home=${profileHome}`,
-    );
-    seeded = { profile: profile.name, conventions: metaNs, config: metaNs };
+    try {
+      writeState(
+        db,
+        metaNs,
+        "conventions",
+        conventions,
+        ["conventions", `profile:${profile.name}`],
+        opts.principalId,
+      );
+      writeState(
+        db,
+        metaNs,
+        "config",
+        JSON.stringify({ tracked_patterns: trackedPatterns }, null, 2),
+        ["config", `profile:${profile.name}`],
+        opts.principalId,
+      );
+      auditLog(
+        db,
+        "principal_profile_seed",
+        opts.principalId,
+        `profile=${profile.name}, home=${profileHome}`,
+      );
+      seeded = { profile: profile.name, conventions: metaNs, config: metaNs };
+    } catch (err) {
+      // Seeding runs outside the principal-insert transaction (writeState opens
+      // its own). If any seed write fails, roll back so we never leave a live
+      // principal with a missing or half-written profile.
+      db.prepare("DELETE FROM entries WHERE owner_principal_id = ? AND namespace = ?").run(opts.principalId, metaNs);
+      db.prepare("DELETE FROM principals WHERE id = ?").run(id);
+      throw err;
+    }
   }
 
   return { id, principalId: opts.principalId, principalType: opts.principalType, token, seeded };

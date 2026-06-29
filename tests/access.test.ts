@@ -582,17 +582,23 @@ describe("principalHomePrefix / principalMetaNamespace", () => {
     expect(principalMetaNamespace(ctx)).toBe("users/sara/meta");
   });
 
-  it("skips read-only and lone-wildcard rules", () => {
+  it("skips read-only and lone-wildcard rules, taking the first rw prefix", () => {
     const ctx = ctxWith([
       { pattern: "*", permissions: "rw" },
       { pattern: "docs/*", permissions: "read" },
-      { pattern: "inbox/p/*", permissions: "write" },
+      { pattern: "inbox/p/*", permissions: "rw" },
     ]);
     expect(principalHomePrefix(ctx)).toBe("inbox/p");
     expect(principalMetaNamespace(ctx)).toBe("inbox/p/meta");
   });
 
-  it("returns null when there is no writable prefix rule", () => {
+  it("requires rw — a write-only prefix is not a valid home (must be readable)", () => {
+    const ctx = ctxWith([{ pattern: "inbox/p/*", permissions: "write" }]);
+    expect(principalHomePrefix(ctx)).toBeNull();
+    expect(principalMetaNamespace(ctx)).toBeNull();
+  });
+
+  it("returns null when there is no rw prefix rule", () => {
     const ctx = ctxWith([{ pattern: "docs/*", permissions: "read" }]);
     expect(principalHomePrefix(ctx)).toBeNull();
     expect(principalMetaNamespace(ctx)).toBeNull();

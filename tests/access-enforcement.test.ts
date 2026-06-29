@@ -1594,4 +1594,36 @@ describe("end-to-end: profile onboarding → per-principal orient", () => {
       .map((e) => e.namespace);
     expect(ns).toContain("users/sara/home/garden");
   });
+
+  it("a household principal can memory_update_status its own configured tracked namespace", async () => {
+    addPrincipal(db, {
+      principalId: "sara",
+      principalType: "family",
+      rules: [{ pattern: "users/sara/*", permissions: "rw" }],
+      profile: "household",
+    });
+    // users/sara/home/* is tracked by Sara's seeded config, so the write-side
+    // guard must accept update_status here (it used to hard-reject anything
+    // outside projects/*|clients/*).
+    const ok = parse(
+      await familyCall("memory_update_status", {
+        namespace: "users/sara/home/cleanup",
+        phase: "Active",
+        current_work: "Declutter the garage",
+        next_steps: ["Sort tools"],
+        lifecycle: "active",
+      }),
+    ) as { status?: string; error?: string };
+    expect(ok.error).toBeUndefined();
+    expect(ok.status).toBe("created");
+
+    // A namespace NOT in her tracked patterns is still rejected.
+    const rejected = parse(
+      await familyCall("memory_update_status", {
+        namespace: "users/sara/notes/random",
+        current_work: "x",
+      }),
+    ) as { error?: string };
+    expect(rejected.error).toBe("validation_error");
+  });
 });

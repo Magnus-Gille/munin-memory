@@ -359,18 +359,22 @@ export function filterByAccess<T extends { namespace: string }>(
 
 /**
  * The namespace prefix under which a non-owner principal's personal settings
- * (conventions, config) live. Derived from the principal's FIRST writable
- * "prefix/*" rule — e.g. a principal granted rw on "users/sara/*" has home
- * "users/sara". Read-only rules and the lone "*" wildcard are skipped: a
- * personal home must be a concrete, writable subtree the principal owns.
+ * (conventions, config) live. Derived from the principal's FIRST read-write
+ * (`rw`) "prefix/*" rule — e.g. a principal granted rw on "users/sara/*" has
+ * home "users/sara". Read-only rules, write-only rules, and the lone "*"
+ * wildcard are all skipped: a personal home must be a concrete, READABLE +
+ * writable subtree the principal owns (readable so they can see their own
+ * seeded settings).
  *
  * Returns null for:
  *   - the owner (owner uses the global meta/* namespaces, not a personal home)
- *   - any principal with no writable "prefix/*" rule
+ *   - any principal with no `rw` "prefix/*" rule
  */
 export function homePrefixFromRules(rules: NamespaceRule[]): string | null {
   for (const rule of rules) {
-    if (rule.permissions !== "write" && rule.permissions !== "rw") continue;
+    // A personal home must be readable by the principal (require rw, not merely
+    // writable) so a write-only rule is never chosen as a home.
+    if (rule.permissions !== "rw") continue;
     if (rule.pattern === "*") continue;
     if (rule.pattern.endsWith("/*")) {
       return rule.pattern.slice(0, -2); // "users/sara/*" → "users/sara"
