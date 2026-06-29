@@ -583,17 +583,60 @@ describe("memory_orient — access enforcement", () => {
     });
   });
 
-  it("family orient → conventions is null, dashboard filtered to accessible namespaces", async () => {
+  it("family orient → universal physics-default conventions, dashboard filtered to accessible namespaces", async () => {
     const raw = await familyCall("memory_orient");
     const result = parse(raw) as {
-      conventions: null | unknown;
+      conventions: { content: string; source?: string; compact?: boolean } | null;
       dashboard: Record<string, Array<{ namespace: string }>>;
     };
-    expect(result.conventions).toBeNull();
+    // Non-owner principals now receive the universal physics-only baseline
+    // (not null), with NO owner-specific consultant taxonomy leaking through.
+    expect(result.conventions).not.toBeNull();
+    expect(result.conventions!.source).toBe("default");
+    expect(result.conventions!.content).toContain("State entries");
+    expect(result.conventions!.content).not.toContain("clients/");
+    expect(result.conventions!.content).not.toContain("Owner conventions");
 
     // Dashboard should not contain projects/foo
     const allDashboardNamespaces = Object.values(result.dashboard).flat().map((e) => e.namespace);
     expect(allDashboardNamespaces).not.toContain("projects/foo");
+  });
+
+  it("family with personal conventions → full reveals them; compact stays neutral with a hint", async () => {
+    // Owner seeds Sara's personal conventions in her own meta namespace.
+    await ownerCall("memory_write", {
+      namespace: "users/sara/meta",
+      key: "conventions",
+      content: "# Sara's world\nGroceries live in shared/family/shopping.",
+    });
+
+    const full = parse(await familyCall("memory_orient", { include_full_conventions: true })) as {
+      conventions: { content: string; source?: string };
+    };
+    expect(full.conventions.source).toBe("principal");
+    expect(full.conventions.content).toContain("Sara's world");
+
+    const compact = parse(await familyCall("memory_orient")) as {
+      conventions: { content: string; compact?: boolean; source?: string; full_conventions_hint?: string };
+    };
+    expect(compact.conventions.compact).toBe(true);
+    expect(compact.conventions.source).toBe("principal");
+    expect(compact.conventions.full_conventions_hint).toContain("users/sara/meta");
+    // Compact stays the neutral baseline — personal detail only surfaces on `full`.
+    expect(compact.conventions.content).not.toContain("Sara's world");
+  });
+
+  it("family can write its own conventions and see them on full orient", async () => {
+    await familyCall("memory_write", {
+      namespace: "users/sara/meta",
+      key: "conventions",
+      content: "# My rules\nKeep it tidy.",
+    });
+    const full = parse(await familyCall("memory_orient", { include_full_conventions: true })) as {
+      conventions: { content: string; source?: string };
+    };
+    expect(full.conventions.source).toBe("principal");
+    expect(full.conventions.content).toContain("My rules");
   });
 
   it("owner orient → conventions present, full dashboard", async () => {

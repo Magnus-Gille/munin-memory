@@ -9,6 +9,8 @@ import {
   canWrite,
   canReadSubtree,
   filterByAccess,
+  principalHomePrefix,
+  principalMetaNamespace,
   resolveAccessContext,
   ownerContext,
   type AccessContext,
@@ -554,5 +556,45 @@ describe("resolveAccessContext", () => {
     // Either zero-access because insert was rejected (unknown) or because JSON.parse failed
     expect(ctx.principalId).toBe("anonymous");
     expect(ctx.principalType).toBe("external");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// principalHomePrefix / principalMetaNamespace
+// ---------------------------------------------------------------------------
+
+describe("principalHomePrefix / principalMetaNamespace", () => {
+  function ctxWith(rules: NamespaceRule[]): AccessContext {
+    return { principalId: "p", principalType: "family", accessibleNamespaces: rules };
+  }
+
+  it("returns null for the owner (owner uses global meta/*)", () => {
+    expect(principalHomePrefix(ownerContext())).toBeNull();
+    expect(principalMetaNamespace(ownerContext())).toBeNull();
+  });
+
+  it("derives home from the first writable prefix rule", () => {
+    const ctx = ctxWith([
+      { pattern: "users/sara/*", permissions: "rw" },
+      { pattern: "shared/family/*", permissions: "rw" },
+    ]);
+    expect(principalHomePrefix(ctx)).toBe("users/sara");
+    expect(principalMetaNamespace(ctx)).toBe("users/sara/meta");
+  });
+
+  it("skips read-only and lone-wildcard rules", () => {
+    const ctx = ctxWith([
+      { pattern: "*", permissions: "rw" },
+      { pattern: "docs/*", permissions: "read" },
+      { pattern: "inbox/p/*", permissions: "write" },
+    ]);
+    expect(principalHomePrefix(ctx)).toBe("inbox/p");
+    expect(principalMetaNamespace(ctx)).toBe("inbox/p/meta");
+  });
+
+  it("returns null when there is no writable prefix rule", () => {
+    const ctx = ctxWith([{ pattern: "docs/*", permissions: "read" }]);
+    expect(principalHomePrefix(ctx)).toBeNull();
+    expect(principalMetaNamespace(ctx)).toBeNull();
   });
 });
