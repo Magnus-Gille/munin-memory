@@ -487,7 +487,12 @@ npx munin-admin principals list
 npx munin-admin principals add sara --type family --email sara@example.com \
   --rules '[{"pattern":"users/sara/*","permissions":"rw"},{"pattern":"shared/family/*","permissions":"rw"}]'
 # --profile seeds a taxonomy (freelancer | researcher | household | personal-knowledge)
-# into the principal's <home>/meta conventions + config:
+# into the principal's <home>/meta conventions + config. The <home> is the FIRST
+# writable "prefix/*" rule, so list the principal's own users/<id>/* rule BEFORE any
+# shared rule — seeding is REJECTED if the derived <home>/meta is also readable by
+# another active non-owner principal (it would leak the principal's personal taxonomy).
+# Seeds are written at the principal's effective max classification (override) so the
+# principal can read its own conventions even under MUNIN_LIBRARIAN_ENABLED (#164):
 npx munin-admin principals add sara --type family \
   --rules '[{"pattern":"users/sara/*","permissions":"rw"}]' --profile household
 npx munin-admin principals update sara --email newemail@example.com

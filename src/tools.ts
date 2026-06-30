@@ -2157,6 +2157,7 @@ function buildExtractSuggestions(
   signals: ExtractSignals,
   namespace: string | undefined,
   relatedEntries: ExtractRelatedEntry[],
+  trackedPatterns: string[] = [...DEFAULT_TRACKED_PATTERNS],
 ): {
   suggestions: ExtractSuggestion[];
   warnings: string[];
@@ -2173,7 +2174,7 @@ function buildExtractSuggestions(
   const duplicateLines: string[] = [];
   const suggestions: ExtractSuggestion[] = [];
 
-  const isTracked = isTrackedNamespace(namespace);
+  const isTracked = isTrackedNamespace(namespace, trackedPatterns);
   const isPeopleNamespace = namespace.startsWith("people/");
 
   const dedupeLine = (line: string): boolean => {
@@ -2604,6 +2605,7 @@ function entryHasTerminalLifecycle(entry: Entry): boolean {
 function extractCommitmentsFromEntry(
   entry: Entry,
   resolvedNamespaces?: Set<string>,
+  trackedPatterns: string[] = [...DEFAULT_TRACKED_PATTERNS],
 ): DerivedCommitmentInput[] {
   const commitments: DerivedCommitmentInput[] = [];
   const seenNormalized = new Set<string>();
@@ -2630,7 +2632,7 @@ function extractCommitmentsFromEntry(
     commitments.push(commitment);
   };
 
-  pushTrackedNextStepCommitments(entry, pushCommitment);
+  pushTrackedNextStepCommitments(entry, pushCommitment, trackedPatterns);
 
   for (const segment of extractCandidateSegments(entry.content)) {
     const derived = buildSegmentCommitment(segment, entry.updated_at);
@@ -2643,8 +2645,9 @@ function extractCommitmentsFromEntry(
 function pushTrackedNextStepCommitments(
   entry: Entry,
   pushCommitment: (commitment: DerivedCommitmentInput, normalizedText: string) => void,
+  trackedPatterns: string[] = [...DEFAULT_TRACKED_PATTERNS],
 ): void {
-  if (entry.entry_type === "state" && entry.key === "status" && isTrackedNamespace(entry.namespace)) {
+  if (entry.entry_type === "state" && entry.key === "status" && isTrackedNamespace(entry.namespace, trackedPatterns)) {
     const structured = parseStructuredStatus(entry.content);
     for (const step of structured.next_steps ?? []) {
       if (isNoneLikeStatusText(step)) continue;
@@ -2723,8 +2726,15 @@ function syncCommitmentsForScope(
   );
 
   const resolvedNamespaces = getResolvedNamespaces(db);
+  const trackedPatterns = resolveTrackedPatterns(db, ctx);
   for (const entry of filtered.allowed) {
-    syncCommitmentsForEntry(db, entry.id, extractCommitmentsFromEntry(entry, resolvedNamespaces));
+    // Only reconcile commitments for namespaces the caller actually tracks.
+    // If the caller doesn't track the namespace, extractCommitmentsFromEntry
+    // returns [] for tracked_next_step items, and syncCommitmentsForEntry would
+    // then mark another principal's open commitment as done — silently corrupting
+    // cross-principal commitment state. (#164 Codex Finding 1)
+    if (!isTrackedNamespace(entry.namespace, trackedPatterns)) continue;
+    syncCommitmentsForEntry(db, entry.id, extractCommitmentsFromEntry(entry, resolvedNamespaces, trackedPatterns));
   }
 
   return filtered.redacted;
@@ -2746,6 +2756,7 @@ function listFreshCommitmentRows(
   const loggedEntryIds = new Set<string>();
   const redactedSources = syncCommitmentsForScope(db, ctx, toolName, namespace, since, sessionId, loggedEntryIds);
   const resolvedNamespaces = getResolvedNamespaces(db);
+  const trackedPatterns = resolveTrackedPatterns(db, ctx);
 
   const refreshCandidates = listCommitments(db, {
     namespace,
@@ -2788,7 +2799,11 @@ function listFreshCommitmentRows(
       redactedSources.push(...entryFilter.redacted);
       continue;
     }
-    syncCommitmentsForEntry(db, entry.id, extractCommitmentsFromEntry(entry, resolvedNamespaces));
+    // Same guard as syncCommitmentsForScope: skip entries the caller doesn't
+    // track to avoid marking another principal's commitments as done.
+    // (#164 Codex Finding 1)
+    if (!isTrackedNamespace(entry.namespace, trackedPatterns)) continue;
+    syncCommitmentsForEntry(db, entry.id, extractCommitmentsFromEntry(entry, resolvedNamespaces, trackedPatterns));
   }
 
   const rows = listCommitments(db, {
@@ -4909,7 +4924,12 @@ export function registerTools(
               );
               const relatedEntries = buildExtractRelatedEntries(db, scope.primaryNamespace, ctx, sessionId);
               const signals = extractConversationSignals(extractArgs.conversation_text);
-              const built = buildExtractSuggestions(signals, scope.primaryNamespace, relatedEntries.entries);
+              const built = buildExtractSuggestions(
+                signals,
+                scope.primaryNamespace,
+                relatedEntries.entries,
+                resolveTrackedPatterns(db, ctx),
+              );
               const extractRedactedSources = combineRedactedSources(
                 visibleTrackedStatuses.redacted,
                 relatedEntries.redacted,
@@ -5714,7 +5734,7 @@ export function registerTools(
 
                 const patchedEntry = readState(db, namespace, key);
                 if (patchedEntry) {
-                  syncCommitmentsForEntry(db, patchedEntry.id, extractCommitmentsFromEntry(patchedEntry, getResolvedNamespaces(db)));
+                  syncCommitmentsForEntry(db, patchedEntry.id, extractCommitmentsFromEntry(patchedEntry, getResolvedNamespaces(db), resolveTrackedPatterns(db, ctx)));
                 }
 
                 const patchedResponse: Record<string, unknown> = { status: "patched", id: patchResult.id, namespace, key, hint: hintPatch };
@@ -5863,7 +5883,7 @@ export function registerTools(
               if (result.id) {
                 const writtenEntry = getById(db, result.id);
                 if (writtenEntry) {
-                  syncCommitmentsForEntry(db, writtenEntry.id, extractCommitmentsFromEntry(writtenEntry, getResolvedNamespaces(db)));
+                  syncCommitmentsForEntry(db, writtenEntry.id, extractCommitmentsFromEntry(writtenEntry, getResolvedNamespaces(db), resolveTrackedPatterns(db, ctx)));
                 }
               }
 
@@ -6014,7 +6034,7 @@ export function registerTools(
               if (result.id) {
                 const statusEntry = getById(db, result.id);
                 if (statusEntry) {
-                  syncCommitmentsForEntry(db, statusEntry.id, extractCommitmentsFromEntry(statusEntry, getResolvedNamespaces(db)));
+                  syncCommitmentsForEntry(db, statusEntry.id, extractCommitmentsFromEntry(statusEntry, getResolvedNamespaces(db), resolveTrackedPatterns(db, ctx)));
                 }
               }
 
@@ -6746,7 +6766,7 @@ export function registerTools(
               }
               const logEntry = getById(db, result.id);
               if (logEntry) {
-                syncCommitmentsForEntry(db, logEntry.id, extractCommitmentsFromEntry(logEntry, getResolvedNamespaces(db)));
+                syncCommitmentsForEntry(db, logEntry.id, extractCommitmentsFromEntry(logEntry, getResolvedNamespaces(db), resolveTrackedPatterns(db, ctx)));
               }
               // Analytics: log log outcome correlated to prior retrieval in this session
               if (sessionId) {
