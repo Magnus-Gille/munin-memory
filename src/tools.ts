@@ -8,12 +8,14 @@ import type { CallToolRequest } from "@modelcontextprotocol/sdk/types.js";
 import type Database from "better-sqlite3";
 import {
   type AccessContext,
+  type NamespaceRule,
   ownerContext,
   canRead,
   canWrite,
   canReadSubtree,
   filterByAccess,
   principalMetaNamespace,
+  homePrefixFromRules,
   getContextMaxClassification,
   getContextTransportType,
 } from "./access.js";
@@ -989,6 +991,9 @@ import {
   getDaysUntil,
   isTrackedNamespace,
   DEFAULT_TRACKED_PATTERNS,
+  REFERENCE_NAMESPACE_PATTERNS,
+  detectUntrackedNamespaces,
+  detectUntrackedNamespaceClusters,
   canonicalizeTags,
   stripReservedTags,
   getLifecycleTags,
@@ -4068,6 +4073,47 @@ const RETRIEVED_UNUSED_ORIENT_MIN = 3;
 /** Rolling window in days for both surfaces. */
 const RETRIEVED_UNUSED_SINCE_DAYS = 30;
 
+// --- Untracked-namespace (convention proposal) thresholds (ADR 0001 layer-2) ---
+/** Minimum untracked clusters before memory_orient emits an untracked_namespace_cluster item. */
+const UNTRACKED_NAMESPACE_ORIENT_MIN = 3;
+/** Max untracked namespaces named inline in the orient maintenance suggestion. */
+const UNTRACKED_NAMESPACE_ORIENT_PREVIEW = 5;
+
+/**
+ * Collect all home-namespace PATTERNS (`<home>/*`) for active, non-revoked,
+ * non-owner principals by reading `principals.namespace_rules`. Used to augment
+ * the reference allowlist when running untracked-namespace detection, so the
+ * owner is never nagged about clusters that are actually a principal's personal
+ * home (e.g. `family/sara/*`, `inbox/p/alice/*`) — even when the home prefix
+ * is not under the hard-coded `users/*` pattern (fix #1 — Codex review).
+ *
+ * Query is lightweight (one SELECT without JOINs; principals table is tiny) and
+ * only runs in the owner-only, unscoped path of memory_patterns and memory_orient.
+ */
+function getNonOwnerHomePrefixPatterns(db: Database.Database): string[] {
+  const now = new Date().toISOString();
+  const rows = db
+    .prepare(
+      `SELECT namespace_rules FROM principals
+       WHERE principal_type != 'owner'
+         AND (revoked_at IS NULL OR revoked_at > ?)
+         AND (expires_at IS NULL OR expires_at > ?)`,
+    )
+    .all(now, now) as Array<{ namespace_rules: string }>;
+
+  const patterns: string[] = [];
+  for (const row of rows) {
+    try {
+      const rules = JSON.parse(row.namespace_rules) as NamespaceRule[];
+      const home = homePrefixFromRules(rules);
+      if (home) patterns.push(`${home}/*`);
+    } catch {
+      // Malformed rules — skip; don't crash the orient hot path.
+    }
+  }
+  return patterns;
+}
+
 function computeEntryInsight(row: {
   entry_id: string;
   namespace: string | null;
@@ -4382,6 +4428,38 @@ export function registerTools(
                     };
                     maintenanceSortKey.set(unusedOrientItem, "");
                     maintenanceNeeded.push(unusedOrientItem);
+                  }
+                }
+
+                // Block 4: Untracked-namespace clusters — namespaces the owner keeps
+                // writing to that are not on the dashboard and not conventional
+                // reference namespaces (ADR 0001 layer-2 observe→propose). Advisory
+                // nag at the cluster threshold; the full proposal + crystallize write
+                // is built by memory_patterns. Derived from the cheap namespace-count
+                // aggregate, so no per-entry scan on the orient hot path.
+                // Fix #1 (Codex): augment the reference allowlist with the home-namespace
+                // patterns of all active non-owner principals so the owner is never nagged
+                // about a cluster that belongs to a principal's personal workspace.
+                {
+                  const nonOwnerHomePatternsOrient = getNonOwnerHomePrefixPatterns(db);
+                  const untrackedClusters = detectUntrackedNamespaceClusters(namespaces, orientTrackedPatterns, {
+                    referencePatterns: [...REFERENCE_NAMESPACE_PATTERNS, ...nonOwnerHomePatternsOrient],
+                  });
+                  if (untrackedClusters.length >= UNTRACKED_NAMESPACE_ORIENT_MIN) {
+                    const named = untrackedClusters
+                      .slice(0, UNTRACKED_NAMESPACE_ORIENT_PREVIEW)
+                      .map((c) => c.pattern)
+                      .join(", ");
+                    const more = untrackedClusters.length > UNTRACKED_NAMESPACE_ORIENT_PREVIEW
+                      ? `, +${untrackedClusters.length - UNTRACKED_NAMESPACE_ORIENT_PREVIEW} more`
+                      : "";
+                    const untrackedItem: MaintenanceItem = {
+                      namespace: null,
+                      issue: "untracked_namespace_cluster",
+                      suggestion: `${untrackedClusters.length} namespaces you write to are not on your dashboard (${named}${more}). Run memory_patterns to review whether they should be tracked.`,
+                    };
+                    maintenanceSortKey.set(untrackedItem, "");
+                    maintenanceNeeded.push(untrackedItem);
                   }
                 }
               }
@@ -5250,6 +5328,67 @@ export function registerTools(
                 }
               }
 
+              // Untracked-namespace convention proposal (owner-only, propose-only).
+              // ADR 0001 layer-2 "observe → propose → crystallize": surface namespaces
+              // the owner keeps writing to that are NOT in their tracked patterns and
+              // not conventional reference namespaces, suggesting they may belong on
+              // the dashboard. Never auto-writes — the paired heuristic gives the exact
+              // meta/config write the owner would run to crystallize. Only on an
+              // unscoped call (a global taxonomy signal, not a within-namespace pattern).
+              if (ctx.principalType === "owner" && !namespace && !topicNeedle) {
+                // Fix #1 (Codex): augment the reference allowlist with home-namespace
+                // patterns of all active non-owner principals so the owner is never nagged
+                // about a cluster belonging to a principal's personal workspace.
+                const nonOwnerHomePatternsPatterns = getNonOwnerHomePrefixPatterns(db);
+                const augmentedRefPatterns = [...REFERENCE_NAMESPACE_PATTERNS, ...nonOwnerHomePatternsPatterns];
+                const untracked = detectUntrackedNamespaces(allEntries, patternsTrackedPatterns, {
+                  referencePatterns: augmentedRefPatterns,
+                });
+                // Read the current meta/config ONCE for field-preserving merge.
+                // Issue #4 (Codex): crystallize must patch only tracked_patterns,
+                // not overwrite the whole entry (other fields would be lost).
+                const currentConfigEntry = readState(db, "meta/config", "config");
+                let existingConfigFields: Record<string, unknown> = {};
+                if (currentConfigEntry) {
+                  try {
+                    const parsed = JSON.parse(parseEntry(currentConfigEntry).content) as Record<string, unknown>;
+                    // Preserve all fields except tracked_patterns (we'll re-set it).
+                    const { tracked_patterns: _tp, ...rest } = parsed;
+                    void _tp;
+                    existingConfigFields = rest;
+                  } catch {
+                    // Malformed JSON — ignore and produce a clean object.
+                  }
+                }
+
+                for (const candidate of untracked) {
+                  candidate.source_entry_ids.forEach((id) => sourceIds.add(id));
+                  patterns.push({
+                    kind: "untracked_namespace",
+                    summary: `You write to \`${candidate.pattern}\` (${candidate.entry_count} entr${candidate.entry_count === 1 ? "y" : "ies"} across ${candidate.namespaces.length} namespace${candidate.namespaces.length === 1 ? "" : "s"}) but it is not on your dashboard. It may be project work worth tracking.`,
+                    confidence: Math.min(0.9, 0.4 + candidate.entry_count * 0.1),
+                    source_entry_ids: candidate.source_entry_ids,
+                    source_namespaces: candidate.namespaces,
+                  });
+                  // Fix #2 (Codex): for mixed clusters (bare + sub-paths), both
+                  // "prefix" (exact) and "prefix/*" must be added to tracked_patterns
+                  // so that isTrackedNamespace returns true for all observed entries.
+                  const patternsToAdd = candidate.hasBare
+                    ? [candidate.prefix, candidate.pattern]  // exact + glob
+                    : [candidate.pattern];                    // glob only
+                  const newPatterns = [...new Set([...patternsTrackedPatterns, ...patternsToAdd])];
+                  // Fix #4 (Codex): merge — only replace tracked_patterns, preserve
+                  // any other fields (e.g. display_timezone) in the existing config.
+                  const configObj = { ...existingConfigFields, tracked_patterns: newPatterns };
+                  const configJson = JSON.stringify(configObj);
+                  heuristics.push({
+                    summary: `Add \`${candidate.pattern}\` to your tracked patterns to surface it on the dashboard.`,
+                    rationale: `Propose-only — nothing is written. To crystallize, run: memory_write namespace="meta/config" key="config" content='${configJson}'`,
+                    source_entry_ids: candidate.source_entry_ids,
+                  });
+                }
+              }
+
               const sortedPatterns = patterns
                 .sort((a, b) => b.confidence - a.confidence || a.summary.localeCompare(b.summary))
                 .slice(0, limit);
@@ -5269,11 +5408,11 @@ export function registerTools(
                 const logCount = decisionLogs.length;
                 if (entryCount === 0) {
                   response.reason = `Namespace has ${logCount} log entries — minimum 5 required for pattern detection`;
-                  response.data_requirements = "Pattern detection requires decision-tagged log entries (tagged with 'decision'). A decision_theme pattern needs at least 3 entries sharing recurring terms, with 2+ terms appearing across 2+ entries. An undated_next_steps pattern needs 2+ open commitments without due dates. A commitment_slip or blocked_followthrough pattern needs 2+ overdue or blocked commitments.";
+                  response.data_requirements = "Pattern detection requires decision-tagged log entries (tagged with 'decision'). A decision_theme pattern needs at least 3 entries sharing recurring terms, with 2+ terms appearing across 2+ entries. An undated_next_steps pattern needs 2+ open commitments without due dates. A commitment_slip or blocked_followthrough pattern needs 2+ overdue or blocked commitments. An untracked_namespace proposal (owner-only, unscoped call) needs 3+ entries under a top-level namespace outside your tracked patterns and the reference allowlist.";
                   response.suggestion = "Use memory_query with tags: [\"decision\"] to browse decision logs directly.";
                 } else {
                   response.reason = `${entryCount} entries scanned, no recurring terms above frequency threshold`;
-                  response.data_requirements = "Pattern detection requires decision-tagged log entries (tagged with 'decision'). A decision_theme pattern needs at least 3 entries sharing recurring terms, with 2+ terms appearing across 2+ entries. An undated_next_steps pattern needs 2+ open commitments without due dates. A commitment_slip or blocked_followthrough pattern needs 2+ overdue or blocked commitments.";
+                  response.data_requirements = "Pattern detection requires decision-tagged log entries (tagged with 'decision'). A decision_theme pattern needs at least 3 entries sharing recurring terms, with 2+ terms appearing across 2+ entries. An undated_next_steps pattern needs 2+ open commitments without due dates. A commitment_slip or blocked_followthrough pattern needs 2+ overdue or blocked commitments. An untracked_namespace proposal (owner-only, unscoped call) needs 3+ entries under a top-level namespace outside your tracked patterns and the reference allowlist.";
                   response.suggestion = "Use memory_query with tags: [\"decision\"] to browse decision logs directly.";
                 }
               }

@@ -201,6 +201,196 @@ export function isTrackedNamespace(
   return namespaceMatchesAnyPattern(namespace, patterns);
 }
 
+// --- Convention-level proposals: untracked-namespace detection (ADR 0001 layer-2) ---
+
+/**
+ * Reference / per-principal-home namespace patterns that are conventionally NOT
+ * project work and must never be proposed as "tracked" dashboard namespaces.
+ * Mirrors the recognized-namespace table in CLAUDE.md (`meta/*`, `people/*`,
+ * `decisions/*`, `documents/*`, `reading/*`, `signals/*`, `digests/*`) plus
+ * demo/scratch (`demo/*`), the task surface (`tasks/*`), feedback (`feedback/*`),
+ * and per-principal homes (`users/*`). Suppresses false positives so the
+ * `untracked_namespace` proposal only fires on namespaces that genuinely look
+ * like un-dashboarded project work.
+ */
+export const REFERENCE_NAMESPACE_PATTERNS: readonly string[] = [
+  "meta/*",
+  "people/*",
+  "decisions/*",
+  "documents/*",
+  "reading/*",
+  "signals/*",
+  "digests/*",
+  "demo/*",
+  "tasks/*",
+  "feedback/*",
+  "users/*",
+];
+
+/** Minimum state+log entries under a top-level prefix before it is proposed as untracked. */
+export const UNTRACKED_NAMESPACE_MIN_ENTRIES = 3;
+
+/**
+ * Top-level prefix to attribute a namespace to for untracked-cluster detection,
+ * or null if the namespace is tracked or a reference namespace. Shared by the
+ * entry-based proposal (memory_patterns) and the count-based orient nag so both
+ * apply identical exclusions. The whole-prefix `pattern` checks cover a bare
+ * top-level namespace (e.g. "tasks") whose `tasks/*` pattern is tracked/reference
+ * but does not match the bare name.
+ */
+function untrackedPrefixOf(
+  ns: string,
+  trackedPatterns: readonly string[],
+  referencePatterns: readonly string[],
+): string | null {
+  if (namespaceMatchesAnyPattern(ns, trackedPatterns)) return null;
+  if (namespaceMatchesAnyPattern(ns, referencePatterns)) return null;
+  const prefix = ns.split("/")[0];
+  const pattern = `${prefix}/*`;
+  if (trackedPatterns.includes(pattern)) return null;
+  if (referencePatterns.includes(pattern)) return null;
+  return prefix;
+}
+
+export interface UntrackedNamespaceCandidate {
+  /** Top-level namespace segment, e.g. "recipes". */
+  prefix: string;
+  /** Glob pattern to add to tracked_patterns to crystallize, e.g. "recipes/*". */
+  pattern: string;
+  /** Total entries observed under this prefix (within the supplied input set). */
+  entry_count: number;
+  /** Distinct full namespaces seen under this prefix, sorted ascending. */
+  namespaces: string[];
+  /** Sample entry ids (up to maxSources) backing the proposal. */
+  source_entry_ids: string[];
+  /** Most recent updated_at across the prefix's entries. */
+  last_activity_at: string;
+  /**
+   * True when at least one entry sits on the bare top-level namespace (e.g.
+   * "recipes" with no slash) alongside sub-path siblings ("recipes/dinner").
+   * When true the crystallize suggestion must include BOTH `"recipes"` (exact)
+   * and `"recipes/*"` so `isTrackedNamespace` returns true for all observed
+   * entries. Bare-ONLY clusters are excluded (crystallizing "recipes/*" would
+   * silently miss the exact "recipes" entry, making the proposal irresolvable).
+   */
+  hasBare?: boolean;
+}
+
+/**
+ * Detect namespaces the principal keeps writing to that are NOT in their resolved
+ * tracked patterns and are NOT conventional reference namespaces — i.e. taxonomy
+ * the dashboard is missing. Pure: groups the supplied entries by top-level
+ * segment, drops anything tracked or reference-allowlisted, and returns clusters
+ * at or above `minEntries`, sorted by entry_count desc then prefix asc.
+ *
+ * The output feeds an owner-only, propose-only `untracked_namespace` PatternItem
+ * (observe → propose; never auto-writes). A cluster disappears once its `<prefix>/*`
+ * pattern is crystallized into the principal's meta/config tracked_patterns.
+ */
+export function detectUntrackedNamespaces(
+  entries: readonly { id: string; namespace: string; updated_at: string }[],
+  trackedPatterns: readonly string[],
+  options: {
+    minEntries?: number;
+    referencePatterns?: readonly string[];
+    maxSources?: number;
+  } = {},
+): UntrackedNamespaceCandidate[] {
+  const minEntries = options.minEntries ?? UNTRACKED_NAMESPACE_MIN_ENTRIES;
+  const referencePatterns = options.referencePatterns ?? REFERENCE_NAMESPACE_PATTERNS;
+  const maxSources = options.maxSources ?? 6;
+
+  interface Group {
+    prefix: string;
+    entry_count: number;
+    namespaces: Set<string>;
+    sourceIds: string[];
+    last_activity_at: string;
+    hasSubPath: boolean; // at least one "prefix/..." entry
+    hasBare: boolean;    // at least one bare "prefix" (no slash) entry
+  }
+  const groups = new Map<string, Group>();
+
+  for (const e of entries) {
+    const prefix = untrackedPrefixOf(e.namespace, trackedPatterns, referencePatterns);
+    if (prefix === null) continue;
+    const ns = e.namespace;
+    const isBareName = ns === prefix; // "recipes" with no slash
+
+    let group = groups.get(prefix);
+    if (!group) {
+      group = {
+        prefix, entry_count: 0, namespaces: new Set(), sourceIds: [],
+        last_activity_at: e.updated_at, hasSubPath: false, hasBare: false,
+      };
+      groups.set(prefix, group);
+    }
+    group.entry_count += 1;
+    group.namespaces.add(ns);
+    if (group.sourceIds.length < maxSources) group.sourceIds.push(e.id);
+    if (e.updated_at > group.last_activity_at) group.last_activity_at = e.updated_at;
+    if (isBareName) group.hasBare = true;
+    else group.hasSubPath = true;
+  }
+
+  return [...groups.values()]
+    // Exclude bare-ONLY clusters: crystallizing "prefix/*" would NOT match the
+    // bare "prefix" entry, leaving the proposal in an irresolvable loop.
+    .filter((g) => g.entry_count >= minEntries && g.hasSubPath)
+    .map((g) => ({
+      prefix: g.prefix,
+      pattern: `${g.prefix}/*`,
+      entry_count: g.entry_count,
+      namespaces: [...g.namespaces].sort(),
+      source_entry_ids: g.sourceIds,
+      last_activity_at: g.last_activity_at,
+      ...(g.hasBare ? { hasBare: true } : {}),
+    }))
+    .sort((a, b) => b.entry_count - a.entry_count || a.prefix.localeCompare(b.prefix));
+}
+
+export interface UntrackedNamespaceCluster {
+  prefix: string;
+  pattern: string;
+  entry_count: number;
+}
+
+/**
+ * Count-based variant of {@link detectUntrackedNamespaces} for the orient hot
+ * path: derives the same untracked clusters from cheap per-namespace counts
+ * (`listNamespaces`) without loading every entry. Returns clusters at or above
+ * `minEntries`, sorted by entry_count desc then prefix asc. Used only to decide
+ * whether to nag (count of clusters); the full proposal with sources is built by
+ * memory_patterns.
+ */
+export function detectUntrackedNamespaceClusters(
+  namespaceCounts: readonly { namespace: string; state_count: number; log_count: number }[],
+  trackedPatterns: readonly string[],
+  options: { minEntries?: number; referencePatterns?: readonly string[] } = {},
+): UntrackedNamespaceCluster[] {
+  const minEntries = options.minEntries ?? UNTRACKED_NAMESPACE_MIN_ENTRIES;
+  const referencePatterns = options.referencePatterns ?? REFERENCE_NAMESPACE_PATTERNS;
+  interface CountGroup { count: number; hasSubPath: boolean }
+  const groups = new Map<string, CountGroup>();
+
+  for (const row of namespaceCounts) {
+    const prefix = untrackedPrefixOf(row.namespace, trackedPatterns, referencePatterns);
+    if (prefix === null) continue;
+    const isSubPath = row.namespace.includes("/") && row.namespace !== prefix;
+    const existing = groups.get(prefix);
+    groups.set(prefix, {
+      count: (existing?.count ?? 0) + row.state_count + row.log_count,
+      hasSubPath: (existing?.hasSubPath ?? false) || isSubPath,
+    });
+  }
+
+  return [...groups.entries()]
+    // Mirror detectUntrackedNamespaces: exclude bare-only clusters (no sub-path)
+    .filter(([, g]) => g.count >= minEntries && g.hasSubPath)
+    .map(([prefix, g]) => ({ prefix, pattern: `${prefix}/*`, entry_count: g.count }))
+    .sort((a, b) => b.entry_count - a.entry_count || a.prefix.localeCompare(b.prefix));
+}
+
 export function canonicalizeTags(tags: string[]): { canonical: string[]; normalized: string[] } {
   const normalized: string[] = [];
   const canonical = tags.map(t => {

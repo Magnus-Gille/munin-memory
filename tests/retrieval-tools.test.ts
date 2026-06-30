@@ -755,3 +755,259 @@ describe("memory_orient — retrieved_unused maintenance signal", () => {
     expect(item).toBeUndefined();
   });
 });
+
+// -----------------------------------------------------------------------
+// memory_patterns — untracked_namespace convention proposal (ADR 0001 layer-2)
+// -----------------------------------------------------------------------
+describe("memory_patterns — untracked_namespace proposal", () => {
+  function seedRecipes() {
+    writeState(db, "recipes/dinner", "carbonara", "pasta recipe", []);
+    writeState(db, "recipes/lunch", "salad", "salad recipe", []);
+    writeState(db, "recipes/breakfast", "pancakes", "pancake recipe", []);
+  }
+
+  it("surfaces untracked_namespace for a namespace with >=3 entries outside the tracked set (owner)", async () => {
+    const call = makeCallTool(db, ownerCtx());
+    seedRecipes();
+
+    const raw = await call("memory_patterns", {});
+    const result = parseToolResponse(raw) as {
+      patterns: Array<{ kind: string; summary: string; source_entry_ids: string[]; source_namespaces: string[] }>;
+      heuristics: Array<{ summary: string; rationale: string }>;
+    };
+    const p = result.patterns.find((x) => x.kind === "untracked_namespace");
+    expect(p).toBeDefined();
+    expect(p!.summary).toContain("recipes/*");
+    expect(p!.source_entry_ids.length).toBeGreaterThan(0);
+    // A paired crystallize heuristic gives the exact meta/config write.
+    const h = result.heuristics.find((x) => x.rationale.includes("meta/config"));
+    expect(h).toBeDefined();
+    expect(h!.rationale).toContain("recipes/*");
+  });
+
+  it("does NOT surface untracked_namespace for reference namespaces (meta, people)", async () => {
+    const call = makeCallTool(db, ownerCtx());
+    writeState(db, "meta/a", "k", "x", []);
+    writeState(db, "meta/b", "k", "x", []);
+    writeState(db, "meta/c", "k", "x", []);
+    writeState(db, "people/a", "k", "x", []);
+    writeState(db, "people/b", "k", "x", []);
+    writeState(db, "people/c", "k", "x", []);
+
+    const raw = await call("memory_patterns", {});
+    const result = parseToolResponse(raw) as { patterns: Array<{ kind: string }> };
+    expect(result.patterns.find((x) => x.kind === "untracked_namespace")).toBeUndefined();
+  });
+
+  it("does NOT surface untracked_namespace for already-tracked namespaces", async () => {
+    const call = makeCallTool(db, ownerCtx());
+    writeState(db, "projects/a", "status", "x", ["active"]);
+    writeState(db, "projects/b", "status", "x", ["active"]);
+    writeState(db, "projects/c", "status", "x", ["active"]);
+
+    const raw = await call("memory_patterns", {});
+    const result = parseToolResponse(raw) as { patterns: Array<{ kind: string }> };
+    expect(result.patterns.find((x) => x.kind === "untracked_namespace")).toBeUndefined();
+  });
+
+  it("does NOT surface untracked_namespace for a non-owner principal", async () => {
+    const call = makeCallTool(db, agentCtx());
+    // Agent can write under projects/* only; seed a non-tracked cluster as owner via direct db.
+    writeState(db, "recipes/dinner", "carbonara", "pasta recipe", []);
+    writeState(db, "recipes/lunch", "salad", "salad recipe", []);
+    writeState(db, "recipes/breakfast", "pancakes", "pancake recipe", []);
+
+    const raw = await call("memory_patterns", {});
+    const result = parseToolResponse(raw) as { patterns: Array<{ kind: string }> };
+    expect(result.patterns.find((x) => x.kind === "untracked_namespace")).toBeUndefined();
+  });
+
+  it("stops proposing a namespace once the owner crystallizes it into meta/config tracked_patterns", async () => {
+    const call = makeCallTool(db, ownerCtx());
+    seedRecipes();
+    writeState(
+      db,
+      "meta/config",
+      "config",
+      JSON.stringify({ tracked_patterns: ["projects/*", "clients/*", "recipes/*"] }),
+      [],
+    );
+
+    const raw = await call("memory_patterns", {});
+    const result = parseToolResponse(raw) as { patterns: Array<{ kind: string }> };
+    expect(result.patterns.find((x) => x.kind === "untracked_namespace")).toBeUndefined();
+  });
+});
+
+// -----------------------------------------------------------------------
+// memory_orient — untracked_namespace_cluster maintenance signal
+// -----------------------------------------------------------------------
+describe("memory_orient — untracked_namespace_cluster maintenance signal", () => {
+  function seedClusters(labels: string[]) {
+    for (const label of labels) {
+      writeState(db, `${label}/a`, "k1", "x", []);
+      writeState(db, `${label}/b`, "k2", "x", []);
+      writeState(db, `${label}/c`, "k3", "x", []);
+    }
+  }
+
+  it("fires when >=3 untracked clusters exist (owner)", async () => {
+    const call = makeCallTool(db, ownerCtx());
+    seedClusters(["recipes", "hobby", "garden"]);
+
+    const raw = await call("memory_orient", {});
+    const result = parseToolResponse(raw) as { maintenance_needed?: Array<{ issue: string }> };
+    const item = (result.maintenance_needed ?? []).find((m) => m.issue === "untracked_namespace_cluster");
+    expect(item).toBeDefined();
+  });
+
+  it("does NOT fire below the cluster threshold (2 clusters)", async () => {
+    const call = makeCallTool(db, ownerCtx());
+    seedClusters(["recipes", "hobby"]);
+
+    const raw = await call("memory_orient", {});
+    const result = parseToolResponse(raw) as { maintenance_needed?: Array<{ issue: string }> };
+    const item = (result.maintenance_needed ?? []).find((m) => m.issue === "untracked_namespace_cluster");
+    expect(item).toBeUndefined();
+  });
+
+  it("does NOT fire for a non-owner principal", async () => {
+    const call = makeCallTool(db, agentCtx());
+    seedClusters(["recipes", "hobby", "garden"]);
+
+    const raw = await call("memory_orient", {});
+    const result = parseToolResponse(raw) as { maintenance_needed?: Array<{ issue: string }> };
+    const item = (result.maintenance_needed ?? []).find((m) => m.issue === "untracked_namespace_cluster");
+    expect(item).toBeUndefined();
+  });
+});
+
+// -----------------------------------------------------------------------
+// Codex review fixes — issues 1-4 (#163 followup)
+// -----------------------------------------------------------------------
+
+describe("fix #1 — non-owner home prefixes excluded from owner untracked proposal", () => {
+  it("owner is NOT nagged about a non-owner principal's home namespace (non-users/* prefix)", async () => {
+    const call = makeCallTool(db, ownerCtx());
+
+    // Register a principal whose home is inbox/p/sara (not under users/*)
+    db.prepare(
+      `INSERT INTO principals (id, principal_id, principal_type, namespace_rules, created_at)
+       VALUES (?, ?, 'family', ?, ?)`,
+    ).run("pid-sara", "sara", JSON.stringify([{ pattern: "inbox/p/sara/*", permissions: "rw" }]), new Date().toISOString());
+
+    // Seed 3+ entries under that home prefix
+    writeState(db, "inbox/p/sara/a", "k1", "x", []);
+    writeState(db, "inbox/p/sara/b", "k2", "x", []);
+    writeState(db, "inbox/p/sara/c", "k3", "x", []);
+
+    const raw = await call("memory_patterns", {});
+    const result = parseToolResponse(raw) as { patterns: Array<{ kind: string; summary: string }> };
+    // The owner must NOT see a proposal about inbox/p — it's a principal's home.
+    const p = result.patterns.find((x) => x.kind === "untracked_namespace" && x.summary.includes("inbox"));
+    expect(p).toBeUndefined();
+  });
+
+  it("orient does NOT fire untracked_namespace_cluster for a non-owner home prefix", async () => {
+    const call = makeCallTool(db, ownerCtx());
+
+    for (const pid of ["sara", "bob", "cat"]) {
+      db.prepare(
+        `INSERT INTO principals (id, principal_id, principal_type, namespace_rules, created_at)
+         VALUES (?, ?, 'family', ?, ?)`,
+      ).run(`pid-${pid}`, pid, JSON.stringify([{ pattern: `family/${pid}/*`, permissions: "rw" }]), new Date().toISOString());
+      writeState(db, `family/${pid}/a`, "k1", "x", []);
+      writeState(db, `family/${pid}/b`, "k2", "x", []);
+      writeState(db, `family/${pid}/c`, "k3", "x", []);
+    }
+
+    const raw = await call("memory_orient", {});
+    const result = parseToolResponse(raw) as { maintenance_needed?: Array<{ issue: string; suggestion: string }> };
+    const item = (result.maintenance_needed ?? []).find(
+      (m) => m.issue === "untracked_namespace_cluster" && m.suggestion.includes("family"),
+    );
+    expect(item).toBeUndefined();
+  });
+});
+
+describe("fix #2 — bare (single-segment) namespace handling", () => {
+  it("bare-only namespace cluster (no sub-paths) does NOT appear in memory_patterns", async () => {
+    const call = makeCallTool(db, ownerCtx());
+    // Write 3 entries under the bare "cooking" namespace (no slash)
+    for (let i = 0; i < 3; i++) {
+      writeState(db, "cooking", `recipe${i}`, `entry ${i}`, []);
+    }
+
+    const raw = await call("memory_patterns", {});
+    const result = parseToolResponse(raw) as { patterns: Array<{ kind: string; summary: string }> };
+    // Bare-only cluster excluded: crystallizing "cooking/*" would not match
+    // "cooking" so we must not propose it (avoid a loop where the proposal never resolves).
+    const p = result.patterns.find((x) => x.kind === "untracked_namespace" && x.summary.includes("cooking"));
+    expect(p).toBeUndefined();
+  });
+
+  it("mixed namespace (bare + sub-paths) IS proposed and crystallize pattern tracks both", async () => {
+    const call = makeCallTool(db, ownerCtx());
+    // "recipes" bare + sub-paths — should be proposed with both patterns suggested
+    writeState(db, "recipes", "index", "index entry", []);
+    writeState(db, "recipes/dinner", "x", "x", []);
+    writeState(db, "recipes/lunch", "x", "x", []);
+    writeState(db, "recipes/breakfast", "x", "x", []);
+
+    const raw = await call("memory_patterns", {});
+    const result = parseToolResponse(raw) as {
+      patterns: Array<{ kind: string; summary: string }>;
+      heuristics: Array<{ rationale: string }>;
+    };
+    const p = result.patterns.find((x) => x.kind === "untracked_namespace" && x.summary.includes("recipes"));
+    expect(p).toBeDefined();
+    // The crystallize heuristic must include BOTH "recipes" (exact) and "recipes/*"
+    const h = result.heuristics.find((x) => x.rationale.includes("meta/config"));
+    expect(h).toBeDefined();
+    expect(h!.rationale).toContain('"recipes"');
+    expect(h!.rationale).toContain('"recipes/*"');
+  });
+});
+
+describe("fix #3 — topic filter gates untracked detection", () => {
+  it("memory_patterns with a topic argument skips the untracked_namespace pass", async () => {
+    const call = makeCallTool(db, ownerCtx());
+    writeState(db, "recipes/a", "k", "x", []);
+    writeState(db, "recipes/b", "k", "x", []);
+    writeState(db, "recipes/c", "k", "x", []);
+
+    const raw = await call("memory_patterns", { topic: "cache" });
+    const result = parseToolResponse(raw) as { patterns: Array<{ kind: string }> };
+    expect(result.patterns.find((x) => x.kind === "untracked_namespace")).toBeUndefined();
+  });
+});
+
+describe("fix #4 — crystallize heuristic preserves existing meta/config fields", () => {
+  it("suggested meta/config content merges tracked_patterns without dropping other fields", async () => {
+    const call = makeCallTool(db, ownerCtx());
+    // Write a meta/config with an extra field that must be preserved
+    writeState(
+      db,
+      "meta/config",
+      "config",
+      JSON.stringify({ tracked_patterns: ["projects/*", "clients/*"], display_timezone: "Europe/Stockholm" }),
+      [],
+    );
+    // Seed a cluster to propose
+    writeState(db, "recipes/a", "k", "x", []);
+    writeState(db, "recipes/b", "k", "x", []);
+    writeState(db, "recipes/c", "k", "x", []);
+
+    const raw = await call("memory_patterns", {});
+    const result = parseToolResponse(raw) as {
+      patterns: Array<{ kind: string }>;
+      heuristics: Array<{ rationale: string }>;
+    };
+    const h = result.heuristics.find((x) => x.rationale.includes("meta/config"));
+    expect(h).toBeDefined();
+    // The suggested content must contain display_timezone (other field preserved)
+    expect(h!.rationale).toContain("display_timezone");
+    // And it must contain the new pattern
+    expect(h!.rationale).toContain("recipes/*");
+  });
+});
