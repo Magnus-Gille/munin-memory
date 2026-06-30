@@ -307,15 +307,18 @@ export function assessTrackedStatus(row: TrackedStatusRow): TrackedStatusAssessm
  *
  * Exported for the benchmark runner's production_ranker mode.
  */
-export function getTrackedStatusAssessments(db: Database.Database): Map<string, TrackedStatusAssessment> {
-  const assessments = getTrackedStatuses(db).map(assessTrackedStatus);
+export function getTrackedStatusAssessments(
+  db: Database.Database,
+  patterns?: readonly string[],
+): Map<string, TrackedStatusAssessment> {
+  const assessments = getTrackedStatuses(db, patterns).map(assessTrackedStatus);
   return new Map(assessments.map((assessment) => [assessment.entry.id, assessment]));
 }
 
 // --- Shared predicates used by both getQueryHeuristicScore and getQueryExplainReasons ---
 
-export function isTrackedStatusEntry(entry: Entry): boolean {
-  return isTrackedNamespace(entry.namespace) && entry.key === "status";
+export function isTrackedStatusEntry(entry: Entry, patterns?: readonly string[]): boolean {
+  return isTrackedNamespace(entry.namespace, patterns) && entry.key === "status";
 }
 
 export function isPeopleProfileEntry(entry: Entry): boolean {

@@ -354,6 +354,54 @@ export function filterByAccess<T extends { namespace: string }>(
 }
 
 // ---------------------------------------------------------------------------
+// Per-principal home derivation
+// ---------------------------------------------------------------------------
+
+/**
+ * The namespace prefix under which a non-owner principal's personal settings
+ * (conventions, config) live. Derived from the principal's FIRST read-write
+ * (`rw`) "prefix/*" rule — e.g. a principal granted rw on "users/sara/*" has
+ * home "users/sara". Read-only rules, write-only rules, and the lone "*"
+ * wildcard are all skipped: a personal home must be a concrete, READABLE +
+ * writable subtree the principal owns (readable so they can see their own
+ * seeded settings).
+ *
+ * Returns null for:
+ *   - the owner (owner uses the global meta/* namespaces, not a personal home)
+ *   - any principal with no `rw` "prefix/*" rule
+ */
+export function homePrefixFromRules(rules: NamespaceRule[]): string | null {
+  for (const rule of rules) {
+    // A personal home must be readable by the principal (require rw, not merely
+    // writable) so a write-only rule is never chosen as a home.
+    if (rule.permissions !== "rw") continue;
+    if (rule.pattern === "*") continue;
+    if (rule.pattern.endsWith("/*")) {
+      return rule.pattern.slice(0, -2); // "users/sara/*" → "users/sara"
+    }
+  }
+  return null;
+}
+
+export function principalHomePrefix(ctx: AccessContext): string | null {
+  if (ctx.principalType === "owner") return null;
+  return homePrefixFromRules(ctx.accessibleNamespaces);
+}
+
+/**
+ * The namespace holding a non-owner principal's personal Munin settings — the
+ * "meta" sub-namespace of their home (e.g. "users/sara/meta"). The principal's
+ * own conventions (key "conventions") and tracked-pattern config (key "config")
+ * live here: writable by the principal, readable by the owner. Returns null
+ * when the principal has no writable home (see principalHomePrefix) or is the
+ * owner.
+ */
+export function principalMetaNamespace(ctx: AccessContext): string | null {
+  const home = principalHomePrefix(ctx);
+  return home ? `${home}/meta` : null;
+}
+
+// ---------------------------------------------------------------------------
 // resolveAccessContext
 // ---------------------------------------------------------------------------
 

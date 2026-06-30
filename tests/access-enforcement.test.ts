@@ -14,6 +14,7 @@ import { initDatabase, writeState, replaceCrossReferences } from "../src/db.js";
 import { registerTools } from "../src/tools.js";
 import type { AccessContext } from "../src/access.js";
 import { ownerContext } from "../src/access.js";
+import { addPrincipal } from "../src/admin-cli.js";
 
 // ---------------------------------------------------------------------------
 // Infrastructure
@@ -583,17 +584,60 @@ describe("memory_orient — access enforcement", () => {
     });
   });
 
-  it("family orient → conventions is null, dashboard filtered to accessible namespaces", async () => {
+  it("family orient → universal physics-default conventions, dashboard filtered to accessible namespaces", async () => {
     const raw = await familyCall("memory_orient");
     const result = parse(raw) as {
-      conventions: null | unknown;
+      conventions: { content: string; source?: string; compact?: boolean } | null;
       dashboard: Record<string, Array<{ namespace: string }>>;
     };
-    expect(result.conventions).toBeNull();
+    // Non-owner principals now receive the universal physics-only baseline
+    // (not null), with NO owner-specific consultant taxonomy leaking through.
+    expect(result.conventions).not.toBeNull();
+    expect(result.conventions!.source).toBe("default");
+    expect(result.conventions!.content).toContain("State entries");
+    expect(result.conventions!.content).not.toContain("clients/");
+    expect(result.conventions!.content).not.toContain("Owner conventions");
 
     // Dashboard should not contain projects/foo
     const allDashboardNamespaces = Object.values(result.dashboard).flat().map((e) => e.namespace);
     expect(allDashboardNamespaces).not.toContain("projects/foo");
+  });
+
+  it("family with personal conventions → full reveals them; compact stays neutral with a hint", async () => {
+    // Owner seeds Sara's personal conventions in her own meta namespace.
+    await ownerCall("memory_write", {
+      namespace: "users/sara/meta",
+      key: "conventions",
+      content: "# Sara's world\nGroceries live in shared/family/shopping.",
+    });
+
+    const full = parse(await familyCall("memory_orient", { include_full_conventions: true })) as {
+      conventions: { content: string; source?: string };
+    };
+    expect(full.conventions.source).toBe("principal");
+    expect(full.conventions.content).toContain("Sara's world");
+
+    const compact = parse(await familyCall("memory_orient")) as {
+      conventions: { content: string; compact?: boolean; source?: string; full_conventions_hint?: string };
+    };
+    expect(compact.conventions.compact).toBe(true);
+    expect(compact.conventions.source).toBe("principal");
+    expect(compact.conventions.full_conventions_hint).toContain("users/sara/meta");
+    // Compact stays the neutral baseline — personal detail only surfaces on `full`.
+    expect(compact.conventions.content).not.toContain("Sara's world");
+  });
+
+  it("family can write its own conventions and see them on full orient", async () => {
+    await familyCall("memory_write", {
+      namespace: "users/sara/meta",
+      key: "conventions",
+      content: "# My rules\nKeep it tidy.",
+    });
+    const full = parse(await familyCall("memory_orient", { include_full_conventions: true })) as {
+      conventions: { content: string; source?: string };
+    };
+    expect(full.conventions.source).toBe("principal");
+    expect(full.conventions.content).toContain("My rules");
   });
 
   it("owner orient → conventions present, full dashboard", async () => {
@@ -1431,5 +1475,155 @@ describe("meta: all registered tools are covered", () => {
       untestedTools,
       `These tools have no access enforcement tests: ${untestedTools.join(", ")}`,
     ).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Configurable + per-principal tracked-namespace patterns (#157 / ADR 0001)
+// ---------------------------------------------------------------------------
+
+describe("memory_orient — configurable tracked patterns (#157)", () => {
+  function dashboardNamespaces(result: unknown): string[] {
+    const r = result as { dashboard: Record<string, Array<{ namespace: string }>> };
+    return Object.values(r.dashboard).flat().map((e) => e.namespace);
+  }
+
+  it("owner with no meta/config still tracks projects/* and clients/* (unchanged)", async () => {
+    await ownerCall("memory_write", {
+      namespace: "projects/foo",
+      key: "status",
+      content: "Foo",
+      tags: ["active"],
+    });
+    const ns = dashboardNamespaces(parse(await ownerCall("memory_orient")));
+    expect(ns).toContain("projects/foo");
+  });
+
+  it("owner meta/config overrides which namespaces are tracked", async () => {
+    await ownerCall("memory_write", {
+      namespace: "meta/config",
+      key: "config",
+      content: JSON.stringify({ tracked_patterns: ["papers/*"] }),
+    });
+    await ownerCall("memory_write", {
+      namespace: "papers/p1",
+      key: "status",
+      content: "A paper",
+      tags: ["active"],
+    });
+    await ownerCall("memory_write", {
+      namespace: "projects/foo",
+      key: "status",
+      content: "A project",
+      tags: ["active"],
+    });
+    const ns = dashboardNamespaces(parse(await ownerCall("memory_orient")));
+    expect(ns).toContain("papers/p1");
+    expect(ns).not.toContain("projects/foo");
+  });
+
+  it("family with personal config sees their own tracked namespaces in the dashboard", async () => {
+    await ownerCall("memory_write", {
+      namespace: "users/sara/meta",
+      key: "config",
+      content: JSON.stringify({ tracked_patterns: ["users/sara/projects/*"] }),
+    });
+    await ownerCall("memory_write", {
+      namespace: "users/sara/projects/garden",
+      key: "status",
+      content: "Garden redesign",
+      tags: ["active"],
+    });
+    const ns = dashboardNamespaces(parse(await familyCall("memory_orient")));
+    expect(ns).toContain("users/sara/projects/garden");
+    // Owner's projects/foo (from beforeEach) is not Sara's and not readable by her.
+    expect(ns).not.toContain("projects/foo");
+  });
+
+  it("family without personal config does not auto-track its own sub-namespaces (must opt in)", async () => {
+    // No users/sara/meta config written. The default patterns (projects/*, clients/*)
+    // do NOT match users/sara/projects/*, so Sara's own project is not tracked until
+    // she (or a profile) seeds a config selecting it.
+    await ownerCall("memory_write", {
+      namespace: "users/sara/projects/garden",
+      key: "status",
+      content: "Garden",
+      tags: ["active"],
+    });
+    const ns = dashboardNamespaces(parse(await familyCall("memory_orient")));
+    expect(ns).not.toContain("users/sara/projects/garden");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// End-to-end: profile onboarding → per-principal orient (Phase 1 + 2 + 3)
+// ---------------------------------------------------------------------------
+
+describe("end-to-end: profile onboarding → per-principal orient", () => {
+  it("a household-profile onboarding gives the principal their own conventions + dashboard", async () => {
+    // Onboard Sara with the household profile — seeds users/sara/meta conventions + config.
+    addPrincipal(db, {
+      principalId: "sara",
+      principalType: "family",
+      rules: [{ pattern: "users/sara/*", permissions: "rw" }],
+      profile: "household",
+    });
+    // She records a tracked item within her seeded taxonomy.
+    await ownerCall("memory_write", {
+      namespace: "users/sara/home/garden",
+      key: "status",
+      content: "Replant the back beds",
+      tags: ["active"],
+    });
+
+    // Full orient → her personal household conventions, not the owner's.
+    const full = parse(await familyCall("memory_orient", { include_full_conventions: true })) as {
+      conventions: { content: string; source?: string };
+    };
+    expect(full.conventions.source).toBe("principal");
+    expect(full.conventions.content).toContain("Household");
+    expect(full.conventions.content).toContain("users/sara/home");
+
+    // Dashboard tracks her seeded namespace (config-driven, canRead-filtered).
+    const ns = Object.values(
+      (parse(await familyCall("memory_orient")) as {
+        dashboard: Record<string, Array<{ namespace: string }>>;
+      }).dashboard,
+    )
+      .flat()
+      .map((e) => e.namespace);
+    expect(ns).toContain("users/sara/home/garden");
+  });
+
+  it("a household principal can memory_update_status its own configured tracked namespace", async () => {
+    addPrincipal(db, {
+      principalId: "sara",
+      principalType: "family",
+      rules: [{ pattern: "users/sara/*", permissions: "rw" }],
+      profile: "household",
+    });
+    // users/sara/home/* is tracked by Sara's seeded config, so the write-side
+    // guard must accept update_status here (it used to hard-reject anything
+    // outside projects/*|clients/*).
+    const ok = parse(
+      await familyCall("memory_update_status", {
+        namespace: "users/sara/home/cleanup",
+        phase: "Active",
+        current_work: "Declutter the garage",
+        next_steps: ["Sort tools"],
+        lifecycle: "active",
+      }),
+    ) as { status?: string; error?: string };
+    expect(ok.error).toBeUndefined();
+    expect(ok.status).toBe("created");
+
+    // A namespace NOT in her tracked patterns is still rejected.
+    const rejected = parse(
+      await familyCall("memory_update_status", {
+        namespace: "users/sara/notes/random",
+        current_work: "x",
+      }),
+    ) as { error?: string };
+    expect(rejected.error).toBe("validation_error");
   });
 });
