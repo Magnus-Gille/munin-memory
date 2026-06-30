@@ -69,8 +69,11 @@ import {
   getEmbeddingQueueCounts,
   getMemorySizeCounts,
   getHealthRetrievalMetrics,
+  getRetrievalLatencyPercentiles,
   getClassificationDistribution,
   getSecurityEventCounts,
+  getAccessDeniedCount7d,
+  recordAccessDenied,
   getLastSynthesisAt,
   getAvgConsolidationLatencyMs,
 } from "./db.js";
@@ -914,12 +917,14 @@ function formatStructuredStatus(status: BuiltStructuredStatus): string {
 const VALID_AUDIT_ACTIONS: Array<AuditAction | "delete_namespace" | "log"> = [
   "write",
   "update",
+  "patch",
   "delete",
   "namespace_delete",
   "log_append",
   "delete_namespace",
   "log",
   "cross_zone_block",
+  "access_denied",
 ];
 
 function contentPreview(content: string, maxLen = 500): string {
@@ -4010,15 +4015,34 @@ function errResult(action: string, error: string, message: string, extra?: Recor
   return { content: [{ type: "text" as const, text: JSON.stringify({ ok: false, action, error, message, ...extra }) }] };
 }
 
-function accessDeniedResponse(ctx: AccessContext, action: string) {
+function accessDeniedResponse(db: Database.Database, ctx: AccessContext, action: string) {
+  // Best-effort security telemetry — feeds memory_health classification.access_denied_7d.
+  // recordAccessDenied swallows its own errors, so this never breaks the denial path.
+  recordAccessDenied(db, ctx.principalId, `memory_${action}`);
   if (ctx.principalType === "agent") {
     return errResult(action, "access_denied", "Access denied.");
   }
   return okResult(action, { found: false });
 }
 
-function accessDeniedReadResponse(action: string) {
+function accessDeniedReadResponse(db: Database.Database, ctx: AccessContext, action: string) {
+  recordAccessDenied(db, ctx.principalId, `memory_${action}`);
   return okResult(action, { found: false, message: "No entry found." });
+}
+
+/**
+ * Record and return an access-denied errResult. Used for non-namespace-gate
+ * denials (e.g. classification_override owner-only checks) that previously
+ * called errResult directly and therefore bypassed recordAccessDenied telemetry.
+ */
+function accessDeniedErrorResponse(
+  db: Database.Database,
+  ctx: AccessContext,
+  action: string,
+  message: string,
+) {
+  recordAccessDenied(db, ctx.principalId, `memory_${action}`);
+  return errResult(action, "access_denied", message);
 }
 
 export function getMaxContentSize(): number {
@@ -5472,11 +5496,11 @@ export function registerTools(
                 return errResult("write", "validation_error", classificationInputError);
               }
               if (classification_override === true && ctx.principalType !== "owner") {
-                return errResult("write", "access_denied", "classification_override is only available to the owner principal.");
+                return accessDeniedErrorResponse(db, ctx, "write", "classification_override is only available to the owner principal.");
               }
 
               if (!canWrite(ctx, namespace)) {
-                return accessDeniedResponse(ctx, "write");
+                return accessDeniedResponse(db, ctx, "write");
               }
 
               // --- Patch path ---
@@ -5732,14 +5756,14 @@ export function registerTools(
                 return errResult("update_status", "validation_error", "memory_update_status only supports the caller's configured tracked namespaces (default projects/* or clients/*).");
               }
               if (!canWrite(ctx, namespace)) {
-                return accessDeniedResponse(ctx, "update_status");
+                return accessDeniedResponse(db, ctx, "update_status");
               }
               const classificationInputError = validateClassificationInput(classification, classification_override);
               if (classificationInputError) {
                 return errResult("update_status", "validation_error", classificationInputError);
               }
               if (classification_override === true && ctx.principalType !== "owner") {
-                return errResult("update_status", "access_denied", "classification_override is only available to the owner principal.");
+                return accessDeniedErrorResponse(db, ctx, "update_status", "classification_override is only available to the owner principal.");
               }
               if (next_steps !== undefined && (!Array.isArray(next_steps) || next_steps.some((item) => typeof item !== "string"))) {
                 return errResult("update_status", "validation_error", "next_steps must be an array of strings.");
@@ -5883,7 +5907,7 @@ export function registerTools(
                 return errResult("read", "validation_error", keyCheck.error!);
               }
               if (!canRead(ctx, namespace)) {
-                return accessDeniedReadResponse("read");
+                return accessDeniedReadResponse(db, ctx, "read");
               }
               const entry = readState(db, namespace, key);
               if (entry) {
@@ -5992,7 +6016,7 @@ export function registerTools(
               }
               const entry = getById(db, id);
               if (entry && !canRead(ctx, entry.namespace)) {
-                return accessDeniedReadResponse("get");
+                return accessDeniedReadResponse(db, ctx, "get");
               }
               if (entry) {
                 const parsed = parseEntry(entry);
@@ -6029,6 +6053,9 @@ export function registerTools(
 
           case "memory_query": {
             const handleMemoryQuery = async () => {
+              // Wall-clock start for the retrieval-latency metric (#161). Recorded
+              // onto the retrieval_event so memory_health can report p50/p95.
+              const queryStartedAt = Date.now();
               const queryArgs = (args ?? {}) as unknown as QueryParams;
               const { query, namespace, entry_type, tags, limit, search_mode, since, until } = queryArgs;
               const explain = queryArgs.explain === true;
@@ -6110,6 +6137,7 @@ export function registerTools(
                     resultIds,
                     resultNamespaces,
                     resultRanks,
+                    durationMs: Date.now() - queryStartedAt,
                   });
                 }
 
@@ -6410,6 +6438,7 @@ export function registerTools(
                   resultIds,
                   resultNamespaces,
                   resultRanks,
+                  durationMs: Date.now() - queryStartedAt,
                 });
               }
 
@@ -6550,10 +6579,10 @@ export function registerTools(
                 return errResult("log", "validation_error", classificationInputError);
               }
               if (classification_override === true && ctx.principalType !== "owner") {
-                return errResult("log", "access_denied", "classification_override is only available to the owner principal.");
+                return accessDeniedErrorResponse(db, ctx, "log", "classification_override is only available to the owner principal.");
               }
               if (!canWrite(ctx, namespace)) {
-                return accessDeniedResponse(ctx, "log");
+                return accessDeniedResponse(db, ctx, "log");
               }
               // Strip server-reserved tags (e.g. source:synthesis) from client input.
               const { kept: logTags, removed: logReservedRemoved } = stripReservedTags(tags ?? []);
@@ -6735,7 +6764,7 @@ export function registerTools(
               }
 
               if (!canWrite(ctx, namespace)) {
-                return accessDeniedResponse(ctx, "delete");
+                return accessDeniedResponse(db, ctx, "delete");
               }
               const allowGlobalNamespaceDelete = ctx.principalType === "owner";
 
@@ -6870,7 +6899,7 @@ export function registerTools(
           case "memory_retrieval_feedback": {
             const handleMemoryRetrievalFeedback = async () => {
               if (ctx.principalType !== "owner") {
-                return accessDeniedResponse(ctx, "retrieval_feedback");
+                return accessDeniedResponse(db, ctx, "retrieval_feedback");
               }
 
               const fbArgs = (args ?? {}) as unknown as RetrievalFeedbackParams;
@@ -6934,7 +6963,7 @@ export function registerTools(
                 return errResult(
                   "history",
                   "validation_error",
-                  `Invalid action "${action}". Must be one of: write, update, delete, delete_namespace, log, cross_zone_block. Legacy aliases namespace_delete and log_append are also accepted.`,
+                  `Invalid action "${action}". Must be one of: write, update, patch, delete, delete_namespace, log, cross_zone_block, access_denied. Legacy aliases namespace_delete and log_append are also accepted.`,
                 );
               }
 
@@ -6964,7 +6993,7 @@ export function registerTools(
           case "memory_consolidate": {
             const handleMemoryConsolidate = async () => {
               if (ctx.principalType !== "owner") {
-                return accessDeniedResponse(ctx, "consolidate");
+                return accessDeniedResponse(db, ctx, "consolidate");
               }
 
               if (!isConsolidationAvailable()) {
@@ -7080,7 +7109,7 @@ export function registerTools(
               //   - all other non-owner principals → { found: false } (invisible denial)
               // This matches the pattern in memory_consolidate, memory_retrieval_feedback, etc.
               if (ctx.principalType !== "owner") {
-                return accessDeniedResponse(ctx, "health");
+                return accessDeniedResponse(db, ctx, "health");
               }
 
               const isOwner = true; // checked above — defense-in-depth gate for DB helpers
@@ -7173,6 +7202,8 @@ export function registerTools(
                 const vol = r.query_volume_7d;
                 const frac = (n: number): number =>
                   vol > 0 ? Math.round((n / vol) * 10000) / 10000 : 0;
+                // p50/p95 memory_query latency over a 7-day window (null when no timed events).
+                const latency = getRetrievalLatencyPercentiles(db, isOwner);
                 return {
                   query_volume_7d: r.query_volume_7d,
                   query_volume_30d: r.query_volume_30d,
@@ -7181,13 +7212,19 @@ export function registerTools(
                     semantic: frac(r.mode_mix_7d.semantic),
                     hybrid: frac(r.mode_mix_7d.hybrid),
                   },
+                  latency_p50_ms: latency.p50_ms,
+                  latency_p95_ms: latency.p95_ms,
                   unused_surface_count: r.retrieved_unused_count,
                 };
               });
 
               // --- Section 4: classification ---
               buildSection("classification", () => {
-                return { by_level: getClassificationDistribution(db, isOwner) };
+                return {
+                  by_level: getClassificationDistribution(db, isOwner),
+                  // Access-denied security events over the last 7 days.
+                  access_denied_7d: getAccessDeniedCount7d(db, isOwner),
+                };
               });
 
               // --- Section 5: maintenance ---
@@ -7280,8 +7317,9 @@ export function registerTools(
               });
 
               // --- Section 7: security_events ---
-              // Only exposes what real queries support: redaction_log + cross_zone_block in audit_log.
-              // access-denied count from audit_log is NOT included (unsupported by schema).
+              // Exposes content-policy events: redaction_log (Librarian) + cross_zone_block in audit_log.
+              // access-denied counts are in classification.access_denied_7d (getAccessDeniedCount7d),
+              // not here — security_events is scoped to content-policy events, not access-control telemetry.
               buildSection("security_events", () => {
                 return { ...getSecurityEventCounts(db, isOwner) };
               });

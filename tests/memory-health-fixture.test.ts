@@ -19,6 +19,8 @@ import {
   writeState,
   appendLog,
   upsertConsolidationMetadata,
+  logRetrievalEvent,
+  recordAccessDenied,
 } from "../src/db.js";
 import { registerTools } from "../src/tools.js";
 import { ownerContext } from "../src/access.js";
@@ -76,6 +78,20 @@ function seed(db: Database.Database): void {
     run_duration_ms: 1843,
     drain_in_progress: 0,
   });
+
+  logRetrievalEvent(db, {
+    sessionId: "seed-session",
+    toolName: "memory_query",
+    queryText: "demo",
+    requestedMode: "lexical",
+    actualMode: "lexical",
+    resultIds: [],
+    resultNamespaces: [],
+    resultRanks: [],
+    durationMs: 12,
+  });
+
+  recordAccessDenied(db, "agent:demo", "memory_read");
 }
 
 // ---------------------------------------------------------------------------
