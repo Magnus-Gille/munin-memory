@@ -351,6 +351,50 @@ export function showPrincipal(
  * excluded (the owner can read everything by design and is the intended reader
  * of a principal's seeded settings).
  */
+/**
+ * Checks whether any of `newRules` would grant the principal being added/updated
+ * (identified by `excludePrincipalId`) read or rw access to a namespace that
+ * holds another non-owner principal's seeded profile conventions or config.
+ *
+ * Seeded-home namespaces are detected from the entries table: state entries with
+ * key "conventions" or "config", namespace ending in "/meta", a "profile:*" tag,
+ * and an owner_principal_id that belongs to an active non-owner principal.
+ *
+ * Returns the first conflict found, or null if the rules are safe.
+ */
+function findRuleAccessingSeededHome(
+  db: Database.Database,
+  newRules: NamespaceRule[],
+  excludePrincipalId: string,
+): { seededNamespace: string; seedOwner: string; conflictingPattern: string } | null {
+  const seededRows = db
+    .prepare(
+      `SELECT DISTINCT e.namespace, e.owner_principal_id
+       FROM entries e
+       JOIN principals p ON p.principal_id = e.owner_principal_id
+       WHERE e.entry_type = 'state'
+         AND e.key IN ('conventions', 'config')
+         AND e.namespace LIKE '%/meta'
+         AND p.principal_type != 'owner'
+         AND e.owner_principal_id != ?
+         AND p.revoked_at IS NULL
+         AND EXISTS (
+           SELECT 1 FROM json_each(e.tags) WHERE value LIKE 'profile:%'
+         )`,
+    )
+    .all(excludePrincipalId) as Array<{ namespace: string; owner_principal_id: string }>;
+
+  for (const { namespace: seededNamespace, owner_principal_id: seedOwner } of seededRows) {
+    for (const rule of newRules) {
+      if (rule.permissions !== "read" && rule.permissions !== "rw") continue;
+      if (namespaceMatchesPattern(seededNamespace, rule.pattern)) {
+        return { seededNamespace, seedOwner, conflictingPattern: rule.pattern };
+      }
+    }
+  }
+  return null;
+}
+
 function findPrincipalSharingNamespace(
   db: Database.Database,
   seedNamespace: string,
@@ -409,6 +453,22 @@ export function addPrincipal(
   }
 
   validateNamespaceRules(opts.rules);
+
+  // Seeded-home isolation guard (#164 Codex Finding 2): reject rules that would
+  // give this principal access to another non-owner principal's seeded conventions
+  // or config. The check runs for all non-owner principals, not just --profile
+  // adds, so that a later addPrincipal cannot breach isolation set up earlier.
+  if (opts.principalType !== "owner") {
+    const conflict = findRuleAccessingSeededHome(db, opts.rules, opts.principalId);
+    if (conflict !== null) {
+      throw new Error(
+        `Cannot add principal "${opts.principalId}": rule "${conflict.conflictingPattern}" ` +
+          `would grant access to "${conflict.seededNamespace}", which holds seeded profile ` +
+          `conventions owned by "${conflict.seedOwner}". Use a more specific rule that ` +
+          `does not overlap a private seeded home.`,
+      );
+    }
+  }
 
   // Validate --profile up front so we never create a principal we cannot seed.
   let profileHome: string | null = null;
@@ -579,6 +639,28 @@ export function updatePrincipal(
 ): boolean {
   if (opts.rules) {
     validateNamespaceRules(opts.rules);
+
+    // Seeded-home isolation guard (#164 Codex Finding 2): same invariant as
+    // addPrincipal — reject rule updates that would grant this principal access
+    // to another non-owner principal's seeded conventions/config. Only skip the
+    // check for owner principals (owner has unrestricted access by design).
+    const principalRow = db
+      .prepare(
+        "SELECT principal_type FROM principals WHERE principal_id = ? AND revoked_at IS NULL",
+      )
+      .get(principalId) as { principal_type: string } | undefined;
+
+    if (principalRow && principalRow.principal_type !== "owner") {
+      const conflict = findRuleAccessingSeededHome(db, opts.rules, principalId);
+      if (conflict !== null) {
+        throw new Error(
+          `Cannot update principal "${principalId}": rule "${conflict.conflictingPattern}" ` +
+            `would grant access to "${conflict.seededNamespace}", which holds seeded profile ` +
+            `conventions owned by "${conflict.seedOwner}". Use a more specific rule that ` +
+            `does not overlap a private seeded home.`,
+        );
+      }
+    }
   }
 
   if (opts.expiresAt !== undefined && opts.expiresAt !== null) {

@@ -10,7 +10,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { initDatabase, writeState, replaceCrossReferences } from "../src/db.js";
+import { initDatabase, writeState, replaceCrossReferences, listCommitments } from "../src/db.js";
 import { registerTools } from "../src/tools.js";
 import type { AccessContext } from "../src/access.js";
 import { ownerContext } from "../src/access.js";
@@ -1694,6 +1694,37 @@ describe("per-principal tracked patterns — extract + commitments (#164)", () =
     expect(openTexts).toContain("Buy compost");
     expect(
       (commitments.open ?? []).some((c) => c.namespace === "users/sara/home/garden"),
+    ).toBe(true);
+  });
+
+  it("owner calling memory_commitments does not close a family principal's tracked_next_step (#164 Finding 1)", async () => {
+    // Onboard Sara with household profile so users/sara/home/* is tracked for her.
+    onboardSaraHousehold();
+
+    // Sara writes a status with a next step → creates an open tracked_next_step commitment.
+    await familyCall("memory_update_status", {
+      namespace: "users/sara/home/garden",
+      phase: "Active",
+      current_work: "Plant herbs",
+      next_steps: ["Buy seedlings"],
+      lifecycle: "active",
+    });
+
+    // Confirm Sara's commitment is open in the DB before owner reads.
+    const dbBefore = listCommitments(db, { includeResolved: true, limit: 10 });
+    expect(dbBefore.some((r) => r.text === "Buy seedlings" && r.status === "open")).toBe(true);
+
+    // Owner calls unscoped memory_commitments. Owner's tracked patterns are
+    // projects/* and clients/* — does NOT include users/sara/home/*.
+    // This must NOT close Sara's open commitment in the DB.
+    await ownerCall("memory_commitments", {});
+
+    // Check the DB DIRECTLY — before Sara's next sync could re-open the commitment.
+    // If the bug is present, Sara's tracked_next_step will be "done" here.
+    const dbAfter = listCommitments(db, { includeResolved: true, limit: 10 });
+    expect(
+      dbAfter.some((r) => r.text === "Buy seedlings" && r.status === "open"),
+      "Sara's commitment must remain open in the DB after owner calls memory_commitments",
     ).toBe(true);
   });
 });

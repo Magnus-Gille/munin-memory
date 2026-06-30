@@ -14,7 +14,7 @@ import Database from "better-sqlite3";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { initDatabase } from "../src/db.js";
 import { runMigrations } from "../src/migrations.js";
-import { addPrincipal } from "../src/admin-cli.js";
+import { addPrincipal, updatePrincipal } from "../src/admin-cli.js";
 import { registerTools } from "../src/tools.js";
 import type { AccessContext, NamespaceRule } from "../src/access.js";
 
@@ -109,6 +109,88 @@ describe("addPrincipal --profile — shared-home hardening (#164 part 2)", () =>
       conventions: "users/alice/meta",
       config: "users/alice/meta",
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Codex review Finding 2 — rule-update shared-home guard (#164 follow-up)
+// addPrincipal / updatePrincipal must reject rules that would grant access to
+// another non-owner principal's seeded-home namespace.
+// ---------------------------------------------------------------------------
+
+describe("addPrincipal / updatePrincipal — seeded-home access guard (Codex Finding 2)", () => {
+  it("adding a principal with rules that read an existing seeded home is rejected", () => {
+    const db = makeDb();
+    // Sara is the only principal with shared/family/* → her home seeds fine.
+    addPrincipal(db, {
+      principalId: "sara",
+      principalType: "family",
+      rules: [{ pattern: "shared/family/*", permissions: "rw" }],
+      profile: "household",
+    });
+
+    // Now Bob is added with shared/family/* — that would let him read Sara's
+    // seeded conventions/config in shared/family/meta. Must be rejected.
+    expect(() =>
+      addPrincipal(db, {
+        principalId: "bob",
+        principalType: "family",
+        rules: [{ pattern: "shared/family/*", permissions: "rw" }],
+      }),
+    ).toThrow(/shared\/family\/meta|seeded/i);
+  });
+
+  it("updating a principal's rules to read an existing seeded private home is rejected", () => {
+    const db = makeDb();
+    // Sara's home is private users/sara/meta — no other principal can read it.
+    addPrincipal(db, {
+      principalId: "sara",
+      principalType: "family",
+      rules: [{ pattern: "users/sara/*", permissions: "rw" }],
+      profile: "household",
+    });
+    // Bob starts with non-overlapping rules.
+    addPrincipal(db, {
+      principalId: "bob",
+      principalType: "family",
+      rules: [{ pattern: "users/bob/*", permissions: "rw" }],
+    });
+
+    // Attempting to update Bob's rules to include users/sara/* should fail because
+    // users/sara/meta is Sara's seeded home.
+    expect(() =>
+      updatePrincipal(db, "bob", {
+        rules: [
+          { pattern: "users/bob/*", permissions: "rw" },
+          { pattern: "users/sara/*", permissions: "rw" },
+        ],
+      }),
+    ).toThrow(/users\/sara\/meta|seeded/i);
+  });
+
+  it("updating a principal's rules to non-overlapping namespaces succeeds", () => {
+    const db = makeDb();
+    addPrincipal(db, {
+      principalId: "sara",
+      principalType: "family",
+      rules: [{ pattern: "users/sara/*", permissions: "rw" }],
+      profile: "household",
+    });
+    addPrincipal(db, {
+      principalId: "bob",
+      principalType: "family",
+      rules: [{ pattern: "users/bob/*", permissions: "rw" }],
+    });
+
+    // Bob adds access to shared/family/* — does not overlap users/sara/meta.
+    expect(() =>
+      updatePrincipal(db, "bob", {
+        rules: [
+          { pattern: "users/bob/*", permissions: "rw" },
+          { pattern: "shared/family/*", permissions: "rw" },
+        ],
+      }),
+    ).not.toThrow();
   });
 });
 

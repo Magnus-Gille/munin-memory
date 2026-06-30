@@ -2728,6 +2728,12 @@ function syncCommitmentsForScope(
   const resolvedNamespaces = getResolvedNamespaces(db);
   const trackedPatterns = resolveTrackedPatterns(db, ctx);
   for (const entry of filtered.allowed) {
+    // Only reconcile commitments for namespaces the caller actually tracks.
+    // If the caller doesn't track the namespace, extractCommitmentsFromEntry
+    // returns [] for tracked_next_step items, and syncCommitmentsForEntry would
+    // then mark another principal's open commitment as done — silently corrupting
+    // cross-principal commitment state. (#164 Codex Finding 1)
+    if (!isTrackedNamespace(entry.namespace, trackedPatterns)) continue;
     syncCommitmentsForEntry(db, entry.id, extractCommitmentsFromEntry(entry, resolvedNamespaces, trackedPatterns));
   }
 
@@ -2793,6 +2799,10 @@ function listFreshCommitmentRows(
       redactedSources.push(...entryFilter.redacted);
       continue;
     }
+    // Same guard as syncCommitmentsForScope: skip entries the caller doesn't
+    // track to avoid marking another principal's commitments as done.
+    // (#164 Codex Finding 1)
+    if (!isTrackedNamespace(entry.namespace, trackedPatterns)) continue;
     syncCommitmentsForEntry(db, entry.id, extractCommitmentsFromEntry(entry, resolvedNamespaces, trackedPatterns));
   }
 
