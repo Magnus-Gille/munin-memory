@@ -755,3 +755,129 @@ describe("memory_orient — retrieved_unused maintenance signal", () => {
     expect(item).toBeUndefined();
   });
 });
+
+// -----------------------------------------------------------------------
+// memory_patterns — untracked_namespace convention proposal (ADR 0001 layer-2)
+// -----------------------------------------------------------------------
+describe("memory_patterns — untracked_namespace proposal", () => {
+  function seedRecipes() {
+    writeState(db, "recipes/dinner", "carbonara", "pasta recipe", []);
+    writeState(db, "recipes/lunch", "salad", "salad recipe", []);
+    writeState(db, "recipes/breakfast", "pancakes", "pancake recipe", []);
+  }
+
+  it("surfaces untracked_namespace for a namespace with >=3 entries outside the tracked set (owner)", async () => {
+    const call = makeCallTool(db, ownerCtx());
+    seedRecipes();
+
+    const raw = await call("memory_patterns", {});
+    const result = parseToolResponse(raw) as {
+      patterns: Array<{ kind: string; summary: string; source_entry_ids: string[]; source_namespaces: string[] }>;
+      heuristics: Array<{ summary: string; rationale: string }>;
+    };
+    const p = result.patterns.find((x) => x.kind === "untracked_namespace");
+    expect(p).toBeDefined();
+    expect(p!.summary).toContain("recipes/*");
+    expect(p!.source_entry_ids.length).toBeGreaterThan(0);
+    // A paired crystallize heuristic gives the exact meta/config write.
+    const h = result.heuristics.find((x) => x.rationale.includes("meta/config"));
+    expect(h).toBeDefined();
+    expect(h!.rationale).toContain("recipes/*");
+  });
+
+  it("does NOT surface untracked_namespace for reference namespaces (meta, people)", async () => {
+    const call = makeCallTool(db, ownerCtx());
+    writeState(db, "meta/a", "k", "x", []);
+    writeState(db, "meta/b", "k", "x", []);
+    writeState(db, "meta/c", "k", "x", []);
+    writeState(db, "people/a", "k", "x", []);
+    writeState(db, "people/b", "k", "x", []);
+    writeState(db, "people/c", "k", "x", []);
+
+    const raw = await call("memory_patterns", {});
+    const result = parseToolResponse(raw) as { patterns: Array<{ kind: string }> };
+    expect(result.patterns.find((x) => x.kind === "untracked_namespace")).toBeUndefined();
+  });
+
+  it("does NOT surface untracked_namespace for already-tracked namespaces", async () => {
+    const call = makeCallTool(db, ownerCtx());
+    writeState(db, "projects/a", "status", "x", ["active"]);
+    writeState(db, "projects/b", "status", "x", ["active"]);
+    writeState(db, "projects/c", "status", "x", ["active"]);
+
+    const raw = await call("memory_patterns", {});
+    const result = parseToolResponse(raw) as { patterns: Array<{ kind: string }> };
+    expect(result.patterns.find((x) => x.kind === "untracked_namespace")).toBeUndefined();
+  });
+
+  it("does NOT surface untracked_namespace for a non-owner principal", async () => {
+    const call = makeCallTool(db, agentCtx());
+    // Agent can write under projects/* only; seed a non-tracked cluster as owner via direct db.
+    writeState(db, "recipes/dinner", "carbonara", "pasta recipe", []);
+    writeState(db, "recipes/lunch", "salad", "salad recipe", []);
+    writeState(db, "recipes/breakfast", "pancakes", "pancake recipe", []);
+
+    const raw = await call("memory_patterns", {});
+    const result = parseToolResponse(raw) as { patterns: Array<{ kind: string }> };
+    expect(result.patterns.find((x) => x.kind === "untracked_namespace")).toBeUndefined();
+  });
+
+  it("stops proposing a namespace once the owner crystallizes it into meta/config tracked_patterns", async () => {
+    const call = makeCallTool(db, ownerCtx());
+    seedRecipes();
+    writeState(
+      db,
+      "meta/config",
+      "config",
+      JSON.stringify({ tracked_patterns: ["projects/*", "clients/*", "recipes/*"] }),
+      [],
+    );
+
+    const raw = await call("memory_patterns", {});
+    const result = parseToolResponse(raw) as { patterns: Array<{ kind: string }> };
+    expect(result.patterns.find((x) => x.kind === "untracked_namespace")).toBeUndefined();
+  });
+});
+
+// -----------------------------------------------------------------------
+// memory_orient — untracked_namespace_cluster maintenance signal
+// -----------------------------------------------------------------------
+describe("memory_orient — untracked_namespace_cluster maintenance signal", () => {
+  function seedClusters(labels: string[]) {
+    for (const label of labels) {
+      writeState(db, `${label}/a`, "k1", "x", []);
+      writeState(db, `${label}/b`, "k2", "x", []);
+      writeState(db, `${label}/c`, "k3", "x", []);
+    }
+  }
+
+  it("fires when >=3 untracked clusters exist (owner)", async () => {
+    const call = makeCallTool(db, ownerCtx());
+    seedClusters(["recipes", "hobby", "garden"]);
+
+    const raw = await call("memory_orient", {});
+    const result = parseToolResponse(raw) as { maintenance_needed?: Array<{ issue: string }> };
+    const item = (result.maintenance_needed ?? []).find((m) => m.issue === "untracked_namespace_cluster");
+    expect(item).toBeDefined();
+  });
+
+  it("does NOT fire below the cluster threshold (2 clusters)", async () => {
+    const call = makeCallTool(db, ownerCtx());
+    seedClusters(["recipes", "hobby"]);
+
+    const raw = await call("memory_orient", {});
+    const result = parseToolResponse(raw) as { maintenance_needed?: Array<{ issue: string }> };
+    const item = (result.maintenance_needed ?? []).find((m) => m.issue === "untracked_namespace_cluster");
+    expect(item).toBeUndefined();
+  });
+
+  it("does NOT fire for a non-owner principal", async () => {
+    const call = makeCallTool(db, agentCtx());
+    seedClusters(["recipes", "hobby", "garden"]);
+
+    const raw = await call("memory_orient", {});
+    const result = parseToolResponse(raw) as { maintenance_needed?: Array<{ issue: string }> };
+    const item = (result.maintenance_needed ?? []).find((m) => m.issue === "untracked_namespace_cluster");
+    expect(item).toBeUndefined();
+  });
+});

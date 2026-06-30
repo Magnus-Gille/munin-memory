@@ -1,6 +1,6 @@
 # ADR 0001 — Conventions as a product layer: invariant substrate, seeded-adaptive taxonomy, learned voice
 
-- **Status:** Accepted — Phases 1–3 implemented (2026-06-30; see Implementation status)
+- **Status:** Accepted — Phases 1–3 implemented; layer-2 adaptation (observe → propose → crystallize) first increment implemented (2026-06-30; see Implementation status)
 - **Date:** 2026-06-29
 - **Context:** Productizing Munin Memory (SW and SW-in-HW appliance). The current
   implementation is "Magnus-shaped" — it encodes one solo-consultant's taxonomy.
@@ -112,4 +112,63 @@ Layers 1–2 of the model are implemented on `feat/multi-user-conventions`:
 
 The relationship to the productization framing held: building **per-principal** first made the single-owner instance the degenerate (single-principal) case. The owner path is byte-for-byte unchanged.
 
-Deferred: the **observe → propose → confirm → crystallize** adaptation mechanism (layer-2 learning) and conversational onboarding for the HW appliance — tracked as a follow-up.
+### Layer-2 adaptation — observe → propose → crystallize (2026-06-30, #163)
+
+The first increment of the adaptation mechanism is now implemented (owner-only,
+propose-only, never auto-writes):
+
+- **Observe + Propose.** `memory_patterns` gained an `untracked_namespace`
+  `PatternItem` kind. On an unscoped owner call it groups the owner's entries by
+  top-level namespace segment, drops anything matched by their resolved
+  `tracked_patterns` or by a reference allowlist (`meta/*`, `people/*`,
+  `decisions/*`, `documents/*`, `reading/*`, `signals/*`, `digests/*`, `demo/*`,
+  `tasks/*`, `feedback/*`, `users/*`), and surfaces every remaining cluster with
+  ≥3 entries as a reviewable proposal with sources + confidence. `memory_orient`
+  nags with an `untracked_namespace_cluster` maintenance item once ≥3 such
+  clusters exist (derived from the cheap `listNamespaces` count aggregate to keep
+  the orient hot path free of a per-entry scan).
+- **Confirm + Crystallize.** Each proposal ships a paired crystallize heuristic
+  containing the **exact `memory_write` to `meta/config`** the owner would run to
+  add the `<prefix>/*` pattern to their `tracked_patterns`. It is presented, never
+  executed — taxonomy is identity-shaped, so promotion stays human-in-the-loop and
+  matches the constitutional stance. Once crystallized, the cluster stops being
+  proposed (detection reads the live `tracked_patterns`).
+- Pure detection lives in `src/internal/retrieval-shared.ts`
+  (`detectUntrackedNamespaces` for the entry-based proposal,
+  `detectUntrackedNamespaceClusters` for the count-based orient nag, sharing one
+  exclusion predicate). The crystallize op deliberately reuses the existing
+  `memory_write`-to-`meta/config` path rather than adding a new
+  `ExtractSuggestion.action` target, keeping the change small and the write surface
+  unchanged.
+
+### Conversational onboarding for the HW appliance (design note — follow-up spike, not built)
+
+The appliance has **no `CLAUDE.md` and no repo** (see *Hardware implication*),
+so profile selection cannot be a code edit — it must be **conversational**. The
+sketch:
+
+1. **Cold-start prompt.** On first run the appliance asks, in plain language,
+   *"What should I remember for you — work, family, a hobby, your studies?"*
+   The answer maps to one of the seeded profiles (`freelancer` / `researcher` /
+   `household` / `personal-knowledge`, extensible) which seeds the principal's
+   `<home>/meta` conventions + `tracked_patterns` config — solving organic
+   learning's cold-start with an opinionated default the user didn't have to author.
+2. **Seed.** The chosen profile materializes a starter taxonomy (the same
+   `taxonomy-profiles.ts` packs used by `munin-admin principals add --profile`).
+3. **Refine (this is where observe → propose is load-bearing, not optional).**
+   As the user actually writes, the `untracked_namespace` proposal above watches
+   for drift from the seed — e.g. a `household` user who keeps writing `garden/*`
+   and `recipes/*` — and offers to crystallize those onto their dashboard *in
+   conversation* ("You've been keeping recipes and garden notes — want those on
+   your dashboard?"), writing back to `meta/config` only on a spoken yes. Without
+   a `CLAUDE.md` to hand-edit, this propose→confirm→crystallize loop is the **only**
+   path from a generic seed to a taxonomy that fits the household.
+
+This needs the appliance hardware/runtime (no HW today), so it is recorded here as
+a **follow-up spike** rather than implemented. The server-side observe→propose
+primitives it depends on (above) are now in place, so the spike is a UX/runtime
+problem, not a memory-engine one.
+
+Deferred: the conversational-onboarding runtime for the HW appliance (the spike
+above), and richer layer-2 signals (tag-convention drift, access-pattern proposals)
+beyond `untracked_namespace`.

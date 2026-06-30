@@ -989,6 +989,8 @@ import {
   getDaysUntil,
   isTrackedNamespace,
   DEFAULT_TRACKED_PATTERNS,
+  detectUntrackedNamespaces,
+  detectUntrackedNamespaceClusters,
   canonicalizeTags,
   stripReservedTags,
   getLifecycleTags,
@@ -4068,6 +4070,12 @@ const RETRIEVED_UNUSED_ORIENT_MIN = 3;
 /** Rolling window in days for both surfaces. */
 const RETRIEVED_UNUSED_SINCE_DAYS = 30;
 
+// --- Untracked-namespace (convention proposal) thresholds (ADR 0001 layer-2) ---
+/** Minimum untracked clusters before memory_orient emits an untracked_namespace_cluster item. */
+const UNTRACKED_NAMESPACE_ORIENT_MIN = 3;
+/** Max untracked namespaces named inline in the orient maintenance suggestion. */
+const UNTRACKED_NAMESPACE_ORIENT_PREVIEW = 5;
+
 function computeEntryInsight(row: {
   entry_id: string;
   namespace: string | null;
@@ -4382,6 +4390,32 @@ export function registerTools(
                     };
                     maintenanceSortKey.set(unusedOrientItem, "");
                     maintenanceNeeded.push(unusedOrientItem);
+                  }
+                }
+
+                // Block 4: Untracked-namespace clusters — namespaces the owner keeps
+                // writing to that are not on the dashboard and not conventional
+                // reference namespaces (ADR 0001 layer-2 observe→propose). Advisory
+                // nag at the cluster threshold; the full proposal + crystallize write
+                // is built by memory_patterns. Derived from the cheap namespace-count
+                // aggregate, so no per-entry scan on the orient hot path.
+                {
+                  const untrackedClusters = detectUntrackedNamespaceClusters(namespaces, orientTrackedPatterns);
+                  if (untrackedClusters.length >= UNTRACKED_NAMESPACE_ORIENT_MIN) {
+                    const named = untrackedClusters
+                      .slice(0, UNTRACKED_NAMESPACE_ORIENT_PREVIEW)
+                      .map((c) => c.pattern)
+                      .join(", ");
+                    const more = untrackedClusters.length > UNTRACKED_NAMESPACE_ORIENT_PREVIEW
+                      ? `, +${untrackedClusters.length - UNTRACKED_NAMESPACE_ORIENT_PREVIEW} more`
+                      : "";
+                    const untrackedItem: MaintenanceItem = {
+                      namespace: null,
+                      issue: "untracked_namespace_cluster",
+                      suggestion: `${untrackedClusters.length} namespaces you write to are not on your dashboard (${named}${more}). Run memory_patterns to review whether they should be tracked.`,
+                    };
+                    maintenanceSortKey.set(untrackedItem, "");
+                    maintenanceNeeded.push(untrackedItem);
                   }
                 }
               }
@@ -5250,6 +5284,34 @@ export function registerTools(
                 }
               }
 
+              // Untracked-namespace convention proposal (owner-only, propose-only).
+              // ADR 0001 layer-2 "observe → propose → crystallize": surface namespaces
+              // the owner keeps writing to that are NOT in their tracked patterns and
+              // not conventional reference namespaces, suggesting they may belong on
+              // the dashboard. Never auto-writes — the paired heuristic gives the exact
+              // meta/config write the owner would run to crystallize. Only on an
+              // unscoped call (a global taxonomy signal, not a within-namespace pattern).
+              if (ctx.principalType === "owner" && !namespace) {
+                const untracked = detectUntrackedNamespaces(allEntries, patternsTrackedPatterns);
+                for (const candidate of untracked) {
+                  candidate.source_entry_ids.forEach((id) => sourceIds.add(id));
+                  patterns.push({
+                    kind: "untracked_namespace",
+                    summary: `You write to \`${candidate.pattern}\` (${candidate.entry_count} entr${candidate.entry_count === 1 ? "y" : "ies"} across ${candidate.namespaces.length} namespace${candidate.namespaces.length === 1 ? "" : "s"}) but it is not on your dashboard. It may be project work worth tracking.`,
+                    confidence: Math.min(0.9, 0.4 + candidate.entry_count * 0.1),
+                    source_entry_ids: candidate.source_entry_ids,
+                    source_namespaces: candidate.namespaces,
+                  });
+                  const newPatterns = [...new Set([...patternsTrackedPatterns, candidate.pattern])];
+                  const configJson = JSON.stringify({ tracked_patterns: newPatterns });
+                  heuristics.push({
+                    summary: `Add \`${candidate.pattern}\` to your tracked patterns to surface it on the dashboard.`,
+                    rationale: `Propose-only — nothing is written. To crystallize, run: memory_write namespace="meta/config" key="config" content='${configJson}'`,
+                    source_entry_ids: candidate.source_entry_ids,
+                  });
+                }
+              }
+
               const sortedPatterns = patterns
                 .sort((a, b) => b.confidence - a.confidence || a.summary.localeCompare(b.summary))
                 .slice(0, limit);
@@ -5269,11 +5331,11 @@ export function registerTools(
                 const logCount = decisionLogs.length;
                 if (entryCount === 0) {
                   response.reason = `Namespace has ${logCount} log entries — minimum 5 required for pattern detection`;
-                  response.data_requirements = "Pattern detection requires decision-tagged log entries (tagged with 'decision'). A decision_theme pattern needs at least 3 entries sharing recurring terms, with 2+ terms appearing across 2+ entries. An undated_next_steps pattern needs 2+ open commitments without due dates. A commitment_slip or blocked_followthrough pattern needs 2+ overdue or blocked commitments.";
+                  response.data_requirements = "Pattern detection requires decision-tagged log entries (tagged with 'decision'). A decision_theme pattern needs at least 3 entries sharing recurring terms, with 2+ terms appearing across 2+ entries. An undated_next_steps pattern needs 2+ open commitments without due dates. A commitment_slip or blocked_followthrough pattern needs 2+ overdue or blocked commitments. An untracked_namespace proposal (owner-only, unscoped call) needs 3+ entries under a top-level namespace outside your tracked patterns and the reference allowlist.";
                   response.suggestion = "Use memory_query with tags: [\"decision\"] to browse decision logs directly.";
                 } else {
                   response.reason = `${entryCount} entries scanned, no recurring terms above frequency threshold`;
-                  response.data_requirements = "Pattern detection requires decision-tagged log entries (tagged with 'decision'). A decision_theme pattern needs at least 3 entries sharing recurring terms, with 2+ terms appearing across 2+ entries. An undated_next_steps pattern needs 2+ open commitments without due dates. A commitment_slip or blocked_followthrough pattern needs 2+ overdue or blocked commitments.";
+                  response.data_requirements = "Pattern detection requires decision-tagged log entries (tagged with 'decision'). A decision_theme pattern needs at least 3 entries sharing recurring terms, with 2+ terms appearing across 2+ entries. An undated_next_steps pattern needs 2+ open commitments without due dates. A commitment_slip or blocked_followthrough pattern needs 2+ overdue or blocked commitments. An untracked_namespace proposal (owner-only, unscoped call) needs 3+ entries under a top-level namespace outside your tracked patterns and the reference allowlist.";
                   response.suggestion = "Use memory_query with tags: [\"decision\"] to browse decision logs directly.";
                 }
               }

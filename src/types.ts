@@ -260,7 +260,7 @@ export interface DashboardEntry {
 
 export interface MaintenanceItem {
   namespace: string | null;
-  issue: "active_but_stale" | "missing_status" | "conflicting_lifecycle" | "missing_lifecycle" | "upcoming_event_stale" | "temporal_stale" | "expiring_soon" | "expired" | "consolidation_backlog" | "consolidation_circuit_breaker" | "retrieved_unused";
+  issue: "active_but_stale" | "missing_status" | "conflicting_lifecycle" | "missing_lifecycle" | "upcoming_event_stale" | "temporal_stale" | "expiring_soon" | "expired" | "consolidation_backlog" | "consolidation_circuit_breaker" | "retrieved_unused" | "untracked_namespace_cluster";
   suggestion: string;
 }
 
@@ -638,7 +638,7 @@ export interface CommitmentsResponse {
 }
 
 export interface PatternItem {
-  kind: "decision_theme" | "commitment_slip" | "blocked_followthrough" | "undated_next_steps" | "retrieved_unused";
+  kind: "decision_theme" | "commitment_slip" | "blocked_followthrough" | "undated_next_steps" | "retrieved_unused" | "untracked_namespace";
   summary: string;
   confidence: number;
   source_entry_ids: string[];

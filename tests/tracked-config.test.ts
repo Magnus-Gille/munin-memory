@@ -1,9 +1,12 @@
 import { describe, it, expect } from "vitest";
 import {
   DEFAULT_TRACKED_PATTERNS,
+  REFERENCE_NAMESPACE_PATTERNS,
+  UNTRACKED_NAMESPACE_MIN_ENTRIES,
   namespaceMatchesAnyPattern,
   trackedPatternsToSqlLike,
   isTrackedNamespace,
+  detectUntrackedNamespaces,
 } from "../src/internal/retrieval-shared.js";
 
 // ---------------------------------------------------------------------------
@@ -64,5 +67,97 @@ describe("namespaceMatchesAnyPattern / isTrackedNamespace", () => {
     expect(namespaceMatchesAnyPattern("a/b/c", ["a/b/*"])).toBe(true);
     expect(namespaceMatchesAnyPattern("a/b/c", ["a/b"])).toBe(false);
     expect(namespaceMatchesAnyPattern("x", [])).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// detectUntrackedNamespaces — convention-level proposal source (ADR 0001 layer-2)
+// ---------------------------------------------------------------------------
+
+function entry(namespace: string, id: string, updated_at = "2026-06-29T00:00:00.000Z") {
+  return { id, namespace, updated_at };
+}
+
+describe("detectUntrackedNamespaces", () => {
+  it("surfaces a top-level cluster with >= min entries outside the tracked set", () => {
+    const entries = [
+      entry("recipes/dinner", "r1"),
+      entry("recipes/lunch", "r2"),
+      entry("recipes/breakfast", "r3"),
+    ];
+    const out = detectUntrackedNamespaces(entries, [...DEFAULT_TRACKED_PATTERNS]);
+    expect(out).toHaveLength(1);
+    expect(out[0].prefix).toBe("recipes");
+    expect(out[0].pattern).toBe("recipes/*");
+    expect(out[0].entry_count).toBe(3);
+    expect(out[0].namespaces.sort()).toEqual(["recipes/breakfast", "recipes/dinner", "recipes/lunch"]);
+    expect(out[0].source_entry_ids.length).toBeGreaterThan(0);
+  });
+
+  it("aggregates entries under one top-level prefix (single bare namespace, multiple keys)", () => {
+    const entries = [entry("recipes", "r1"), entry("recipes", "r2"), entry("recipes", "r3")];
+    const out = detectUntrackedNamespaces(entries, [...DEFAULT_TRACKED_PATTERNS]);
+    expect(out).toHaveLength(1);
+    expect(out[0].entry_count).toBe(3);
+  });
+
+  it("does not surface a cluster below the entry threshold", () => {
+    const entries = [entry("recipes/dinner", "r1"), entry("recipes/lunch", "r2")];
+    const out = detectUntrackedNamespaces(entries, [...DEFAULT_TRACKED_PATTERNS]);
+    expect(out).toHaveLength(0);
+  });
+
+  it("excludes tracked namespaces", () => {
+    const entries = [
+      entry("projects/a", "p1"),
+      entry("projects/b", "p2"),
+      entry("projects/c", "p3"),
+    ];
+    expect(detectUntrackedNamespaces(entries, [...DEFAULT_TRACKED_PATTERNS])).toHaveLength(0);
+  });
+
+  it("excludes reference namespaces (meta, people, decisions, ...)", () => {
+    const entries = [
+      entry("meta/a", "m1"),
+      entry("meta/b", "m2"),
+      entry("meta/c", "m3"),
+      entry("people/x", "pe1"),
+      entry("people/y", "pe2"),
+      entry("people/z", "pe3"),
+      entry("decisions/d1", "d1"),
+      entry("decisions/d2", "d2"),
+      entry("decisions/d3", "d3"),
+    ];
+    expect(detectUntrackedNamespaces(entries, [...DEFAULT_TRACKED_PATTERNS])).toHaveLength(0);
+  });
+
+  it("stops surfacing a cluster once its pattern is added to tracked_patterns (crystallized)", () => {
+    const entries = [
+      entry("recipes/dinner", "r1"),
+      entry("recipes/lunch", "r2"),
+      entry("recipes/breakfast", "r3"),
+    ];
+    const crystallized = [...DEFAULT_TRACKED_PATTERNS, "recipes/*"];
+    expect(detectUntrackedNamespaces(entries, crystallized)).toHaveLength(0);
+  });
+
+  it("sorts by entry_count desc then prefix asc", () => {
+    const entries = [
+      entry("hobby/a", "h1"),
+      entry("hobby/b", "h2"),
+      entry("hobby/c", "h3"),
+      entry("recipes/a", "r1"),
+      entry("recipes/b", "r2"),
+      entry("recipes/c", "r3"),
+      entry("recipes/d", "r4"),
+    ];
+    const out = detectUntrackedNamespaces(entries, [...DEFAULT_TRACKED_PATTERNS]);
+    expect(out.map((c) => c.prefix)).toEqual(["recipes", "hobby"]);
+  });
+
+  it("exposes the standard reference allowlist and entry threshold", () => {
+    expect(REFERENCE_NAMESPACE_PATTERNS).toContain("meta/*");
+    expect(REFERENCE_NAMESPACE_PATTERNS).toContain("users/*");
+    expect(UNTRACKED_NAMESPACE_MIN_ENTRIES).toBe(3);
   });
 });
