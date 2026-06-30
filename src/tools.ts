@@ -8,12 +8,14 @@ import type { CallToolRequest } from "@modelcontextprotocol/sdk/types.js";
 import type Database from "better-sqlite3";
 import {
   type AccessContext,
+  type NamespaceRule,
   ownerContext,
   canRead,
   canWrite,
   canReadSubtree,
   filterByAccess,
   principalMetaNamespace,
+  homePrefixFromRules,
   getContextMaxClassification,
   getContextTransportType,
 } from "./access.js";
@@ -989,6 +991,7 @@ import {
   getDaysUntil,
   isTrackedNamespace,
   DEFAULT_TRACKED_PATTERNS,
+  REFERENCE_NAMESPACE_PATTERNS,
   detectUntrackedNamespaces,
   detectUntrackedNamespaceClusters,
   canonicalizeTags,
@@ -4076,6 +4079,41 @@ const UNTRACKED_NAMESPACE_ORIENT_MIN = 3;
 /** Max untracked namespaces named inline in the orient maintenance suggestion. */
 const UNTRACKED_NAMESPACE_ORIENT_PREVIEW = 5;
 
+/**
+ * Collect all home-namespace PATTERNS (`<home>/*`) for active, non-revoked,
+ * non-owner principals by reading `principals.namespace_rules`. Used to augment
+ * the reference allowlist when running untracked-namespace detection, so the
+ * owner is never nagged about clusters that are actually a principal's personal
+ * home (e.g. `family/sara/*`, `inbox/p/alice/*`) — even when the home prefix
+ * is not under the hard-coded `users/*` pattern (fix #1 — Codex review).
+ *
+ * Query is lightweight (one SELECT without JOINs; principals table is tiny) and
+ * only runs in the owner-only, unscoped path of memory_patterns and memory_orient.
+ */
+function getNonOwnerHomePrefixPatterns(db: Database.Database): string[] {
+  const now = new Date().toISOString();
+  const rows = db
+    .prepare(
+      `SELECT namespace_rules FROM principals
+       WHERE principal_type != 'owner'
+         AND (revoked_at IS NULL OR revoked_at > ?)
+         AND (expires_at IS NULL OR expires_at > ?)`,
+    )
+    .all(now, now) as Array<{ namespace_rules: string }>;
+
+  const patterns: string[] = [];
+  for (const row of rows) {
+    try {
+      const rules = JSON.parse(row.namespace_rules) as NamespaceRule[];
+      const home = homePrefixFromRules(rules);
+      if (home) patterns.push(`${home}/*`);
+    } catch {
+      // Malformed rules — skip; don't crash the orient hot path.
+    }
+  }
+  return patterns;
+}
+
 function computeEntryInsight(row: {
   entry_id: string;
   namespace: string | null;
@@ -4399,8 +4437,14 @@ export function registerTools(
                 // nag at the cluster threshold; the full proposal + crystallize write
                 // is built by memory_patterns. Derived from the cheap namespace-count
                 // aggregate, so no per-entry scan on the orient hot path.
+                // Fix #1 (Codex): augment the reference allowlist with the home-namespace
+                // patterns of all active non-owner principals so the owner is never nagged
+                // about a cluster that belongs to a principal's personal workspace.
                 {
-                  const untrackedClusters = detectUntrackedNamespaceClusters(namespaces, orientTrackedPatterns);
+                  const nonOwnerHomePatternsOrient = getNonOwnerHomePrefixPatterns(db);
+                  const untrackedClusters = detectUntrackedNamespaceClusters(namespaces, orientTrackedPatterns, {
+                    referencePatterns: [...REFERENCE_NAMESPACE_PATTERNS, ...nonOwnerHomePatternsOrient],
+                  });
                   if (untrackedClusters.length >= UNTRACKED_NAMESPACE_ORIENT_MIN) {
                     const named = untrackedClusters
                       .slice(0, UNTRACKED_NAMESPACE_ORIENT_PREVIEW)
@@ -5291,8 +5335,32 @@ export function registerTools(
               // the dashboard. Never auto-writes — the paired heuristic gives the exact
               // meta/config write the owner would run to crystallize. Only on an
               // unscoped call (a global taxonomy signal, not a within-namespace pattern).
-              if (ctx.principalType === "owner" && !namespace) {
-                const untracked = detectUntrackedNamespaces(allEntries, patternsTrackedPatterns);
+              if (ctx.principalType === "owner" && !namespace && !topicNeedle) {
+                // Fix #1 (Codex): augment the reference allowlist with home-namespace
+                // patterns of all active non-owner principals so the owner is never nagged
+                // about a cluster belonging to a principal's personal workspace.
+                const nonOwnerHomePatternsPatterns = getNonOwnerHomePrefixPatterns(db);
+                const augmentedRefPatterns = [...REFERENCE_NAMESPACE_PATTERNS, ...nonOwnerHomePatternsPatterns];
+                const untracked = detectUntrackedNamespaces(allEntries, patternsTrackedPatterns, {
+                  referencePatterns: augmentedRefPatterns,
+                });
+                // Read the current meta/config ONCE for field-preserving merge.
+                // Issue #4 (Codex): crystallize must patch only tracked_patterns,
+                // not overwrite the whole entry (other fields would be lost).
+                const currentConfigEntry = readState(db, "meta/config", "config");
+                let existingConfigFields: Record<string, unknown> = {};
+                if (currentConfigEntry) {
+                  try {
+                    const parsed = JSON.parse(parseEntry(currentConfigEntry).content) as Record<string, unknown>;
+                    // Preserve all fields except tracked_patterns (we'll re-set it).
+                    const { tracked_patterns: _tp, ...rest } = parsed;
+                    void _tp;
+                    existingConfigFields = rest;
+                  } catch {
+                    // Malformed JSON — ignore and produce a clean object.
+                  }
+                }
+
                 for (const candidate of untracked) {
                   candidate.source_entry_ids.forEach((id) => sourceIds.add(id));
                   patterns.push({
@@ -5302,8 +5370,17 @@ export function registerTools(
                     source_entry_ids: candidate.source_entry_ids,
                     source_namespaces: candidate.namespaces,
                   });
-                  const newPatterns = [...new Set([...patternsTrackedPatterns, candidate.pattern])];
-                  const configJson = JSON.stringify({ tracked_patterns: newPatterns });
+                  // Fix #2 (Codex): for mixed clusters (bare + sub-paths), both
+                  // "prefix" (exact) and "prefix/*" must be added to tracked_patterns
+                  // so that isTrackedNamespace returns true for all observed entries.
+                  const patternsToAdd = candidate.hasBare
+                    ? [candidate.prefix, candidate.pattern]  // exact + glob
+                    : [candidate.pattern];                    // glob only
+                  const newPatterns = [...new Set([...patternsTrackedPatterns, ...patternsToAdd])];
+                  // Fix #4 (Codex): merge — only replace tracked_patterns, preserve
+                  // any other fields (e.g. display_timezone) in the existing config.
+                  const configObj = { ...existingConfigFields, tracked_patterns: newPatterns };
+                  const configJson = JSON.stringify(configObj);
                   heuristics.push({
                     summary: `Add \`${candidate.pattern}\` to your tracked patterns to surface it on the dashboard.`,
                     rationale: `Propose-only — nothing is written. To crystallize, run: memory_write namespace="meta/config" key="config" content='${configJson}'`,

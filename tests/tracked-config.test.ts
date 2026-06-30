@@ -94,11 +94,12 @@ describe("detectUntrackedNamespaces", () => {
     expect(out[0].source_entry_ids.length).toBeGreaterThan(0);
   });
 
-  it("aggregates entries under one top-level prefix (single bare namespace, multiple keys)", () => {
+  it("aggregates entries under one top-level prefix (single bare namespace, multiple keys) — bare-only excluded (fix #2)", () => {
+    // A cluster composed ONLY of bare-prefix entries ("recipes" with no slash) is
+    // excluded: crystallizing "recipes/*" would NOT match the bare "recipes" entry,
+    // leaving the proposal irresolvable. Mixed clusters (bare + sub-paths) are included.
     const entries = [entry("recipes", "r1"), entry("recipes", "r2"), entry("recipes", "r3")];
-    const out = detectUntrackedNamespaces(entries, [...DEFAULT_TRACKED_PATTERNS]);
-    expect(out).toHaveLength(1);
-    expect(out[0].entry_count).toBe(3);
+    expect(detectUntrackedNamespaces(entries, [...DEFAULT_TRACKED_PATTERNS])).toHaveLength(0);
   });
 
   it("does not surface a cluster below the entry threshold", () => {
@@ -159,5 +160,24 @@ describe("detectUntrackedNamespaces", () => {
     expect(REFERENCE_NAMESPACE_PATTERNS).toContain("meta/*");
     expect(REFERENCE_NAMESPACE_PATTERNS).toContain("users/*");
     expect(UNTRACKED_NAMESPACE_MIN_ENTRIES).toBe(3);
+  });
+
+  // fix #2: bare (single-segment, no slash) namespaces — exclusion + hasBare flag
+  it("excludes clusters whose entries are ALL bare (no sub-path) — crystallize would be inconsistent", () => {
+    const bare = [entry("recipes", "r1"), entry("recipes", "r2"), entry("recipes", "r3")];
+    expect(detectUntrackedNamespaces(bare, [...DEFAULT_TRACKED_PATTERNS])).toHaveLength(0);
+  });
+
+  it("includes mixed clusters (bare + sub-paths) and sets hasBare:true for dual-pattern suggestion", () => {
+    const mixed = [
+      entry("recipes", "r0"),
+      entry("recipes/dinner", "r1"),
+      entry("recipes/lunch", "r2"),
+      entry("recipes/breakfast", "r3"),
+    ];
+    const out = detectUntrackedNamespaces(mixed, [...DEFAULT_TRACKED_PATTERNS]);
+    expect(out).toHaveLength(1);
+    expect(out[0].hasBare).toBe(true);
+    expect(out[0].entry_count).toBe(4);
   });
 });

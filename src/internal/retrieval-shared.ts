@@ -265,6 +265,15 @@ export interface UntrackedNamespaceCandidate {
   source_entry_ids: string[];
   /** Most recent updated_at across the prefix's entries. */
   last_activity_at: string;
+  /**
+   * True when at least one entry sits on the bare top-level namespace (e.g.
+   * "recipes" with no slash) alongside sub-path siblings ("recipes/dinner").
+   * When true the crystallize suggestion must include BOTH `"recipes"` (exact)
+   * and `"recipes/*"` so `isTrackedNamespace` returns true for all observed
+   * entries. Bare-ONLY clusters are excluded (crystallizing "recipes/*" would
+   * silently miss the exact "recipes" entry, making the proposal irresolvable).
+   */
+  hasBare?: boolean;
 }
 
 /**
@@ -297,6 +306,8 @@ export function detectUntrackedNamespaces(
     namespaces: Set<string>;
     sourceIds: string[];
     last_activity_at: string;
+    hasSubPath: boolean; // at least one "prefix/..." entry
+    hasBare: boolean;    // at least one bare "prefix" (no slash) entry
   }
   const groups = new Map<string, Group>();
 
@@ -304,20 +315,28 @@ export function detectUntrackedNamespaces(
     const prefix = untrackedPrefixOf(e.namespace, trackedPatterns, referencePatterns);
     if (prefix === null) continue;
     const ns = e.namespace;
+    const isBareName = ns === prefix; // "recipes" with no slash
 
     let group = groups.get(prefix);
     if (!group) {
-      group = { prefix, entry_count: 0, namespaces: new Set(), sourceIds: [], last_activity_at: e.updated_at };
+      group = {
+        prefix, entry_count: 0, namespaces: new Set(), sourceIds: [],
+        last_activity_at: e.updated_at, hasSubPath: false, hasBare: false,
+      };
       groups.set(prefix, group);
     }
     group.entry_count += 1;
     group.namespaces.add(ns);
     if (group.sourceIds.length < maxSources) group.sourceIds.push(e.id);
     if (e.updated_at > group.last_activity_at) group.last_activity_at = e.updated_at;
+    if (isBareName) group.hasBare = true;
+    else group.hasSubPath = true;
   }
 
   return [...groups.values()]
-    .filter((g) => g.entry_count >= minEntries)
+    // Exclude bare-ONLY clusters: crystallizing "prefix/*" would NOT match the
+    // bare "prefix" entry, leaving the proposal in an irresolvable loop.
+    .filter((g) => g.entry_count >= minEntries && g.hasSubPath)
     .map((g) => ({
       prefix: g.prefix,
       pattern: `${g.prefix}/*`,
@@ -325,6 +344,7 @@ export function detectUntrackedNamespaces(
       namespaces: [...g.namespaces].sort(),
       source_entry_ids: g.sourceIds,
       last_activity_at: g.last_activity_at,
+      ...(g.hasBare ? { hasBare: true } : {}),
     }))
     .sort((a, b) => b.entry_count - a.entry_count || a.prefix.localeCompare(b.prefix));
 }
@@ -350,17 +370,24 @@ export function detectUntrackedNamespaceClusters(
 ): UntrackedNamespaceCluster[] {
   const minEntries = options.minEntries ?? UNTRACKED_NAMESPACE_MIN_ENTRIES;
   const referencePatterns = options.referencePatterns ?? REFERENCE_NAMESPACE_PATTERNS;
-  const counts = new Map<string, number>();
+  interface CountGroup { count: number; hasSubPath: boolean }
+  const groups = new Map<string, CountGroup>();
 
   for (const row of namespaceCounts) {
     const prefix = untrackedPrefixOf(row.namespace, trackedPatterns, referencePatterns);
     if (prefix === null) continue;
-    counts.set(prefix, (counts.get(prefix) ?? 0) + row.state_count + row.log_count);
+    const isSubPath = row.namespace.includes("/") && row.namespace !== prefix;
+    const existing = groups.get(prefix);
+    groups.set(prefix, {
+      count: (existing?.count ?? 0) + row.state_count + row.log_count,
+      hasSubPath: (existing?.hasSubPath ?? false) || isSubPath,
+    });
   }
 
-  return [...counts.entries()]
-    .filter(([, count]) => count >= minEntries)
-    .map(([prefix, count]) => ({ prefix, pattern: `${prefix}/*`, entry_count: count }))
+  return [...groups.entries()]
+    // Mirror detectUntrackedNamespaces: exclude bare-only clusters (no sub-path)
+    .filter(([, g]) => g.count >= minEntries && g.hasSubPath)
+    .map(([prefix, g]) => ({ prefix, pattern: `${prefix}/*`, entry_count: g.count }))
     .sort((a, b) => b.entry_count - a.entry_count || a.prefix.localeCompare(b.prefix));
 }
 

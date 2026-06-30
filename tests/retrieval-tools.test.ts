@@ -881,3 +881,133 @@ describe("memory_orient — untracked_namespace_cluster maintenance signal", () 
     expect(item).toBeUndefined();
   });
 });
+
+// -----------------------------------------------------------------------
+// Codex review fixes — issues 1-4 (#163 followup)
+// -----------------------------------------------------------------------
+
+describe("fix #1 — non-owner home prefixes excluded from owner untracked proposal", () => {
+  it("owner is NOT nagged about a non-owner principal's home namespace (non-users/* prefix)", async () => {
+    const call = makeCallTool(db, ownerCtx());
+
+    // Register a principal whose home is inbox/p/sara (not under users/*)
+    db.prepare(
+      `INSERT INTO principals (id, principal_id, principal_type, namespace_rules, created_at)
+       VALUES (?, ?, 'family', ?, ?)`,
+    ).run("pid-sara", "sara", JSON.stringify([{ pattern: "inbox/p/sara/*", permissions: "rw" }]), new Date().toISOString());
+
+    // Seed 3+ entries under that home prefix
+    writeState(db, "inbox/p/sara/a", "k1", "x", []);
+    writeState(db, "inbox/p/sara/b", "k2", "x", []);
+    writeState(db, "inbox/p/sara/c", "k3", "x", []);
+
+    const raw = await call("memory_patterns", {});
+    const result = parseToolResponse(raw) as { patterns: Array<{ kind: string; summary: string }> };
+    // The owner must NOT see a proposal about inbox/p — it's a principal's home.
+    const p = result.patterns.find((x) => x.kind === "untracked_namespace" && x.summary.includes("inbox"));
+    expect(p).toBeUndefined();
+  });
+
+  it("orient does NOT fire untracked_namespace_cluster for a non-owner home prefix", async () => {
+    const call = makeCallTool(db, ownerCtx());
+
+    for (const pid of ["sara", "bob", "cat"]) {
+      db.prepare(
+        `INSERT INTO principals (id, principal_id, principal_type, namespace_rules, created_at)
+         VALUES (?, ?, 'family', ?, ?)`,
+      ).run(`pid-${pid}`, pid, JSON.stringify([{ pattern: `family/${pid}/*`, permissions: "rw" }]), new Date().toISOString());
+      writeState(db, `family/${pid}/a`, "k1", "x", []);
+      writeState(db, `family/${pid}/b`, "k2", "x", []);
+      writeState(db, `family/${pid}/c`, "k3", "x", []);
+    }
+
+    const raw = await call("memory_orient", {});
+    const result = parseToolResponse(raw) as { maintenance_needed?: Array<{ issue: string; suggestion: string }> };
+    const item = (result.maintenance_needed ?? []).find(
+      (m) => m.issue === "untracked_namespace_cluster" && m.suggestion.includes("family"),
+    );
+    expect(item).toBeUndefined();
+  });
+});
+
+describe("fix #2 — bare (single-segment) namespace handling", () => {
+  it("bare-only namespace cluster (no sub-paths) does NOT appear in memory_patterns", async () => {
+    const call = makeCallTool(db, ownerCtx());
+    // Write 3 entries under the bare "cooking" namespace (no slash)
+    for (let i = 0; i < 3; i++) {
+      writeState(db, "cooking", `recipe${i}`, `entry ${i}`, []);
+    }
+
+    const raw = await call("memory_patterns", {});
+    const result = parseToolResponse(raw) as { patterns: Array<{ kind: string; summary: string }> };
+    // Bare-only cluster excluded: crystallizing "cooking/*" would not match
+    // "cooking" so we must not propose it (avoid a loop where the proposal never resolves).
+    const p = result.patterns.find((x) => x.kind === "untracked_namespace" && x.summary.includes("cooking"));
+    expect(p).toBeUndefined();
+  });
+
+  it("mixed namespace (bare + sub-paths) IS proposed and crystallize pattern tracks both", async () => {
+    const call = makeCallTool(db, ownerCtx());
+    // "recipes" bare + sub-paths — should be proposed with both patterns suggested
+    writeState(db, "recipes", "index", "index entry", []);
+    writeState(db, "recipes/dinner", "x", "x", []);
+    writeState(db, "recipes/lunch", "x", "x", []);
+    writeState(db, "recipes/breakfast", "x", "x", []);
+
+    const raw = await call("memory_patterns", {});
+    const result = parseToolResponse(raw) as {
+      patterns: Array<{ kind: string; summary: string }>;
+      heuristics: Array<{ rationale: string }>;
+    };
+    const p = result.patterns.find((x) => x.kind === "untracked_namespace" && x.summary.includes("recipes"));
+    expect(p).toBeDefined();
+    // The crystallize heuristic must include BOTH "recipes" (exact) and "recipes/*"
+    const h = result.heuristics.find((x) => x.rationale.includes("meta/config"));
+    expect(h).toBeDefined();
+    expect(h!.rationale).toContain('"recipes"');
+    expect(h!.rationale).toContain('"recipes/*"');
+  });
+});
+
+describe("fix #3 — topic filter gates untracked detection", () => {
+  it("memory_patterns with a topic argument skips the untracked_namespace pass", async () => {
+    const call = makeCallTool(db, ownerCtx());
+    writeState(db, "recipes/a", "k", "x", []);
+    writeState(db, "recipes/b", "k", "x", []);
+    writeState(db, "recipes/c", "k", "x", []);
+
+    const raw = await call("memory_patterns", { topic: "cache" });
+    const result = parseToolResponse(raw) as { patterns: Array<{ kind: string }> };
+    expect(result.patterns.find((x) => x.kind === "untracked_namespace")).toBeUndefined();
+  });
+});
+
+describe("fix #4 — crystallize heuristic preserves existing meta/config fields", () => {
+  it("suggested meta/config content merges tracked_patterns without dropping other fields", async () => {
+    const call = makeCallTool(db, ownerCtx());
+    // Write a meta/config with an extra field that must be preserved
+    writeState(
+      db,
+      "meta/config",
+      "config",
+      JSON.stringify({ tracked_patterns: ["projects/*", "clients/*"], display_timezone: "Europe/Stockholm" }),
+      [],
+    );
+    // Seed a cluster to propose
+    writeState(db, "recipes/a", "k", "x", []);
+    writeState(db, "recipes/b", "k", "x", []);
+    writeState(db, "recipes/c", "k", "x", []);
+
+    const raw = await call("memory_patterns", {});
+    const result = parseToolResponse(raw) as {
+      patterns: Array<{ kind: string }>;
+      heuristics: Array<{ rationale: string }>;
+    };
+    const h = result.heuristics.find((x) => x.rationale.includes("meta/config"));
+    expect(h).toBeDefined();
+    // The suggested content must contain display_timezone (other field preserved)
+    expect(h!.rationale).toContain("display_timezone");
+    // And it must contain the new pattern
+    expect(h!.rationale).toContain("recipes/*");
+  });
+});
