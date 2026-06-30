@@ -125,8 +125,80 @@ export function findPassedForwardDate(content: string): string | null {
   return null;
 }
 
-export function isTrackedNamespace(namespace: string): boolean {
-  return namespace.startsWith("projects/") || namespace.startsWith("clients/");
+// --- Tracked-namespace patterns (dashboard taxonomy) ---
+
+/**
+ * Default tracked-namespace patterns: the namespaces whose `status` entries
+ * feed the computed dashboard. Historically hardcoded as projects/* | clients/*
+ * (a billing-consultant taxonomy). Now the DEFAULT, overridable per principal
+ * via a meta/config entry (see resolveTrackedPatterns in tools.ts). Keeping
+ * this as the default means an instance with no config behaves exactly as
+ * before.
+ */
+export const DEFAULT_TRACKED_PATTERNS: readonly string[] = ["projects/*", "clients/*"];
+
+/**
+ * Match a namespace against a set of glob patterns. Grammar mirrors
+ * namespaceMatchesPattern in access.ts: "*" matches everything, "prefix/*"
+ * matches by prefix, anything else is an exact match.
+ */
+export function namespaceMatchesAnyPattern(ns: string, patterns: readonly string[]): boolean {
+  for (const p of patterns) {
+    if (p === "*") return true;
+    if (p.endsWith("/*")) {
+      if (ns.startsWith(p.slice(0, -1))) return true;
+    } else if (ns === p) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function escapeLikePattern(s: string): string {
+  return s.replace(/[\\%_]/g, (c) => "\\" + c);
+}
+
+/**
+ * Translate tracked-namespace glob patterns into a parameterized SQL boolean
+ * clause over `column`:
+ *   - empty patterns → "0" (matches nothing)
+ *   - a "*" pattern  → "1" (matches everything)
+ *   - "prefix/*"     → `column LIKE 'prefix/%' ESCAPE '\\'`
+ *   - exact          → `column = ?`
+ * Returns the clause text and ordered bind params. `column` MUST be a trusted
+ * literal (caller-supplied, never user input); only the pattern VALUES are
+ * parameterized.
+ */
+export function trackedPatternsToSqlLike(
+  patterns: readonly string[],
+  column: string,
+): { clause: string; params: string[] } {
+  if (patterns.length === 0) return { clause: "0", params: [] };
+  const ors: string[] = [];
+  const params: string[] = [];
+  for (const p of patterns) {
+    if (p === "*") return { clause: "1", params: [] };
+    if (p.endsWith("/*")) {
+      ors.push(`${column} LIKE ? ESCAPE '\\'`);
+      params.push(escapeLikePattern(p.slice(0, -1)) + "%");
+    } else {
+      ors.push(`${column} = ?`);
+      params.push(p);
+    }
+  }
+  return { clause: `(${ors.join(" OR ")})`, params };
+}
+
+/**
+ * Whether `namespace` is "tracked" (its status entries feed the dashboard).
+ * Defaults to DEFAULT_TRACKED_PATTERNS so existing call sites are unchanged;
+ * pass resolved per-principal patterns to make it principal-aware.
+ */
+export function isTrackedNamespace(
+  namespace: string,
+  patterns: readonly string[] = DEFAULT_TRACKED_PATTERNS,
+): boolean {
+  return namespaceMatchesAnyPattern(namespace, patterns);
 }
 
 export function canonicalizeTags(tags: string[]): { canonical: string[]; normalized: string[] } {

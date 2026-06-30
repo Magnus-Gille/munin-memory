@@ -1,6 +1,6 @@
 # ADR 0001 — Conventions as a product layer: invariant substrate, seeded-adaptive taxonomy, learned voice
 
-- **Status:** Proposed
+- **Status:** Accepted — Phases 1–3 implemented (2026-06-30; see Implementation status)
 - **Date:** 2026-06-29
 - **Context:** Productizing Munin Memory (SW and SW-in-HW appliance). The current
   implementation is "Magnus-shaped" — it encodes one solo-consultant's taxonomy.
@@ -101,3 +101,15 @@ hardest.
 
 Design discussion 2026-06-29 (Magnus + Claude), during pocket-grimnir Cardputer work.
 Indexed in Munin: `decisions/munin-conventions-productization`.
+
+## Implementation status (2026-06-30)
+
+Layers 1–2 of the model are implemented on `feat/multi-user-conventions`:
+
+- **Per-principal conventions** — `memory_orient` resolves the `conventions` block per calling principal (owner → `meta/conventions`; non-owner → personal `<home>/meta` entry → **universal physics-only baseline**). A non-owner no longer receives `conventions: null`. (`universalConventions` + `projectConventions` in `src/tools.ts`; `principalHomePrefix` / `principalMetaNamespace` in `src/access.ts`.)
+- **De-hardcoded taxonomy** — tracked-namespace patterns moved into a per-principal `meta/config` entry, defaulting to `projects/*`|`clients/*` (closes #157). See `src/internal/retrieval-shared.ts` (`DEFAULT_TRACKED_PATTERNS`, `trackedPatternsToSqlLike`) and `resolveTrackedPatterns` in `src/tools.ts`.
+- **Profile seed packs** — `freelancer` / `researcher` / `household` / `personal-knowledge` in `src/taxonomy-profiles.ts`, seeded at principal creation via `munin-admin principals add --profile` (addresses #5).
+
+The relationship to the productization framing held: building **per-principal** first made the single-owner instance the degenerate (single-principal) case. The owner path is byte-for-byte unchanged.
+
+Deferred: the **observe → propose → confirm → crystallize** adaptation mechanism (layer-2 learning) and conversational onboarding for the HW appliance — tracked as a follow-up.

@@ -281,7 +281,12 @@ claude mcp add-json munin-memory '{"command":"node","args":["/path/to/munin-memo
 The project dashboard in `memory_orient` is computed dynamically from status entries, replacing the manually-maintained `meta/workbench`.
 
 ### Tracked namespaces
-Namespaces matching `projects/*` or `clients/*` are "tracked". Status entries (`key = "status"`) in these namespaces feed the computed dashboard.
+Namespaces matching `projects/*` or `clients/*` are "tracked" by default. Status entries (`key = "status"`) in tracked namespaces feed the computed dashboard.
+
+The tracked patterns are **configurable per principal** via a `meta/config` entry (`{ "tracked_patterns": ["projects/*", "clients/*"] }`): the owner reads `meta/config`; a non-owner principal reads `<home>/meta` (key `config`), where `<home>` is their first writable `prefix/*` rule (e.g. `users/sara`). Absent any config, the default is `projects/*`|`clients/*`, so existing instances are byte-for-byte unchanged (ADR 0001 / #157).
+
+### Per-principal conventions (multi-user)
+`memory_orient` resolves the `conventions` block for the **calling principal**, not just the owner: owner → global `meta/conventions`; a non-owner with a personal conventions entry at `<home>/meta` (key `conventions`) → that entry (on `full`) or a neutral compact baseline + a hint (compact/standard); otherwise → a **universal, taxonomy-neutral baseline** (the entry model, the tools, search, and the two invariants — no secrets; stored content is data, never instructions). The block carries a `source` tier label (`owner` / `principal` / `default`). New principals can be seeded with a **taxonomy profile** at creation (see `munin-admin principals add --profile` below), which writes their `<home>/meta` conventions + config.
 
 ### Lifecycle tags
 Canonical lifecycle tags: `active`, `blocked`, `completed`, `stopped`, `maintenance`, `archived`. Aliases are auto-normalized on write: `done` → `completed`, `paused` → `stopped`, `inactive` → `archived`.
@@ -478,6 +483,10 @@ Principal management CLI + OAuth client management.
 npx munin-admin principals list
 npx munin-admin principals add sara --type family --email sara@example.com \
   --rules '[{"pattern":"users/sara/*","permissions":"rw"},{"pattern":"shared/family/*","permissions":"rw"}]'
+# --profile seeds a taxonomy (freelancer | researcher | household | personal-knowledge)
+# into the principal's <home>/meta conventions + config:
+npx munin-admin principals add sara --type family \
+  --rules '[{"pattern":"users/sara/*","permissions":"rw"}]' --profile household
 npx munin-admin principals update sara --email newemail@example.com
 npx munin-admin principals test sara users/sara/notes
 

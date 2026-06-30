@@ -306,8 +306,11 @@ export function isConsolidationAvailable(): boolean {
  * worker is available implies it is stalled or rate-limited). Encapsulates the
  * configured threshold so callers don't have to know it.
  */
-export function getConsolidationBacklog(db: Database.Database): ConsolidationCandidate[] {
-  return getNamespacesNeedingConsolidation(db, config.minLogs);
+export function getConsolidationBacklog(
+  db: Database.Database,
+  patterns?: readonly string[],
+): ConsolidationCandidate[] {
+  return getNamespacesNeedingConsolidation(db, config.minLogs, patterns);
 }
 
 export function resetConsolidationCircuitBreaker(): void {

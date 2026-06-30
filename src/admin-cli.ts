@@ -34,6 +34,7 @@ import {
   nowUTC,
   resolveDbPath,
   setNamespaceClassificationFloor,
+  writeState,
 } from "./db.js";
 import {
   validateNamespaceRules,
@@ -41,9 +42,15 @@ import {
   canWrite,
   resolveAccessContext,
   namespaceMatchesPattern,
+  homePrefixFromRules,
   type NamespaceRule,
   type PrincipalType,
 } from "./access.js";
+import {
+  getTaxonomyProfile,
+  listProfileNames,
+  materializeProfile,
+} from "./taxonomy-profiles.js";
 import {
   CLASSIFICATION_LEVELS,
   isClassificationLevel,
@@ -93,6 +100,9 @@ export interface AddPrincipalOpts {
   rules: NamespaceRule[];
   email?: string;
   expiresAt?: string;
+  /** Optional taxonomy profile to seed the principal's personal conventions +
+   *  tracked-pattern config (requires a writable "<prefix>/*" rule). */
+  profile?: string;
   force?: boolean;
 }
 
@@ -101,6 +111,8 @@ export interface AddPrincipalResult {
   principalId: string;
   principalType: PrincipalType;
   token?: string;
+  /** Present when --profile seeded the principal's taxonomy. */
+  seeded?: { profile: string; conventions: string; config: string };
 }
 
 export interface UpdatePrincipalOpts {
@@ -344,6 +356,23 @@ export function addPrincipal(
 
   validateNamespaceRules(opts.rules);
 
+  // Validate --profile up front so we never create a principal we cannot seed.
+  let profileHome: string | null = null;
+  if (opts.profile) {
+    if (!getTaxonomyProfile(opts.profile)) {
+      throw new Error(
+        `Unknown profile "${opts.profile}". Valid profiles: ${listProfileNames().join(", ")}.`,
+      );
+    }
+    profileHome = homePrefixFromRules(opts.rules);
+    if (profileHome === null) {
+      throw new Error(
+        `--profile requires a writable "<prefix>/*" rule to seed the principal's namespace; ` +
+          `principal "${opts.principalId}" has no such rule.`,
+      );
+    }
+  }
+
   if (opts.expiresAt) {
     opts.expiresAt = parseExpiresAt(opts.expiresAt);
   }
@@ -385,7 +414,48 @@ export function addPrincipal(
 
   txn();
 
-  return { id, principalId: opts.principalId, principalType: opts.principalType, token };
+  // Seed taxonomy AFTER the principal row is committed: writeState opens its own
+  // transaction, which must not be nested inside the addPrincipal transaction.
+  let seeded: AddPrincipalResult["seeded"];
+  if (opts.profile && profileHome !== null) {
+    const profile = getTaxonomyProfile(opts.profile)!;
+    const metaNs = `${profileHome}/meta`;
+    const { conventions, trackedPatterns } = materializeProfile(profile, profileHome);
+    try {
+      writeState(
+        db,
+        metaNs,
+        "conventions",
+        conventions,
+        ["conventions", `profile:${profile.name}`],
+        opts.principalId,
+      );
+      writeState(
+        db,
+        metaNs,
+        "config",
+        JSON.stringify({ tracked_patterns: trackedPatterns }, null, 2),
+        ["config", `profile:${profile.name}`],
+        opts.principalId,
+      );
+      auditLog(
+        db,
+        "principal_profile_seed",
+        opts.principalId,
+        `profile=${profile.name}, home=${profileHome}`,
+      );
+      seeded = { profile: profile.name, conventions: metaNs, config: metaNs };
+    } catch (err) {
+      // Seeding runs outside the principal-insert transaction (writeState opens
+      // its own). If any seed write fails, roll back so we never leave a live
+      // principal with a missing or half-written profile.
+      db.prepare("DELETE FROM entries WHERE owner_principal_id = ? AND namespace = ?").run(opts.principalId, metaNs);
+      db.prepare("DELETE FROM principals WHERE id = ?").run(id);
+      throw err;
+    }
+  }
+
+  return { id, principalId: opts.principalId, principalType: opts.principalType, token, seeded };
 }
 
 export function revokePrincipal(
@@ -833,6 +903,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     "--rules",
     "--email",
     "--expires-at",
+    "--profile",
     "--principal",
     "--scope",
     "--grace-hours",
@@ -889,7 +960,8 @@ const USAGE = `munin-admin — Manage principals in the munin-memory MCP server.
 Usage:
   munin-admin principals list
   munin-admin principals show <principal-id>
-  munin-admin principals add <principal-id> --type <type> --rules <json|@file> [--email <email>]
+  munin-admin principals add <principal-id> --type <type> --rules <json|@file> [--email <email>] [--profile <name>]
+      profiles: freelancer | researcher | household | personal-knowledge (seeds personal conventions + dashboard config)
   munin-admin principals revoke <principal-id>
   munin-admin principals update <principal-id> [--rules ...] [--email ...] [--expires-at ...]
   munin-admin principals rotate-token <principal-id>
@@ -999,6 +1071,7 @@ function handleAdd(
   const rules = parseRules(rulesStr);
   const expiresAt = flags.get("--expires-at");
   const email = flags.get("--email");
+  const profile = flags.get("--profile");
 
   const result = addPrincipal(db, {
     principalId,
@@ -1006,6 +1079,7 @@ function handleAdd(
     rules,
     email,
     expiresAt,
+    profile,
     force,
   });
 
@@ -1013,6 +1087,11 @@ function handleAdd(
     console.log(JSON.stringify(result, null, 2));
   } else {
     console.log(`Created principal: ${result.principalId} (type: ${result.principalType})`);
+    if (result.seeded) {
+      console.log(
+        `Seeded "${result.seeded.profile}" profile → ${result.seeded.conventions} (conventions + config)`,
+      );
+    }
     if (result.token) {
       console.error(
         `\nService token (shown once, store securely):\n  ${result.token}\n`,
