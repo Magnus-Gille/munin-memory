@@ -1627,3 +1627,73 @@ describe("end-to-end: profile onboarding → per-principal orient", () => {
     expect(rejected.error).toBe("validation_error");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Part 1 (#164): per-principal tracked patterns on the remaining write paths
+// (memory_extract suggestions + commitment derivation).
+// ---------------------------------------------------------------------------
+
+describe("per-principal tracked patterns — extract + commitments (#164)", () => {
+  function onboardSaraHousehold(): void {
+    addPrincipal(db, {
+      principalId: "sara",
+      principalType: "family",
+      rules: [{ pattern: "users/sara/*", permissions: "rw" }],
+      profile: "household",
+    });
+  }
+
+  it("memory_extract suggests memory_update_status for a household tracked namespace", async () => {
+    onboardSaraHousehold();
+
+    const result = parse(
+      await familyCall("memory_extract", {
+        conversation_text: [
+          "Current work: repaint the fence.",
+          "Next steps:",
+          "- Buy paint",
+          "- Sand the boards",
+        ].join("\n"),
+        namespace_hint: "users/sara/home/fence",
+      }),
+    ) as {
+      suggestions: Array<{ action: string; namespace: string; status_patch?: { next_steps?: string[] } }>;
+    };
+
+    // users/sara/home/* is tracked by Sara's household config, so the suggestion
+    // must be a status update, not a plain memory_write.
+    expect(result.suggestions).toContainEqual(
+      expect.objectContaining({
+        action: "memory_update_status",
+        namespace: "users/sara/home/fence",
+      }),
+    );
+    expect(
+      result.suggestions.some(
+        (s) => s.action === "memory_write" && s.namespace === "users/sara/home/fence",
+      ),
+    ).toBe(false);
+  });
+
+  it("a household next-step becomes a commitment surfaced by memory_commitments", async () => {
+    onboardSaraHousehold();
+
+    await familyCall("memory_update_status", {
+      namespace: "users/sara/home/garden",
+      phase: "Active",
+      current_work: "Replant the back beds",
+      next_steps: ["Buy compost"],
+      lifecycle: "active",
+    });
+
+    const commitments = parse(await familyCall("memory_commitments")) as {
+      open?: Array<{ text: string; namespace: string }>;
+    };
+
+    const openTexts = (commitments.open ?? []).map((c) => c.text);
+    expect(openTexts).toContain("Buy compost");
+    expect(
+      (commitments.open ?? []).some((c) => c.namespace === "users/sara/home/garden"),
+    ).toBe(true);
+  });
+});

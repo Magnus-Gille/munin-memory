@@ -43,6 +43,7 @@ import {
   resolveAccessContext,
   namespaceMatchesPattern,
   homePrefixFromRules,
+  getDefaultMaxClassificationForPrincipalType,
   type NamespaceRule,
   type PrincipalType,
 } from "./access.js";
@@ -338,6 +339,59 @@ export function showPrincipal(
   };
 }
 
+/**
+ * Returns the principal_id of an OTHER active, non-owner principal whose
+ * namespace rules grant read access to `seedNamespace`, or null if none.
+ *
+ * Used to harden `--profile` seeding: a principal's personal conventions/config
+ * are written to `<home>/meta`. If the home prefix was (mis)ordered so that a
+ * SHARED rule (e.g. `shared/family/*`) is the first writable prefix, the derived
+ * home would seed under a namespace another principal can read — leaking the
+ * principal's personal taxonomy. We refuse to seed in that case. Owner is
+ * excluded (the owner can read everything by design and is the intended reader
+ * of a principal's seeded settings).
+ */
+function findPrincipalSharingNamespace(
+  db: Database.Database,
+  seedNamespace: string,
+  excludePrincipalId: string,
+): string | null {
+  const rows = db
+    .prepare(
+      `SELECT principal_id, principal_type, namespace_rules, revoked_at, expires_at
+       FROM principals`,
+    )
+    .all() as Array<{
+      principal_id: string;
+      principal_type: string;
+      namespace_rules: string;
+      revoked_at: string | null;
+      expires_at: string | null;
+    }>;
+
+  const now = nowUTC();
+  for (const row of rows) {
+    if (row.principal_id === excludePrincipalId) continue;
+    if (row.principal_type === "owner") continue;
+    if (row.revoked_at !== null) continue;
+    if (row.expires_at !== null && row.expires_at <= now) continue;
+
+    let rules: NamespaceRule[];
+    try {
+      rules = JSON.parse(row.namespace_rules) as NamespaceRule[];
+    } catch {
+      continue;
+    }
+    for (const rule of rules) {
+      if (rule.permissions !== "read" && rule.permissions !== "rw") continue;
+      if (namespaceMatchesPattern(seedNamespace, rule.pattern)) {
+        return row.principal_id;
+      }
+    }
+  }
+  return null;
+}
+
 export function addPrincipal(
   db: Database.Database,
   opts: AddPrincipalOpts,
@@ -369,6 +423,25 @@ export function addPrincipal(
       throw new Error(
         `--profile requires a writable "<prefix>/*" rule to seed the principal's namespace; ` +
           `principal "${opts.principalId}" has no such rule.`,
+      );
+    }
+
+    // Shared-home guard (#164 part 2): the profile seeds personal conventions +
+    // config under "<home>/meta". If that namespace is also readable by another
+    // active non-owner principal (e.g. the home derived to a SHARED prefix
+    // because a shared rule was ordered before the principal's own
+    // "users/<id>/*" rule), seeding would leak the principal's personal taxonomy.
+    const sharedWith = findPrincipalSharingNamespace(
+      db,
+      `${profileHome}/meta`,
+      opts.principalId,
+    );
+    if (sharedWith !== null) {
+      throw new Error(
+        `--profile cannot seed: home prefix "${profileHome}" is shared with another ` +
+          `principal ("${sharedWith}"); profile seeding needs a private home. ` +
+          `List the principal's own "users/${opts.principalId}/*" rule first, or pass an ` +
+          `explicit private "<prefix>/*" rule before any shared rule.`,
       );
     }
   }
@@ -421,6 +494,18 @@ export function addPrincipal(
     const profile = getTaxonomyProfile(opts.profile)!;
     const metaNs = `${profileHome}/meta`;
     const { conventions, trackedPatterns } = materializeProfile(profile, profileHome);
+    // Classification floor vs principal max (#164 part 3): with the Librarian
+    // enabled, the home's namespace floor (default "internal") can exceed a
+    // low-tier principal's effective max (e.g. an external principal caps at
+    // "public"), which would redact the principal's own seeded conventions and
+    // make memory_orient(full) fall back to the universal default. Seed at the
+    // principal's effective max with an explicit below-floor override so the
+    // principal can always read its own conventions + config.
+    const seedClassification = getDefaultMaxClassificationForPrincipalType(opts.principalType);
+    const seedClassificationOptions = {
+      classification: seedClassification,
+      classificationOverride: true,
+    };
     try {
       writeState(
         db,
@@ -429,6 +514,9 @@ export function addPrincipal(
         conventions,
         ["conventions", `profile:${profile.name}`],
         opts.principalId,
+        undefined,
+        undefined,
+        seedClassificationOptions,
       );
       writeState(
         db,
@@ -437,6 +525,9 @@ export function addPrincipal(
         JSON.stringify({ tracked_patterns: trackedPatterns }, null, 2),
         ["config", `profile:${profile.name}`],
         opts.principalId,
+        undefined,
+        undefined,
+        seedClassificationOptions,
       );
       auditLog(
         db,
