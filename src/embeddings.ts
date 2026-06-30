@@ -321,8 +321,33 @@ export function _forceCircuitBreakerTrippedForTesting(tripped: boolean): void {
 
 // --- Background worker ---
 
+/**
+ * Reset orphaned `processing` rows back to `pending` so they get re-claimed.
+ *
+ * A row is only set to `processing` by the in-process worker while it holds it
+ * mid-batch; the status is never persisted as a stable state. Therefore any row
+ * found in `processing` at worker startup is an orphan from a prior process that
+ * crashed or was restarted mid-batch — no live worker can legitimately own it.
+ * Left alone, such rows are never re-claimed (the claim query only picks up
+ * `pending`/`failed`/stale-`generated`), so they stay un-embedded forever and,
+ * under the model-identity guard, invisible to semantic search (#155).
+ *
+ * Returns the number of rows reset. `updated_at` is deliberately NOT touched so
+ * the reset does not disturb CAS timestamps or surface as a content change.
+ */
+export function resetOrphanedProcessingRows(db: Database.Database): number {
+  const result = db
+    .prepare("UPDATE entries SET embedding_status = 'pending' WHERE embedding_status = 'processing'")
+    .run();
+  return result.changes;
+}
+
 export function startEmbeddingWorker(db: Database.Database): void {
   if (!isEmbeddingAvailable()) return;
+  const reclaimed = resetOrphanedProcessingRows(db);
+  if (reclaimed > 0) {
+    console.error(`[embeddings] reset ${reclaimed} orphaned 'processing' row(s) to 'pending' on startup`);
+  }
   workerDb = db;
   scheduleNextBatch();
 }
