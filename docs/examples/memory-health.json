@@ -33,13 +33,15 @@
     },
     "retrieval": {
       "ok": true,
-      "query_volume_7d": 0,
-      "query_volume_30d": 0,
+      "query_volume_7d": 1,
+      "query_volume_30d": 1,
       "mode_mix": {
-        "lexical": 0,
+        "lexical": 1,
         "semantic": 0,
         "hybrid": 0
       },
+      "latency_p50_ms": 12,
+      "latency_p95_ms": 12,
       "unused_surface_count": 0
     },
     "classification": {
@@ -49,7 +51,8 @@
         "internal": 8,
         "client-confidential": 0,
         "client-restricted": 0
-      }
+      },
+      "access_denied_7d": 1
     },
     "maintenance": {
       "ok": true,

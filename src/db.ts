@@ -292,6 +292,29 @@ export function recordCrossZoneBlock(
   insertAuditRow(db, nowUTC(), agentId, "cross_zone_block", sourceNamespace, targetNamespace, detail);
 }
 
+/**
+ * Record an access-denied security event in the audit log. Written from the
+ * central tool-gate denial helpers (accessDeniedResponse / accessDeniedReadResponse)
+ * whenever a non-owner principal is denied. Best-effort: never throws — a failed
+ * write must not break the denied tool's response.
+ *
+ * Stores only non-secret metadata: the denied principal (agent_id), the action
+ * "access_denied", a fixed namespace "security/access", and the tool name as the
+ * key. No request content, namespace, or key the caller tried to reach is stored,
+ * so a prompt-injection payload cannot smuggle itself into the audit log here.
+ */
+export function recordAccessDenied(
+  db: Database.Database,
+  principalId: string,
+  toolName: string,
+): void {
+  try {
+    insertAuditRow(db, nowUTC(), principalId, "access_denied", "security/access", toolName, null);
+  } catch {
+    // Fire-and-forget: never fail the denied tool call.
+  }
+}
+
 function resolveWriteClassification(
   db: Database.Database,
   namespace: string,
@@ -2103,6 +2126,9 @@ export interface RetrievalEventInput {
   resultIds: string[];
   resultNamespaces: string[];
   resultRanks: number[];
+  /** Wall-clock query latency in milliseconds. Recorded for memory_query only,
+   *  so the health retrieval section can report p50/p95 latency percentiles. */
+  durationMs?: number;
   detail?: Record<string, unknown>;
 }
 
@@ -2193,8 +2219,8 @@ export function logRetrievalEvent(
       db.prepare(
         `INSERT INTO retrieval_events
            (id, session_id, timestamp, tool_name, query_text, requested_mode, actual_mode,
-            result_ids, result_namespaces, result_ranks, detail)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            result_ids, result_namespaces, result_ranks, duration_ms, detail)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         eventId,
         input.sessionId,
@@ -2206,6 +2232,9 @@ export function logRetrievalEvent(
         JSON.stringify(input.resultIds),
         JSON.stringify(input.resultNamespaces),
         JSON.stringify(input.resultRanks),
+        typeof input.durationMs === "number" && Number.isFinite(input.durationMs)
+          ? Math.round(input.durationMs)
+          : null,
         input.detail ? JSON.stringify(input.detail) : null,
       );
 
@@ -3429,20 +3458,20 @@ export function getHealthRetrievalMetrics(db: Database.Database, isOwner: boolea
     }
   }
 
-  // retrieved_unused_count: reuse getInsightsByEntry with the same event-scoped joins
-  // as memory_orient to avoid (a) stale-outcome false suppression (broad entry_id join
-  // across all time) and (b) LIMIT-inside-CTE capping the COUNT rather than the results.
-  // Limit matches memory_orient (10); count of entries with zero followthrough events.
+  // retrieved_unused_count: uncapped COUNT(*) over the same event-scoped joins
+  // as memory_orient/getInsightsByEntry. Using a dedicated count query (rather than
+  // getInsightsByEntry(limit=N).filter(...).length) avoids (a) stale-outcome false
+  // suppression (broad entry_id join across all time), (b) LIMIT-inside-CTE capping
+  // the COUNT rather than the results, and (c) the result-cap undercount that made the
+  // value saturate at the limit once the unused backlog grew past it (#161).
   const UNUSED_MIN_IMPRESSIONS = 5;
-  const UNUSED_LIMIT = 10;
   let unusedCount = 0;
   try {
     const hasRecent = !!db.prepare(
       "SELECT 1 FROM retrieval_events WHERE timestamp >= ? LIMIT 1",
     ).get(since30d);
     if (hasRecent) {
-      unusedCount = getInsightsByEntry(db, undefined, UNUSED_MIN_IMPRESSIONS, UNUSED_LIMIT, since30d, true)
-        .filter((r) => r.followthrough_events === 0).length;
+      unusedCount = countUnusedSurfaces(db, UNUSED_MIN_IMPRESSIONS, since30d, true);
     }
   } catch {
     // retrieval_events may not exist in very old DBs; treat as 0
@@ -3455,6 +3484,120 @@ export function getHealthRetrievalMetrics(db: Database.Database, isOwner: boolea
     mode_mix_7d: modeMix,
     retrieved_unused_count: unusedCount,
   };
+}
+
+/**
+ * Uncapped COUNT(*) of "unused surfaces": entries surfaced at least
+ * `minImpressions` times (within the optional `since` window) with ZERO
+ * follow-through (no opened_result / write_in_result_namespace /
+ * log_in_result_namespace outcome on the same impression event).
+ *
+ * Replicates the event-scoped follow-through semantics of getInsightsByEntry
+ * (same impression CTE, same per-event outcome joins) but wraps the result in
+ * COUNT(*) with NO LIMIT, so the count is accurate even when the unused backlog
+ * exceeds any display cap (#161). Used by getHealthRetrievalMetrics.
+ */
+export function countUnusedSurfaces(
+  db: Database.Database,
+  minImpressions: number,
+  since: string | undefined,
+  restrictToTracked: boolean,
+  trackedPatterns: readonly string[] = DEFAULT_TRACKED_PATTERNS,
+): number {
+  const tracked = restrictToTracked
+    ? trackedPatternsToSqlLike(trackedPatterns, "e.namespace")
+    : { clause: "", params: [] as string[] };
+  const trackedFilter = tracked.clause ? `AND ${tracked.clause}` : "";
+
+  const sinceFilter = since ? "AND rev.timestamp >= ?" : "";
+  const sinceParams: unknown[] = since ? [since] : [];
+
+  const sql = `
+    WITH impressions_cte AS (
+      SELECT e_json.value AS entry_id, rev.id AS event_id
+      FROM retrieval_events rev,
+           json_each(rev.result_ids) AS e_json
+      WHERE rev.tool_name IN ('memory_query', 'memory_attention')
+        AND json_array_length(rev.result_ids) > 0
+        ${sinceFilter}
+    ),
+    opens_cte AS (
+      SELECT ro.entry_id, ro.retrieval_event_id
+      FROM retrieval_outcomes ro
+      WHERE ro.outcome_type = 'opened_result'
+        AND ro.entry_id IS NOT NULL
+    ),
+    per_entry AS (
+      SELECT
+        imp.entry_id,
+        COUNT(DISTINCT imp.event_id) AS impressions,
+        COUNT(DISTINCT CASE
+          WHEN op.retrieval_event_id IS NOT NULL
+            OR ro_w.retrieval_event_id IS NOT NULL
+            OR ro_l.retrieval_event_id IS NOT NULL
+          THEN imp.event_id
+        END) AS followthrough_events
+      FROM impressions_cte imp
+      LEFT JOIN entries e ON e.id = imp.entry_id
+      LEFT JOIN opens_cte op ON op.entry_id = imp.entry_id AND op.retrieval_event_id = imp.event_id
+      LEFT JOIN retrieval_outcomes ro_w ON ro_w.retrieval_event_id = imp.event_id
+        AND ro_w.outcome_type = 'write_in_result_namespace'
+      LEFT JOIN retrieval_outcomes ro_l ON ro_l.retrieval_event_id = imp.event_id
+        AND ro_l.outcome_type = 'log_in_result_namespace'
+      WHERE TRUE
+        ${trackedFilter}
+      GROUP BY imp.entry_id
+    )
+    SELECT COUNT(*) AS cnt
+    FROM per_entry
+    WHERE impressions >= ? AND followthrough_events = 0
+  `;
+
+  const row = db
+    .prepare(sql)
+    .get(...sinceParams, ...tracked.params, minImpressions) as { cnt: number } | undefined;
+  return row?.cnt ?? 0;
+}
+
+/** p50/p95 query latency (ms) for the memory_health retrieval section. */
+export interface RetrievalLatencyPercentiles {
+  p50_ms: number | null;
+  p95_ms: number | null;
+}
+
+/**
+ * Nearest-rank p50/p95 of memory_query wall-clock latency over a 7-day window.
+ * SQLite has no PERCENTILE_CONT, so we compute n first, then select the value
+ * at OFFSET CAST(pct*(n-1) AS INT) from the ascending-ordered durations.
+ * Returns nulls when there are no timed query events in the window.
+ * Owner-only (defense-in-depth — mirrors the sibling health helpers).
+ */
+export function getRetrievalLatencyPercentiles(
+  db: Database.Database,
+  isOwner: boolean,
+): RetrievalLatencyPercentiles {
+  if (!isOwner) throw new Error("memory_health helpers are owner-only");
+  const since7d = new Date(Date.now() - 7 * 86400000).toISOString();
+
+  const n = (db.prepare(
+    "SELECT COUNT(*) AS cnt FROM retrieval_events WHERE tool_name = 'memory_query' AND timestamp >= ? AND duration_ms IS NOT NULL",
+  ).get(since7d) as { cnt: number }).cnt;
+
+  if (n === 0) return { p50_ms: null, p95_ms: null };
+
+  const pctStmt = db.prepare(
+    `SELECT duration_ms FROM retrieval_events
+     WHERE tool_name = 'memory_query' AND timestamp >= ? AND duration_ms IS NOT NULL
+     ORDER BY duration_ms ASC
+     LIMIT 1 OFFSET ?`,
+  );
+  const valueAt = (pct: number): number | null => {
+    const offset = Math.trunc(pct * (n - 1)); // CAST(pct*(n-1) AS INT)
+    const row = pctStmt.get(since7d, offset) as { duration_ms: number } | undefined;
+    return row?.duration_ms ?? null;
+  };
+
+  return { p50_ms: valueAt(0.5), p95_ms: valueAt(0.95) };
 }
 
 /** Distribution of all entries by classification level. */
@@ -3526,4 +3669,17 @@ export function getSecurityEventCounts(db: Database.Database, isOwner: boolean):
     cross_zone_blocks_7d: cross7,
     cross_zone_blocks_30d: cross30,
   };
+}
+
+/**
+ * Count access-denied security events (audit_log action = 'access_denied')
+ * over the last 7 days. Feeds memory_health classification.access_denied_7d.
+ * Owner-only (defense-in-depth — mirrors the sibling health helpers).
+ */
+export function getAccessDeniedCount7d(db: Database.Database, isOwner: boolean): number {
+  if (!isOwner) throw new Error("memory_health helpers are owner-only");
+  const since7d = new Date(Date.now() - 7 * 86400000).toISOString();
+  return (db.prepare(
+    "SELECT COUNT(*) AS cnt FROM audit_log WHERE action = 'access_denied' AND timestamp >= ?",
+  ).get(since7d) as { cnt: number }).cnt;
 }

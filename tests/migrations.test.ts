@@ -6,6 +6,7 @@ import {
   runMigrations,
   getSchemaVersion,
   migrations,
+  registerMuninUDFs,
   splitCamelCaseTokens,
 } from "../src/migrations.js";
 import { initDatabase, writeState, readState, queryEntries } from "../src/db.js";
@@ -798,6 +799,56 @@ describe("migration v17 — augmented FTS index", () => {
       .all("web fetch") as Array<{ rowid: number }>;
     expect(postHits.length).toBeGreaterThanOrEqual(1);
 
+    db.close();
+  });
+});
+
+describe("migration v19 — retrieval_events.duration_ms", () => {
+  it("adds a nullable duration_ms column to retrieval_events", () => {
+    const db = openRawDb();
+    runMigrations(db);
+
+    const cols = db
+      .prepare("PRAGMA table_info(retrieval_events)")
+      .all() as Array<{ name: string; type: string; notnull: number }>;
+    const durationCol = cols.find((c) => c.name === "duration_ms");
+    expect(durationCol).toBeDefined();
+    expect(durationCol!.type).toBe("INTEGER");
+    // Additive + nullable: must not be NOT NULL (safe on the live row-populated table).
+    expect(durationCol!.notnull).toBe(0);
+    db.close();
+  });
+
+  it("upgrades a pre-v19 DB carrying retrieval_events rows without data loss", () => {
+    const db = openRawDb();
+    // v17's FTS rebuild calls the munin_split_tokens UDF; register it before
+    // hand-running the migration chain (runMigrations does this internally).
+    registerMuninUDFs(db);
+    const preV19 = migrations.filter((m) => m.version <= 18);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS schema_version (
+        version INTEGER PRIMARY KEY,
+        applied_at TEXT NOT NULL
+      );
+    `);
+    for (const m of preV19) {
+      m.up(db);
+      db.prepare(
+        "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+      ).run(m.version, new Date().toISOString());
+    }
+    db.prepare(
+      `INSERT INTO retrieval_events (id, session_id, timestamp, tool_name, result_ids, result_namespaces, result_ranks)
+       VALUES ('ev1', 's1', ?, 'memory_query', '[]', '[]', '[]')`,
+    ).run(new Date().toISOString());
+
+    runMigrations(db);
+
+    const row = db
+      .prepare("SELECT id, duration_ms FROM retrieval_events WHERE id = 'ev1'")
+      .get() as { id: string; duration_ms: number | null };
+    expect(row.id).toBe("ev1");
+    expect(row.duration_ms).toBeNull();
     db.close();
   });
 });

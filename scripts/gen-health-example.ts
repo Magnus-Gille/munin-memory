@@ -20,6 +20,8 @@ import {
   writeState,
   appendLog,
   upsertConsolidationMetadata,
+  logRetrievalEvent,
+  recordAccessDenied,
 } from "../src/db.js";
 import { registerTools } from "../src/tools.js";
 import { ownerContext } from "../src/access.js";
@@ -68,6 +70,22 @@ function seed(db: Database.Database): void {
     run_duration_ms: 1843,
     drain_in_progress: 0,
   });
+
+  // A timed memory_query retrieval event so retrieval.latency_p50_ms/p95_ms are non-null.
+  logRetrievalEvent(db, {
+    sessionId: "seed-session",
+    toolName: "memory_query",
+    queryText: "demo",
+    requestedMode: "lexical",
+    actualMode: "lexical",
+    resultIds: [],
+    resultNamespaces: [],
+    resultRanks: [],
+    durationMs: 12,
+  });
+
+  // An access-denied security event so classification.access_denied_7d is non-zero.
+  recordAccessDenied(db, "agent:demo", "memory_read");
 }
 
 // ---------------------------------------------------------------------------

@@ -777,6 +777,31 @@ export const migrations: Migration[] = [
       ).run();
     },
   },
+  {
+    version: 19,
+    description:
+      "Add retrieval_events.duration_ms for memory_query latency percentiles (#161)",
+    up: (db) => {
+      // Additive + nullable so it is safe on the live, row-populated table:
+      // existing rows get NULL and are excluded from percentile computation.
+      // Guard on table existence + column absence so the migration is idempotent
+      // and tolerant of synthetic upgrade baselines that mark v4 applied without
+      // materializing retrieval_events.
+      const tableExists = db
+        .prepare(
+          "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'retrieval_events'",
+        )
+        .get();
+      if (!tableExists) return;
+      const hasColumn = (
+        db.prepare("PRAGMA table_info(retrieval_events)").all() as Array<{ name: string }>
+      ).some((c) => c.name === "duration_ms");
+      if (hasColumn) return;
+      db.prepare(
+        "ALTER TABLE retrieval_events ADD COLUMN duration_ms INTEGER",
+      ).run();
+    },
+  },
 ];
 
 /**

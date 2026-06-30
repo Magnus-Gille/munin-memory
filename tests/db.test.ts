@@ -32,8 +32,11 @@ import {
   getEmbeddingQueueCounts,
   getMemorySizeCounts,
   getHealthRetrievalMetrics,
+  getRetrievalLatencyPercentiles,
   getClassificationDistribution,
   getSecurityEventCounts,
+  recordAccessDenied,
+  getAccessDeniedCount7d,
   getLastSynthesisAt,
   getAvgConsolidationLatencyMs,
   upsertConsolidationMetadata,
@@ -1575,6 +1578,157 @@ describe("getHealthRetrievalMetrics", () => {
     const agg = getHealthRetrievalMetrics(db, true);
     expect(agg.retrieved_unused_count).toBe(1);
     void since30d;
+  });
+
+  it("retrieved_unused_count is uncapped — reports >10 qualifying unused entries (#161)", () => {
+    // Regression: the prior implementation reused getInsightsByEntry(limit=10),
+    // so the count saturated at 10 even with a larger unused backlog. With 15
+    // qualifying entries the full count must be reported.
+    const recent = new Date(Date.now() - 2 * 86400000).toISOString();
+    for (let e = 0; e < 15; e++) {
+      const ns = `projects/unused-many-${e}`;
+      writeState(db, ns, "status", `unused entry ${e}`, ["active"]);
+      const entry = db.prepare("SELECT id FROM entries WHERE namespace=? LIMIT 1").get(ns) as { id: string };
+      // 5 impressions, zero follow-through → qualifies as unused
+      for (let i = 0; i < 5; i++) {
+        db.prepare(
+          "INSERT INTO retrieval_events (id, session_id, timestamp, tool_name, query_text, actual_mode, result_ids, result_namespaces, result_ranks) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ).run(`ev-many-${e}-${i}`, "s1", recent, "memory_query", "query", "lexical", JSON.stringify([entry.id]), JSON.stringify([ns]), "[0]");
+      }
+    }
+
+    const agg = getHealthRetrievalMetrics(db, true);
+    expect(agg.retrieved_unused_count).toBe(15);
+  });
+});
+
+describe("getRetrievalLatencyPercentiles", () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const p = "/tmp/munin-health-latency-test.db" + suffix;
+      if (existsSync(p)) unlinkSync(p);
+    }
+    db = initDatabase("/tmp/munin-health-latency-test.db");
+  });
+
+  afterEach(() => {
+    db.close();
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const p = "/tmp/munin-health-latency-test.db" + suffix;
+      if (existsSync(p)) unlinkSync(p);
+    }
+  });
+
+  function insertEvent(id: string, ts: string, durationMs: number | null): void {
+    db.prepare(
+      "INSERT INTO retrieval_events (id, session_id, timestamp, tool_name, query_text, actual_mode, result_ids, result_namespaces, result_ranks, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run(id, "s1", ts, "memory_query", "q", "lexical", "[]", "[]", "[]", durationMs);
+  }
+
+  it("returns null percentiles when there are no timed query events", () => {
+    const pct = getRetrievalLatencyPercentiles(db, true);
+    expect(pct.p50_ms).toBeNull();
+    expect(pct.p95_ms).toBeNull();
+  });
+
+  it("returns null when all in-window events have null duration_ms", () => {
+    const recent = new Date(Date.now() - 1 * 86400000).toISOString();
+    insertEvent("e1", recent, null);
+    insertEvent("e2", recent, null);
+    const pct = getRetrievalLatencyPercentiles(db, true);
+    expect(pct.p50_ms).toBeNull();
+    expect(pct.p95_ms).toBeNull();
+  });
+
+  it("computes nearest-rank p50/p95 via CAST(pct*(n-1)) offsets over a 7-day window", () => {
+    const recent = new Date(Date.now() - 1 * 86400000).toISOString();
+    // durations 10..100 (n=10), inserted out of order to verify ORDER BY
+    const durations = [50, 10, 100, 30, 70, 20, 90, 40, 60, 80];
+    durations.forEach((d, i) => insertEvent(`e${i}`, recent, d));
+    // p50 offset = trunc(0.5 * 9) = 4 → sorted[4] = 50
+    // p95 offset = trunc(0.95 * 9) = 8 → sorted[8] = 90
+    const pct = getRetrievalLatencyPercentiles(db, true);
+    expect(pct.p50_ms).toBe(50);
+    expect(pct.p95_ms).toBe(90);
+  });
+
+  it("excludes events older than 7 days and non-query tools", () => {
+    const recent = new Date(Date.now() - 1 * 86400000).toISOString();
+    const old = new Date(Date.now() - 20 * 86400000).toISOString();
+    insertEvent("recent", recent, 42);
+    insertEvent("old", old, 9999);
+    // a non-query tool event with a duration must be ignored
+    db.prepare(
+      "INSERT INTO retrieval_events (id, session_id, timestamp, tool_name, query_text, actual_mode, result_ids, result_namespaces, result_ranks, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run("attn", "s1", recent, "memory_attention", "q", "lexical", "[]", "[]", "[]", 7777);
+    const pct = getRetrievalLatencyPercentiles(db, true);
+    expect(pct.p50_ms).toBe(42);
+    expect(pct.p95_ms).toBe(42);
+  });
+
+  it("throws when called with isOwner=false (owner-only defense-in-depth)", () => {
+    expect(() => getRetrievalLatencyPercentiles(db, false)).toThrow("memory_health helpers are owner-only");
+  });
+});
+
+describe("recordAccessDenied + getAccessDeniedCount7d", () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const p = "/tmp/munin-access-denied-test.db" + suffix;
+      if (existsSync(p)) unlinkSync(p);
+    }
+    db = initDatabase("/tmp/munin-access-denied-test.db");
+  });
+
+  afterEach(() => {
+    db.close();
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const p = "/tmp/munin-access-denied-test.db" + suffix;
+      if (existsSync(p)) unlinkSync(p);
+    }
+  });
+
+  it("records a secret-free access_denied audit row and counts it within 7d", () => {
+    recordAccessDenied(db, "agent:skuld", "memory_read");
+    recordAccessDenied(db, "family:sara", "memory_write");
+
+    const rows = db
+      .prepare("SELECT agent_id, action, namespace, key, detail FROM audit_log WHERE action = 'access_denied' ORDER BY id")
+      .all() as Array<{ agent_id: string; action: string; namespace: string; key: string | null; detail: string | null }>;
+    expect(rows).toHaveLength(2);
+    expect(rows[0].action).toBe("access_denied");
+    expect(rows[0].namespace).toBe("security/access");
+    expect(rows[0].agent_id).toBe("agent:skuld");
+    expect(rows[0].key).toBe("memory_read");
+    // No secrets / payloads stored in detail.
+    expect(rows[0].detail).toBeNull();
+
+    expect(getAccessDeniedCount7d(db, true)).toBe(2);
+  });
+
+  it("excludes access_denied events older than 7 days", () => {
+    const old = new Date(Date.now() - 10 * 86400000).toISOString();
+    db.prepare(
+      "INSERT INTO audit_log (timestamp, agent_id, action, namespace, key, detail) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run(old, "agent:old", "access_denied", "security/access", "memory_read", null);
+    recordAccessDenied(db, "agent:new", "memory_get");
+    expect(getAccessDeniedCount7d(db, true)).toBe(1);
+  });
+
+  it("does not count other audit actions", () => {
+    recordAccessDenied(db, "agent:a", "memory_read");
+    db.prepare(
+      "INSERT INTO audit_log (timestamp, agent_id, action, namespace, key, detail) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run(new Date().toISOString(), "owner", "write", "projects/a", "status", null);
+    expect(getAccessDeniedCount7d(db, true)).toBe(1);
+  });
+
+  it("throws when getAccessDeniedCount7d called with isOwner=false", () => {
+    expect(() => getAccessDeniedCount7d(db, false)).toThrow("memory_health helpers are owner-only");
   });
 });
 

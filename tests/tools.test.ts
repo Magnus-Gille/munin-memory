@@ -6951,6 +6951,11 @@ describe("memory_health", () => {
     expect(typeof mm.semantic).toBe("number");
     expect(typeof mm.hybrid).toBe("number");
     expect(typeof ret.unused_surface_count).toBe("number");
+    // latency percentiles (#161): number | null, always present
+    expect("latency_p50_ms" in ret).toBe(true);
+    expect("latency_p95_ms" in ret).toBe(true);
+    expect(ret.latency_p50_ms === null || typeof ret.latency_p50_ms === "number").toBe(true);
+    expect(ret.latency_p95_ms === null || typeof ret.latency_p95_ms === "number").toBe(true);
     expect(ret.mode_mix_7d).toBeUndefined();
     expect(ret.retrieved_unused_count).toBeUndefined();
 
@@ -6962,6 +6967,8 @@ describe("memory_health", () => {
     expect(typeof byLevel.internal).toBe("number");
     expect(typeof byLevel["client-confidential"]).toBe("number");
     expect(typeof byLevel["client-restricted"]).toBe("number");
+    // access_denied_7d (#161): integer count, always present
+    expect(typeof cls.access_denied_7d).toBe("number");
     expect(cls.distribution).toBeUndefined();
 
     // maintenance section shape (flattened — no counts nesting)
@@ -7109,6 +7116,53 @@ describe("memory_health", () => {
       expect(typeof item.unincorporated).toBe("number");
       expect(item.unincorporated_log_count).toBeUndefined();
     }
+  });
+
+  it("retrieval latency p50/p95 are non-null after timed memory_query calls (#161)", async () => {
+    // Session-bound owner caller so memory_query logs retrieval events (with duration_ms).
+    const ownerSession = makeContextCallTool(ownerContext(), "latency-session");
+    await ownerSession("memory_write", { namespace: "projects/lat", key: "status", content: "alpha beta gamma", tags: ["active"] });
+    // Several queries → several timed retrieval events in the 7-day window.
+    for (let i = 0; i < 3; i++) {
+      await ownerSession("memory_query", { query: "alpha", search_mode: "lexical" });
+    }
+
+    const raw = await ownerSession("memory_health", {});
+    const result = parseToolResponse(raw) as Record<string, unknown>;
+    const ret = (result.sections as Record<string, Record<string, unknown>>).retrieval;
+    expect(ret.ok).toBe(true);
+    expect(typeof ret.latency_p50_ms).toBe("number");
+    expect(typeof ret.latency_p95_ms).toBe("number");
+    expect(ret.latency_p50_ms as number).toBeGreaterThanOrEqual(0);
+    expect(ret.latency_p95_ms as number).toBeGreaterThanOrEqual(ret.latency_p50_ms as number);
+  });
+
+  it("classification.access_denied_7d counts denials recorded by the tool gate (#161)", async () => {
+    // Baseline (fresh DB → 0 access-denied events).
+    const before = parseToolResponse(await callTool("memory_health", {})) as Record<string, unknown>;
+    expect(((before.sections as Record<string, Record<string, unknown>>).classification).access_denied_7d).toBe(0);
+
+    // Drive two denials through the central gate helpers: a family read denial
+    // (accessDeniedReadResponse) and an agent write denial (accessDeniedResponse).
+    // Spread ownerContext() so accessibleNamespaces is the empty owner array;
+    // overriding principalType to a non-owner with no rules denies everything.
+    const familyCall = makeContextCallTool({
+      ...ownerContext(),
+      principalId: "principal:sara",
+      principalType: "family",
+    });
+    await familyCall("memory_read", { namespace: "projects/secret", key: "status" });
+
+    const agentCall = makeContextCallTool({
+      ...ownerContext(),
+      principalId: "agent:skuld",
+      principalType: "agent",
+    });
+    await agentCall("memory_write", { namespace: "projects/secret", key: "status", content: "blocked", tags: [] });
+
+    const after = parseToolResponse(await callTool("memory_health", {})) as Record<string, unknown>;
+    const cls = (after.sections as Record<string, Record<string, unknown>>).classification;
+    expect(cls.access_denied_7d).toBe(2);
   });
 
   it("agent non-owner gets access_denied error (zero metadata)", async () => {

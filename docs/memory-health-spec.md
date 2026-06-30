@@ -65,13 +65,16 @@ everywhere, so additive fields are non-breaking.
 | `query_volume_7d` | integer | yes | `memory_query` events in the last 7 days. |
 | `query_volume_30d` | integer | yes | …last 30 days. |
 | `mode_mix` | object | yes | `{ lexical, semantic, hybrid }` as **fractions** of `query_volume_7d` (each in `[0, 1]`). All `0` when `query_volume_7d == 0` (no divide-by-zero). Sums to **~1**: events with no recorded `actual_mode` are excluded from the numerators, so the sum can be slightly below 1. |
-| `unused_surface_count` | integer | yes | Entries surfaced ≥5× over 30d with zero follow-through. |
+| `latency_p50_ms` | number \| null | yes | Nearest-rank p50 of `memory_query` wall-clock latency (ms) over the last 7 days. **`null`** when no timed query events exist in the window. SQLite has no `PERCENTILE_CONT`; computed as the value at `OFFSET CAST(0.5*(n-1) AS INT)` over the ascending-ordered `duration_ms`. |
+| `latency_p95_ms` | number \| null | yes | As `latency_p50_ms`, at `OFFSET CAST(0.95*(n-1) AS INT)`. |
+| `unused_surface_count` | integer | yes | Entries surfaced ≥5× over 30d with zero follow-through. **Uncapped** COUNT(\*) — accurate even when the unused backlog exceeds any display limit. |
 
 ### `classification`
 | Field | Type | Required | Notes |
 |---|---|:--:|---|
 | `ok` | boolean | yes | |
 | `by_level` | object | yes | Entry counts keyed by classification level: `public`, `internal`, `client-confidential`, `client-restricted` (all integers). |
+| `access_denied_7d` | integer | yes | Count of access-denied security events (`audit_log` action = `access_denied`) over the last 7 days. Recorded by the central tool-gate denial helpers whenever a non-owner principal is denied. |
 
 ### `maintenance`
 Flat (no `counts` nesting). All integers, all required when `ok: true`.
@@ -114,11 +117,12 @@ Flat (no `counts` nesting). All integers, all required when `ok: true`.
 
 ## Deferred (not yet emitted)
 
-These were in the original heimdall-facing contract but are intentionally **not** emitted
-by this producer yet. Consumers must treat them as optional/absent:
+All previously-deferred fields are now emitted (#161):
 
-- `retrieval.latency_p50_ms` / `retrieval.latency_p95_ms` — retrieval latency percentiles.
-  Deferred because computing percentiles requires per-event latency capture that the current
-  `retrieval_events` schema does not record; adding it is tracked separately.
-- `classification.access_denied_7d` — access-denied count. Unsupported by the current
-  `audit_log` schema (see `getSecurityEventCounts` / `getClassificationDistribution`).
+- `retrieval.latency_p50_ms` / `retrieval.latency_p95_ms` — backed by migration v19
+  (`retrieval_events.duration_ms`), `memory_query` instrumentation, and
+  `getRetrievalLatencyPercentiles`.
+- `classification.access_denied_7d` — backed by the `access_denied` audit action written from
+  the central tool-gate denial helpers, counted by `getAccessDeniedCount7d`.
+
+There are currently no deferred fields.

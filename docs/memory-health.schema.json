@@ -131,10 +131,27 @@
             "hybrid": { "type": "number", "minimum": 0, "maximum": 1 }
           }
         },
+        "latency_p50_ms": {
+          "type": ["number", "null"],
+          "description": "Nearest-rank p50 of memory_query wall-clock latency (ms) over the last 7 days; null when there are no timed query events in the window."
+        },
+        "latency_p95_ms": {
+          "type": ["number", "null"],
+          "description": "Nearest-rank p95 of memory_query wall-clock latency (ms) over the last 7 days; null when there are no timed query events in the window."
+        },
         "unused_surface_count": { "type": "integer" }
       },
       "if": { "properties": { "ok": { "const": true } }, "required": ["ok"] },
-      "then": { "required": ["query_volume_7d", "query_volume_30d", "mode_mix", "unused_surface_count"] },
+      "then": {
+        "required": [
+          "query_volume_7d",
+          "query_volume_30d",
+          "mode_mix",
+          "latency_p50_ms",
+          "latency_p95_ms",
+          "unused_surface_count"
+        ]
+      },
       "else": { "$ref": "#/$defs/degradedSection" }
     },
     "classification": {
@@ -153,10 +170,14 @@
             "client-confidential": { "type": "integer" },
             "client-restricted": { "type": "integer" }
           }
+        },
+        "access_denied_7d": {
+          "type": "integer",
+          "description": "Count of access-denied security events (audit_log action = 'access_denied') over the last 7 days."
         }
       },
       "if": { "properties": { "ok": { "const": true } }, "required": ["ok"] },
-      "then": { "required": ["by_level"] },
+      "then": { "required": ["by_level", "access_denied_7d"] },
       "else": { "$ref": "#/$defs/degradedSection" }
     },
     "maintenance": {
