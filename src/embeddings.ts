@@ -334,6 +334,20 @@ export function _forceCircuitBreakerTrippedForTesting(tripped: boolean): void {
  *
  * Returns the number of rows reset. `updated_at` is deliberately NOT touched so
  * the reset does not disturb CAS timestamps or surface as a content change.
+ *
+ * ASSUMPTION — single embedding worker per database. This treats *every*
+ * `processing` row as an orphan, which is correct when at most one worker
+ * process runs against a given DB (the production deployment: one HTTP server
+ * on the Pi, many clients). It does NOT distinguish an orphan from a row a
+ * *concurrent* worker in another process legitimately holds in-flight, so two
+ * embedding workers sharing one DB file (only possible via concurrent stdio
+ * sessions — a dev-only footgun, see CLAUDE.md "Concurrent Sessions") could
+ * race: a second startup resets the first's in-flight row. Self-heals on the
+ * next pass (the row re-embeds), but wastes work and can transiently leave a
+ * row `failed` with a vector present. Hardening this to true multi-worker
+ * safety needs an explicit claim token (`embedding_claimed_at`/worker id) and
+ * age-bounded reset — tracked as a fast-follow, deliberately out of scope for
+ * this single-worker self-heal (#155).
  */
 export function resetOrphanedProcessingRows(db: Database.Database): number {
   const result = db
