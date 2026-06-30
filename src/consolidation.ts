@@ -175,6 +175,8 @@ export interface ConsolidationHealth {
   circuit_breaker_tripped: boolean;
   failures: number;
   max_failures: number;
+  /** Worker threshold: a namespace needs ≥ min_logs unincorporated logs to be drained. */
+  min_logs: number;
   last_error: string | null;
   last_error_at: string | null;
 }
@@ -187,6 +189,7 @@ export function getConsolidationHealth(): ConsolidationHealth {
     circuit_breaker_tripped: circuitBreakerTripped,
     failures: circuitBreakerFailures,
     max_failures: config.maxFailures,
+    min_logs: config.minLogs,
     last_error: lastError,
     last_error_at: lastErrorAt,
   };

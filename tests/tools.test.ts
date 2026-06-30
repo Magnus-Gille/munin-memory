@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -6877,7 +6877,7 @@ describe("read-time untrusted-content envelope (#150)", () => {
 // --- memory_health tests ---
 
 describe("memory_health", () => {
-  it("owner receives full payload with all required sections and top-level fields", async () => {
+  it("owner receives full payload conforming to the canonical contract shape", async () => {
     // Write some state entries so the response is meaningful
     await callTool("memory_write", { namespace: "projects/health-test", key: "status", content: "Active project", tags: ["active"] });
     await callTool("memory_log", { namespace: "projects/health-test", content: "A log entry", tags: ["decision"] });
@@ -6888,71 +6888,227 @@ describe("memory_health", () => {
     // Top-level shape
     expect(result.ok).toBe(true);
     expect(result.action).toBe("health");
-    expect(result.schema_version).toBe(1);
+    expect(result.schema_version).toBe(2);
     expect(typeof result.generated_at).toBe("string");
     expect(typeof result.partial).toBe("boolean");
 
-    // All sections must be present
+    // All sections must be present under the CANONICAL (renamed) keys
     const sections = result.sections as Record<string, unknown>;
     expect(sections).toBeDefined();
-    expect(sections.embedding_queue).toBeDefined();
-    expect(sections.memory_size).toBeDefined();
+    expect(sections.embedding).toBeDefined();
+    expect(sections.size).toBeDefined();
     expect(sections.retrieval).toBeDefined();
     expect(sections.classification).toBeDefined();
     expect(sections.maintenance).toBeDefined();
+    expect(sections.consolidation).toBeDefined();
     expect(sections.security_events).toBeDefined();
-    // consolidation section may or may not be present (gated on availability)
-    // but if present, it must have ok
-    if (sections.consolidation !== undefined) {
-      const consol = sections.consolidation as Record<string, unknown>;
-      expect(typeof consol.ok).toBe("boolean");
-    }
+    // Old section keys must be gone
+    expect(sections.embedding_queue).toBeUndefined();
+    expect(sections.memory_size).toBeUndefined();
 
-    // embedding_queue section shape
-    const eq = sections.embedding_queue as Record<string, unknown>;
-    expect(eq.ok).toBe(true);
-    expect(typeof eq.pending).toBe("number");
-    expect(typeof eq.generated_current).toBe("number");
-    expect(typeof eq.generated_stale).toBe("number");
-    expect(typeof eq.generated_null).toBe("number");
-    expect(typeof eq.reembedding_backlog).toBe("number");
-    expect(typeof eq.coverage_pct).toBe("number");
-    expect(typeof eq.embedding_available).toBe("boolean");
-    expect(typeof eq.stuck_note).toBe("string");
+    // embedding section shape
+    const emb = sections.embedding as Record<string, unknown>;
+    expect(emb.ok).toBe(true);
+    expect("model" in emb).toBe(true);
+    expect("dtype" in emb).toBe(true);
+    // counts nesting
+    const ec = emb.counts as Record<string, unknown>;
+    expect(typeof ec.pending).toBe("number");
+    expect(typeof ec.processing).toBe("number");
+    expect(typeof ec.generated).toBe("number");
+    expect(typeof ec.failed).toBe("number");
+    expect(typeof ec.total).toBe("number");
+    // coverage_pct is number or null
+    expect(emb.coverage_pct === null || typeof emb.coverage_pct === "number").toBe(true);
+    expect(typeof emb.reembed_in_progress).toBe("boolean");
+    expect(typeof emb.stuck).toBe("number");
+    expect(["healthy", "tripped"]).toContain(emb.circuit_breaker);
+    expect(typeof emb.embedding_available).toBe("boolean");
+    expect(typeof emb.status_reason).toBe("string");
+    // old flat fields must be gone from the section root
+    expect(emb.pending).toBeUndefined();
+    expect(emb.active_model).toBeUndefined();
+    expect(emb.circuit_breaker_tripped).toBeUndefined();
 
-    // memory_size section shape
-    const ms = sections.memory_size as Record<string, unknown>;
-    expect(ms.ok).toBe(true);
-    expect(typeof ms.total_state_entries).toBe("number");
-    expect(typeof ms.total_log_entries).toBe("number");
-    expect(ms.total_state_entries).toBeGreaterThan(0);
-    expect(ms.total_log_entries).toBeGreaterThan(0);
+    // size section shape (renamed fields)
+    const sz = sections.size as Record<string, unknown>;
+    expect(sz.ok).toBe(true);
+    expect(typeof sz.entries_total).toBe("number");
+    expect(typeof sz.entries_state).toBe("number");
+    expect(typeof sz.entries_log).toBe("number");
+    expect(typeof sz.namespace_count).toBe("number");
+    expect(sz.entries_state).toBeGreaterThan(0);
+    expect(sz.entries_log).toBeGreaterThan(0);
+    expect(sz.total_state_entries).toBeUndefined();
 
-    // retrieval section shape
+    // retrieval section shape (mode_mix renamed + fractions)
     const ret = sections.retrieval as Record<string, unknown>;
     expect(ret.ok).toBe(true);
     expect(typeof ret.query_volume_7d).toBe("number");
     expect(typeof ret.query_volume_30d).toBe("number");
-    expect(ret.mode_mix_7d).toBeDefined();
+    const mm = ret.mode_mix as Record<string, number>;
+    expect(typeof mm.lexical).toBe("number");
+    expect(typeof mm.semantic).toBe("number");
+    expect(typeof mm.hybrid).toBe("number");
+    expect(typeof ret.unused_surface_count).toBe("number");
+    expect(ret.mode_mix_7d).toBeUndefined();
+    expect(ret.retrieved_unused_count).toBeUndefined();
 
-    // classification section shape
+    // classification section shape (by_level rename)
     const cls = sections.classification as Record<string, unknown>;
     expect(cls.ok).toBe(true);
-    expect(typeof (cls.distribution as Record<string, unknown>).internal).toBe("number");
+    const byLevel = cls.by_level as Record<string, unknown>;
+    expect(typeof byLevel.public).toBe("number");
+    expect(typeof byLevel.internal).toBe("number");
+    expect(typeof byLevel["client-confidential"]).toBe("number");
+    expect(typeof byLevel["client-restricted"]).toBe("number");
+    expect(cls.distribution).toBeUndefined();
 
-    // maintenance section shape
+    // maintenance section shape (flattened — no counts nesting)
     const maint = sections.maintenance as Record<string, unknown>;
     expect(maint.ok).toBe(true);
-    const counts = maint.counts as Record<string, unknown>;
-    expect(typeof counts.active_but_stale).toBe("number");
-    expect(typeof counts.missing_status).toBe("number");
-    expect(typeof counts.temporal_stale).toBe("number");
+    expect(maint.counts).toBeUndefined();
+    expect(typeof maint.active_but_stale).toBe("number");
+    expect(typeof maint.missing_status).toBe("number");
+    expect(typeof maint.temporal_stale).toBe("number");
+    expect(typeof maint.consolidation_backlog).toBe("number");
+    expect(typeof maint.retrieved_unused).toBe("number");
 
-    // security_events section shape
+    // consolidation section shape (enums + restored fields)
+    const consol = sections.consolidation as Record<string, unknown>;
+    expect(consol.ok).toBe(true);
+    expect(["available", "unavailable", "disabled"]).toContain(consol.worker);
+    expect(["healthy", "tripped"]).toContain(consol.circuit_breaker);
+    expect(typeof consol.failures).toBe("number");
+    expect(typeof consol.max_failures).toBe("number");
+    expect(typeof consol.min_logs).toBe("number");
+    expect(consol.last_synthesis_at === null || typeof consol.last_synthesis_at === "string").toBe(true);
+    expect(consol.avg_latency_ms === null || typeof consol.avg_latency_ms === "number").toBe(true);
+    expect(consol.backlog_complete).toBe(true);
+    expect(typeof consol.backlog_namespace_count).toBe("number");
+    expect(typeof consol.api_key_present).toBe("boolean");
+    expect(Array.isArray(consol.backlog)).toBe(true);
+    expect(consol.available).toBeUndefined();
+    expect(consol.circuit_breaker_tripped).toBeUndefined();
+
+    // security_events section shape (unchanged)
     const sec = sections.security_events as Record<string, unknown>;
     expect(sec.ok).toBe(true);
     expect(typeof sec.redaction_events_7d).toBe("number");
     expect(typeof sec.cross_zone_blocks_7d).toBe("number");
+  });
+
+  it("coverage_pct is null on an empty database (total == 0), not 0", async () => {
+    // Fresh DB has no entries → total == 0 → coverage_pct must be null.
+    const raw = await callTool("memory_health", {});
+    const result = parseToolResponse(raw) as Record<string, unknown>;
+    const emb = (result.sections as Record<string, Record<string, unknown>>).embedding;
+    expect((emb.counts as Record<string, number>).total).toBe(0);
+    expect(emb.coverage_pct).toBeNull();
+  });
+
+  it("mode_mix is fractions of query_volume_7d summing to ~1", async () => {
+    // Seed three memory_query events within 7d: 2 lexical, 1 hybrid actual_mode.
+    const recent = new Date(Date.now() - 1 * 86400000).toISOString();
+    for (const [i, mode] of [["a", "lexical"], ["b", "lexical"], ["c", "hybrid"]] as const) {
+      db.prepare(
+        "INSERT INTO retrieval_events (id, session_id, timestamp, tool_name, query_text, actual_mode, result_ids, result_namespaces, result_ranks) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run(`mm-${i}`, "s1", recent, "memory_query", "q", mode, "[]", "[]", "[]");
+    }
+    const raw = await callTool("memory_health", {});
+    const result = parseToolResponse(raw) as Record<string, unknown>;
+    const ret = (result.sections as Record<string, Record<string, unknown>>).retrieval;
+    expect(ret.query_volume_7d).toBe(3);
+    const mm = ret.mode_mix as Record<string, number>;
+    expect(mm.lexical).toBeCloseTo(2 / 3, 4);
+    expect(mm.hybrid).toBeCloseTo(1 / 3, 4);
+    expect(mm.semantic).toBe(0);
+    expect(mm.lexical + mm.semantic + mm.hybrid).toBeCloseTo(1, 4);
+  });
+
+  it("mode_mix fractions are all 0 when there is no query volume (no divide-by-zero)", async () => {
+    const raw = await callTool("memory_health", {});
+    const result = parseToolResponse(raw) as Record<string, unknown>;
+    const ret = (result.sections as Record<string, Record<string, unknown>>).retrieval;
+    expect(ret.query_volume_7d).toBe(0);
+    expect(ret.mode_mix).toEqual({ lexical: 0, semantic: 0, hybrid: 0 });
+  });
+
+  it("consolidation.last_synthesis_at and avg_latency_ms reflect consolidation_metadata rows", async () => {
+    upsertConsolidationMetadata(db, {
+      namespace: "projects/health-test",
+      last_consolidated_at: "2026-06-01T10:00:00.000Z",
+      last_log_id: "log-1",
+      last_log_created_at: "2026-06-01T09:00:00.000Z",
+      synthesis_model: "test-model",
+      synthesis_token_count: 100,
+      run_duration_ms: 200,
+      drain_in_progress: false,
+    });
+    upsertConsolidationMetadata(db, {
+      namespace: "projects/other",
+      last_consolidated_at: "2026-06-02T10:00:00.000Z",
+      last_log_id: "log-2",
+      last_log_created_at: "2026-06-02T09:00:00.000Z",
+      synthesis_model: "test-model",
+      synthesis_token_count: 100,
+      run_duration_ms: 400,
+      drain_in_progress: false,
+    });
+    const raw = await callTool("memory_health", {});
+    const result = parseToolResponse(raw) as Record<string, unknown>;
+    const consol = (result.sections as Record<string, Record<string, unknown>>).consolidation;
+    expect(consol.last_synthesis_at).toBe("2026-06-02T10:00:00.000Z"); // MAX
+    expect(consol.avg_latency_ms).toBe(300); // AVG(200, 400)
+  });
+
+  it("consolidation.worker enum reflects enabled/available state across all three values", async () => {
+    const savedEnabled = _consolidationConfig.enabled;
+    try {
+      // disabled
+      _consolidationConfig.enabled = false;
+      _setApiKey(null);
+      let result = parseToolResponse(await callTool("memory_health", {})) as Record<string, unknown>;
+      expect((result.sections as Record<string, Record<string, unknown>>).consolidation.worker).toBe("disabled");
+
+      // available
+      _consolidationConfig.enabled = true;
+      _setApiKey("test-key");
+      resetConsolidationCircuitBreaker();
+      result = parseToolResponse(await callTool("memory_health", {})) as Record<string, unknown>;
+      expect((result.sections as Record<string, Record<string, unknown>>).consolidation.worker).toBe("available");
+
+      // unavailable (enabled, but no api key / not available)
+      _consolidationConfig.enabled = true;
+      _setApiKey(null);
+      result = parseToolResponse(await callTool("memory_health", {})) as Record<string, unknown>;
+      const worker = (result.sections as Record<string, Record<string, unknown>>).consolidation.worker;
+      // If a custom LLM base URL is configured in the env, available stays true.
+      expect(["unavailable", "available"]).toContain(worker);
+    } finally {
+      _consolidationConfig.enabled = savedEnabled;
+      _setApiKey(null);
+      resetConsolidationCircuitBreaker();
+      _resetHealthState();
+    }
+  });
+
+  it("consolidation.backlog entries use the `unincorporated` field (renamed)", async () => {
+    // Seed a tracked namespace with enough logs to enter the backlog (default minLogs = 3).
+    for (let i = 0; i < 4; i++) {
+      await callTool("memory_log", { namespace: "projects/backlog-test", content: `log ${i}`, tags: [] });
+    }
+    const raw = await callTool("memory_health", {});
+    const result = parseToolResponse(raw) as Record<string, unknown>;
+    const consol = (result.sections as Record<string, Record<string, unknown>>).consolidation;
+    const backlog = consol.backlog as Array<Record<string, unknown>>;
+    expect(backlog.length).toBeGreaterThan(0);
+    expect(consol.backlog_namespace_count).toBe(backlog.length);
+    for (const item of backlog) {
+      expect(typeof item.namespace).toBe("string");
+      expect(typeof item.unincorporated).toBe("number");
+      expect(item.unincorporated_log_count).toBeUndefined();
+    }
   });
 
   it("agent non-owner gets access_denied error (zero metadata)", async () => {
@@ -7012,8 +7168,9 @@ describe("memory_health", () => {
   it("degradation: injected throwing section → partial=true, error='section_unavailable', no secrets leak, siblings ok", async () => {
     // M2: inject one failing section that throws a secret-bearing error.
     _setHealthSectionOverridesForTesting({
-      embedding_queue: () => { throw new Error("failed /Users/x/secret OPENROUTER_API_KEY=sk-or-v1-abc123"); },
+      embedding: () => { throw new Error("failed /Users/x/secret OPENROUTER_API_KEY=sk-or-v1-abc123"); },
     });
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockReturnValue(true);
     try {
       const raw = await callTool("memory_health", {});
       const result = parseToolResponse(raw) as Record<string, unknown>;
@@ -7025,21 +7182,29 @@ describe("memory_health", () => {
       const sections = result.sections as Record<string, Record<string, unknown>>;
 
       // Failing section: ok=false, error is stable opaque string
-      expect(sections.embedding_queue.ok).toBe(false);
-      expect(sections.embedding_queue.error).toBe("section_unavailable");
+      expect(sections.embedding.ok).toBe(false);
+      expect(sections.embedding.error).toBe("section_unavailable");
 
       // Raw error text, path, and secret must NOT appear in the serialized payload
       expect(text).not.toContain("/Users/x/secret");
       expect(text).not.toContain("sk-or-v1-");
       expect(text).not.toContain("failed /Users");
 
+      // ...nor in the stderr health log — it is opaque (section name + error class only).
+      const log = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(log).toContain('memory_health section "embedding" failed');
+      expect(log).not.toContain("/Users/x/secret");
+      expect(log).not.toContain("sk-or-v1-");
+      expect(log).not.toContain("OPENROUTER_API_KEY");
+
       // Sibling sections must remain ok
-      expect(sections.memory_size?.ok).toBe(true);
+      expect(sections.size?.ok).toBe(true);
       expect(sections.retrieval?.ok).toBe(true);
       expect(sections.classification?.ok).toBe(true);
       expect(sections.maintenance?.ok).toBe(true);
       expect(sections.security_events?.ok).toBe(true);
     } finally {
+      stderrSpy.mockRestore();
       _setHealthSectionOverridesForTesting(null);
     }
   });
@@ -7056,35 +7221,35 @@ describe("memory_health", () => {
     expect(text).not.toMatch(/sk-or-v1-/);
   });
 
-  it("circuit_breaker_tripped: false when embeddings not loaded (config-disabled state)", async () => {
+  it("circuit_breaker: 'healthy' when embeddings not loaded (config-disabled state)", async () => {
     // M4: In test env, embeddings aren't loaded (no real model). The circuit breaker
     // should NOT be tripped — it's simply unloaded.
     resetCircuitBreaker();
     const raw = await callTool("memory_health", {});
     const result = parseToolResponse(raw) as Record<string, unknown>;
-    const eq = (result.sections as Record<string, Record<string, unknown>>).embedding_queue;
-    expect(eq.ok).toBe(true);
-    // embedding_available = false (not loaded) but circuit_breaker_tripped must be false
-    expect(eq.circuit_breaker_tripped).toBe(false);
+    const emb = (result.sections as Record<string, Record<string, unknown>>).embedding;
+    expect(emb.ok).toBe(true);
+    // embedding_available = false (not loaded) but breaker must read "healthy"
+    expect(emb.circuit_breaker).toBe("healthy");
   });
 
-  it("circuit_breaker_tripped: true when breaker actually tripped", async () => {
+  it("circuit_breaker: 'tripped' when breaker actually tripped", async () => {
     // M4: Force the circuit breaker tripped state and verify it's reflected.
     _forceCircuitBreakerTrippedForTesting(true);
     try {
       const raw = await callTool("memory_health", {});
       const result = parseToolResponse(raw) as Record<string, unknown>;
-      const eq = (result.sections as Record<string, Record<string, unknown>>).embedding_queue;
-      expect(eq.ok).toBe(true);
-      expect(eq.circuit_breaker_tripped).toBe(true);
+      const emb = (result.sections as Record<string, Record<string, unknown>>).embedding;
+      expect(emb.ok).toBe(true);
+      expect(emb.circuit_breaker).toBe("tripped");
     } finally {
       _forceCircuitBreakerTrippedForTesting(false);
       resetCircuitBreaker();
     }
   });
 
-  it("active_model_dtype comes from profile-resolved config (not raw env)", async () => {
-    // L5: active_model_dtype must reflect the resolved dtype (including profile defaults).
+  it("embedding.dtype comes from profile-resolved config (not raw env)", async () => {
+    // L5: dtype must reflect the resolved dtype (including profile defaults).
     // Simulate zero-appliance: dtype resolved to "q8".
     const savedDtype = _embeddingConfig.dtype;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -7092,15 +7257,15 @@ describe("memory_health", () => {
     try {
       const raw = await callTool("memory_health", {});
       const result = parseToolResponse(raw) as Record<string, unknown>;
-      const eq = (result.sections as Record<string, Record<string, unknown>>).embedding_queue;
-      expect(eq.active_model_dtype).toBe("q8");
+      const emb = (result.sections as Record<string, Record<string, unknown>>).embedding;
+      expect(emb.dtype).toBe("q8");
     } finally {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (_embeddingConfig as any).dtype = savedDtype;
     }
   });
 
-  it("active_model_dtype is null when dtype unset (no profile, no env var)", async () => {
+  it("embedding.dtype is null when dtype unset (no profile, no env var)", async () => {
     // L5: With no profile and no MUNIN_EMBEDDINGS_DTYPE, dtype resolves to undefined → null.
     const savedDtype = _embeddingConfig.dtype;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -7108,8 +7273,8 @@ describe("memory_health", () => {
     try {
       const raw = await callTool("memory_health", {});
       const result = parseToolResponse(raw) as Record<string, unknown>;
-      const eq = (result.sections as Record<string, Record<string, unknown>>).embedding_queue;
-      expect(eq.active_model_dtype).toBeNull();
+      const emb = (result.sections as Record<string, Record<string, unknown>>).embedding;
+      expect(emb.dtype).toBeNull();
       // Verify getActiveEmbeddingDtype() also returns null (export consistent)
       expect(getActiveEmbeddingDtype()).toBeNull();
     } finally {
@@ -7138,8 +7303,8 @@ describe("memory_health", () => {
     const healthRaw = await callTool("memory_health", {});
     const healthResult = parseToolResponse(healthRaw) as Record<string, unknown>;
     const healthSections = healthResult.sections as Record<string, Record<string, unknown>>;
-    const healthMaintenance = healthSections.maintenance as Record<string, unknown>;
-    const healthCounts = healthMaintenance.counts as Record<string, number>;
+    // maintenance section is now flat (no `counts` nesting) per the canonical contract.
+    const healthCounts = healthSections.maintenance as unknown as Record<string, number>;
 
     // Fetch memory_orient at detail:full to get maintenance items
     const orientRaw = await callTool("memory_orient", { detail: "full" });

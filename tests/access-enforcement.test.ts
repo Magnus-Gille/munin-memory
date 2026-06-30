@@ -1406,9 +1406,9 @@ describe("memory_health — access enforcement", () => {
     const raw = await ownerCall("memory_health");
     const result = parse(raw) as { ok: boolean; schema_version: number; sections: Record<string, unknown> };
     expect(result.ok).toBe(true);
-    expect(result.schema_version).toBe(1);
+    expect(result.schema_version).toBe(2);
     expect(result.sections).toBeDefined();
-    expect(result.sections.memory_size).toBeDefined();
+    expect(result.sections.size).toBeDefined();
   });
 
   it("family memory_health → denied (invisible, found: false)", async () => {
