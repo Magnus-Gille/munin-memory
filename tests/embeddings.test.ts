@@ -31,6 +31,7 @@ import {
   initEmbeddings,
   startEmbeddingWorker,
   stopEmbeddingWorker,
+  resetOrphanedProcessingRows,
   _embeddingConfig,
   getEmbeddingCacheDir,
   VALID_DTYPES,
@@ -560,6 +561,40 @@ describe("background worker", () => {
       .prepare("SELECT COUNT(*) as cnt FROM entries_vec")
       .get() as { cnt: number };
     expect(vecRows.cnt).toBe(2);
+  });
+
+  it("resets orphaned 'processing' rows to 'pending' on startup", () => {
+    // Simulate a row left stuck in 'processing' by a prior crash/restart (#155)
+    const { id } = writeState(db, "test/ns", "orphan", "stuck content", []);
+    const before = (db.prepare("SELECT updated_at FROM entries WHERE id = ?").get(id) as { updated_at: string }).updated_at;
+    db.prepare("UPDATE entries SET embedding_status = 'processing', embedding_model = NULL WHERE id = ?").run(id);
+
+    const reset = resetOrphanedProcessingRows(db);
+    expect(reset).toBe(1);
+
+    const after = db
+      .prepare("SELECT embedding_status, updated_at FROM entries WHERE id = ?")
+      .get(id) as { embedding_status: string; updated_at: string };
+    expect(after.embedding_status).toBe("pending");
+    // updated_at must NOT be disturbed (no CAS/content-change side effect)
+    expect(after.updated_at).toBe(before);
+  });
+
+  it.skipIf(!vecAvailable)("reclaims and embeds an orphaned 'processing' row via startup", async () => {
+    const { id } = writeState(db, "test/ns", "orphan2", "content about cats", []);
+    db.prepare("UPDATE entries SET embedding_status = 'processing' WHERE id = ?").run(id);
+
+    startEmbeddingWorker(db);
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    await stopEmbeddingWorker();
+
+    const after = db
+      .prepare("SELECT embedding_status FROM entries WHERE id = ?")
+      .get(id) as { embedding_status: string };
+    expect(after.embedding_status).toBe("generated");
+
+    const vecRow = db.prepare("SELECT entry_id FROM entries_vec WHERE entry_id = ?").get(id);
+    expect(vecRow).toBeDefined();
   });
 
   it.skipIf(!vecAvailable)("guards against stale writes", async () => {
