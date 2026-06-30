@@ -6706,6 +6706,24 @@ describe("aggregate tool untrusted-content envelope — Finding 1 (#150)", () =>
   });
 });
 
+// ── memory_history action filter includes access_denied (#161 issue 5) ─────────
+describe("memory_history action filter — access_denied (#161 issue 5)", () => {
+  it("accepts action='access_denied' without a validation error", async () => {
+    const raw = await callTool("memory_history", { action: "access_denied" });
+    const result = parseToolResponse(raw) as Record<string, unknown>;
+    // Should not error — may return empty entries but must not be validation_error
+    expect(result.error).not.toBe("validation_error");
+  });
+
+  it("rejects unknown action values with a helpful error message that includes access_denied", async () => {
+    const raw = await callTool("memory_history", { action: "bogus_action" });
+    const result = parseToolResponse(raw) as { error: string; message: string };
+    expect(result.error).toBe("validation_error");
+    // Error message must enumerate access_denied so callers know it's valid
+    expect(result.message).toContain("access_denied");
+  });
+});
+
 // ── Finding 3: memory_delete key:'' edge case (#150) ─────────────────────────
 describe("memory_delete key:'' edge case — Finding 3 (#150)", () => {
   beforeEach(async () => {
@@ -7163,6 +7181,31 @@ describe("memory_health", () => {
     const after = parseToolResponse(await callTool("memory_health", {})) as Record<string, unknown>;
     const cls = (after.sections as Record<string, Record<string, unknown>>).classification;
     expect(cls.access_denied_7d).toBe(2);
+  });
+
+  it("classification_override denial increments access_denied_7d (#161 issue 3)", async () => {
+    // Baseline: no denials yet
+    const before = parseToolResponse(await callTool("memory_health", {})) as Record<string, unknown>;
+    const beforeCls = (before.sections as Record<string, Record<string, unknown>>).classification;
+    const beforeCount = beforeCls.access_denied_7d as number;
+
+    // Drive a classification_override denial for memory_write (non-owner using override)
+    const familyCall = makeContextCallTool({
+      ...ownerContext(),
+      principalId: "principal:sara2",
+      principalType: "family",
+    });
+    await familyCall("memory_write", {
+      namespace: "projects/testns",
+      key: "status",
+      content: "test",
+      tags: [],
+      classification_override: true,
+    });
+
+    const after = parseToolResponse(await callTool("memory_health", {})) as Record<string, unknown>;
+    const afterCls = (after.sections as Record<string, Record<string, unknown>>).classification;
+    expect(afterCls.access_denied_7d as number).toBe(beforeCount + 1);
   });
 
   it("agent non-owner gets access_denied error (zero metadata)", async () => {

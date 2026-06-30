@@ -309,6 +309,16 @@ export function recordAccessDenied(
   toolName: string,
 ): void {
   try {
+    // 60-second dedup: skip if an identical access_denied row (same principal +
+    // tool) was already written within the last 60 seconds. Prevents unbounded
+    // audit_log growth from a denied principal hammering a single tool.
+    // access_denied_7d counts are deduped per (principal, tool, minute).
+    const since60s = new Date(Date.now() - 60_000).toISOString();
+    const existing = db.prepare(
+      "SELECT 1 FROM audit_log WHERE action = 'access_denied' AND agent_id = ? AND key = ? AND timestamp >= ? LIMIT 1",
+    ).get(principalId, toolName, since60s);
+    if (existing) return;
+
     insertAuditRow(db, nowUTC(), principalId, "access_denied", "security/access", toolName, null);
   } catch {
     // Fire-and-forget: never fail the denied tool call.
@@ -3471,7 +3481,7 @@ export function getHealthRetrievalMetrics(db: Database.Database, isOwner: boolea
       "SELECT 1 FROM retrieval_events WHERE timestamp >= ? LIMIT 1",
     ).get(since30d);
     if (hasRecent) {
-      unusedCount = countUnusedSurfaces(db, UNUSED_MIN_IMPRESSIONS, since30d, true);
+      unusedCount = countUnusedSurfaces(db, UNUSED_MIN_IMPRESSIONS, since30d, true, isOwner);
     }
   } catch {
     // retrieval_events may not exist in very old DBs; treat as 0
@@ -3502,8 +3512,10 @@ export function countUnusedSurfaces(
   minImpressions: number,
   since: string | undefined,
   restrictToTracked: boolean,
+  isOwner: boolean,
   trackedPatterns: readonly string[] = DEFAULT_TRACKED_PATTERNS,
 ): number {
+  if (!isOwner) throw new Error("memory_health helpers are owner-only");
   const tracked = restrictToTracked
     ? trackedPatternsToSqlLike(trackedPatterns, "e.namespace")
     : { clause: "", params: [] as string[] };
@@ -3568,7 +3580,10 @@ export interface RetrievalLatencyPercentiles {
 /**
  * Nearest-rank p50/p95 of memory_query wall-clock latency over a 7-day window.
  * SQLite has no PERCENTILE_CONT, so we compute n first, then select the value
- * at OFFSET CAST(pct*(n-1) AS INT) from the ascending-ordered durations.
+ * at OFFSET max(0, min(n-1, ceil(pct*n)-1)) — matching the computeP95 helper
+ * used for tool_calls p95 response sizes. The trunc(pct*(n-1)) formula used
+ * in the original implementation under-reports p95 at small n (n=2 gives index
+ * 0 = minimum rather than index 1 = maximum; n=10 gives index 8 rather than 9).
  * Returns nulls when there are no timed query events in the window.
  * Owner-only (defense-in-depth — mirrors the sibling health helpers).
  */
@@ -3592,7 +3607,8 @@ export function getRetrievalLatencyPercentiles(
      LIMIT 1 OFFSET ?`,
   );
   const valueAt = (pct: number): number | null => {
-    const offset = Math.trunc(pct * (n - 1)); // CAST(pct*(n-1) AS INT)
+    // Nearest-rank: ceil(pct*n)-1, clamped to [0, n-1]. Matches computeP95().
+    const offset = Math.max(0, Math.min(n - 1, Math.ceil(pct * n) - 1));
     const row = pctStmt.get(since7d, offset) as { duration_ms: number } | undefined;
     return row?.duration_ms ?? null;
   };
@@ -3632,8 +3648,11 @@ export function getClassificationDistribution(db: Database.Database, isOwner: bo
 /**
  * Security event counts for the memory_health security_events section.
  * Reads from redaction_log (Librarian redaction events) and audit_log
- * (cross_zone_block containment events). Never reads audit_log for
- * access-denied counts — that metric is unsupported by the current schema.
+ * (cross_zone_block containment events). access-denied counts are a separate
+ * metric in classification.access_denied_7d (getAccessDeniedCount7d); they
+ * are NOT included here because security_events is scoped to content-policy
+ * events (redaction + cross-zone containment) while access-denied is an
+ * access-control telemetry signal.
  */
 export interface SecurityEventCounts {
   redaction_events_7d: number;

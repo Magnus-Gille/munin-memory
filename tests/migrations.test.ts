@@ -851,6 +851,40 @@ describe("migration v19 — retrieval_events.duration_ms", () => {
     expect(row.duration_ms).toBeNull();
     db.close();
   });
+
+  it("(6a) idempotent: running runMigrations twice does not throw and column is still present", () => {
+    const db = openRawDb();
+    runMigrations(db); // first run
+    runMigrations(db); // second run — must not throw on ALTER TABLE if column already exists
+
+    const cols = db
+      .prepare("PRAGMA table_info(retrieval_events)")
+      .all() as Array<{ name: string }>;
+    expect(cols.some((c) => c.name === "duration_ms")).toBe(true);
+    db.close();
+  });
+
+  it("(6b) synthetic baseline: v19 skips ALTER TABLE when retrieval_events is absent", () => {
+    // Simulate a DB where migrations are marked applied (incl. v4 which created
+    // retrieval_events in normal flow) but the table was never materialised —
+    // the guard should return early and not throw.
+    const db = openRawDb();
+    db.exec(`
+      CREATE TABLE schema_version (
+        version INTEGER PRIMARY KEY,
+        applied_at TEXT NOT NULL
+      );
+    `);
+    // Mark all versions up to v18 as applied WITHOUT creating any tables.
+    for (let v = 1; v <= 18; v++) {
+      db.prepare("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)").run(
+        v, new Date().toISOString(),
+      );
+    }
+    // runMigrations should run v19; the table-absent guard must prevent a throw.
+    expect(() => runMigrations(db)).not.toThrow();
+    db.close();
+  });
 });
 
 describe("migration v7 — entries_vec cleanup branch", () => {

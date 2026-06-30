@@ -917,12 +917,14 @@ function formatStructuredStatus(status: BuiltStructuredStatus): string {
 const VALID_AUDIT_ACTIONS: Array<AuditAction | "delete_namespace" | "log"> = [
   "write",
   "update",
+  "patch",
   "delete",
   "namespace_delete",
   "log_append",
   "delete_namespace",
   "log",
   "cross_zone_block",
+  "access_denied",
 ];
 
 function contentPreview(content: string, maxLen = 500): string {
@@ -4028,6 +4030,21 @@ function accessDeniedReadResponse(db: Database.Database, ctx: AccessContext, act
   return okResult(action, { found: false, message: "No entry found." });
 }
 
+/**
+ * Record and return an access-denied errResult. Used for non-namespace-gate
+ * denials (e.g. classification_override owner-only checks) that previously
+ * called errResult directly and therefore bypassed recordAccessDenied telemetry.
+ */
+function accessDeniedErrorResponse(
+  db: Database.Database,
+  ctx: AccessContext,
+  action: string,
+  message: string,
+) {
+  recordAccessDenied(db, ctx.principalId, `memory_${action}`);
+  return errResult(action, "access_denied", message);
+}
+
 export function getMaxContentSize(): number {
   const envVal = process.env.MUNIN_MEMORY_MAX_CONTENT_SIZE;
   return envVal ? parseInt(envVal, 10) || 100_000 : 100_000;
@@ -5479,7 +5496,7 @@ export function registerTools(
                 return errResult("write", "validation_error", classificationInputError);
               }
               if (classification_override === true && ctx.principalType !== "owner") {
-                return errResult("write", "access_denied", "classification_override is only available to the owner principal.");
+                return accessDeniedErrorResponse(db, ctx, "write", "classification_override is only available to the owner principal.");
               }
 
               if (!canWrite(ctx, namespace)) {
@@ -5746,7 +5763,7 @@ export function registerTools(
                 return errResult("update_status", "validation_error", classificationInputError);
               }
               if (classification_override === true && ctx.principalType !== "owner") {
-                return errResult("update_status", "access_denied", "classification_override is only available to the owner principal.");
+                return accessDeniedErrorResponse(db, ctx, "update_status", "classification_override is only available to the owner principal.");
               }
               if (next_steps !== undefined && (!Array.isArray(next_steps) || next_steps.some((item) => typeof item !== "string"))) {
                 return errResult("update_status", "validation_error", "next_steps must be an array of strings.");
@@ -6562,7 +6579,7 @@ export function registerTools(
                 return errResult("log", "validation_error", classificationInputError);
               }
               if (classification_override === true && ctx.principalType !== "owner") {
-                return errResult("log", "access_denied", "classification_override is only available to the owner principal.");
+                return accessDeniedErrorResponse(db, ctx, "log", "classification_override is only available to the owner principal.");
               }
               if (!canWrite(ctx, namespace)) {
                 return accessDeniedResponse(db, ctx, "log");
@@ -6946,7 +6963,7 @@ export function registerTools(
                 return errResult(
                   "history",
                   "validation_error",
-                  `Invalid action "${action}". Must be one of: write, update, delete, delete_namespace, log, cross_zone_block. Legacy aliases namespace_delete and log_append are also accepted.`,
+                  `Invalid action "${action}". Must be one of: write, update, patch, delete, delete_namespace, log, cross_zone_block, access_denied. Legacy aliases namespace_delete and log_append are also accepted.`,
                 );
               }
 
@@ -7300,8 +7317,9 @@ export function registerTools(
               });
 
               // --- Section 7: security_events ---
-              // Only exposes what real queries support: redaction_log + cross_zone_block in audit_log.
-              // access-denied count from audit_log is NOT included (unsupported by schema).
+              // Exposes content-policy events: redaction_log (Librarian) + cross_zone_block in audit_log.
+              // access-denied counts are in classification.access_denied_7d (getAccessDeniedCount7d),
+              // not here — security_events is scoped to content-policy events, not access-control telemetry.
               buildSection("security_events", () => {
                 return { ...getSecurityEventCounts(db, isOwner) };
               });
