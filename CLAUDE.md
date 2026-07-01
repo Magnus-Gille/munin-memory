@@ -94,11 +94,16 @@ munin-memory/
 │   ├── appliance-profiles.md              # Tiered hardware/appliance direction and Pi Zero spike plan
 │   ├── authorization-matrix.md            # Multi-principal authorization policy reference
 │   ├── claude-md-template.md              # Reusable CLAUDE.md guidance template
+│   ├── offsite-backup.md                  # Encrypted offsite cloud backup (rclone crypt) setup + restore
 │   └── usage-model.md                     # Durable design concepts and two-layer model
 ├── munin-memory.service   # systemd unit file for RPi deployment
+├── munin-offsite.service  # systemd unit — daily encrypted offsite backup (with .timer)
+├── munin-offsite.timer
 ├── scripts/
-│   ├── deploy-rpi.sh      # Deploy to Raspberry Pi
-│   └── migrate-db.sh      # One-time DB migration to Pi
+│   ├── deploy-rpi.sh          # Deploy to Raspberry Pi
+│   ├── migrate-db.sh          # One-time DB migration to Pi
+│   ├── offsite-backup.sh      # Shared offsite mechanism (rclone crypt) — verbatim copy of mimir#10
+│   └── offsite-snapshot.sh    # Munin snapshot wrapper (VACUUM INTO → offsite-backup.sh)
 └── dist/                  # Compiled output (gitignored)
 ```
 

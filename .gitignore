@@ -23,6 +23,7 @@ docs/*
 !docs/usage-model.md
 !docs/claude-md-template.md
 !docs/authorization-matrix.md
+!docs/offsite-backup.md
 !docs/competitive-analysis.md
 !docs/librarian-architecture.md
 !docs/librarian-engineering-plan.md
