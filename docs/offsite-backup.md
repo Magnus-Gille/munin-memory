@@ -150,7 +150,7 @@ chmod 600 ~/.config/rclone/rclone.conf
 
 ### 5. Environment
 
-The service reads `EnvironmentFile=-/home/magnus/repos/munin-memory/.env` (optional).
+The service reads `EnvironmentFile=-/home/magnus/munin-ops/.env` (optional).
 It only needs the shared Heimdall vars there for the status panel — **no crypt key**
 (that stays in the rclone config). Optional overrides (defaults shown):
 
@@ -170,14 +170,18 @@ It only needs the shared Heimdall vars there for the status panel — **no crypt
 # RCLONE_BIN=rclone                                  # rclone binary path
 ```
 
-### 6. Install the timer
+### 6. Install the scripts + timer
+
+The operational scripts run from a dedicated **`~/munin-ops`** dir, decoupled from any
+git checkout, so cron never executes code out of a mutable/dev checkout. `install-ops.sh`
+copies the scripts there and installs the systemd units. Run it from a clean tracking
+checkout (re-run after every `git pull` to update the runtime):
 
 ```bash
-sudo cp /home/magnus/repos/munin-memory/munin-offsite.service /etc/systemd/system/
-sudo cp /home/magnus/repos/munin-memory/munin-offsite.timer   /etc/systemd/system/
-sudo systemctl daemon-reload
+cd ~/repos/munin-memory && git pull --ff-only
+scripts/install-ops.sh                        # → ~/munin-ops/scripts + /etc/systemd/system units
 sudo systemctl enable --now munin-offsite.timer
-systemctl list-timers munin-offsite.timer   # confirm next run
+systemctl list-timers munin-offsite.timer     # confirm next run
 ```
 
 ---
@@ -187,7 +191,7 @@ systemctl list-timers munin-offsite.timer   # confirm next run
 Run these once after setup. **A backup you haven't restored from is not a backup.**
 
 ```bash
-cd /home/magnus/repos/munin-memory
+cd ~/munin-ops
 
 # a) First push, then confirm ONLY encrypted blobs are in OneDrive.
 ./scripts/offsite-snapshot.sh

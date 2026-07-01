@@ -98,9 +98,10 @@ munin-memory/
 │   └── usage-model.md                     # Durable design concepts and two-layer model
 ├── munin-memory.service   # systemd unit file for RPi deployment
 ├── munin-offsite.service  # systemd unit — daily encrypted offsite backup (with .timer)
-├── munin-offsite.timer
+├── munin-offsite.timer    # NOTE: backup/offsite units run scripts from ~/munin-ops, NOT a checkout
 ├── scripts/
 │   ├── deploy-rpi.sh          # Deploy to Raspberry Pi
+│   ├── install-ops.sh         # Install backup/offsite scripts + units into ~/munin-ops (decoupled from any checkout)
 │   ├── migrate-db.sh          # One-time DB migration to Pi
 │   ├── offsite-backup.sh      # Shared offsite mechanism (rclone crypt) — verbatim copy of mimir#10
 │   └── offsite-snapshot.sh    # Munin snapshot wrapper (VACUUM INTO → offsite-backup.sh)
