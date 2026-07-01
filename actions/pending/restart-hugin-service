@@ -1,0 +1,7 @@
+ACTION: Restart Hugin service on huginmunin
+DATE: 2026-03-28
+REASON: MCP injection feature deployed (commit 405ff51) — code compiled and in place, but sudo systemctl restart hugin.service was blocked by no-new-privileges container flag during automated deploy.
+COMMAND: sudo systemctl restart hugin.service
+THEN VERIFY:
+  systemctl is-active hugin.service   # expect: active
+  journalctl -u hugin.service -n 10 --no-pager
