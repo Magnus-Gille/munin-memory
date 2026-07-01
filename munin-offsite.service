@@ -1,0 +1,35 @@
+[Unit]
+Description=Munin Memory offsite backup (encrypted push to cloud)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=magnus
+WorkingDirectory=/home/magnus/repos/munin-memory
+ExecStart=/home/magnus/repos/munin-memory/scripts/offsite-snapshot.sh
+# Optional — reuses HEIMDALL_HUB_URL + HEIMDALL_FLEET_TOKEN (shared) for the status
+# panel, plus any MIMIR_OFFSITE_* / MUNIN_OFFSITE_* overrides. The munin-crypt remote
+# + OneDrive OAuth token live in the rclone config (~/.config/rclone/rclone.conf,
+# chmod 600) — NOT in this .env and NOT in the repo.
+EnvironmentFile=-/home/magnus/repos/munin-memory/.env
+Nice=10
+IOSchedulingClass=idle
+
+# Timeouts (VACUUM INTO snapshot + encrypted upload). Generous so a slow/throttled
+# uplink can't get SIGKILLed mid-run (a kill wouldn't get to push a fail panel). The
+# memory DB is small, so this is far above any real run; the heartbeat stamp
+# (MIMIR_OFFSITE_STAMP) is the staleness backstop if a run is ever reaped.
+TimeoutStartSec=7200
+
+# Sandboxing
+ProtectSystem=strict
+# rclone rewrites rclone.conf when it refreshes the OneDrive OAuth token, so its
+# config dir must be writable. The live DB, VACUUM INTO snapshot staging, log + stamp
+# all live under ~/.munin-memory (the snapshot reads the DB; sqlite may touch WAL/shm).
+ReadWritePaths=/home/magnus/.munin-memory /home/magnus/.config/rclone
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,13 @@
+[Unit]
+Description=Run Munin Memory offsite backup daily
+
+[Timer]
+# Daily at 03:45 local — after the 03:00 NAS backup (munin-backup.timer), jittered up
+# to 15 min to avoid a thundering herd on the provider. Persistent=true runs a missed
+# backup on next boot (e.g. the Pi was off overnight).
+OnCalendar=*-*-* 03:45:00
+RandomizedDelaySec=900
+Persistent=true
+
+[Install]
+WantedBy=timers.target
