@@ -162,7 +162,8 @@ It only needs the shared Heimdall vars there for the status panel — **no crypt
 # MIMIR_OFFSITE_MAX_DELETE=1000                      # abort if a run removes ≥ this many files
 # MIMIR_OFFSITE_MAX_DELETE_PCT=25                    # ...or more than this % of current/
 # MUNIN_OFFSITE_DB=$HOME/.munin-memory/memory.db     # live DB to snapshot
-# MUNIN_OFFSITE_STAGING=$HOME/.munin-memory/offsite-staging   # snapshot dir (becomes ROOT)
+# MUNIN_OFFSITE_STAGING=$HOME/.munin-memory/offsite-staging   # DEDICATED snapshot dir (becomes ROOT)
+# MUNIN_OFFSITE_LOCK=$HOME/.munin-memory/offsite-snapshot.lock # concurrency guard (flock)
 # MIMIR_OFFSITE_STAMP=$HOME/.munin-memory/offsite.stamp
 # MIMIR_OFFSITE_LOG=$HOME/.munin-memory/offsite-backup.log
 # MIMIR_OFFSITE_DRYRUN=1                             # same as passing --dry-run

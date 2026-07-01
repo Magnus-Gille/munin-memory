@@ -16,8 +16,11 @@ EnvironmentFile=-/home/magnus/repos/munin-memory/.env
 Nice=10
 IOSchedulingClass=idle
 
-# Timeouts (VACUUM INTO snapshot + encrypted upload)
-TimeoutStartSec=1800
+# Timeouts (VACUUM INTO snapshot + encrypted upload). Generous so a slow/throttled
+# uplink can't get SIGKILLed mid-run (a kill wouldn't get to push a fail panel). The
+# memory DB is small, so this is far above any real run; the heartbeat stamp
+# (MIMIR_OFFSITE_STAMP) is the staleness backstop if a run is ever reaped.
+TimeoutStartSec=7200
 
 # Sandboxing
 ProtectSystem=strict
