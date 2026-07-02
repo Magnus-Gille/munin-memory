@@ -163,6 +163,13 @@ export async function checkOpenRouterKey(
   apiKey: string,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<KeyHealthResult> {
+  // Defense-in-depth: never let the key surface in the returned detail, even if
+  // a proxy reflects the Authorization header into an error body or a low-level
+  // fetch error message embeds it. Strip the exact key and `Bearer <key>`.
+  const redact = (s: string): string => {
+    if (!apiKey) return s;
+    return s.split(`Bearer ${apiKey}`).join("Bearer [REDACTED]").split(apiKey).join("[REDACTED]");
+  };
   const endpoint = `${getLlmBaseUrl(env)}/auth/key`;
   try {
     const response = await fetch(endpoint, {
@@ -175,10 +182,10 @@ export async function checkOpenRouterKey(
     });
     if (!response.ok) {
       const text = await response.text().catch(() => "");
-      return { ok: false, status: response.status, error: text.slice(0, 200) };
+      return { ok: false, status: response.status, error: redact(text).slice(0, 200) };
     }
     return { ok: true, status: response.status };
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    return { ok: false, error: redact(err instanceof Error ? err.message : String(err)) };
   }
 }

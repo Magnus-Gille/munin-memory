@@ -507,4 +507,29 @@ describe("checkOpenRouterKey (#168)", () => {
     await checkOpenRouterKey("sk-test");
     expect(fetchMock.mock.calls[0][0]).toBe("http://localhost:1234/v1/auth/key");
   });
+
+  it("redacts the key if a reflected error body echoes it (defense-in-depth)", async () => {
+    const secret = "sk-or-secret-abc123";
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      text: () => Promise.resolve(`proxy error for Authorization: Bearer ${secret}`),
+    } as unknown as Response);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await checkOpenRouterKey(secret);
+    expect(result.ok).toBe(false);
+    expect(result.error).not.toContain(secret);
+    expect(result.error).toContain("[REDACTED]");
+  });
+
+  it("redacts the key if a thrown fetch error message embeds it", async () => {
+    const secret = "sk-or-secret-xyz789";
+    const fetchMock = vi.fn().mockRejectedValue(new Error(`connect failed with Bearer ${secret}`));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await checkOpenRouterKey(secret);
+    expect(result.ok).toBe(false);
+    expect(result.error).not.toContain(secret);
+  });
 });
