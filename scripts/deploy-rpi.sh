@@ -51,6 +51,14 @@ rsync -avz \
   --exclude 'benchmark/reports/' \
   ./ "${USER}@${HOST}:${REMOTE_DIR}/"
 
+# The deploy target is a pure ARTIFACT, never a git checkout (the git source of
+# truth is ~/repos/munin-memory). rsync excludes .git above, but a past ad-hoc
+# sync from a git worktree left a dangling `.git` gitdir-pointer file here that
+# produced phantom `git status` noise (munin-memory#175). Defensively strip any
+# .git so the artifact dir can never masquerade as a checkout.
+echo "==> Ensuring deploy target carries no git metadata (artifact, not checkout)..."
+ssh "${USER}@${HOST}" "rm -rf ${REMOTE_DIR}/.git"
+
 echo "==> Installing dependencies on Pi (compiles native modules for ARM64)..."
 ssh "${USER}@${HOST}" "cd ${REMOTE_DIR} && npm install --production"
 
