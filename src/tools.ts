@@ -292,13 +292,18 @@ function shouldWrapAsUntrusted(content: string, tags: string[]): boolean {
 }
 
 /**
- * Double-wrap guard (#152): a serialized/synthesized string may already carry the
- * untrusted envelope (e.g. content that stored a previously-wrapped blob, or a
- * derived field re-processed through the serializer). Re-wrapping would nest the
- * delimiters and corrupt the signal, so wrapping is idempotent.
+ * The `⚠` sentinel anchors every server-owned envelope delimiter
+ * (`UNTRUSTED_PREFIX`/`UNTRUSTED_SUFFIX`/`UNTRUSTED_PREVIEW_MARKER`). Stored
+ * content is attacker-controlled, so before wrapping we neutralize any `⚠` in
+ * the body — otherwise a payload could (a) start with the prefix to look
+ * already-wrapped, or (b) embed a fake `⚠ END UNTRUSTED DATA ⚠` mid-body to make
+ * the consuming model believe the untrusted section closed and trusted
+ * instructions follow. Replacing the sentinel (rather than a `startsWith` skip)
+ * is the robust guard and makes wrapping idempotent: re-wrapping our own output
+ * simply neutralizes the inner delimiters and re-wraps cleanly. (#152, Codex critical)
  */
-function isAlreadyWrapped(text: string): boolean {
-  return text.startsWith(UNTRUSTED_PREFIX) || text.startsWith(UNTRUSTED_PREVIEW_MARKER);
+function neutralizeEnvelopeSigil(body: string): string {
+  return body.split("⚠").join("▲");
 }
 
 /**
@@ -319,13 +324,14 @@ function applyUntrustedEnvelope(
   if (!untrusted) return;
   response.untrusted_content = true;
   response.content_provenance_notice = UNTRUSTED_NOTICE;
-  response.content = isAlreadyWrapped(content) ? content : UNTRUSTED_PREFIX + content + UNTRUSTED_SUFFIX;
+  response.content = UNTRUSTED_PREFIX + neutralizeEnvelopeSigil(content) + UNTRUSTED_SUFFIX;
 }
 
 /**
  * Centralized safety helper for full-content fields in aggregate tool responses.
  * Returns { text: safeText, untrusted: boolean }.
- * When untrusted, wraps with UNTRUSTED_PREFIX/SUFFIX delimiters (idempotently).
+ * When untrusted, wraps with UNTRUSTED_PREFIX/SUFFIX delimiters after neutralizing
+ * any embedded sentinel so the delimiters can't be forged.
  * tags is optional; when omitted only scan-based detection fires.
  * `untrustedOverride` forces the verdict (e.g. a preview whose full-content entry
  * was already judged untrusted, or a contagious multi-entry aggregate).
@@ -334,20 +340,33 @@ function applyUntrustedEnvelope(
 function safenText(text: string, tags?: string[], untrustedOverride?: boolean): { text: string; untrusted: boolean } {
   const untrusted = untrustedOverride ?? shouldWrapAsUntrusted(text, tags ?? []);
   if (!untrusted) return { text, untrusted: false };
-  return { text: isAlreadyWrapped(text) ? text : UNTRUSTED_PREFIX + text + UNTRUSTED_SUFFIX, untrusted: true };
+  return { text: UNTRUSTED_PREFIX + neutralizeEnvelopeSigil(text) + UNTRUSTED_SUFFIX, untrusted: true };
 }
 
 /**
  * Preview-field variant. For short preview strings in aggregate results.
  * When untrusted, prefixes with a compact inline marker instead of full delimiters
- * (previews are intentionally short, so the marker stays proportionate).
+ * (previews are intentionally short, so the marker stays proportionate). Any
+ * embedded sentinel is neutralized so a forged marker can't be smuggled in.
  * tags is optional; when omitted only scan-based detection fires.
  * `untrustedOverride` forces the verdict from the full-content trust decision. (#150)
  */
 function safenPreview(preview: string, tags?: string[], untrustedOverride?: boolean): { text: string; untrusted: boolean } {
   const untrusted = untrustedOverride ?? shouldWrapAsUntrusted(preview, tags ?? []);
   if (!untrusted) return { text: preview, untrusted: false };
-  return { text: isAlreadyWrapped(preview) ? preview : UNTRUSTED_PREVIEW_MARKER + preview, untrusted: true };
+  return { text: UNTRUSTED_PREVIEW_MARKER + neutralizeEnvelopeSigil(preview), untrusted: true };
+}
+
+/**
+ * Preview a derived field from an entry's content, deciding trust from the FULL
+ * content + tags (not the truncated preview) so an untagged injection payload
+ * located past the preview window still marks the emitted preview (#152, Codex
+ * finding 4). Use anywhere the full `content` string is in hand; DB paths that
+ * only load a SUBSTR preview can't use this and fall back to tag + limited-window
+ * scan (documented at those call sites).
+ */
+function safenEntryPreview(content: string, tags: string[], maxLen: number): { text: string; untrusted: boolean } {
+  return safenPreview(contentPreview(content, maxLen), tags, shouldWrapAsUntrusted(content, tags));
 }
 
 function buildRedactableEntryMetadata(entry: ReturnType<typeof parseEntry>) {
@@ -610,12 +629,15 @@ function formatQueryResult(
     return redacted as unknown as QueryResult;
   }
 
+  // Trust verdict from FULL content (not the truncated preview) so a payload past
+  // the preview window still flags AND marks the emitted preview (#152, Codex).
+  const previewUntrusted = shouldWrapAsUntrusted(entry.content, parsed.tags);
   const result: QueryResult = {
     id: entry.id,
     namespace: entry.namespace,
     key: entry.key,
     entry_type: entry.entry_type,
-    content_preview: contentPreview(entry.content),
+    content_preview: safenPreview(contentPreview(entry.content), parsed.tags, previewUntrusted).text,
     tags: parsed.tags,
     created_at: entry.created_at,
     updated_at: entry.updated_at,
@@ -651,10 +673,9 @@ function formatQueryResult(
     result.match = match;
   }
 
-  // Piece 2: read-time untrusted-content envelope for query results (#150).
-  // Query returns content_preview (not full content), so we add the flag only —
-  // no inline wrapping — to signal that the source entry is untrusted/injection-shaped.
-  if (shouldWrapAsUntrusted(entry.content, parsed.tags)) {
+  // Read-time untrusted-content envelope for query results (#150/#152). The
+  // content_preview is marked via safenPreview above; set the metadata flag too.
+  if (previewUntrusted) {
     result.untrusted_content = true;
   }
 
@@ -1626,7 +1647,7 @@ function buildResumeStatusCandidate(
   const suggestedAction = resolveResumeStatusAction(assessment, includeAttention);
 
   const statusTags = parseTags(assessment.row.tags);
-  const safePreviewResult = safenPreview(contentPreview(assessment.row.content_preview, 220), statusTags);
+  const safePreviewResult = safenEntryPreview(assessment.row.content, statusTags, 220);
   return {
     item: {
       namespace: assessment.row.namespace,
@@ -1658,7 +1679,7 @@ function buildResumeStateCandidate(
   const matchText = `${entry.namespace} ${entry.key ?? ""} ${entry.content}`;
   const matchedTerms = countResumeTermMatches(matchText, hintTerms);
   const entryTags = parseTags(entry.tags);
-  const safePreviewResult = safenPreview(contentPreview(entry.content, 220), entryTags);
+  const safePreviewResult = safenEntryPreview(entry.content, entryTags, 220);
 
   return {
     item: {
@@ -1716,7 +1737,7 @@ function buildResumeLogCandidate(
   const inScope = scope ? matchesNamespacePrefix(entry.namespace, scope) : false;
 
   const logTags = parseTags(entry.tags);
-  const safeLogPreview = safenPreview(contentPreview(entry.content, 220), logTags);
+  const safeLogPreview = safenEntryPreview(entry.content, logTags, 220);
   return {
     item: {
       namespace: entry.namespace,
@@ -2135,7 +2156,7 @@ function buildExtractRelatedEntries(
   return {
     entries: filtered.allowed.slice(0, 5).map((source) => {
       const tags = parseTags(source.entry.tags);
-      const safe = safenPreview(contentPreview(source.entry.content, 220), tags);
+      const safe = safenEntryPreview(source.entry.content, tags, 220);
       return {
         id: source.entry.id,
         namespace: source.entry.namespace,
@@ -2343,7 +2364,7 @@ function resolveNarrativeStatusEntry(db: Database.Database, namespace: string): 
 
 function buildNarrativeSourceFromEntry(entry: Entry): NarrativeSource {
   const tags = parseTags(entry.tags);
-  const safe = safenPreview(contentPreview(entry.content, 220), tags);
+  const safe = safenEntryPreview(entry.content, tags, 220);
   return {
     kind: "entry",
     id: entry.id,
@@ -2531,7 +2552,8 @@ function buildNarrativeTimeline(
   if (statusEntry) {
     const statusTags = parseTags(statusEntry.tags);
     const statusSummary = buildNarrativeStatusSummary(statusEntry);
-    const safeSummary = safenPreview(statusSummary, statusTags);
+    // Trust from FULL status content, not the derived summary (#152, Codex finding 4).
+    const safeSummary = safenPreview(statusSummary, statusTags, shouldWrapAsUntrusted(statusEntry.content, statusTags));
     items.push({
       timestamp: statusEntry.updated_at,
       category: "status",
@@ -2543,7 +2565,7 @@ function buildNarrativeTimeline(
 
   for (const entry of logs) {
     const logTags = parseTags(entry.tags);
-    const safeLogSummary = safenPreview(contentPreview(entry.content, 180), logTags);
+    const safeLogSummary = safenEntryPreview(entry.content, logTags, 180);
     items.push({
       timestamp: entry.created_at,
       category: "log",
@@ -2957,19 +2979,20 @@ function listFreshCommitmentRows(
 }
 
 /**
- * Trust verdict for a derived commitment (#152). `CommitmentRow` persists a
- * snapshot (`text`, `source_excerpt`) rather than the live source entry, so
- * tag-based detection needs a live lookup. Prefer the current source entry's
- * full content + tags (contagious: if the source is untrusted, every
- * commitment derived from it is too); fall back to scanning the persisted
- * text/excerpt when the source entry is gone (deleted after extraction).
+ * Trust verdict for a derived commitment (#152). Prefer the LIVE source entry's
+ * full content + tags (contagious: if the source is untrusted, every commitment
+ * derived from it is too), decided from full content so a payload past the
+ * persisted excerpt still flags. `listCommitments` inner-joins the source entry,
+ * so in practice `getById` always resolves here; the fallback scan of the
+ * persisted `text` is defensive only (a source-less row would never reach this
+ * via the tool path — `source_excerpt` is derived live, not persisted).
  */
 function commitmentTrustOverride(db: Database.Database, row: CommitmentRow): boolean {
   const sourceEntry = getById(db, row.source_entry_id);
   if (sourceEntry) {
     return shouldWrapAsUntrusted(sourceEntry.content, parseTags(sourceEntry.tags));
   }
-  return shouldWrapAsUntrusted(`${row.text} ${row.source_excerpt ?? ""}`, []);
+  return shouldWrapAsUntrusted(row.text, []);
 }
 
 function buildCommitmentItem(db: Database.Database, row: CommitmentRow, reason?: string): CommitmentItem {
@@ -3105,7 +3128,7 @@ function buildPatternSources(entries: Entry[], sourceIds: Set<string>): PatternS
     .filter((entry) => sourceIds.has(entry.id))
     .map((entry) => {
       const tags = parseTags(entry.tags);
-      const safe = safenPreview(contentPreview(entry.content, 220), tags);
+      const safe = safenEntryPreview(entry.content, tags, 220);
       return {
         entry_id: entry.id,
         namespace: entry.namespace,
@@ -3124,7 +3147,8 @@ function buildHandoffCurrentState(namespace: string, statusEntry: Entry | null, 
     const contentSummary = contentPreview(statusEntry.content, 300);
     const rawSummary = `${phasePart}${contentSummary}`;
     const statusTags = parseTags(statusEntry.tags);
-    const safe = safenPreview(rawSummary, statusTags);
+    // Trust from FULL status content, not the truncated summary (#152, Codex finding 4).
+    const safe = safenPreview(rawSummary, statusTags, shouldWrapAsUntrusted(statusEntry.content, statusTags));
     return {
       namespace,
       summary: safe.text,
@@ -3137,7 +3161,7 @@ function buildHandoffCurrentState(namespace: string, statusEntry: Entry | null, 
   const fallback = fallbackEntries.find((entry) => entry.entry_type === "state");
   if (!fallback) return null;
   const fallbackTags = parseTags(fallback.tags);
-  const safeFallback = safenPreview(contentPreview(fallback.content, 220), fallbackTags);
+  const safeFallback = safenEntryPreview(fallback.content, fallbackTags, 220);
   return {
     namespace,
     summary: safeFallback.text,
@@ -3369,10 +3393,15 @@ function projectConventions(
   if (detail === "full") {
     if (personal) {
       const parsed = parseEntry(personal);
+      // Trust envelope (#152, Codex): a non-owner principal can store
+      // instruction-shaped personal conventions under <home>/meta and receive
+      // them back through the handshake — mirror the owner branch's envelope.
+      const safeConventions = safenText(parsed.content, parsed.tags);
       const conv: Record<string, unknown> = {
-        content: parsed.content,
+        content: safeConventions.text,
         updated_at: parsed.updated_at,
         source: "principal",
+        ...(safeConventions.untrusted ? { untrusted_content: true } : {}),
       };
       if (isStale(parsed.updated_at)) conv.stale = true;
       return conv;
@@ -5750,7 +5779,7 @@ export function registerTools(
                 .slice(0, limit)
                 .map((entry) => {
                   const decisionTags = parseTags(entry.tags);
-                  const safeDecision = safenPreview(contentPreview(entry.content, 200), decisionTags);
+                  const safeDecision = safenEntryPreview(entry.content, decisionTags, 200);
                   return {
                     timestamp: entry.created_at,
                     summary: safeDecision.text,
@@ -7162,6 +7191,11 @@ export function registerTools(
                 if (redacted) {
                   return redacted;
                 }
+                // Trust envelope (#152). listNamespaceContents loads only a
+                // SUBSTR(content,1,100) preview, so scan-based detection is bounded
+                // to that window — but this tool ONLY ever emits that preview, so
+                // an injection past char 100 is neither flagged NOR shown (it can't
+                // reach a consumer here). Tag-based trust is exact regardless.
                 const safePreview = safenPreview(e.preview, tags);
                 return {
                   id: e.id,
