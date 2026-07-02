@@ -5,9 +5,11 @@ const TOOLS_SOURCE = readFileSync(new URL("../src/tools.ts", import.meta.url), "
 
 const ENFORCEMENT_EXPECTATIONS: Record<string, string[]> = {
   memory_write: ["buildWriteHint("],
-  memory_read: ["maybeRedactDirectEntry(", "buildReadMissHint("],
-  memory_read_batch: ["maybeRedactDirectEntry("],
-  memory_get: ["maybeRedactDirectEntry("],
+  // Direct-read tools route through the unified read gate (#154), which folds
+  // classification redaction (maybeRedactDirectEntry) + the untrusted envelope.
+  memory_read: ["serializeEntry(", "buildReadMissHint("],
+  memory_read_batch: ["serializeEntry("],
+  memory_get: ["serializeEntry("],
   memory_query: ["formatQueryResult("],
   memory_list: ["listVisibleNamespaces(", "maybeRedactEntryMetadata("],
   memory_delete: ["previewDeleteByClassification("],
