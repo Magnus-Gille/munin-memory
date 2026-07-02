@@ -240,6 +240,8 @@ export interface DashboardSynthesis {
     reference_type: string;
     context: string | null;
     confidence: number;
+    /** Set when the cross-reference context is instruction-shaped. (#152) */
+    untrusted_content?: boolean;
   }>;
   /** Count of cross-references (included in standard mode where the full array is omitted) */
   cross_reference_count?: number;
@@ -255,6 +257,8 @@ export interface DashboardEntry {
   synthesis?: DashboardSynthesis;
   classification?: ClassificationLevel;
   redacted?: boolean;
+  /** Set when the source status entry is instruction-shaped or tagged `untrusted`/`source:external`. (#152) */
+  untrusted_content?: boolean;
   redaction_reason?: string;
 }
 
@@ -467,6 +471,8 @@ export interface AttentionItem {
   classification?: ClassificationLevel;
   redacted?: boolean;
   redaction_reason?: string;
+  /** Set when the source entry is instruction-shaped or tagged `untrusted`/`source:external`. (#152) */
+  untrusted_content?: boolean;
 }
 
 export interface AttentionResponse {
@@ -514,6 +520,8 @@ export interface ResumeOpenLoop {
   type: "blocker" | "next_step" | "attention";
   summary: string;
   suggested_action: string;
+  /** Set when the source status entry is instruction-shaped or tagged `untrusted`/`source:external`. (#152) */
+  untrusted_content?: boolean;
 }
 
 export interface ResumeSuggestedRead {
@@ -627,6 +635,8 @@ export interface CommitmentItem {
   source_excerpt?: string;
   source_classification?: ClassificationLevel;
   reason?: string;
+  /** Set when the source entry is instruction-shaped or tagged `untrusted`/`source:external`. (#152) */
+  untrusted_content?: boolean;
 }
 
 export interface CommitmentsResponse {
@@ -720,6 +730,8 @@ export interface EntryInsight {
   followthrough_rate: number;
   staleness_pressure: number;
   learned_signals: string[];
+  /** Set when content_preview is instruction-shaped or the entry is tagged `untrusted`/`source:external`. (#152) */
+  untrusted_content?: boolean;
 }
 
 export interface InsightsResponse {

@@ -1509,32 +1509,48 @@ function extractResumeOpenLoops(assessment: TrackedStatusAssessment): ResumeOpen
   const structured = parseStructuredStatus(assessment.row.content);
   const loops: ResumeOpenLoop[] = [];
 
+  // Trust envelope (#152): decide from the FULL status content + tags so a
+  // payload past any truncation window still flags every loop derived from
+  // this status entry — untrust is contagious across all derived summaries.
+  const statusTags = parseTags(assessment.row.tags);
+  const loopUntrustedOverride = shouldWrapAsUntrusted(assessment.row.content, statusTags);
+
   if (structured.blockers && !isNoneLikeStatusText(structured.blockers)) {
+    const safeBlockers = safenPreview(contentPreview(structured.blockers, 160), statusTags, loopUntrustedOverride);
     loops.push({
       namespace: assessment.row.namespace,
       type: "blocker",
-      summary: contentPreview(structured.blockers, 160),
+      summary: safeBlockers.text,
       suggested_action: "Review blocker details and update the status when it changes.",
+      ...(safeBlockers.untrusted ? { untrusted_content: true } : {}),
     });
   }
 
   for (const step of structured.next_steps ?? []) {
     if (isNoneLikeStatusText(step)) continue;
+    const safeStep = safenPreview(contentPreview(step, 160), statusTags, loopUntrustedOverride);
     loops.push({
       namespace: assessment.row.namespace,
       type: "next_step",
-      summary: contentPreview(step, 160),
+      summary: safeStep.text,
       suggested_action: "Treat this as the next concrete action for the project.",
+      ...(safeStep.untrusted ? { untrusted_content: true } : {}),
     });
     if (loops.filter((loop) => loop.type === "next_step").length >= 2) break;
   }
 
   if (assessment.needsAttention && assessment.maintenanceItems.length > 0) {
+    const safeAttention = safenPreview(
+      contentPreview(assessment.maintenanceItems[0].suggestion, 160),
+      statusTags,
+      loopUntrustedOverride,
+    );
     loops.push({
       namespace: assessment.row.namespace,
       type: "attention",
-      summary: contentPreview(assessment.maintenanceItems[0].suggestion, 160),
+      summary: safeAttention.text,
       suggested_action: assessment.maintenanceItems[0].suggestion,
+      ...(safeAttention.untrusted ? { untrusted_content: true } : {}),
     });
   }
 
@@ -2340,13 +2356,18 @@ function buildNarrativeSourceFromEntry(entry: Entry): NarrativeSource {
 }
 
 function buildNarrativeSourceFromAudit(entry: AuditHistoryEntry): NarrativeSource {
+  // Trust envelope (#152): audit `detail` echoes a preview of the written/logged
+  // content, so injection-shaped text can surface here. Audit rows carry no tags,
+  // so detection is scan-only on the emitted preview.
+  const safe = safenPreview(contentPreview(entry.detail ?? `${entry.action} ${entry.key ?? "namespace"}`, 220));
   return {
     kind: "audit",
     id: entry.id,
     namespace: entry.namespace,
     key: entry.key,
     timestamp: entry.timestamp,
-    preview: contentPreview(entry.detail ?? `${entry.action} ${entry.key ?? "namespace"}`, 220),
+    preview: safe.text,
+    ...(safe.untrusted ? { untrusted_content: true } : {}),
   };
 }
 
@@ -2935,11 +2956,30 @@ function listFreshCommitmentRows(
   };
 }
 
-function buildCommitmentItem(row: CommitmentRow, reason?: string): CommitmentItem {
+/**
+ * Trust verdict for a derived commitment (#152). `CommitmentRow` persists a
+ * snapshot (`text`, `source_excerpt`) rather than the live source entry, so
+ * tag-based detection needs a live lookup. Prefer the current source entry's
+ * full content + tags (contagious: if the source is untrusted, every
+ * commitment derived from it is too); fall back to scanning the persisted
+ * text/excerpt when the source entry is gone (deleted after extraction).
+ */
+function commitmentTrustOverride(db: Database.Database, row: CommitmentRow): boolean {
+  const sourceEntry = getById(db, row.source_entry_id);
+  if (sourceEntry) {
+    return shouldWrapAsUntrusted(sourceEntry.content, parseTags(sourceEntry.tags));
+  }
+  return shouldWrapAsUntrusted(`${row.text} ${row.source_excerpt ?? ""}`, []);
+}
+
+function buildCommitmentItem(db: Database.Database, row: CommitmentRow, reason?: string): CommitmentItem {
+  const untrustedOverride = commitmentTrustOverride(db, row);
+  const safeText = safenText(row.text, undefined, untrustedOverride);
+  const safeExcerpt = row.source_excerpt ? safenPreview(row.source_excerpt, undefined, untrustedOverride) : null;
   return {
     id: row.id,
     namespace: row.namespace,
-    text: row.text,
+    text: safeText.text,
     due_at: row.due_at,
     status: row.status,
     confidence: row.confidence,
@@ -2949,9 +2989,10 @@ function buildCommitmentItem(row: CommitmentRow, reason?: string): CommitmentIte
     created_at: row.created_at,
     updated_at: row.updated_at,
     resolved_at: row.resolved_at,
-    source_excerpt: row.source_excerpt,
+    source_excerpt: safeExcerpt ? safeExcerpt.text : row.source_excerpt,
     source_classification: row.source_classification,
     reason,
+    ...(safeText.untrusted || safeExcerpt?.untrusted ? { untrusted_content: true } : {}),
   };
 }
 
@@ -2964,6 +3005,7 @@ function compareCommitmentItems(a: CommitmentItem, b: CommitmentItem): number {
 }
 
 function buildAtRiskCommitmentItem(
+  db: Database.Database,
   row: CommitmentRow,
   assessment: TrackedStatusAssessment | undefined,
 ): CommitmentItem | null {
@@ -2986,13 +3028,14 @@ function buildAtRiskCommitmentItem(
     } else if (lowConfidence) {
       reason = "Low confidence: commitment may be stale or from an uncertain source.";
     }
-    return buildCommitmentItem(row, reason);
+    return buildCommitmentItem(db, row, reason);
   }
 
   return null;
 }
 
 function classifyCommitments(
+  db: Database.Database,
   rows: CommitmentRow[],
   trackedStatusByNamespace: Map<string, TrackedStatusAssessment>,
   limit: number,
@@ -3009,24 +3052,24 @@ function classifyCommitments(
     const assessment = trackedStatusByNamespace.get(row.namespace);
 
     if (row.status === "done" && row.resolved_at && row.resolved_at >= completedCutoff) {
-      completedRecently.push(buildCommitmentItem(row, "Recently resolved from an explicit source entry."));
+      completedRecently.push(buildCommitmentItem(db, row, "Recently resolved from an explicit source entry."));
       continue;
     }
 
     if (row.status !== "open") continue;
 
     if (row.due_at && row.due_at < now) {
-      overdue.push(buildCommitmentItem(row, `Due at ${row.due_at}.`));
+      overdue.push(buildCommitmentItem(db, row, `Due at ${row.due_at}.`));
       continue;
     }
 
-    const atRiskItem = buildAtRiskCommitmentItem(row, assessment);
+    const atRiskItem = buildAtRiskCommitmentItem(db, row, assessment);
     if (atRiskItem) {
       atRisk.push(atRiskItem);
       continue;
     }
 
-    open.push(buildCommitmentItem(row));
+    open.push(buildCommitmentItem(db, row));
   }
 
   return {
@@ -3302,10 +3345,14 @@ function projectConventions(
     const allowed = redact(entry);
     if (!allowed) return null; // present but redacted away — preserve prior behavior
     const parsed = parseEntry(allowed);
+    // Trust envelope (#152): only the full-document branch emits raw entry
+    // content — the compact branch is a static computed summary, never leaks.
+    const safeConventions = detail === "full" ? safenText(parsed.content, parsed.tags) : null;
     const conv: Record<string, unknown> = {
-      content: detail === "full" ? parsed.content : compactConventions(parsed.updated_at),
+      content: safeConventions ? safeConventions.text : compactConventions(parsed.updated_at),
       updated_at: parsed.updated_at,
       source: "owner",
+      ...(safeConventions?.untrusted ? { untrusted_content: true } : {}),
     };
     if (detail !== "full") {
       conv.compact = true;
@@ -4231,6 +4278,7 @@ function computeEntryInsight(row: {
   namespace: string | null;
   key: string | null;
   content_preview: string | null;
+  tags?: string | null;
   impressions: number;
   opens: number;
   write_outcomes: number;
@@ -4239,7 +4287,7 @@ function computeEntryInsight(row: {
   opened_when_stale_count: number;
   updated_at: string;
 }): EntryInsight {
-  const { entry_id, namespace, key, content_preview, impressions, opens, write_outcomes, log_outcomes, followthrough_events, opened_when_stale_count } = row;
+  const { entry_id, namespace, key, content_preview, tags, impressions, opens, write_outcomes, log_outcomes, followthrough_events, opened_when_stale_count } = row;
   // Use the pre-computed followthrough_events (distinct events with any follow-through action)
   // to avoid double-counting events that had multiple outcome types. Math.min is a safety clamp.
   const followthrough = impressions > 0
@@ -4267,16 +4315,27 @@ function computeEntryInsight(row: {
     signals.push("no follow-through");
   }
 
+  // Trust envelope (#152). content_preview is only the first 60 chars of the
+  // source entry (see getInsightsByEntry), so scan-based detection is limited
+  // to that window — an injection payload past char 60 won't be caught here.
+  // Tag-based detection is exact (tags are fetched in full).
+  // tags is null for deleted entries (LEFT JOIN with no match) — parseTags
+  // does JSON.parse, which throws on an empty string, so guard explicitly
+  // rather than falling back to "".
+  const insightTags = tags ? parseTags(tags) : [];
+  const safePreview = content_preview !== null ? safenPreview(content_preview, insightTags) : null;
+
   return {
     entry_id,
     namespace,
     key: key ?? null,
-    content_preview: content_preview ?? null,
+    content_preview: safePreview ? safePreview.text : null,
     impressions,
     opens,
     followthrough_rate: followthrough,
     staleness_pressure: stalenessPressure,
     learned_signals: signals,
+    ...(safePreview?.untrusted ? { untrusted_content: true } : {}),
   };
 }
 
@@ -4380,14 +4439,23 @@ export function registerTools(
               const maintenanceSortKey = new Map<MaintenanceItem, string>();
 
               for (const assessment of trackedStatusAssessments) {
+                // Trust envelope (#152): decide from the FULL status content + tags so a
+                // payload past the one-liner/150-char truncation window still flags the
+                // dashboard summary.
+                const dashboardStatusTags = parseTags(assessment.row.tags);
+                const dashboardUntrustedOverride = shouldWrapAsUntrusted(assessment.row.content, dashboardStatusTags);
+                const rawSummary = detail === "compact"
+                  ? phaseOneliner(assessment.row.content_preview)
+                  : assessment.row.content_preview.slice(0, 150);
+                const safeSummary = safenPreview(rawSummary, dashboardStatusTags, dashboardUntrustedOverride);
+
                 const entry: DashboardEntry = {
                   namespace: assessment.row.namespace,
-                  summary: detail === "compact"
-                    ? phaseOneliner(assessment.row.content_preview)
-                    : assessment.row.content_preview.slice(0, 150),
+                  summary: safeSummary.text,
                   updated_at: assessment.row.updated_at,
                   updated_at_local: toLocalDisplay(assessment.row.updated_at),
                   lifecycle: assessment.lifecycle,
+                  ...(safeSummary.untrusted ? { untrusted_content: true } : {}),
                 };
 
                 if (assessment.needsAttention) {
@@ -4446,12 +4514,19 @@ export function registerTools(
                         synthesis_age_days: synthesisAgeDays,
                         logs_incorporated: logsIncorporated,
                         origin: synthesisMeta ? "auto" : "manual",
-                        cross_references: crossRefs.map((ref) => ({
-                          target_namespace: ref.target_namespace === assessment.row.namespace ? ref.source_namespace : ref.target_namespace,
-                          reference_type: ref.reference_type,
-                          context: ref.context,
-                          confidence: ref.confidence,
-                        })),
+                        cross_references: crossRefs.map((ref) => {
+                          // Trust envelope (#152): cross-reference context is derived
+                          // (consolidation-extracted or explicit) and has no owning entry
+                          // tags of its own — scan-only detection.
+                          const safeContext = ref.context !== null ? safenPreview(ref.context) : null;
+                          return {
+                            target_namespace: ref.target_namespace === assessment.row.namespace ? ref.source_namespace : ref.target_namespace,
+                            reference_type: ref.reference_type,
+                            context: safeContext ? safeContext.text : ref.context,
+                            confidence: ref.confidence,
+                            ...(safeContext?.untrusted ? { untrusted_content: true } : {}),
+                          };
+                        }),
                       };
                     }
                   }
@@ -4615,7 +4690,11 @@ export function registerTools(
                   );
                   orientRedactedSources.push(...filteredNotes.redacted);
                   if (filteredNotes.allowed.length > 0) {
-                    response.notes = filteredNotes.allowed[0].content;
+                    const notesEntry = parseEntry(filteredNotes.allowed[0]);
+                    // Trust envelope (#152): freeform curated notes can carry
+                    // instruction-shaped or externally-sourced text. `notes` is a bare
+                    // string field, so the wrapped text itself is the only signal.
+                    response.notes = safenText(notesEntry.content, notesEntry.tags).text;
                   }
                 }
 
@@ -4633,7 +4712,8 @@ export function registerTools(
                   orientRedactedSources.push(...filteredReferenceIndex.redacted);
                   if (filteredReferenceIndex.allowed.length > 0) {
                     try {
-                      const parsed = JSON.parse(filteredReferenceIndex.allowed[0].content);
+                      const refIndexEntry = parseEntry(filteredReferenceIndex.allowed[0]);
+                      const parsed = JSON.parse(refIndexEntry.content);
                       if (parsed && Array.isArray(parsed.references)) {
                         const validEntries = parsed.references.filter(
                           (r: Record<string, unknown>) =>
@@ -4643,8 +4723,23 @@ export function registerTools(
                             typeof r.when_to_load === "string",
                         );
                         if (validEntries.length > 0) {
+                          // Trust envelope (#152): decide once from the FULL
+                          // reference-index entry (content + tags) — a single owner
+                          // edit can carry an injected title/when_to_load line, so
+                          // every listed reference inherits the same verdict.
+                          const refIndexUntrustedOverride = shouldWrapAsUntrusted(refIndexEntry.content, refIndexEntry.tags);
+                          const safeEntries = validEntries.map((r: Record<string, unknown>) => {
+                            const safeTitle = safenPreview(r.title as string, refIndexEntry.tags, refIndexUntrustedOverride);
+                            const safeWhenToLoad = safenPreview(r.when_to_load as string, refIndexEntry.tags, refIndexUntrustedOverride);
+                            return {
+                              ...r,
+                              title: safeTitle.text,
+                              when_to_load: safeWhenToLoad.text,
+                              ...(safeTitle.untrusted || safeWhenToLoad.untrusted ? { untrusted_content: true } : {}),
+                            };
+                          });
                           response.references = {
-                            entries: validEntries,
+                            entries: safeEntries,
                             updated_at: filteredReferenceIndex.allowed[0].updated_at,
                           };
                         }
@@ -4721,10 +4816,14 @@ export function registerTools(
                   orientRedactedSources.push(...filteredWorkbench.redacted);
                   if (filteredWorkbench.allowed.length > 0) {
                     const parsed = parseEntry(filteredWorkbench.allowed[0]);
+                    // Trust envelope (#152): the deprecated freeform workbench blob
+                    // can still carry instruction-shaped or externally-sourced text.
+                    const safeWorkbench = safenText(parsed.content, parsed.tags);
                     response.legacy_workbench = {
-                      content: parsed.content,
+                      content: safeWorkbench.text,
                       updated_at: parsed.updated_at,
                       deprecation_note: "The workbench is deprecated. The computed dashboard above is now the source of truth for project/client state. Delete meta/workbench when ready.",
+                      ...(safeWorkbench.untrusted ? { untrusted_content: true } : {}),
                     };
                   }
                 }
@@ -5232,7 +5331,7 @@ export function registerTools(
                 includeResolved: true,
               }, sessionId);
 
-              const classified = classifyCommitments(rows, trackedStatusByNamespace, limit);
+              const classified = classifyCommitments(db, rows, trackedStatusByNamespace, limit);
               const response: Record<string, unknown> = { ...classified };
 
               const allBucketsEmpty =
@@ -5672,19 +5771,23 @@ export function registerTools(
 
               for (const row of commitmentRows) {
                 if (row.status !== "open") continue;
+                // Trust envelope (#152): commitment text is derived, stored-content
+                // text interpolated straight into a response string — wrap it before
+                // interpolation using the live source entry's content + tags.
+                const safeCommitmentText = safenPreview(row.text, undefined, commitmentTrustOverride(db, row));
                 if (row.due_at && row.due_at < nowUTC()) {
-                  openLoopSet.add(`Overdue commitment: ${row.text}`);
+                  openLoopSet.add(`Overdue commitment: ${safeCommitmentText.text}`);
                   recommendedActionSet.add(`Resolve or reschedule the overdue commitment written for ${row.due_at}.`);
                   continue;
                 }
                 const namespaceAssessment = trackedStatusByNamespace.get(row.namespace);
                 if (namespaceAssessment?.lifecycle === "blocked") {
-                  openLoopSet.add(`Blocked commitment: ${row.text}`);
+                  openLoopSet.add(`Blocked commitment: ${safeCommitmentText.text}`);
                   recommendedActionSet.add("Unblock the namespace or clear the lingering commitment before handing work onward.");
                   continue;
                 }
                 if (row.due_at && getDaysUntil(row.due_at) <= COMMITMENT_SOON_DAYS) {
-                  openLoopSet.add(`Due soon: ${row.text}`);
+                  openLoopSet.add(`Due soon: ${safeCommitmentText.text}`);
                   recommendedActionSet.add(`Review the commitment due at ${row.due_at}.`);
                 }
               }
@@ -6830,14 +6933,27 @@ export function registerTools(
               for (const assessment of trackedStatusAssessments) {
                 if (!matchesNamespacePrefix(assessment.row.namespace, attentionArgs.namespace_prefix)) continue;
 
+                // Trust envelope (#152): decide from the FULL status content + tags so a
+                // payload past the 150-char preview window still flags the entry, then
+                // apply that verdict as an override to the truncated preview text.
+                const attentionStatusTags = parseTags(assessment.row.tags);
+                const attentionUntrustedOverride = shouldWrapAsUntrusted(assessment.row.content, attentionStatusTags);
+                const safeAttentionPreview = safenPreview(
+                  assessment.row.content_preview.slice(0, 150),
+                  attentionStatusTags,
+                  attentionUntrustedOverride,
+                );
+
                 if (includeBlocked && assessment.lifecycle === "blocked") {
-                  attentionItems.push(buildAttentionItem(
+                  const item = buildAttentionItem(
                     assessment.row.namespace,
                     "blocked",
                     assessment.row.updated_at,
-                    assessment.row.content_preview.slice(0, 150),
+                    safeAttentionPreview.text,
                     "Review blocker and update status.",
-                  ));
+                  );
+                  if (safeAttentionPreview.untrusted) item.untrusted_content = true;
+                  attentionItems.push(item);
                 }
 
                 for (const item of assessment.maintenanceItems) {
@@ -6850,13 +6966,15 @@ export function registerTools(
                   if (item.issue === "missing_status") continue;
 
                   // namespace is always a string here (derived from assessment.row.namespace)
-                  attentionItems.push(buildAttentionItem(
+                  const attentionItem = buildAttentionItem(
                     item.namespace ?? assessment.row.namespace,
                     item.issue,
                     assessment.row.updated_at,
-                    assessment.row.content_preview.slice(0, 150),
+                    safeAttentionPreview.text,
                     item.suggestion,
-                  ));
+                  );
+                  if (safeAttentionPreview.untrusted) attentionItem.untrusted_content = true;
+                  attentionItems.push(attentionItem);
                 }
               }
 
