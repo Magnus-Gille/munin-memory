@@ -32,15 +32,40 @@ const INJECTION_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
     label: "instruction-override phrase",
   },
   {
-    pattern: /\bdo\s+not\s+(tell|inform|alert|notify|reveal\s+to|mention\s+to)\s+(the\s+)?(user|owner|human|magnus|principal)\b/i,
+    // Allow an object between the verb and the target ("do not mention THIS to
+    // the user") — the earlier `mention\s+to` form missed the #150 payload's
+    // "Do not mention this to the user." (#150).
+    pattern: /\bdo\s+not\s+(tell|inform|alert|notify|reveal|mention|disclose|report)\b[^.\n]{0,30}?\b(user|owner|human|magnus|principal)\b/i,
     label: "concealment instruction",
   },
   {
     // Deliberately narrow: "new task:" / "updated rules:" are routine PM prose, so
-    // only genuinely injection-shaped nouns (instructions / system prompt / message)
-    // trip this. Override/directive forms are covered by the phrases above.
-    pattern: /\b(new|updated|revised|additional|real|actual|true)\s+(instruction|instructions|system\s+prompt|system\s+message)\s*:/i,
+    // only genuinely injection-shaped nouns (instructions / directives / system
+    // prompt / message) trip this. The urgency prefixes (important/urgent/…) catch
+    // the #150 "IMPORTANT SYSTEM INSTRUCTION:" payload. Override forms are above.
+    // "directive(s)" is intentionally NOT a bare noun here — "Revised directives:
+    // ship Friday" is routine PM prose. Only instruction/system-prompt nouns trip
+    // the prefix form; "system directive:" is handled by the system-prefixed rule
+    // below. Urgency prefixes catch the #150 "IMPORTANT SYSTEM INSTRUCTION:".
+    pattern: /\b(new|updated|revised|additional|real|actual|true|important|urgent|critical|mandatory)\s+(system\s+)?(instruction|instructions|system\s+prompt|system\s+message)\s*:/i,
     label: "injected directive block",
+  },
+  {
+    // A bare "SYSTEM INSTRUCTION:" / "SYSTEM DIRECTIVE:" block — the "system"
+    // qualifier is what makes it injection-shaped (vs. plain "directives:").
+    pattern: /\bsystem\s+(instruction|instructions|directive|directives)\s*:/i,
+    label: "system-directive block",
+  },
+  {
+    // Imperative directive to invoke a destructive tool ("immediately call
+    // memory_delete …", "proceed to run … purge"). Targets the exact dangerous
+    // shape of the #150 attack; the urgency adverb + destructive verb keep it off
+    // benign numbered dev steps ("then run the delete migration").
+    // Note: no word boundary before the destructive verb, so tool names with
+    // underscores (memory_delete) match. Boundary required after the verb to ensure
+    // it's a complete word (not part of "delete-orphans").
+    pattern: /\b(immediately|now|proceed\s+to)\s+(call|invoke|execute|run|trigger)\b[^.\n]{0,30}?(delete|remove|drop|erase|wipe|purge)\b/i,
+    label: "imperative destructive-tool directive",
   },
   {
     pattern: /\b(developer\s+mode|jailbroken|jailbreak|DAN\s+mode|do\s+anything\s+now)\b/i,
