@@ -1009,6 +1009,85 @@ describe("startConsolidationWorker / stopConsolidationWorker", () => {
   });
 });
 
+// ─── Startup OpenRouter key health check (#168) ──────────────────────────────
+
+describe("startConsolidationWorker — OpenRouter key health check (#168)", () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+  let originalFetch: typeof globalThis.fetch;
+  let savedBaseUrl: string | undefined;
+
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    originalFetch = globalThis.fetch;
+    savedBaseUrl = process.env.MUNIN_LLM_BASE_URL;
+    delete process.env.MUNIN_LLM_BASE_URL;
+  });
+  afterEach(async () => {
+    await stopConsolidationWorker();
+    globalThis.fetch = originalFetch;
+    errorSpy.mockRestore();
+    _setApiKey(null);
+    _setWorkerDb(null);
+    if (savedBaseUrl === undefined) delete process.env.MUNIN_LLM_BASE_URL;
+    else process.env.MUNIN_LLM_BASE_URL = savedBaseUrl;
+  });
+
+  it("probes /auth/key when a key is present on the default host", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: () => Promise.resolve(""),
+    } as unknown as Response);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    _setApiKey("test-key");
+
+    startConsolidationWorker(db);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/auth/key");
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
+
+  it("does not probe when a custom MUNIN_LLM_BASE_URL is set", async () => {
+    process.env.MUNIN_LLM_BASE_URL = "http://localhost:8091/v1";
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    _setApiKey("test-key");
+
+    startConsolidationWorker(db);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("logs a loud, secret-free error on an invalid key and does not reject", async () => {
+    const secret = "sk-or-stale-secret";
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      text: () => Promise.resolve(`{"error":"bad key Bearer ${secret}"}`),
+    } as unknown as Response);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    _setApiKey(secret);
+
+    startConsolidationWorker(db);
+    await vi.waitFor(() => expect(errorSpy).toHaveBeenCalled());
+    const logged = errorSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+    expect(logged).toContain("health check FAILED");
+    expect(logged).toContain("openrouter.ai/settings/keys");
+    expect(logged).not.toContain(secret);
+  });
+
+  it("swallows a rejected fetch without an unhandled rejection", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    _setApiKey("test-key");
+
+    startConsolidationWorker(db);
+    await vi.waitFor(() => expect(errorSpy).toHaveBeenCalled());
+    // No throw escaped startConsolidationWorker; the error path logged instead.
+    expect(errorSpy.mock.calls.map((c) => c.join(" ")).join("\n")).toContain("health check FAILED");
+  });
+});
+
 // ─── Circuit breaker ─────────────────────────────────────────────────────────
 
 describe("circuit breaker", () => {
@@ -2075,7 +2154,6 @@ describe("startConsolidationWorker reconciliation on startup", () => {
     } as unknown as Response);
 
     await processConsolidationBatch();
-    globalThis.fetch = originalFetch;
 
     // Verify persisted entry says tripped
     const trippedEntry = readState(db, "meta/system-health", "consolidation");
@@ -2090,8 +2168,12 @@ describe("startConsolidationWorker reconciliation on startup", () => {
     expect(JSON.parse(afterNoDbReset!.content).status).toBe("tripped");
 
     // Step 3: Start the worker again with the db — reconciliation should write healthy.
+    // Keep fetch mocked through this call: startConsolidationWorker now fires a
+    // fire-and-forget OpenRouter key probe (#168), and with the real fetch it
+    // would hit the network with "fake-key".
     startConsolidationWorker(db);
     await stopConsolidationWorker();
+    globalThis.fetch = originalFetch;
 
     // Persisted entry should now be healthy (Fix B reconciliation).
     const reconciledEntry = readState(db, "meta/system-health", "consolidation");

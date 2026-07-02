@@ -22,7 +22,7 @@ import type { AccessContext } from "./access.js";
 import { validateNamespace, scanForSecrets, redactSecrets, scanForInjection } from "./security.js";
 import type { ClassificationLevel } from "./types.js";
 import type { Entry, SynthesisResult, ConsolidationRunResult, CrossReferenceType, ConsolidationCandidate } from "./types.js";
-import { callOpenRouter as callLlm, isCustomLlmBaseUrl } from "./internal/openrouter.js";
+import { callOpenRouter as callLlm, isCustomLlmBaseUrl, checkOpenRouterKey } from "./internal/openrouter.js";
 import type { ChatCompletionResponse as SharedChatCompletionResponse } from "./internal/openrouter.js";
 
 // --- Cross-zone containment guard (#96) ---
@@ -251,6 +251,27 @@ export function initConsolidation(): boolean {
 export function startConsolidationWorker(db: Database.Database): void {
   if (apiKey === null && !isCustomLlmBaseUrl()) return;
   workerDb = db;
+
+  // #168: proactively verify the OpenRouter key against the authenticated
+  // /auth/key endpoint. /models returns 200 unauthenticated and masks a stale
+  // key, so without this a 401 only surfaces on the first synthesis call —
+  // silently blocking consolidation. Fire-and-forget so it never blocks
+  // startup; only meaningful against the default OpenRouter host (a custom/local
+  // base URL has no /auth/key and no bearer auth). The logged detail is
+  // secret-free (status + response body only, never the key).
+  if (apiKey !== null && !isCustomLlmBaseUrl()) {
+    const keyForCheck = apiKey;
+    void checkOpenRouterKey(keyForCheck).then((result) => {
+      if (!result.ok) {
+        console.error(
+          `consolidation: OpenRouter API key health check FAILED (status ${result.status ?? "network error"})` +
+            `${result.error ? `: ${result.error}` : ""}. ` +
+            "Synthesis calls will fail until the key is fixed — regenerate at " +
+            "openrouter.ai/settings/keys and update OPENROUTER_API_KEY (and the Pi .env if shared).",
+        );
+      }
+    });
+  }
 
   // Reconcile stale persisted alert on startup. If a previous run tripped or
   // failed but the server restarted (clearing in-memory state) without being

@@ -6,7 +6,7 @@
  * auth) while keeping the default path byte-for-byte unchanged.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { callOpenRouter, getLlmBaseUrl, isCustomLlmBaseUrl } from "../src/internal/openrouter.js";
+import { callOpenRouter, getLlmBaseUrl, isCustomLlmBaseUrl, checkOpenRouterKey } from "../src/internal/openrouter.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -445,5 +445,91 @@ describe("callOpenRouter — error handling", () => {
         apiKey: "sk-test",
       }),
     ).rejects.toThrow("OpenRouter API error 401:");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// checkOpenRouterKey — authenticated key health probe (#168)
+// ---------------------------------------------------------------------------
+
+describe("checkOpenRouterKey (#168)", () => {
+  it("hits the authenticated /auth/key endpoint (not /models) with a Bearer token", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: () => Promise.resolve(""),
+    } as unknown as Response);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await checkOpenRouterKey("sk-valid");
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0][0]).toBe(`${DEFAULT_BASE_URL}/auth/key`);
+    const init = fetchMock.mock.calls[0][1] as { method: string; headers: Record<string, string> };
+    expect(init.method).toBe("GET");
+    expect(init.headers["Authorization"]).toBe("Bearer sk-valid");
+    expect(result).toEqual({ ok: true, status: 200 });
+  });
+
+  it("reports ok:false with the status on a 401 (the masked stale-key failure)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      text: () => Promise.resolve('{"error":{"message":"User not found.","code":401}}'),
+    } as unknown as Response);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await checkOpenRouterKey("sk-stale");
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe(401);
+    expect(result.error).toContain("User not found.");
+  });
+
+  it("never throws on a network error — returns ok:false with the message", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await checkOpenRouterKey("sk-test");
+    expect(result.ok).toBe(false);
+    expect(result.status).toBeUndefined();
+    expect(result.error).toContain("ECONNREFUSED");
+  });
+
+  it("targets a custom base URL when MUNIN_LLM_BASE_URL is set", async () => {
+    process.env.MUNIN_LLM_BASE_URL = "http://localhost:1234/v1";
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: () => Promise.resolve(""),
+    } as unknown as Response);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await checkOpenRouterKey("sk-test");
+    expect(fetchMock.mock.calls[0][0]).toBe("http://localhost:1234/v1/auth/key");
+  });
+
+  it("redacts the key if a reflected error body echoes it (defense-in-depth)", async () => {
+    const secret = "sk-or-secret-abc123";
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      text: () => Promise.resolve(`proxy error for Authorization: Bearer ${secret}`),
+    } as unknown as Response);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await checkOpenRouterKey(secret);
+    expect(result.ok).toBe(false);
+    expect(result.error).not.toContain(secret);
+    expect(result.error).toContain("[REDACTED]");
+  });
+
+  it("redacts the key if a thrown fetch error message embeds it", async () => {
+    const secret = "sk-or-secret-xyz789";
+    const fetchMock = vi.fn().mockRejectedValue(new Error(`connect failed with Bearer ${secret}`));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await checkOpenRouterKey(secret);
+    expect(result.ok).toBe(false);
+    expect(result.error).not.toContain(secret);
   });
 });

@@ -134,3 +134,58 @@ export function getOpenRouterApiKey(): string | null {
   const key = process.env.OPENROUTER_API_KEY;
   return key && key.length > 0 ? key : null;
 }
+
+// --- Key health check (#168) ---
+
+export interface KeyHealthResult {
+  ok: boolean;
+  /** HTTP status of the /auth/key probe, when a response was received. */
+  status?: number;
+  /** Truncated, secret-free error detail (response body or fetch error). */
+  error?: string;
+}
+
+/**
+ * Verify an OpenRouter API key against the authenticated `/auth/key` endpoint.
+ *
+ * `/models` returns 200 *unauthenticated*, so a stale/invalid key is masked
+ * until the first real completion call fails with `401 {"User not found."}` —
+ * silently blocking consolidation (and the eval). `/auth/key` requires a valid
+ * bearer token, so a 401 here surfaces the failure loudly and early (#168).
+ *
+ * Only meaningful against the default OpenRouter host — a custom/local
+ * `MUNIN_LLM_BASE_URL` (llama.cpp/Ollama/vLLM) has no such endpoint and no
+ * bearer auth, so callers should skip the probe in that case. Never throws:
+ * a network error is returned as `{ ok: false, error }`. The returned `error`
+ * carries only the response body / fetch message (never the key itself).
+ */
+export async function checkOpenRouterKey(
+  apiKey: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<KeyHealthResult> {
+  // Defense-in-depth: never let the key surface in the returned detail, even if
+  // a proxy reflects the Authorization header into an error body or a low-level
+  // fetch error message embeds it. Strip the exact key and `Bearer <key>`.
+  const redact = (s: string): string => {
+    if (!apiKey) return s;
+    return s.split(`Bearer ${apiKey}`).join("Bearer [REDACTED]").split(apiKey).join("[REDACTED]");
+  };
+  const endpoint = `${getLlmBaseUrl(env)}/auth/key`;
+  try {
+    const response = await fetch(endpoint, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "HTTP-Referer": HTTP_REFERER,
+        "X-Title": DEFAULT_TITLE,
+      },
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      return { ok: false, status: response.status, error: redact(text).slice(0, 200) };
+    }
+    return { ok: true, status: response.status };
+  } catch (err) {
+    return { ok: false, error: redact(err instanceof Error ? err.message : String(err)) };
+  }
+}
