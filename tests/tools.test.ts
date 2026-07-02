@@ -546,6 +546,100 @@ describe("memory_update_status", () => {
     expect(entry2.content).toContain("## Milestones");
     expect(entry2.content).toContain("Waiting on PR review.");
   });
+
+  it("rejects string fields polluted with tool-call parameter markup (#167)", async () => {
+    // Reproduces the transport artifact where a string field absorbs a trailing
+    // `</parameter><parameter name="...">value` block from the following param.
+    // The tool must reject rather than silently persist the corrupted value
+    // (and drop the swallowed field).
+    const raw = await callTool("memory_update_status", {
+      namespace: "projects/markup-guard",
+      current_work:
+        'Real work</parameter>\n<parameter name="blockers">None',
+      lifecycle: "active",
+    });
+    const result = parseToolResponse(raw) as { error?: string; message?: string };
+    expect(result.error).toBe("validation_error");
+    expect(result.message ?? "").toMatch(/parameter/i);
+
+    // Nothing must have been written.
+    const readRaw = await callTool("memory_read", {
+      namespace: "projects/markup-guard",
+      key: "status",
+    });
+    const read = parseToolResponse(readRaw) as { found?: boolean };
+    expect(read.found).not.toBe(true);
+  });
+
+  it("detects the opening `<parameter name=` control sequence too (#167)", async () => {
+    const raw = await callTool("memory_update_status", {
+      namespace: "projects/markup-guard-2",
+      phase: 'Active<parameter name="current_work">stuff',
+      lifecycle: "active",
+    });
+    const result = parseToolResponse(raw) as { error?: string };
+    expect(result.error).toBe("validation_error");
+  });
+
+  it("refuses a partial update that would blank a legacy free-form status (#177)", async () => {
+    // Seed a free-form status that predates the canonical section structure
+    // (no `##` headers, no `**Label**:` inlines) via memory_write.
+    await callTool("memory_write", {
+      namespace: "projects/legacy-status",
+      key: "status",
+      content:
+        "Currently shipping the telemetry layer. Next: wire alerts, add dashboards, backfill history.",
+      tags: ["active"],
+    });
+
+    // A partial structured update must NOT silently default the unspecified
+    // sections and destroy the real content.
+    const raw = await callTool("memory_update_status", {
+      namespace: "projects/legacy-status",
+      current_work: "Shipping telemetry layer",
+    });
+    const result = parseToolResponse(raw) as {
+      error?: string;
+      message?: string;
+      missing_sections?: string[];
+    };
+    expect(result.error).toBe("legacy_format_partial_update");
+    expect(result.missing_sections).toEqual(
+      expect.arrayContaining(["phase", "blockers", "next_steps"]),
+    );
+
+    // The original free-form content must be untouched.
+    const readRaw = await callTool("memory_read", {
+      namespace: "projects/legacy-status",
+      key: "status",
+    });
+    const read = parseToolResponse(readRaw) as { content: string };
+    expect(read.content).toContain("wire alerts");
+    expect(read.content).not.toContain("Unspecified.");
+  });
+
+  it("allows a full replacement of a legacy free-form status (#177)", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/legacy-status-2",
+      key: "status",
+      content: "Old free-form blob with no canonical sections.",
+      tags: ["active"],
+    });
+
+    // Supplying every canonical section is a deliberate, non-silent replacement.
+    const raw = await callTool("memory_update_status", {
+      namespace: "projects/legacy-status-2",
+      phase: "Active",
+      current_work: "Rebuilt on canonical structure",
+      blockers: "None.",
+      next_steps: ["Verify"],
+      lifecycle: "active",
+    });
+    const result = parseToolResponse(raw) as { status: string; content: string };
+    expect(result.status).toBe("updated");
+    expect(result.content).toContain("## Phase");
+    expect(result.content).toContain("Rebuilt on canonical structure");
+  });
 });
 
 describe("memory_read", () => {

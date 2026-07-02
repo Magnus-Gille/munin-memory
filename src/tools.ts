@@ -862,6 +862,27 @@ function parseStructuredStatus(content: string): StructuredStatus {
   return structured;
 }
 
+// A tool-call transport artifact can leak literal `<parameter name="...">` /
+// `</parameter>` markup into a string field's value: the field absorbs a
+// trailing block from the *following* parameter, and that following field is
+// dropped (#167). The value looks fine (`ok:true`) but is corrupted and one
+// field is silently lost. Detect the control sequences and reject loudly rather
+// than persist truncated/polluted status content.
+const PARAMETER_MARKUP_RE = /<\/parameter>|<parameter\s+name\s*=/i;
+
+function detectParameterMarkup(fields: Array<{ name: string; value?: string | string[] }>): string | null {
+  for (const { name, value } of fields) {
+    if (value === undefined) continue;
+    const parts = Array.isArray(value) ? value : [value];
+    for (const part of parts) {
+      if (typeof part === "string" && PARAMETER_MARKUP_RE.test(part)) {
+        return name;
+      }
+    }
+  }
+  return null;
+}
+
 function normalizeStatusText(value?: string): string | undefined {
   if (value === undefined) return undefined;
   const trimmed = value.trim();
@@ -5928,6 +5949,22 @@ export function registerTools(
                 return errResult("update_status", "validation_error", "next_steps must be an array of strings.");
               }
 
+              // #167: reject tool-call parameter markup leaked into string fields.
+              const pollutedField = detectParameterMarkup([
+                { name: "phase", value: phase },
+                { name: "current_work", value: current_work },
+                { name: "blockers", value: blockers },
+                { name: "notes", value: notes },
+                { name: "next_steps", value: next_steps },
+              ]);
+              if (pollutedField) {
+                return errResult(
+                  "update_status",
+                  "validation_error",
+                  `Field "${pollutedField}" contains tool-call parameter markup (\`<parameter name=...>\` / \`</parameter>\`), which indicates the value was corrupted by the transport (a following field was likely swallowed). Nothing was written. Retry with one field per call, or re-send the corrected value(s).`,
+                );
+              }
+
               const existing = readState(db, namespace, "status");
               const existingParsed = existing ? parseEntry(existing) : null;
               const existingStructured = existingParsed ? parseStructuredStatus(existingParsed.content) : undefined;
@@ -5951,6 +5988,33 @@ export function registerTools(
                 return errResult("update_status", "validation_error", "No status fields were provided to update.");
               }
 
+              // #177: an existing status that predates the canonical section
+              // structure (free-form markdown that parses into no recognized
+              // sections) would have its real content silently defaulted away by
+              // a partial structured update. Refuse unless the caller fully
+              // specifies every canonical section (a deliberate, non-silent
+              // replacement).
+              if (existing && !hasExistingStructure) {
+                const missingSections = (
+                  [
+                    ["phase", phase],
+                    ["current_work", current_work],
+                    ["blockers", blockers],
+                    ["next_steps", next_steps],
+                  ] as const
+                )
+                  .filter(([, value]) => value === undefined)
+                  .map(([name]) => name);
+                if (missingSections.length > 0) {
+                  return errResult(
+                    "update_status",
+                    "legacy_format_partial_update",
+                    `Existing status is in a legacy free-form format that does not map to the canonical sections, so a partial update would blank the sections you did not supply. Provide all canonical sections (phase, current_work, blockers, next_steps) in one call to replace it deliberately, or use memory_write to migrate it. Missing: ${missingSections.join(", ")}.`,
+                    { namespace, key: "status", missing_sections: missingSections },
+                  );
+                }
+              }
+
               const structured = buildStructuredStatus(
                 {
                   phase,
@@ -5965,7 +6029,7 @@ export function registerTools(
 
               const warnings: string[] = [];
               if (existing && !hasExistingStructure) {
-                warnings.push("Existing status was not in the canonical structured format; missing sections were filled with defaults.");
+                warnings.push("Existing status was in a legacy free-form format; it has been replaced with the canonical structured format from the fields you supplied.");
               }
 
               const validation = validateWriteInput(namespace, "status", content, existingParsed?.tags, maxContentSize);
