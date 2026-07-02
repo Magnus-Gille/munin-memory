@@ -197,6 +197,16 @@ npm run dev      # tsx watch src/index.ts
 ./scripts/migrate-db.sh <your-pi-hostname>
 ```
 
+### On-Pi layout — one owner per role (munin-memory#175)
+
+Two directories on the deploy host, each with a single, distinct role — do not blur them:
+
+- **`~/repos/munin-memory`** — the **git source of truth** on the Pi. Kept current with `git pull --ff-only`; `scripts/install-ops.sh` copies operational scripts from here into `~/munin-ops`. This is the *only* git checkout on the host.
+- **`~/munin-memory`** — the **deploy artifact** the systemd service runs from (`WorkingDirectory`, `dist/index.js`). `deploy-rpi.sh` rsyncs into it excluding `.git`, and defensively strips any `.git` after sync — so it is never a checkout and never produces phantom `git status` state.
+- **`~/munin-ops`** — the **cron runtime** (backup/offsite), decoupled from any checkout (#174).
+
+Historically both dirs carried `.git` metadata with unclear ownership, which is how stale-HEAD/hand-patched drift accreted. Keep the artifact git-free and the source current.
+
 The Pi needs a `.env` file at the project root:
 ```
 MUNIN_API_KEY=<generate with: openssl rand -hex 32>
