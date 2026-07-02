@@ -2160,6 +2160,8 @@ export interface EntryInsightRow {
   namespace: string | null;
   key: string | null;
   content_preview: string | null;
+  /** Raw tags string of the source entry (comma-separated), for read-time trust evaluation (#152). */
+  tags: string | null;
   impressions: number;
   opens: number;
   write_outcomes: number;
@@ -2382,6 +2384,7 @@ export function getInsightsByEntry(
       e.namespace,
       e.key,
       SUBSTR(e.content, 1, 60) AS content_preview,
+      e.tags AS tags,
       COUNT(DISTINCT imp.event_id) AS impressions,
       COUNT(DISTINCT op.retrieval_event_id) AS opens,
       COUNT(DISTINCT CASE WHEN ro_w.outcome_type = 'write_in_result_namespace' THEN ro_w.retrieval_event_id END) AS write_outcomes,
