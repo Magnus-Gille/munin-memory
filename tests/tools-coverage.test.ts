@@ -368,20 +368,32 @@ describe("memory_update_status edges", () => {
     expect(res.message).toBe("No status fields were provided to update.");
   });
 
-  it("warns when the existing status was unstructured", async () => {
+  it("refuses a partial update of an unstructured status, then warns on full replacement (#177)", async () => {
     await callTool("memory_write", {
       namespace: "projects/freeform",
       key: "status",
       content: "just some freeform prose with no recognized sections at all",
       tags: ["active"],
     });
-    const res = parseToolResponse(await callTool("memory_update_status", {
+    // Partial update must be refused — it would blank the real content.
+    const partial = parseToolResponse(await callTool("memory_update_status", {
       namespace: "projects/freeform",
       phase: "Hardening",
     }));
-    expect(res.ok).toBe(true);
-    expect(res.warnings).toEqual(
-      expect.arrayContaining([expect.stringContaining("not in the canonical structured format")]),
+    expect(partial.ok).toBe(false);
+    expect(partial.error).toBe("legacy_format_partial_update");
+
+    // Full replacement is a deliberate, non-silent migration — succeeds, warns.
+    const full = parseToolResponse(await callTool("memory_update_status", {
+      namespace: "projects/freeform",
+      phase: "Hardening",
+      current_work: "Migrated to canonical format",
+      blockers: "None.",
+      next_steps: ["Continue"],
+    }));
+    expect(full.ok).toBe(true);
+    expect(full.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining("legacy free-form format")]),
     );
   });
 
