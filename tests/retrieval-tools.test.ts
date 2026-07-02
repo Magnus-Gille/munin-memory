@@ -983,9 +983,17 @@ describe("fix #3 — topic filter gates untracked detection", () => {
 });
 
 describe("fix #4 — crystallize heuristic preserves existing meta/config fields", () => {
-  it("suggested meta/config content merges tracked_patterns without dropping other fields", async () => {
+  // Round 2 (Codex finding 4, #152): the rationale used to interpolate the
+  // FULL merged meta/config object (echoing every stored field verbatim),
+  // bypassing the read-time envelope/redaction gate entirely. It now emits
+  // only the minimal tracked_patterns patch and tells the owner to merge it
+  // with their existing config themselves (read via the normal memory_read
+  // gate) — other stored fields (e.g. display_timezone) must never appear
+  // unmarked in the rationale string, even though they are still preserved
+  // by the owner's own merge-and-write.
+  it("suggested rationale carries only the tracked_patterns patch, not other stored config fields", async () => {
     const call = makeCallTool(db, ownerCtx());
-    // Write a meta/config with an extra field that must be preserved
+    // Write a meta/config with an extra field that must NOT be echoed
     writeState(
       db,
       "meta/config",
@@ -1005,9 +1013,12 @@ describe("fix #4 — crystallize heuristic preserves existing meta/config fields
     };
     const h = result.heuristics.find((x) => x.rationale.includes("meta/config"));
     expect(h).toBeDefined();
-    // The suggested content must contain display_timezone (other field preserved)
-    expect(h!.rationale).toContain("display_timezone");
-    // And it must contain the new pattern
+    // Other stored fields must NOT be echoed into the rationale.
+    expect(h!.rationale).not.toContain("display_timezone");
+    // The rationale still carries the new pattern (the minimal patch) and
+    // instructs the owner to merge/preserve their existing fields themselves.
     expect(h!.rationale).toContain("recipes/*");
+    expect(h!.rationale).toContain("tracked_patterns");
+    expect(h!.rationale.toLowerCase()).toContain("merge");
   });
 });

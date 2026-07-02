@@ -23,6 +23,9 @@ const ENFORCEMENT_EXPECTATIONS: Record<string, string[]> = {
     "dashboardUntrustedOverride",
     "refIndexUntrustedOverride",
     "safeContext",
+    // Synthesis summary trust is decided from FULL synthesis content, not the
+    // truncated preview (#152 round 2 / Codex finding 1).
+    "synthesisUntrustedOverride",
   ],
   // memory_resume's open_loops trust envelope lives inside the
   // extractResumeOpenLoops helper (checked below, reached via
@@ -32,7 +35,10 @@ const ENFORCEMENT_EXPECTATIONS: Record<string, string[]> = {
   memory_extract: ["getVisibleTrackedStatusAssessments(", "buildExtractRelatedEntries(", "redacted_sources"],
   memory_narrative: ["filterDerivedSources("],
   memory_commitments: ["getVisibleTrackedStatusAssessments(", "listFreshCommitmentRows(", "classifyCommitments("],
-  memory_patterns: ["getVisibleTrackedStatusAssessments(", "filterDerivedSources("],
+  // patternsOnlyJson (round 2 / Codex finding 4): the untracked-namespace
+  // crystallize heuristic must emit only the minimal tracked_patterns patch,
+  // never echo other stored meta/config fields into the rationale string.
+  memory_patterns: ["getVisibleTrackedStatusAssessments(", "filterDerivedSources(", "patternsOnlyJson"],
   // memory_handoff wraps both the status-derived open loops (via
   // extractResumeOpenLoops) and the commitment-derived open loops (via
   // commitmentTrustOverride) inline in the case block (#152).
@@ -57,8 +63,20 @@ const HELPER_ENFORCEMENT_EXPECTATIONS: Record<string, string[]> = {
   computeEntryInsight: ["safenPreview(", "insightTags"],
   // memory_orient (conventions.content, full-detail branch)
   projectConventions: ["safenText("],
-  // memory_narrative (audit-source previews via the sources array)
-  buildNarrativeSourceFromAudit: ["safenPreview("],
+  // memory_narrative (audit-source previews via the sources array) — resolves
+  // trust from the SOURCE entry's full content when entry_id still resolves
+  // (#152 round 2 / Codex finding 2), not a scan of the truncated detail.
+  buildNarrativeSourceFromAudit: ["safenAuditDetail("],
+  // memory_history detail field — same source-entry resolution.
+  formatHistoryEntry: ["safenAuditDetail("],
+  // memory_resume history candidates — same source-entry resolution.
+  buildResumeHistoryCandidate: ["safenAuditDetail("],
+  // memory_narrative timeline audit items — same source-entry resolution.
+  buildNarrativeTimeline: ["safenAuditDetail("],
+  // memory_narrative time_in_phase signal — trust decided from FULL status
+  // content, not just the interpolated Phase snippet (#152 round 2 / Codex
+  // finding 3).
+  pushNarrativePhaseSignals: ["safenPreview(", "statusUntrustedOverride"],
 };
 
 function getCaseBlock(toolName: string): string {

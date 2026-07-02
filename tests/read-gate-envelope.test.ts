@@ -165,6 +165,60 @@ describe("read-gate envelope — aggregate tool coverage (#154/#152)", () => {
     });
   });
 
+  // ── memory_orient: dashboard synthesis summary ───────────────────────────
+  describe("memory_orient dashboard synthesis summary", () => {
+    it("untagged injection past the synthesis preview window flags the synthesis summary (#152 round 2, finding 1)", async () => {
+      // The dashboard synthesis summary is built from a 500-char contentPreview.
+      // Trust must be decided from the FULL synthesis content, not that preview —
+      // otherwise an untagged injection payload past char 500 goes unflagged.
+      const padded = "Normal-looking synthesis text. ".repeat(20) + INJECTION;
+      expect(padded.slice(0, 500)).not.toContain("Ignore all previous instructions");
+      await callTool("memory_write", {
+        namespace: "projects/orient-synth-past-window",
+        key: "status",
+        content: "Phase: active. " + BENIGN,
+        tags: ["active"],
+      });
+      await callTool("memory_write", {
+        namespace: "projects/orient-synth-past-window",
+        key: "synthesis",
+        content: padded,
+      });
+      const raw = await callTool("memory_orient", { detail: "standard" });
+      const result = parseToolResponse(raw) as {
+        dashboard: Record<string, Array<{ namespace: string; synthesis?: { summary?: string; untrusted_content?: boolean } }>>;
+      };
+      const entry = Object.values(result.dashboard).flat().find((e) => e.namespace === "projects/orient-synth-past-window");
+      expect(entry).toBeTruthy();
+      expect(entry!.synthesis).toBeTruthy();
+      expect(entry!.synthesis!.untrusted_content).toBe(true);
+      expect(entry!.synthesis!.summary).toContain(UNTRUSTED_MARKER);
+    });
+
+    it("benign synthesis content is clean, no marker", async () => {
+      await callTool("memory_write", {
+        namespace: "projects/orient-synth-clean",
+        key: "status",
+        content: "Phase: active. " + BENIGN,
+        tags: ["active"],
+      });
+      await callTool("memory_write", {
+        namespace: "projects/orient-synth-clean",
+        key: "synthesis",
+        content: "Routine synthesized summary with no special instructions.",
+      });
+      const raw = await callTool("memory_orient", { detail: "standard" });
+      const result = parseToolResponse(raw) as {
+        dashboard: Record<string, Array<{ namespace: string; synthesis?: { summary?: string; untrusted_content?: boolean } }>>;
+      };
+      const entry = Object.values(result.dashboard).flat().find((e) => e.namespace === "projects/orient-synth-clean");
+      expect(entry).toBeTruthy();
+      expect(entry!.synthesis).toBeTruthy();
+      expect(entry!.synthesis!.untrusted_content).toBeUndefined();
+      expect(entry!.synthesis!.summary).not.toContain("⚠");
+    });
+  });
+
   // ── memory_orient: cross-reference context (full detail) ────────────────
   describe("memory_orient cross-reference context", () => {
     it("injection-shaped cross-reference context is flagged in full-detail dashboard", async () => {
@@ -511,6 +565,139 @@ describe("read-gate envelope — aggregate tool coverage (#154/#152)", () => {
         expect(s.preview).not.toContain("⚠");
       }
     });
+
+    it("source:external tagged source entry flags its audit detail even though the echoed text is benign (#152 round 2, finding 2)", async () => {
+      // The audit `detail` string itself is plain, scan-clean text — only the
+      // SOURCE entry carries the source:external tag. Resolving trust via the
+      // audit row's entry_id (safenAuditDetail) is required to catch this;
+      // scan-only detection on the truncated detail would miss it entirely.
+      await callTool("memory_write", {
+        namespace: "projects/narrative-audit-tag",
+        key: "status",
+        content: "Phase: active. " + BENIGN,
+        tags: ["active", "source:external"],
+      });
+      const raw = await callTool("memory_narrative", {
+        namespace: "projects/narrative-audit-tag",
+        include_sources: true,
+      });
+      const result = parseToolResponse(raw) as {
+        sources?: Array<{ kind: string; preview: string; untrusted_content?: boolean }>;
+      };
+      const auditSource = (result.sources ?? []).find((s) => s.kind === "audit");
+      expect(auditSource).toBeTruthy();
+      expect(auditSource!.untrusted_content).toBe(true);
+      expect(auditSource!.preview).toContain(UNTRUSTED_MARKER);
+    });
+  });
+
+  // ── memory_history: audit detail resolves trust via source entry ────────
+  describe("memory_history audit detail (source-entry resolution)", () => {
+    it("source:external tagged source entry flags its audit detail even though the echoed text is benign (#152 round 2, finding 2)", async () => {
+      await callTool("memory_write", {
+        namespace: "projects/hist-audit-tag",
+        key: "status",
+        content: "Phase: active. " + BENIGN,
+        tags: ["active", "source:external"],
+      });
+      const raw = await callTool("memory_history", { namespace: "projects/hist-audit-tag" });
+      const result = parseToolResponse(raw) as {
+        entries: Array<{ detail: string | null; untrusted_detail?: boolean }>;
+      };
+      const writeEntry = result.entries.find((e) => e.detail !== null);
+      expect(writeEntry).toBeTruthy();
+      expect(writeEntry!.untrusted_detail).toBe(true);
+      expect(writeEntry!.detail).toContain(UNTRUSTED_MARKER);
+    });
+
+    it("benign, untagged source entry leaves audit detail clean", async () => {
+      await callTool("memory_write", {
+        namespace: "projects/hist-audit-clean",
+        key: "status",
+        content: "Phase: active. " + BENIGN,
+        tags: ["active"],
+      });
+      const raw = await callTool("memory_history", { namespace: "projects/hist-audit-clean" });
+      const result = parseToolResponse(raw) as {
+        entries: Array<{ detail: string | null; untrusted_detail?: boolean }>;
+      };
+      const writeEntry = result.entries.find((e) => e.detail !== null);
+      expect(writeEntry).toBeTruthy();
+      expect(writeEntry!.untrusted_detail).toBeUndefined();
+      expect(writeEntry!.detail).not.toContain("⚠");
+    });
+  });
+
+  // ── memory_narrative: time_in_phase signal summary ───────────────────────
+  describe("memory_narrative time_in_phase signal summary", () => {
+    it("injection-shaped Phase value flags the signal summary (#152 round 2, finding 3)", async () => {
+      // pushNarrativePhaseSignals interpolates the raw stored Phase value into
+      // the time_in_phase signal summary with no envelope prior to this fix.
+      await callTool("memory_update_status", {
+        namespace: "projects/narrative-phase-inj",
+        phase: INJECTION,
+        current_work: "Ongoing work",
+        blockers: "None.",
+        next_steps: ["Keep going"],
+        lifecycle: "active",
+      });
+      db.prepare(
+        "UPDATE entries SET updated_at = '2026-03-31T00:00:00.000Z' WHERE namespace = 'projects/narrative-phase-inj' AND key = 'status'",
+      ).run();
+
+      const raw = await callTool("memory_narrative", { namespace: "projects/narrative-phase-inj" });
+      const result = parseToolResponse(raw) as {
+        signals: Array<{ category: string; summary: string; untrusted_content?: boolean }>;
+      };
+      const phaseSignal = result.signals.find((s) => s.category === "time_in_phase");
+      expect(phaseSignal).toBeTruthy();
+      expect(phaseSignal!.untrusted_content).toBe(true);
+      expect(phaseSignal!.summary).toContain(UNTRUSTED_MARKER);
+    });
+
+    it("source:external tagged status (benign Phase) flags the signal summary (tag)", async () => {
+      await callTool("memory_write", {
+        namespace: "projects/narrative-phase-tag",
+        key: "status",
+        content: "## Phase\nRollout\n\n## Current Work\nOngoing.\n",
+        tags: ["active", "source:external"],
+      });
+      db.prepare(
+        "UPDATE entries SET updated_at = '2026-03-31T00:00:00.000Z' WHERE namespace = 'projects/narrative-phase-tag' AND key = 'status'",
+      ).run();
+
+      const raw = await callTool("memory_narrative", { namespace: "projects/narrative-phase-tag" });
+      const result = parseToolResponse(raw) as {
+        signals: Array<{ category: string; summary: string; untrusted_content?: boolean }>;
+      };
+      const phaseSignal = result.signals.find((s) => s.category === "time_in_phase");
+      expect(phaseSignal).toBeTruthy();
+      expect(phaseSignal!.untrusted_content).toBe(true);
+      expect(phaseSignal!.summary).toContain(UNTRUSTED_MARKER);
+    });
+
+    it("benign Phase value is clean, no marker", async () => {
+      await callTool("memory_update_status", {
+        namespace: "projects/narrative-phase-clean",
+        phase: "Rollout",
+        current_work: "Ongoing work",
+        blockers: "None.",
+        next_steps: ["Keep going"],
+        lifecycle: "active",
+      });
+      db.prepare(
+        "UPDATE entries SET updated_at = '2026-03-31T00:00:00.000Z' WHERE namespace = 'projects/narrative-phase-clean' AND key = 'status'",
+      ).run();
+
+      const raw = await callTool("memory_narrative", { namespace: "projects/narrative-phase-clean" });
+      const result = parseToolResponse(raw) as {
+        signals: Array<{ category: string; summary: string; untrusted_content?: boolean }>;
+      };
+      const phaseSignal = result.signals.find((s) => s.category === "time_in_phase");
+      expect(phaseSignal).toBeTruthy();
+      expect(phaseSignal!.untrusted_content).toBeUndefined();
+      expect(phaseSignal!.summary).not.toContain("⚠");
+    });
   });
 
   // ── memory_attention: preview ────────────────────────────────────────────
@@ -717,6 +904,38 @@ describe("read-gate envelope — aggregate tool coverage (#154/#152)", () => {
       const entry = result.entries.find((e) => e.namespace === "projects/insights-clean");
       expect(entry).toBeTruthy();
       expect(entry!.untrusted_content).toBeUndefined();
+    });
+  });
+
+  // ── memory_patterns: untracked-namespace crystallize rationale ──────────
+  describe("memory_patterns untracked-namespace rationale (#152 round 2, finding 4)", () => {
+    it("does not echo an injection-shaped extra meta/config field into the rationale", async () => {
+      // Seed a namespace cluster outside the tracked patterns so the
+      // untracked_namespace proposal + crystallize heuristic fire.
+      await callTool("memory_write", { namespace: "recipes/dinner", key: "carbonara", content: "pasta recipe" });
+      await callTool("memory_write", { namespace: "recipes/lunch", key: "salad", content: "salad recipe" });
+      await callTool("memory_write", { namespace: "recipes/breakfast", key: "pancakes", content: "pancake recipe" });
+
+      // meta/config carries an extra field with injection-shaped content — this
+      // must never be interpolated into the emitted rationale command string.
+      await callTool("memory_write", {
+        namespace: "meta/config",
+        key: "config",
+        content: JSON.stringify({
+          tracked_patterns: ["projects/*", "clients/*"],
+          note: INJECTION,
+        }),
+      });
+
+      const raw = await callTool("memory_patterns", {});
+      const result = parseToolResponse(raw) as {
+        heuristics: Array<{ summary: string; rationale: string }>;
+      };
+      const h = result.heuristics.find((x) => x.rationale.includes("meta/config"));
+      expect(h).toBeTruthy();
+      expect(h!.rationale).toContain("recipes/*");
+      expect(h!.rationale).not.toContain(INJECTION);
+      expect(h!.rationale).not.toContain("Ignore all previous instructions");
     });
   });
 });

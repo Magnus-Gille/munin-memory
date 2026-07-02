@@ -245,6 +245,8 @@ export interface DashboardSynthesis {
   }>;
   /** Count of cross-references (included in standard mode where the full array is omitted) */
   cross_reference_count?: number;
+  /** Set when the synthesis summary is instruction-shaped or the entry is tagged `untrusted`/`source:external` (trust decided from FULL synthesis content, not the truncated preview). (#152) */
+  untrusted_content?: boolean;
 }
 
 export interface DashboardEntry {
@@ -587,6 +589,8 @@ export interface NarrativeSignal {
   reason: string;
   source_entry_ids: string[];
   source_audit_ids: number[];
+  /** Set when the summary echoes instruction-shaped or tagged-untrusted status content. (#152) */
+  untrusted_content?: boolean;
 }
 
 export interface NarrativeTimelineItem {

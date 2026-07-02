@@ -369,6 +369,33 @@ function safenEntryPreview(content: string, tags: string[], maxLen: number): { t
   return safenPreview(contentPreview(content, maxLen), tags, shouldWrapAsUntrusted(content, tags));
 }
 
+/**
+ * Preview an audit-derived detail string, deciding trust from the SOURCE entry's
+ * full content + tags when the audit row's `entry_id` still resolves (#152 round
+ * 2 / Codex finding 2) — audit rows themselves carry no tags, so a plain
+ * scan-based `safenPreview(detail)` misses a benign `source:external`/`untrusted`
+ * tagged write and misses injection payloads that landed past the 80-char detail
+ * echo but within the full source content. Falls back to scan-only on the
+ * truncated detail when the source entry no longer resolves (deleted since the
+ * write, or the audit row predates entry_id tracking).
+ */
+function safenAuditDetail(
+  db: Database.Database,
+  entryId: string | null | undefined,
+  detail: string,
+  maxLen: number,
+): { text: string; untrusted: boolean } {
+  const preview = contentPreview(detail, maxLen);
+  if (entryId) {
+    const src = getById(db, entryId);
+    if (src) {
+      const srcTags = parseTags(src.tags);
+      return safenPreview(preview, srcTags, shouldWrapAsUntrusted(src.content, srcTags));
+    }
+  }
+  return safenPreview(preview);
+}
+
 function buildRedactableEntryMetadata(entry: ReturnType<typeof parseEntry>) {
   return {
     id: entry.id,
@@ -755,13 +782,14 @@ function formatHistoryEntry(
     return response;
   }
 
-  // Audit entries have no tags — apply scan-based detection to the detail field.
-  // The detail echoes up to 80 chars of the written content, so injection text
-  // appearing early in a write would surface here. Use safenPreview since detail
-  // is a short excerpt, not the full entry content. (#150)
+  // The detail echoes up to 80 chars of the written content. Resolve the trust
+  // verdict from the SOURCE entry's full content + tags when entry_id still
+  // resolves (#152 round 2 / Codex finding 2) — audit rows themselves carry no
+  // tags, so a scan-only check misses a benign source:external-tagged write.
+  // Falls back to scan-only on the truncated detail when the source is gone.
   const result = { ...entry, action, provenance };
   if (result.detail !== null && result.detail !== undefined) {
-    const safeDetail = safenPreview(result.detail);
+    const safeDetail = safenAuditDetail(db, entry.entry_id, result.detail, result.detail.length);
     if (safeDetail.untrusted) {
       result.detail = safeDetail.text;
       (result as Record<string, unknown>).untrusted_detail = true;
@@ -1764,10 +1792,11 @@ function buildResumeLogCandidate(
   };
 }
 
-function buildResumeHistoryCandidate(entry: AuditHistoryEntry, scope: string): ResumeCandidate {
-  const rawDetail = entry.detail ? contentPreview(entry.detail, 180) : `${entry.action} ${entry.key ?? "namespace"}`;
-  // Audit entries carry no tags — scan-based detection only.
-  const safeDetail = safenPreview(rawDetail);
+function buildResumeHistoryCandidate(db: Database.Database, entry: AuditHistoryEntry, scope: string): ResumeCandidate {
+  const rawDetail = entry.detail ? entry.detail : `${entry.action} ${entry.key ?? "namespace"}`;
+  // Resolve trust from the SOURCE entry's full content + tags when entry_id
+  // still resolves (#152 round 2 / Codex finding 2); falls back to scan-only.
+  const safeDetail = safenAuditDetail(db, entry.entry_id, rawDetail, 180);
   return {
     item: {
       namespace: entry.namespace,
@@ -2376,11 +2405,12 @@ function buildNarrativeSourceFromEntry(entry: Entry): NarrativeSource {
   };
 }
 
-function buildNarrativeSourceFromAudit(entry: AuditHistoryEntry): NarrativeSource {
-  // Trust envelope (#152): audit `detail` echoes a preview of the written/logged
-  // content, so injection-shaped text can surface here. Audit rows carry no tags,
-  // so detection is scan-only on the emitted preview.
-  const safe = safenPreview(contentPreview(entry.detail ?? `${entry.action} ${entry.key ?? "namespace"}`, 220));
+function buildNarrativeSourceFromAudit(db: Database.Database, entry: AuditHistoryEntry): NarrativeSource {
+  // Trust envelope (#152, round 2 / Codex finding 2): audit `detail` echoes a
+  // preview of the written/logged content, so injection-shaped text can surface
+  // here. Resolve trust from the SOURCE entry's full content + tags when
+  // entry_id still resolves; falls back to scan-only when it doesn't.
+  const safe = safenAuditDetail(db, entry.entry_id, entry.detail ?? `${entry.action} ${entry.key ?? "namespace"}`, 220);
   return {
     kind: "audit",
     id: entry.id,
@@ -2411,15 +2441,23 @@ function pushNarrativePhaseSignals(statusEntry: Entry, pushSignal: NarrativeSign
   const lifecycle = getLifecycleFromEntry(statusEntry);
   const phase = structured.phase ?? lifecycle ?? "Unspecified";
   const daysInPhase = getDaysSince(statusEntry.updated_at);
+  // Trust from FULL status content, not just the interpolated Phase snippet
+  // (#152 round 2 / Codex finding 3) — the summary below echoes the raw
+  // stored Phase value verbatim.
+  const statusTags = parseTags(statusEntry.tags);
+  const statusUntrustedOverride = shouldWrapAsUntrusted(statusEntry.content, statusTags);
 
   if (daysInPhase >= 3) {
+    const rawSummary = `Current phase "${phase}" has held for ${daysInPhase} day${daysInPhase === 1 ? "" : "s"}.`;
+    const safeSummary = safenPreview(rawSummary, statusTags, statusUntrustedOverride);
     pushSignal({
       category: "time_in_phase",
       severity: daysInPhase > NARRATIVE_LONG_GAP_DAYS && (lifecycle === "active" || lifecycle === "blocked") ? "medium" : "low",
-      summary: `Current phase "${phase}" has held for ${daysInPhase} day${daysInPhase === 1 ? "" : "s"}.`,
+      summary: safeSummary.text,
       reason: "Derived from the current tracked status timestamp.",
       source_entry_ids: [statusEntry.id],
       source_audit_ids: [],
+      ...(safeSummary.untrusted ? { untrusted_content: true } : {}),
     });
   }
 
@@ -2542,6 +2580,7 @@ function buildNarrativeSignals(
 }
 
 function buildNarrativeTimeline(
+  db: Database.Database,
   statusEntry: Entry | null,
   logs: Entry[],
   history: AuditHistoryEntry[],
@@ -2576,9 +2615,9 @@ function buildNarrativeTimeline(
   }
 
   for (const entry of history) {
-    // Audit entries have no tags — apply scan-based detection only.
-    const rawDetail = contentPreview(entry.detail ?? `${entry.action} ${entry.key ?? "namespace"}`, 180);
-    const safeDetail = safenPreview(rawDetail);
+    // Resolve trust from the SOURCE entry's full content + tags when entry_id
+    // still resolves (#152 round 2 / Codex finding 2); falls back to scan-only.
+    const safeDetail = safenAuditDetail(db, entry.entry_id, entry.detail ?? `${entry.action} ${entry.key ?? "namespace"}`, 180);
     items.push({
       timestamp: entry.timestamp,
       category: "audit",
@@ -2594,6 +2633,7 @@ function buildNarrativeTimeline(
 }
 
 function buildNarrativeSources(
+  db: Database.Database,
   includeSources: boolean,
   statusEntry: Entry | null,
   logs: Entry[],
@@ -2613,7 +2653,7 @@ function buildNarrativeSources(
 
   if (statusEntry) push(buildNarrativeSourceFromEntry(statusEntry));
   for (const entry of logs) push(buildNarrativeSourceFromEntry(entry));
-  for (const entry of history) push(buildNarrativeSourceFromAudit(entry));
+  for (const entry of history) push(buildNarrativeSourceFromAudit(db, entry));
 
   return sources;
 }
@@ -4508,10 +4548,14 @@ export function registerTools(
 
                     // Apply untrusted envelope to synthesis summary (#150). Synthesis
                     // is machine-generated and could echo injection-shaped log content.
+                    // Decide trust from the FULL synthesis content, not the truncated
+                    // preview (#152 round 2 / Codex finding 1) — an untagged injection
+                    // payload past the preview window must still flag the summary.
                     const synthesisTags = parseTags(synthesis.tags);
+                    const synthesisUntrustedOverride = shouldWrapAsUntrusted(synthesis.content, synthesisTags);
                     const rawSynthesisSummary = synthesisIsStale ? null : contentPreview(synthesis.content);
                     const safeSynthesisSummary = rawSynthesisSummary !== null
-                      ? safenPreview(rawSynthesisSummary, synthesisTags)
+                      ? safenPreview(rawSynthesisSummary, synthesisTags, synthesisUntrustedOverride)
                       : null;
 
                     if (detail === "standard") {
@@ -4999,7 +5043,7 @@ export function registerTools(
                 );
                 resumeRedactedSources.push(...filteredHistory.redacted);
                 for (const entry of filteredHistory.allowed) {
-                  candidates.push(buildResumeHistoryCandidate(entry, scope));
+                  candidates.push(buildResumeHistoryCandidate(db, entry, scope));
                 }
               }
 
@@ -5288,8 +5332,8 @@ export function registerTools(
               }
 
               const signals = buildNarrativeSignals(narrativeArgs.namespace, visibleStatusEntry, logs, history);
-              const timeline = buildNarrativeTimeline(visibleStatusEntry, logs, history, limit);
-              const sources = buildNarrativeSources(narrativeArgs.include_sources === true, visibleStatusEntry, logs, history);
+              const timeline = buildNarrativeTimeline(db, visibleStatusEntry, logs, history, limit);
+              const sources = buildNarrativeSources(db, narrativeArgs.include_sources === true, visibleStatusEntry, logs, history);
 
               const recentActivity = timeline[0]?.timestamp;
               const summary = recentActivity
@@ -5598,22 +5642,6 @@ export function registerTools(
                 const untracked = detectUntrackedNamespaces(allEntries, patternsTrackedPatterns, {
                   referencePatterns: augmentedRefPatterns,
                 });
-                // Read the current meta/config ONCE for field-preserving merge.
-                // Issue #4 (Codex): crystallize must patch only tracked_patterns,
-                // not overwrite the whole entry (other fields would be lost).
-                const currentConfigEntry = readState(db, "meta/config", "config");
-                let existingConfigFields: Record<string, unknown> = {};
-                if (currentConfigEntry) {
-                  try {
-                    const parsed = JSON.parse(parseEntry(currentConfigEntry).content) as Record<string, unknown>;
-                    // Preserve all fields except tracked_patterns (we'll re-set it).
-                    const { tracked_patterns: _tp, ...rest } = parsed;
-                    void _tp;
-                    existingConfigFields = rest;
-                  } catch {
-                    // Malformed JSON — ignore and produce a clean object.
-                  }
-                }
 
                 for (const candidate of untracked) {
                   candidate.source_entry_ids.forEach((id) => sourceIds.add(id));
@@ -5631,13 +5659,16 @@ export function registerTools(
                     ? [candidate.prefix, candidate.pattern]  // exact + glob
                     : [candidate.pattern];                    // glob only
                   const newPatterns = [...new Set([...patternsTrackedPatterns, ...patternsToAdd])];
-                  // Fix #4 (Codex): merge — only replace tracked_patterns, preserve
-                  // any other fields (e.g. display_timezone) in the existing config.
-                  const configObj = { ...existingConfigFields, tracked_patterns: newPatterns };
-                  const configJson = JSON.stringify(configObj);
+                  // Round 2 fix (Codex finding 4): do NOT echo other stored meta/config
+                  // fields into the rationale — they'd bypass the read-time envelope/
+                  // redaction gate entirely (meta/config content is stored data, not a
+                  // pre-cleared command). Emit only the minimal tracked_patterns patch;
+                  // the owner merges it with their existing config (read via the normal
+                  // memory_read gate) before writing.
+                  const patternsOnlyJson = JSON.stringify({ tracked_patterns: newPatterns });
                   heuristics.push({
                     summary: `Add \`${candidate.pattern}\` to your tracked patterns to surface it on the dashboard.`,
-                    rationale: `Propose-only — nothing is written. To crystallize, run: memory_write namespace="meta/config" key="config" content='${configJson}'`,
+                    rationale: `Propose-only — nothing is written. To crystallize: read meta/config (key "config") via memory_read, merge ${patternsOnlyJson} into it (preserving any other existing fields), then memory_write the merged result back to namespace="meta/config" key="config".`,
                     source_entry_ids: candidate.source_entry_ids,
                   });
                 }
