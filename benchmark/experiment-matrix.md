@@ -118,3 +118,37 @@ npm run benchmark:locomo:dialog:hybrid   # dialog + hybrid
 ```
 
 `benchmark:fetch:locomo` is a prerequisite the combined scripts already run.
+
+## Memory Evolvability (outcome eval — #186)
+
+A separate benchmark layer from the R@k/nDCG/MRR retrieval-quality tables
+above: instead of "did the right content come back", it asks "does an agent
+holding the decision's PATH (rationale + rejected alternatives) revise a
+decision correctly when the world changes, versus an agent holding only the
+DESTINATION (what was chosen)". See `evolvability/README.md` for the full
+design (3-arm ablation, perturbation/stasis probes, should-flip / false-flip
+metrics, parser-based grading).
+
+| Priority | Variant | Why | Status |
+|---|---|---|---|
+| 1 | v1 scaffold — toy corpus (2 invented worlds), arms A/B/C, parser grading | Establish the harness shape and prove the arm-construction + grading logic before spending model calls. | Done |
+| 2 | Real-case mining → human-reviewed corpus | Ground the corpus in real (but never Munin-stored) decisions rather than only invented toy worlds. | In progress (#186 gated pipeline step 2) |
+| 3 | First overnight M5 sweep (multiple models/temperatures, k>=10) | Gate: clean-arm signal at k-large, or deprioritize. | Planned |
+| 4 | Server-mode (ephemeral SQLite, real retrieval + read-gate) | Tests whether the production read-gate/retrieval path itself taxes provenance-rich content, not just the raw text. | Planned |
+| 5 | Consolidation pre/post toggle | Direct input to #98 — does synthesis destroy decision-reversal capability? | Planned |
+| 6 | Frontier arm (small scale) | Transfer check only, not the primary signal — see the issue's non-goals (not a compression license). | Planned |
+
+### Toy-corpus scaffold (v1)
+
+`evolvability/corpus/toy.json`, 2 invented worlds (message-queue library
+choice; sensor-vendor choice), 4 probes each (2 perturbation: one attacking
+rationale, one attacking a rejected branch; 2 stasis controls). No live-model
+numbers yet — this priority is the harness itself (`arms.ts`, `grade.ts`,
+`corpus.ts`, `runner.ts`), unit-tested without any network calls. Run it
+against a real model with:
+
+```bash
+EVOLVABILITY_MODEL=<model> npx tsx benchmark/evolvability/runner.ts \
+  --corpus benchmark/evolvability/corpus/toy.json --arms A,B,C --k 5 \
+  --out benchmark/reports/evolvability
+```
