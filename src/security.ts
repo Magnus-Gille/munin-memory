@@ -32,10 +32,13 @@ const INJECTION_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
     label: "instruction-override phrase",
   },
   {
-    // Allow an object between the verb and the target ("do not mention THIS to
-    // the user") — the earlier `mention\s+to` form missed the #150 payload's
-    // "Do not mention this to the user." (#150).
-    pattern: /\bdo\s+not\s+(tell|inform|alert|notify|reveal|mention|disclose|report)\b[^.\n]{0,30}?\b(user|owner|human|magnus|principal)\b/i,
+    // Concealment directed at the user/owner. Covers three shapes (#150 / Codex):
+    //  - "do not / don't / never {tell|mention|reveal|…}" with an optional object
+    //    before the target ("do not mention THIS to the user");
+    //  - "{keep|hide|conceal|withhold} … from {the user}";
+    //  - "without {telling|informing|…}" the target.
+    // (Input is whitespace-collapsed before scanning, so newline-split phrases match.)
+    pattern: /(?:\bdo\s+not\s+|\bdon['’]t\s+|\bnever\s+)(?:tell|inform|alert|notify|reveal|mention|disclose|report)\b[^.\n]{0,30}?\b(?:user|owner|human|magnus|principal)\b|\b(?:keep|hide|conceal|withhold)\b[^.\n]{0,25}?\bfrom\b[^.\n]{0,20}?\b(?:user|owner|human|magnus|principal)\b|\bwithout\s+(?:telling|informing|alerting|notifying|letting)\b[^.\n]{0,20}?\b(?:user|owner|human|magnus|principal)\b/i,
     label: "concealment instruction",
   },
   {
@@ -62,9 +65,18 @@ const INJECTION_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
     // shape of the #150 attack; the urgency adverb + destructive verb keep it off
     // benign numbered dev steps ("then run the delete migration").
     // Note: no word boundary before the destructive verb, so tool names with
-    // underscores (memory_delete) match. Boundary required after the verb to ensure
-    // it's a complete word (not part of "delete-orphans").
-    pattern: /\b(immediately|now|proceed\s+to)\s+(call|invoke|execute|run|trigger)\b[^.\n]{0,30}?(delete|remove|drop|erase|wipe|purge)\b/i,
+    // underscores (memory_delete) match. `(?![-\w])` after the verb requires a
+    // complete word — excludes "delete-orphans"/"deletion" (a `\b` there would
+    // wrongly match before the hyphen; Codex low finding).
+    pattern: /\b(immediately|now|proceed\s+to)\s+(call|invoke|execute|run|trigger)\b[^.\n]{0,30}?(delete|remove|drop|erase|wipe|purge)(?![-\w])/i,
+    label: "imperative destructive-tool directive",
+  },
+  {
+    // Rephrasings the urgency-prefix rule misses (#150 / Codex): stealth verbs
+    // ("silently remove all projects") and POSTPOSED urgency ("delete projects
+    // now", "call memory_delete immediately"). No leading boundary so memory_delete
+    // matches; `(?![-\w])` keeps it off hyphenated/continued words.
+    pattern: /\b(?:silently|quietly|secretly)\s+[^.\n]{0,20}?(?:delete|remove|drop|erase|wipe|purge)(?![-\w])|(?:delete|remove|drop|erase|wipe|purge)(?![-\w])[^.\n]{0,25}?\b(?:immediately|now|right\s+now|at\s+once|without\s+delay)\b/i,
     label: "imperative destructive-tool directive",
   },
   {
@@ -117,14 +129,32 @@ export function redactSecrets(message: string): string {
 }
 
 /**
+ * Normalize content before injection scanning so trivial obfuscation can't slip
+ * an instruction-shaped payload past the literal patterns while remaining legible
+ * to an LLM (#150 / Codex): NFKC folds full-width & homoglyph-ish forms; strip
+ * zero-width / joiner / BOM / variation-selector / soft-hyphen chars that split
+ * keywords (`mem​ory_delete`); collapse all whitespace runs (incl. newlines)
+ * to single spaces so a phrase split across a line break still matches a
+ * `[^.\n]`-bounded pattern. Returns a scan-only copy — stored content is never mutated.
+ */
+function normalizeForScan(content: string): string {
+  return content
+    .normalize("NFKC")
+    .replace(/[\u00AD\u200B-\u200D\u2060\uFEFF\uFE00-\uFE0F]/g, "")
+    .replace(/\s+/g, " ");
+}
+
+/**
  * Scan content for instruction-shaped phrasing (see {@link INJECTION_PATTERNS}).
  * Returns the de-duplicated labels of every matched signature, or an empty array.
  * Advisory only — callers surface this as a warning and still store the entry.
+ * Scans a normalized copy (see {@link normalizeForScan}); never mutates input.
  */
 export function scanForInjection(content: string): string[] {
+  const normalized = normalizeForScan(content);
   const matched: string[] = [];
   for (const { pattern, label } of INJECTION_PATTERNS) {
-    if (pattern.test(content)) {
+    if (pattern.test(normalized)) {
       matched.push(label);
     }
   }

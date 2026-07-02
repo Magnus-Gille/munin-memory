@@ -94,9 +94,10 @@ describe("stored-content prompt-injection resistance (#150)", () => {
   });
 
   it("the namespace-wide delete the payload asks for is REFUSED by default", async () => {
-    // Seed entries the injected instruction would target.
+    // Seed both an exact "projects" entry AND subtree entries the injected
+    // instruction would target, so we prove the requested target itself survives.
+    await callTool("memory_write", { namespace: "projects", key: "index", content: "Project index", tags: ["active"] });
     await callTool("memory_write", { namespace: "projects/alpha", key: "status", content: "Real work", tags: ["active"] });
-    await callTool("memory_write", { namespace: "projects/beta", key: "status", content: "Real work", tags: ["active"] });
 
     // Exactly what a compromised agent would attempt: a namespace-wide delete
     // (no key). The default-off gate rejects it before any preview/token dance.
@@ -104,18 +105,28 @@ describe("stored-content prompt-injection resistance (#150)", () => {
     const result = parseToolResponse(raw) as { error?: string };
     expect(result.error).toBe("namespace_delete_disabled");
 
-    // The targeted entries survive.
-    const stillThere = parseToolResponse(await callTool("memory_read", { namespace: "projects/alpha", key: "status" })) as { found: boolean };
-    expect(stillThere.found).toBe(true);
+    // The exact requested namespace AND the subtree entries survive.
+    const exact = parseToolResponse(await callTool("memory_read", { namespace: "projects", key: "index" })) as { found: boolean };
+    expect(exact.found).toBe(true);
+    const subtree = parseToolResponse(await callTool("memory_read", { namespace: "projects/alpha", key: "status" })) as { found: boolean };
+    expect(subtree.found).toBe(true);
   });
 
-  it("single-entry deletes remain available (the gate only blocks namespace-wide deletes)", async () => {
+  it("single-entry deletes remain available and delete ONLY the targeted entry", async () => {
     await callTool("memory_write", { namespace: "projects/alpha", key: "scratch", content: "disposable", tags: ["active"] });
+    // A sibling in the same namespace that must survive a single-entry delete.
+    await callTool("memory_write", { namespace: "projects/alpha", key: "keep", content: "important", tags: ["active"] });
+
     const preview = parseToolResponse(await callTool("memory_delete", { namespace: "projects/alpha", key: "scratch" })) as { delete_token?: string; error?: string };
     expect(preview.error).toBeUndefined();
     expect(preview.delete_token).toBeTruthy();
     const confirmed = parseToolResponse(await callTool("memory_delete", { namespace: "projects/alpha", key: "scratch", delete_token: preview.delete_token })) as { phase?: string; deleted_count?: number };
     expect(confirmed.phase).toBe("confirmed");
-    expect(confirmed.deleted_count).toBeGreaterThanOrEqual(1);
+    expect(confirmed.deleted_count).toBe(1); // exactly one — no over-deletion
+
+    const gone = parseToolResponse(await callTool("memory_read", { namespace: "projects/alpha", key: "scratch" })) as { found: boolean };
+    expect(gone.found).toBe(false);
+    const sibling = parseToolResponse(await callTool("memory_read", { namespace: "projects/alpha", key: "keep" })) as { found: boolean };
+    expect(sibling.found).toBe(true);
   });
 });
