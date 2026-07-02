@@ -32,15 +32,52 @@ const INJECTION_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
     label: "instruction-override phrase",
   },
   {
-    pattern: /\bdo\s+not\s+(tell|inform|alert|notify|reveal\s+to|mention\s+to)\s+(the\s+)?(user|owner|human|magnus|principal)\b/i,
+    // Concealment directed at the user/owner. Covers three shapes (#150 / Codex):
+    //  - "do not / don't / never {tell|mention|reveal|…}" with an optional object
+    //    before the target ("do not mention THIS to the user");
+    //  - "{keep|hide|conceal|withhold} … from {the user}";
+    //  - "without {telling|informing|…}" the target.
+    // (Input is whitespace-collapsed before scanning, so newline-split phrases match.)
+    pattern: /(?:\bdo\s+not\s+|\bdon['’]t\s+|\bnever\s+)(?:tell|inform|alert|notify|reveal|mention|disclose|report)\b[^.\n]{0,30}?\b(?:user|owner|human|magnus|principal)\b|\b(?:keep|hide|conceal|withhold)\b[^.\n]{0,25}?\bfrom\b[^.\n]{0,20}?\b(?:user|owner|human|magnus|principal)\b|\bwithout\s+(?:telling|informing|alerting|notifying|letting)\b[^.\n]{0,20}?\b(?:user|owner|human|magnus|principal)\b/i,
     label: "concealment instruction",
   },
   {
     // Deliberately narrow: "new task:" / "updated rules:" are routine PM prose, so
-    // only genuinely injection-shaped nouns (instructions / system prompt / message)
-    // trip this. Override/directive forms are covered by the phrases above.
-    pattern: /\b(new|updated|revised|additional|real|actual|true)\s+(instruction|instructions|system\s+prompt|system\s+message)\s*:/i,
+    // only genuinely injection-shaped nouns (instructions / directives / system
+    // prompt / message) trip this. The urgency prefixes (important/urgent/…) catch
+    // the #150 "IMPORTANT SYSTEM INSTRUCTION:" payload. Override forms are above.
+    // "directive(s)" is intentionally NOT a bare noun here — "Revised directives:
+    // ship Friday" is routine PM prose. Only instruction/system-prompt nouns trip
+    // the prefix form; "system directive:" is handled by the system-prefixed rule
+    // below. Urgency prefixes catch the #150 "IMPORTANT SYSTEM INSTRUCTION:".
+    pattern: /\b(new|updated|revised|additional|real|actual|true|important|urgent|critical|mandatory)\s+(system\s+)?(instruction|instructions|system\s+prompt|system\s+message)\s*:/i,
     label: "injected directive block",
+  },
+  {
+    // A bare "SYSTEM INSTRUCTION:" / "SYSTEM DIRECTIVE:" block — the "system"
+    // qualifier is what makes it injection-shaped (vs. plain "directives:").
+    pattern: /\bsystem\s+(instruction|instructions|directive|directives)\s*:/i,
+    label: "system-directive block",
+  },
+  {
+    // Imperative directive to invoke a destructive tool ("immediately call
+    // memory_delete …", "proceed to run … purge"). Targets the exact dangerous
+    // shape of the #150 attack; the urgency adverb + destructive verb keep it off
+    // benign numbered dev steps ("then run the delete migration").
+    // Note: no word boundary before the destructive verb, so tool names with
+    // underscores (memory_delete) match. `(?![-\w])` after the verb requires a
+    // complete word — excludes "delete-orphans"/"deletion" (a `\b` there would
+    // wrongly match before the hyphen; Codex low finding).
+    pattern: /\b(immediately|now|proceed\s+to)\s+(call|invoke|execute|run|trigger)\b[^.\n]{0,30}?(delete|remove|drop|erase|wipe|purge)(?![-\w])/i,
+    label: "imperative destructive-tool directive",
+  },
+  {
+    // Rephrasings the urgency-prefix rule misses (#150 / Codex): stealth verbs
+    // ("silently remove all projects") and POSTPOSED urgency ("delete projects
+    // now", "call memory_delete immediately"). No leading boundary so memory_delete
+    // matches; `(?![-\w])` keeps it off hyphenated/continued words.
+    pattern: /\b(?:silently|quietly|secretly)\s+[^.\n]{0,20}?(?:delete|remove|drop|erase|wipe|purge)(?![-\w])|(?:delete|remove|drop|erase|wipe|purge)(?![-\w])[^.\n]{0,25}?\b(?:immediately|now|right\s+now|at\s+once|without\s+delay)\b/i,
+    label: "imperative destructive-tool directive",
   },
   {
     pattern: /\b(developer\s+mode|jailbroken|jailbreak|DAN\s+mode|do\s+anything\s+now)\b/i,
@@ -92,14 +129,32 @@ export function redactSecrets(message: string): string {
 }
 
 /**
+ * Normalize content before injection scanning so trivial obfuscation can't slip
+ * an instruction-shaped payload past the literal patterns while remaining legible
+ * to an LLM (#150 / Codex): NFKC folds full-width & homoglyph-ish forms; strip
+ * zero-width / joiner / BOM / variation-selector / soft-hyphen chars that split
+ * keywords (`mem​ory_delete`); collapse all whitespace runs (incl. newlines)
+ * to single spaces so a phrase split across a line break still matches a
+ * `[^.\n]`-bounded pattern. Returns a scan-only copy — stored content is never mutated.
+ */
+function normalizeForScan(content: string): string {
+  return content
+    .normalize("NFKC")
+    .replace(/[\u00AD\u200B-\u200D\u2060\uFEFF\uFE00-\uFE0F]/g, "")
+    .replace(/\s+/g, " ");
+}
+
+/**
  * Scan content for instruction-shaped phrasing (see {@link INJECTION_PATTERNS}).
  * Returns the de-duplicated labels of every matched signature, or an empty array.
  * Advisory only — callers surface this as a warning and still store the entry.
+ * Scans a normalized copy (see {@link normalizeForScan}); never mutates input.
  */
 export function scanForInjection(content: string): string[] {
+  const normalized = normalizeForScan(content);
   const matched: string[] = [];
   for (const { pattern, label } of INJECTION_PATTERNS) {
-    if (pattern.test(content)) {
+    if (pattern.test(normalized)) {
       matched.push(label);
     }
   }
