@@ -2554,6 +2554,7 @@ describe("memory_orient", () => {
       conventions: { content: string; updated_at: string };
       dashboard: Record<string, unknown[]>;
       namespaces: Array<{ namespace: string }>;
+      getting_started: string[];
     };
 
     // Default is compact conventions
@@ -2564,6 +2565,10 @@ describe("memory_orient", () => {
     expect((result.conventions as any).compact).toBe(true);
     expect(result.dashboard).toBeDefined();
     expect(result.dashboard.active).toHaveLength(1);
+    // First-action scaffold (#147): a concrete next-step list, not just a map.
+    expect(Array.isArray(result.getting_started)).toBe(true);
+    expect(result.getting_started).toHaveLength(3);
+    expect(result.getting_started.join(" ")).toContain("memory_query");
   });
 
   it("returns full conventions when include_full_conventions is true", async () => {
