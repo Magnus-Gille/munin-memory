@@ -3363,7 +3363,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_extract",
     description:
-      "Suggest reviewable memory operations from explicit conversation signals. Use this after `memory_orient` when you have messy notes or transcript text and want proposed `memory_log`, `memory_write`, or `memory_update_status` calls. This tool is suggestion-only: it never writes to memory.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Suggest reviewable memory operations from explicit conversation signals. Use this after `memory_orient` when you have messy notes or transcript text and want proposed `memory_log`, `memory_write`, or `memory_update_status` calls. This tool is suggestion-only: it never writes to memory.\n\nUse `memory_extract` when you have unstructured text and are unsure what (if anything) is worth persisting or where it belongs — it proposes the ops for you to review. When you already know the single decision or event to record, skip extraction and call `memory_log` directly. Extraction proposes; it does not persist — you must issue the returned calls yourself.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -3425,7 +3425,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_commitments",
     description:
-      "Surface explicit commitments derived from tracked next steps and dated, attributable source text. Use this when you want to review open, at-risk, overdue, or recently completed follow-through items rather than rely on fuzzy prose search.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Surface explicit commitments derived from tracked next steps and dated, attributable source text. Use this when you want to review open, at-risk, overdue, or recently completed follow-through items rather than rely on fuzzy prose search.\n\nRead-only: this tool derives and reports commitments from existing entries — it does not create, store, or modify commitments. To add a commitment, record it as a Next Step via `memory_update_status` (or in a `memory_log` entry); it will then surface here.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -3508,7 +3508,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_write",
     description:
-      "Store or update a state entry in memory. If an entry with the same namespace+key exists, it will be overwritten. Use this for mutable facts and non-tracked state. For `status` entries under `projects/*` or `clients/*`, prefer `memory_update_status`. Optional `valid_until` adds soft expiry for temporary state; direct reads still work after expiry, but broad search hides expired state by default.\n\nIf this is your first memory operation in this conversation, call memory_orient first.\n\nNamespace conventions: projects/<name> for project state, people/<name> for context about people, decisions/<topic> for cross-cutting decisions, meta/<topic> for system notes.\n\nKey conventions: 'status' = compact resumption summary (Phase / Current work / Blockers / Next — keep brief, move details to other keys like 'architecture', 'workflow', 'research'). 'index' = directory of important keys in this namespace and their purpose.\n\nTag vocabulary: Use canonical lifecycle tags on status entries: active, blocked, completed, stopped, maintenance, archived. Aliases are auto-normalized (done→completed, paused→stopped, inactive→archived). Category tags: decision, architecture, preference, milestone, convention. Type tags: bug, feature, research. Prefixed tags for cross-referencing: client:<name>, person:<name>, topic:<topic>, type:<artifact> (pdf, presentation, meeting-notes), source:external/internal.\n\nThe project dashboard is computed automatically from status entries with lifecycle tags. No manual workbench maintenance needed. Compare-and-swap via expected_updated_at is supported for any state write (all namespaces), not only 'status' in projects/* or clients/*.\n\nTo start a new project: (1) write projects/<name>/status with a lifecycle tag (e.g. 'active'), (2) optionally write projects/<name>/index listing the keys.",
+      "Store or update a state entry in memory. If an entry with the same namespace+key exists, it will be overwritten. Use this for mutable facts and non-tracked state. For `status` entries under `projects/*` or `clients/*`, prefer `memory_update_status`. Optional `valid_until` adds soft expiry for temporary state; direct reads still work after expiry, but broad search hides expired state by default.\n\nIf this is your first memory operation in this conversation, call memory_orient first.\n\nNamespace conventions: projects/<name> for project state, people/<name> for context about people, decisions/<topic> for cross-cutting decisions, meta/<topic> for system notes.\n\nKey conventions: 'status' = compact resumption summary (Phase / Current work / Blockers / Next — keep brief, move details to other keys like 'architecture', 'workflow', 'research'). 'index' = directory of important keys in this namespace and their purpose.\n\nTag vocabulary: Use canonical lifecycle tags on status entries: active, blocked, completed, stopped, maintenance, archived. Aliases are auto-normalized (done→completed, paused→stopped, inactive→archived). Category tags: decision, architecture, preference, milestone, convention. Type tags: bug, feature, research. Prefixed tags for cross-referencing: client:<name>, person:<name>, topic:<topic>, type:<artifact> (pdf, presentation, meeting-notes), source:external/internal.\n\nThe project dashboard is computed automatically from status entries with lifecycle tags. No manual workbench maintenance needed. Compare-and-swap via expected_updated_at is OPTIONAL and supported for any state write (all namespaces), not only 'status' in projects/* or clients/*; omit it for a plain write and to create a new entry — only pass it when you want the write to fail if the entry changed since your last read.\n\nTo start a new project: (1) write projects/<name>/status with a lifecycle tag (e.g. 'active'), (2) optionally write projects/<name>/index listing the keys.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -3552,7 +3552,7 @@ const TOOL_DEFINITIONS = [
         expected_updated_at: {
           type: "string",
           description:
-            "Optional compare-and-swap guard for any state write (all namespaces, not only tracked projects/*/clients/* statuses): pass the updated_at from your last read to prevent blind overwrites. Returns a conflict error if the entry was modified since.",
+            "Optional compare-and-swap guard for any state write (all namespaces, not only tracked projects/*/clients/* statuses): pass the updated_at from your last read to prevent blind overwrites. Returns a conflict error if the entry was modified since. OPTIONAL — omit it entirely for an unconditional write; it is never required to create a new entry.",
         },
         patch: {
           type: "object",
@@ -3571,7 +3571,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_update_status",
     description:
-      "Update a tracked status entry in `projects/*` or `clients/*` namespaces only. Uses a server-enforced structure with canonical sections: Phase, Current Work, Blockers, Next Steps, and optional Notes. Prefer this over `memory_write` for status updates — it supports reliable partial updates without read-modify-write on markdown blobs. Status changes are not auto-logged; call `memory_log` separately when recording a decision or milestone.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Update a tracked status entry in `projects/*` or `clients/*` namespaces only. Uses a server-enforced structure with canonical sections: Phase, Current Work, Blockers, Next Steps, and optional Notes. Prefer this over `memory_write` for status updates — it supports reliable partial updates without read-modify-write on markdown blobs.\n\nCall this only when the project's phase, current work, blockers, next steps, or lifecycle actually changes — NOT after every `memory_log`. Logging a decision and updating the status are independent: log the decision (history), and separately update the status only if the change moves the project's current state. Every field is optional; supply just the sections that changed. Compare-and-swap (`expected_updated_at`) is optional — omit it for an unconditional update. Status changes are not auto-logged; call `memory_log` separately when recording a decision or milestone.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -3616,7 +3616,7 @@ const TOOL_DEFINITIONS = [
         },
         expected_updated_at: {
           type: "string",
-          description: "Optional compare-and-swap guard. Pass the updated_at from a prior read to avoid blind overwrites.",
+          description: "Optional compare-and-swap guard. Pass the updated_at from a prior read to avoid blind overwrites. OPTIONAL — omit it for an unconditional update; it is never required to create a new tracked status.",
         },
       },
       required: ["namespace"],
@@ -3625,7 +3625,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_read",
     description:
-      "Retrieve a specific state entry by namespace and key. Use this when you already know both. Returns the full content, tags, and timestamps. Returns a clear 'not found' message if the entry doesn't exist (not an error). Note: results carry a system-injected `classification:internal` (or higher) tag marking the entry's classification floor — it is set by the server, not by you.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Retrieve a specific state entry by namespace and key. Use this when you already know both — it only reads state entries (not logs). If instead you have an entry UUID from `memory_query` results, use `memory_get` (which also works for log entries). Returns the full content, tags, and timestamps. Returns a clear 'not found' message if the entry doesn't exist (not an error). Note: results carry a system-injected `classification:internal` (or higher) tag marking the entry's classification floor — it is set by the server, not by you.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -3682,7 +3682,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_query",
     description:
-      "Search and filter memories. Supports lexical (keyword), semantic (vector similarity), and hybrid (RRF fusion of both) search modes. Filters by namespace prefix, entry type, tags, time range (since/until), and optional expiry handling. Can be used without a query to browse by filters alone (e.g. all entries with a specific tag, or all entries updated today). Broad retrieval hides expired state entries by default; use `include_expired: true` to include them. Pass `explain: true` to include retrieval metadata and per-result match explanations.\n\nRetrieval tips (the most common formulation failures):\n- **If you get zero results, widen before giving up.** Drop the `namespace` filter first, then drop `tags`, then try different phrasing. Tight namespace filters pointed at the wrong tier (e.g. `meta/` when the entry is in `decisions/`) are the #1 cause of false-negative searches.\n- **Prefer natural-language phrasing.** Default `search_mode` is hybrid, so semantic recall bridges vocabulary gaps — you do not need to guess exact tokens.\n- **Lexical queries are tokenized, not raw FTS5.** The server splits your query into terms, preserves quoted phrases, and requires all terms to match (implicit AND). Boolean operators like `AND`, `OR`, `NOT`, and `NEAR` are not supported in user queries — write term lists or natural language, not FTS5 expressions.\n- **Use concrete tokens likely present in the entry**, not abstract paraphrase (\"explored\", \"examined\") — lexical still wins on structured-vocabulary content like research notes.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Search and filter memories. Supports lexical (keyword), semantic (vector similarity), and hybrid (RRF fusion of both) search modes, selected with the `search_mode` parameter (`\"lexical\"` | `\"semantic\"` | `\"hybrid\"`; default `\"hybrid\"`). Note it is `search_mode: \"semantic\"`, not a `semantic: true` flag. Filters by namespace prefix, entry type, tags, time range (since/until), and optional expiry handling. Can be used without a query to browse by filters alone (e.g. all entries with a specific tag, or all entries updated today). `limit` caps results (default 10, max 50); narrow with filters or `since`/`until` rather than paging if 50 is not enough. Broad retrieval hides expired state entries by default; use `include_expired: true` to include them. Pass `explain: true` to include retrieval metadata and per-result match explanations.\n\nRetrieval tips (the most common formulation failures):\n- **If you get zero results, widen before giving up.** Drop the `namespace` filter first, then drop `tags`, then try different phrasing. Tight namespace filters pointed at the wrong tier (e.g. `meta/` when the entry is in `decisions/`) are the #1 cause of false-negative searches.\n- **Prefer natural-language phrasing.** Default `search_mode` is hybrid, so semantic recall bridges vocabulary gaps — you do not need to guess exact tokens.\n- **Lexical queries are tokenized, not raw FTS5.** The server splits your query into terms, preserves quoted phrases, and requires all terms to match (implicit AND). Boolean operators like `AND`, `OR`, `NOT`, and `NEAR` are not supported in user queries — write term lists or natural language, not FTS5 expressions.\n- **Use concrete tokens likely present in the entry**, not abstract paraphrase (\"explored\", \"examined\") — lexical still wins on structured-vocabulary content like research notes.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -4277,6 +4277,15 @@ export function registerTools(
               // meta/conventions; non-owner → personal entry at <home>/meta,
               // else the universal physics-only default. See projectConventions.
               response.conventions = projectConventions(db, ctx, detail, sessionId, orientRedactedSources);
+
+              // A concrete "what do I do next" scaffold — the #1 onboarding gap
+              // reported by cross-model user-testing (#147) was that orient gives
+              // a map but no first action. Static, tool-choice-disambiguating.
+              response.getting_started = [
+                'Resume work: memory_read("projects/<name>", "status") for a known project, or memory_resume with an opener/namespace for a fuller continuation pack.',
+                "Find past context or decisions: memory_query with natural-language terms (default search_mode is hybrid — no need to guess exact keywords).",
+                "Record something: memory_log for a decision or event (append-only history); use memory_update_status ONLY when a tracked project's phase, next steps, or lifecycle actually changes.",
+              ];
 
               // Computed dashboard from tracked status entries
               const trackedStatusAssessments = visibleTrackedStatuses.allowed;
