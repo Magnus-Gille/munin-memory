@@ -640,6 +640,105 @@ describe("memory_update_status", () => {
     expect(result.content).toContain("## Phase");
     expect(result.content).toContain("Rebuilt on canonical structure");
   });
+
+  it("treats an extras-only (non-canonical headings) status as legacy for the #177 gate (Codex finding 1)", async () => {
+    // Content parses into an `extras` section but NO canonical section — a
+    // partial update would still blank canonical state with defaults.
+    await callTool("memory_write", {
+      namespace: "projects/extras-only",
+      key: "status",
+      content: "## Context\nCurrently shipping the telemetry layer.\n\n## History\nStarted in Q1.",
+      tags: ["active"],
+    });
+    const raw = await callTool("memory_update_status", {
+      namespace: "projects/extras-only",
+      current_work: "Shipping telemetry",
+    });
+    const result = parseToolResponse(raw) as { error?: string };
+    expect(result.error).toBe("legacy_format_partial_update");
+
+    const readRaw = await callTool("memory_read", {
+      namespace: "projects/extras-only",
+      key: "status",
+    });
+    const read = parseToolResponse(readRaw) as { content: string };
+    expect(read.content).toContain("Currently shipping the telemetry layer.");
+    expect(read.content).not.toContain("Unspecified.");
+  });
+
+  it("does not let blank strings bypass the legacy gate (Codex finding 3)", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/blank-bypass",
+      key: "status",
+      content: "Free-form legacy content that must not be silently blanked.",
+      tags: ["active"],
+    });
+    // Blank strings + empty next_steps normalize to defaults, so they must
+    // count as NOT supplied and the partial update must be refused.
+    const raw = await callTool("memory_update_status", {
+      namespace: "projects/blank-bypass",
+      phase: "",
+      current_work: "Real work",
+      blockers: "   ",
+      next_steps: [],
+    });
+    const result = parseToolResponse(raw) as { error?: string; missing_sections?: string[] };
+    expect(result.error).toBe("legacy_format_partial_update");
+    expect(result.missing_sections).toEqual(
+      expect.arrayContaining(["phase", "blockers", "next_steps"]),
+    );
+
+    const readRaw = await callTool("memory_read", {
+      namespace: "projects/blank-bypass",
+      key: "status",
+    });
+    const read = parseToolResponse(readRaw) as { content: string };
+    expect(read.content).toContain("must not be silently blanked");
+  });
+
+  it("rejects a non-string field with a validation error, not a crash (Codex finding 4)", async () => {
+    const raw = await callTool("memory_update_status", {
+      namespace: "projects/nonstring",
+      phase: 42 as unknown as string,
+      lifecycle: "active",
+    });
+    const result = parseToolResponse(raw) as { error?: string; message?: string };
+    expect(result.error).toBe("validation_error");
+    expect(result.message ?? "").toContain("phase must be a string");
+  });
+
+  it("guards memory_write of a tracked status against leaked parameter markup (Codex finding 2)", async () => {
+    const raw = await callTool("memory_write", {
+      namespace: "projects/write-markup-guard",
+      key: "status",
+      content: 'Real work</parameter>\n<parameter name="tags">["active"]',
+      tags: ["active"],
+    });
+    const result = parseToolResponse(raw) as { error?: string; message?: string };
+    expect(result.error).toBe("validation_error");
+    expect(result.message ?? "").toMatch(/parameter/i);
+
+    const readRaw = await callTool("memory_read", {
+      namespace: "projects/write-markup-guard",
+      key: "status",
+    });
+    const read = parseToolResponse(readRaw) as { found?: boolean };
+    expect(read.found).not.toBe(true);
+  });
+
+  it("allows non-status memory_write to contain parameter-like markup (Codex finding 2 scope)", async () => {
+    // Generic content (docs/code) may legitimately contain such markup — only
+    // tracked status writes are guarded.
+    const raw = await callTool("memory_write", {
+      namespace: "documents/xml-example",
+      key: "snippet",
+      content: 'Example: <parameter name="foo">bar</parameter>',
+      tags: ["reference"],
+    });
+    const result = parseToolResponse(raw) as { status?: string; error?: string };
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBeDefined();
+  });
 });
 
 describe("memory_read", () => {
