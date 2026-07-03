@@ -33,6 +33,9 @@ docs/*
 !docs/adr/
 !docs/examples/
 !docs/examples/memory-health.json
+!docs/archive/
+!docs/archive/prd.md
+!docs/archive/technical-spec.md
 
 # Debate files — keep only summaries and resolutions
 debate/*

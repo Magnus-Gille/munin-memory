@@ -1,5 +1,10 @@
 # Munin Memory — Technical Specification
 
+> **Archived — superseded.** This is the original v1 pre-pivot technical spec, kept for
+> historical context. The current architecture and conventions live in
+> [`CLAUDE.md`](../../CLAUDE.md), with product direction in
+> [`docs/vision.md`](../vision.md) and [`docs/roadmap.md`](../roadmap.md).
+
 > This document is the implementation guide for Claude Code. Read `prd.md` first for context, motivation, and UX requirements. This document covers the how.
 
 ## Project Structure

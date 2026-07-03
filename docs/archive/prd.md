@@ -1,5 +1,10 @@
 # Munin Memory — Product Requirements Document
 
+> **Archived — superseded.** This is the original v1 pre-pivot PRD, kept for historical
+> context. The current product direction lives in [`docs/vision.md`](../vision.md) and
+> [`docs/roadmap.md`](../roadmap.md), with day-to-day conventions in
+> [`CLAUDE.md`](../../CLAUDE.md).
+
 ## What Is This?
 
 Munin Memory is a lightweight MCP (Model Context Protocol) server that gives Claude persistent memory across conversations. It is named after Munin, one of Odin's ravens in Norse mythology — the raven of memory.
