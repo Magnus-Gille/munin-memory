@@ -40,6 +40,26 @@ instead undermine *why* the decision was made (rationale) or *why an
 alternative was passed over* (rejected branch), so only an agent that
 actually has that reasoning available can act on it correctly.
 
+**Behavioral-test vocabulary (CheckList).** The two probe kinds map directly
+onto Ribeiro et al.'s CheckList test types, and we adopt that vocabulary for
+legibility to the NLP-eval community: a `perturbation` probe is a **Minimum
+Functionality Test (MFT)** — a targeted case the agent must get right — and a
+`stasis` probe is an **Invariance Test (INV)** — an input that must *not*
+change the behavior. A should-reopen-*in-a-specific-direction* probe would be a
+**Directional Expectation Test (DIR)**; that third kind is a Follow-up.
+
+**Perturbation-authoring discipline (contrast sets).** Following Gardner et
+al.'s contrast-set construction, a perturbation must be a *minimal, targeted*
+edit — small enough that it changes only the rationale's or a rejected branch's
+validity, not the general readability of the scenario. Author each perturbation
+as the smallest change that undermines the specific reasoning, and record its
+intent via `Probe.attacks` (`rationale` | `rejected-branch`) so a case that
+accidentally attacks the decision surface is caught in review rather than
+silently measuring comprehension instead of rationale-dependent revision. Where
+a rationale depends on a *chain* of conditions, distinguish single-hop from
+multi-hop perturbations (cf. MQuAKE's ripple-effect construction) so the corpus
+can report revision recall as a function of reasoning depth.
+
 ## Arms
 
 | Arm | Memory payload | Purpose |
@@ -89,6 +109,27 @@ Per (world × arm × probe), aggregated over `k` runs (`runner.ts`):
   `VERDICT:` line. A high invalid rate means the model isn't following the
   output contract, not that it's making bad decisions — inspect before
   trusting the flip rates.
+
+Two metric extensions are motivated by the #186 prior-art spike (see
+**Prior-art grounding** below) and are tracked as Follow-ups — not yet in
+`runner.ts`:
+
+- **dead-end re-proposal rate** — of the runs that reopen on a
+  `rejected-branch` perturbation, the fraction that re-propose an option the
+  original decision had *already rejected for a reason the perturbation does
+  not remove*. A path-holding agent (arm B) should reopen **and** avoid the
+  dead end; a destination-only agent (arm A) that reopens has no way to know
+  the branch was already walked — so this is the sharpest A-vs-B discriminator.
+  It requires extending the VERDICT contract to name the option switched to,
+  and marking dead-end options in the corpus. (MemoRepair's cascade-staleness
+  framing: source invalidation must not resurrect a stale derived choice.)
+- **consolidation transition quality (TrustMem axes)** — when the
+  consolidation toggle (Follow-ups) lands, grade the pre/post-synthesis path
+  not as a single pass/fail but on TrustMem's three axes: *coverage* (is the
+  rationale still present?), *preservation* (is it unchanged?), *faithfulness*
+  (does it still support the correct revision?). This distinguishes a
+  consolidation that keeps the words but loses the decision-reversal signal
+  from one that drops the content outright.
 
 `k >= 5` runs per (world, arm, probe) is the default — a single run per cell
 is a coin flip at nonzero temperature (default 0.7, deliberately stochastic:
@@ -154,6 +195,68 @@ Output per run: a timestamped JSONL of raw `RunRecord`s, an aggregate JSON
 lineage), and a compact markdown summary table (one row per world × arm:
 should-flip rate, false-flip rate, binary/ternary agreement, invalid count).
 
+## Prior-art grounding & positioning (2026-07-02 spike)
+
+A prior-art / novelty spike (report:
+`~/mimir/research/munin/2026-07-02-memory-evolvability-prior-art.md`, task
+`20260703-120327-memory-evolvability`) returned a **novel-in-combination**
+verdict: no published work combines rationale-vs-outcome ablation,
+rationale-attacking perturbations, stasis controls, pre/post-consolidation
+comparison, and behavioral (non-QA) decision-revision measurement. Nearest
+neighbors to cite and, where runnable, benchmark against:
+
+- **DeMem** — decision-centric memory quality under compression; closest
+  conceptual neighbor, grounds *why* rationale preservation matters. (Only the
+  abstract was read in the spike — re-check the full paper before finalizing
+  the novelty claim; it may contain a closer ablation.)
+- **MQuAKE** — the ripple-effect "edit a premise, measure propagation"
+  methodology; direct template for multi-hop perturbations.
+- **TrustMem** — consolidation transition-quality axes
+  (coverage / preservation / faithfulness); reused directly for the
+  consolidation arm's grading.
+- **MemoRepair** — cascade-update / source-invalidation framing (a repair
+  system, so a citation not a runnable baseline); anchor for the dead-end metric.
+- **Contrast sets** (Gardner et al.) and **CheckList** (Ribeiro et al.) —
+  methodology baselines, adopted in **Concept** above.
+- **MemoryArena** — closest existing benchmark to behavioral measurement;
+  worth comparing on the action-coupled-memory angle.
+
+**Framing — position as decision-provenance value, not "evolvability."** To
+avoid a naming collision with **EvoMemBench** (whose "self-evolving" asks
+whether memory helps an agent improve at tasks over time — a *different*
+question), position this work as **"measuring the behavioral value of decision
+provenance in agent memory."** That framing also connects more cleanly to the
+model-editing / belief-revision and case-based-reasoning literatures.
+**Case-based reasoning** (Hatalis et al. 2025) is conceptual kin — "adapt a
+past solution to a new similar problem" vs. our "revise a past decision when
+its assumptions change" — and must be distinguished explicitly in any writeup.
+
+**Claim narrowed.** The spike refuted the broad claim that "no work measures
+consolidation-caused decision-quality degradation" (TrustMem does, against
+downstream task performance). The surviving, load-bearing claim is narrower:
+*no work measures whether consolidation destroys **decision-reversal
+capability** specifically* — the ability to correctly revise a prior decision
+when its assumptions change. Frame the contribution on that narrower claim.
+
+**Consolidation is not uniformly destructive.** The premise that consolidation
+summarization destroys rationale holds only for systems that rewrite memories
+in place (A-MEM); additive systems (Zep/Graphiti, HippoRAG) preserve the
+rationale but may make it unreachable via retrieval prioritization. Burying
+rationale and deleting it are different failure modes with the same behavioral
+symptom, so the consolidation toggle must test **both** a destructive and an
+additive mode (Follow-ups).
+
+**Open decisions (need a human call before implementation):**
+
+- **4th arm (D = decision + partial rationale, no rejected alternatives)** —
+  would isolate the behavioral value of *rejected alternatives* from general
+  reasoning provenance, at the cost of a larger corpus. Optional; unresolved.
+- **Bayesian-optimal revision labels** alongside golden labels — flagged as
+  possibly ill-defined for some perturbation types.
+- **Timing / venue** — the spike recommends a preprint by ~Q4 2026 given
+  moderate in-flight collision risk (ICLR MemAgents workshop is soliciting
+  adjacent work). Urgency-vs-thoroughness is a call for Magnus.
+
 ## Follow-ups
 
 - **Pattern library from consensus-surviving real cases.** The gated
@@ -169,10 +272,15 @@ should-flip rate, false-flip rate, binary/ternary agreement, invalid count).
   provenance-rich path content? interacts with #154/#183), real
   `memory_write`/`memory_log` validation — instead of hand-assembling the
   arm payload string directly as this v1 scaffold does.
-- **Consolidation pre/post toggle.** Run the same corpus through the
-  consolidation worker (`src/consolidation.ts`) before evaluating arm B, to
-  test whether synthesis destroys decision-reversal capability — direct
-  input to #98 (what must retention preserve?).
+- **Consolidation pre/post toggle — destructive *and* additive modes.** Run
+  the same corpus through the consolidation worker (`src/consolidation.ts`)
+  before evaluating arm B, to test whether synthesis destroys decision-reversal
+  capability — direct input to #98 (what must retention preserve?). Test two
+  modes, not one: a **destructive** mode (rationale rewritten in place, A-MEM
+  style) and an **additive** mode (rationale retained but deprioritized in
+  retrieval, Zep/HippoRAG style) — they are distinct failure modes with the
+  same behavioral symptom. Grade the transition on TrustMem's coverage /
+  preservation / faithfulness axes rather than a single pass/fail (see Metrics).
 - **Read-gate on/off toggle.** Compare arm B with and without the untrusted
   envelope wrapping applied to path-log content, to isolate whether the
   read-gate itself (rather than the underlying content) is the tax.
@@ -190,3 +298,18 @@ should-flip rate, false-flip rate, binary/ternary agreement, invalid count).
   structured counterfactual vs. reproduction-recipe-pointer, to see which
   path representation best preserves revision capability per unit of
   context cost.
+- **Dead-end re-proposal metric.** Extend the VERDICT contract to name the
+  option the agent switches to, mark already-rejected ("dead-end") options in
+  the corpus, and aggregate the dead-end re-proposal rate (see Metrics) — the
+  sharpest arm-A-vs-B discriminator.
+- **DIR (directional) probes.** A third probe kind beyond MFT-perturbation and
+  INV-stasis: cases where reopening is correct *only if it moves in a specified
+  direction* (e.g. switch to a named alternative, not just "reconsider").
+  Requires the option-naming VERDICT extension above.
+- **Retrieval-stage vs decision-stage decomposition.** When a should-flip case
+  fails, tag whether the rationale was never retrieved (retrieval failure) vs.
+  retrieved but not acted on (reasoning failure) — cf. PrecisionMemBench's
+  retrieval/generation split. Only meaningful once the server-mode toggle
+  (real retrieval) lands, since the v1 scaffold hand-assembles the payload.
+- **4th arm (D = partial rationale).** Optional — see the Open decisions note
+  under Prior-art grounding.
