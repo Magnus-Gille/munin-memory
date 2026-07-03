@@ -36,7 +36,7 @@ import { buildArmPayload } from "./arms.js";
 import { buildAgentPrompt } from "./prompt.js";
 import { grade } from "./grade.js";
 import { ALL_ARMS, isReopenAction } from "./types.js";
-import type { Arm, Probe, World, RunRecord, AggregateStats, VerdictAction } from "./types.js";
+import type { Arm, Probe, World, RunRecord, AggregateStats, VerdictAction, GradeOutcome } from "./types.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -48,6 +48,14 @@ export const DEFAULT_TEMPERATURE = 0.7;
 export const DEFAULT_K = 5;
 export const DEFAULT_MAX_RETRIES = 1;
 export const DEFAULT_MAX_TOKENS = 2048;
+/** Cap on how many times a 429 is retried, independent of `maxRetries` (which governs 5xx/network). */
+export const DEFAULT_MAX_429_RETRIES = 4;
+/** Fallback backoff when a 429 carries neither a `Retry-After` header nor a body hint. */
+export const DEFAULT_429_BACKOFF_MS = 2000;
+/** Ceiling on any single 429 wait, so a run can't hang forever on a huge Retry-After value. */
+export const MAX_429_WAIT_MS = 30_000;
+/** Default errored-rate threshold above which the run is flagged as untrustworthy. */
+export const DEFAULT_ERRORED_RATE_WARN_THRESHOLD = 0.2;
 
 // --- Env resolution ---
 
@@ -177,6 +185,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
 export interface MinimalFetchResponse {
   ok: boolean;
   status: number;
+  /** Optional — only consulted for 429 responses, to honor `Retry-After`. */
+  headers?: { get(name: string): string | null };
   json(): Promise<unknown>;
   text(): Promise<string>;
 }
@@ -194,6 +204,11 @@ export interface ChatMessage {
   content: string;
 }
 
+/** Injectable delay — tests supply a spy so the retry loop never actually waits. */
+export type SleepFn = (ms: number) => Promise<void>;
+
+const defaultSleep: SleepFn = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 export interface CallModelOptions {
   baseUrl: string;
   apiKey?: string | null;
@@ -201,24 +216,55 @@ export interface CallModelOptions {
   temperature: number;
   messages: ChatMessage[];
   maxTokens?: number;
-  /** Number of retries after the first attempt. Default 1 (i.e. up to 2 attempts total). */
+  /** Number of retries after the first attempt, for 5xx/network errors. Default 1 (i.e. up to 2 attempts total). */
   maxRetries?: number;
+  /** Cap on 429 retries, independent of `maxRetries`. Default `DEFAULT_MAX_429_RETRIES`. */
+  max429Retries?: number;
   fetchImpl?: FetchLike;
+  /** Injected delay for 429 backoff — tests supply a spy. Defaults to a real `setTimeout`-based wait. */
+  sleep?: SleepFn;
 }
 
 interface RawChatCompletionResponse {
   choices?: Array<{ message?: { content?: string } }>;
 }
 
-/** Tags whether a failed attempt is worth retrying (5xx/network) or not (4xx/malformed body). */
+/**
+ * Tags whether a failed attempt is worth retrying (5xx/network, or 429 with
+ * its own separate retry budget) or not (other 4xx / malformed body).
+ */
 class ModelCallError extends Error {
   constructor(
     message: string,
     public readonly retryable: boolean,
+    public readonly status?: number,
+    /** For a 429: how long to wait before retrying, in milliseconds. */
+    public readonly retryAfterMs?: number,
   ) {
     super(message);
     this.name = "ModelCallError";
   }
+}
+
+/**
+ * Resolve how long to wait before retrying a 429: the `Retry-After` header
+ * (seconds) wins, then a "Retry after Ns" hint in the response body, then a
+ * fixed default. `Retry-After` as an HTTP-date is not handled — falls
+ * through to the body hint / default in that case.
+ */
+function parseRetryAfterMs(response: MinimalFetchResponse, bodyText: string): number {
+  const header = response.headers?.get("Retry-After") ?? response.headers?.get("retry-after");
+  if (header) {
+    const seconds = Number(header);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return seconds * 1000;
+    }
+  }
+  const bodyMatch = bodyText.match(/retry[\s-]?after\s+(\d+(?:\.\d+)?)\s*s/i);
+  if (bodyMatch) {
+    return Number(bodyMatch[1]) * 1000;
+  }
+  return DEFAULT_429_BACKOFF_MS;
 }
 
 async function attemptModelCall(opts: CallModelOptions): Promise<{ content: string; raw: unknown }> {
@@ -251,9 +297,19 @@ async function attemptModelCall(opts: CallModelOptions): Promise<{ content: stri
 
   if (!response.ok) {
     const text = await response.text().catch(() => "");
+    const status = response.status;
+    if (status === 429) {
+      throw new ModelCallError(
+        `Decision-provenance runner: model call to ${endpoint} was rate-limited (HTTP 429): ${text.slice(0, 200)}`,
+        true,
+        status,
+        parseRetryAfterMs(response, text),
+      );
+    }
     throw new ModelCallError(
-      `Decision-provenance runner: model call to ${endpoint} failed with HTTP ${response.status}: ${text.slice(0, 200)}`,
-      response.status >= 500,
+      `Decision-provenance runner: model call to ${endpoint} failed with HTTP ${status}: ${text.slice(0, 200)}`,
+      status >= 500,
+      status,
     );
   }
 
@@ -272,28 +328,43 @@ async function attemptModelCall(opts: CallModelOptions): Promise<{ content: stri
 }
 
 /**
- * Call an OpenAI-compatible chat-completions endpoint with a basic retry:
- * one retry (by default) on a 5xx response or a network-level error. 4xx
- * responses and malformed-JSON bodies fail immediately — retrying a
- * deterministic client error, or a body that will not parse any differently,
- * wastes a call without plausibly fixing anything.
+ * Call an OpenAI-compatible chat-completions endpoint with retry:
+ *
+ * - **429** is retried on its own budget (`max429Retries`, default
+ *   `DEFAULT_MAX_429_RETRIES`), honoring `Retry-After` (header, then a body
+ *   hint, then a fixed default), capped at `MAX_429_WAIT_MS` per wait so a
+ *   run can never hang forever on a huge Retry-After value.
+ * - **5xx / network errors** get one retry by default (`maxRetries`), same
+ *   as before.
+ * - **Other 4xx responses and malformed-JSON bodies fail immediately** —
+ *   retrying a deterministic client error, or a body that will not parse any
+ *   differently, wastes a call without plausibly fixing anything.
  */
 export async function callModel(opts: CallModelOptions): Promise<{ content: string; raw: unknown }> {
   const maxAttempts = 1 + (opts.maxRetries ?? DEFAULT_MAX_RETRIES);
-  let lastError: unknown;
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+  const max429Retries = opts.max429Retries ?? DEFAULT_MAX_429_RETRIES;
+  const sleep = opts.sleep ?? defaultSleep;
+  let generalAttempts = 0;
+  let retries429 = 0;
+  for (;;) {
     try {
       return await attemptModelCall(opts);
     } catch (err) {
-      lastError = err;
+      if (err instanceof ModelCallError && err.status === 429) {
+        if (retries429 < max429Retries) {
+          retries429++;
+          const waitMs = Math.min(err.retryAfterMs ?? DEFAULT_429_BACKOFF_MS, MAX_429_WAIT_MS);
+          await sleep(waitMs);
+          continue;
+        }
+        throw err;
+      }
       const retryable = err instanceof ModelCallError ? err.retryable : false;
-      if (retryable && attempt < maxAttempts - 1) continue;
+      generalAttempts++;
+      if (retryable && generalAttempts < maxAttempts) continue;
       throw err;
     }
   }
-  // Unreachable in practice (the loop always either returns or throws), but
-  // keeps the function's return type honest for the type checker.
-  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
 // --- Chat DI point used by the eval orchestration (distinct from callModel's raw options,
@@ -307,8 +378,10 @@ export interface ChatRequest {
   baseUrl: string;
   apiKey?: string | null;
   maxRetries?: number;
+  max429Retries?: number;
   maxTokens?: number;
   fetchImpl?: FetchLike;
+  sleep?: SleepFn;
 }
 
 export type ChatFn = (req: ChatRequest) => Promise<{ content: string }>;
@@ -352,7 +425,15 @@ async function runOneCase(opts: RunOneCaseOptions): Promise<RunRecord> {
     errorMessage = err instanceof Error ? err.message : String(err);
   }
   const latencyMs = Math.round((performance.now() - start) * 100) / 100;
-  const gradeOutcome = grade(rawResponse, opts.probe.expected);
+  // A run whose call THREW (HTTP error after retries, network error) is
+  // "errored" infrastructure noise, never graded as a model response — grade()
+  // is only meaningful for a call that actually succeeded (HTTP 200).
+  // Conflating the two silently launders rate-limit/5xx failures into "blank"
+  // model behavior.
+  const gradeOutcome: GradeOutcome =
+    errorMessage !== undefined
+      ? { parsed_action: "INVALID", ternary_match: false, binary_match: false, errored: true }
+      : grade(rawResponse, opts.probe.expected);
 
   return {
     world_id: opts.world.id,
@@ -402,19 +483,25 @@ export function aggregateRuns(records: RunRecord[]): AggregateStats[] {
     let binaryHits = 0;
     let reopenCount = 0;
     let blankCount = 0;
+    let erroredCount = 0;
     for (const r of bucket) {
       verdictCounts[r.grade.parsed_action]++;
       if (r.grade.ternary_match) ternaryHits++;
       if (r.grade.binary_match) binaryHits++;
       if (r.grade.blank) blankCount++;
+      if (r.grade.errored) erroredCount++;
       if (r.grade.parsed_action !== "INVALID" && isReopenAction(r.grade.parsed_action)) {
         reopenCount++;
       }
     }
-    // verdictCounts.INVALID includes both blank and malformed responses (it
-    // buckets purely on parsed_action); invalid_count narrows to malformed
-    // only so blank and invalid are visibly distinct, non-overlapping signals.
-    const invalidCount = verdictCounts.INVALID - blankCount;
+    // verdictCounts.INVALID includes blank, errored, and malformed responses
+    // (it buckets purely on parsed_action); invalid_count narrows to
+    // malformed only so blank/errored/invalid are visibly distinct,
+    // non-overlapping signals.
+    const invalidCount = verdictCounts.INVALID - blankCount - erroredCount;
+    // Decisions can only come from runs whose call actually succeeded — an
+    // errored run is infrastructure noise, never a model decision.
+    const decidedCount = k - erroredCount;
 
     const stats: AggregateStats = {
       world_id: first.world_id,
@@ -432,11 +519,13 @@ export function aggregateRuns(records: RunRecord[]): AggregateStats[] {
       invalid_rate: invalidCount / k,
       blank_count: blankCount,
       blank_rate: blankCount / k,
+      errored_count: erroredCount,
+      errored_rate: erroredCount / k,
     };
     if (first.probe_kind === "perturbation") {
-      stats.should_flip_rate = binaryHits / k;
+      stats.should_flip_rate = decidedCount > 0 ? binaryHits / decidedCount : undefined;
     } else {
-      stats.false_flip_rate = reopenCount / k;
+      stats.false_flip_rate = decidedCount > 0 ? reopenCount / decidedCount : undefined;
     }
     result.push(stats);
   }
@@ -464,6 +553,8 @@ export interface WorldArmSummaryRow {
   invalid_count: number;
   /** Sum of blank_count across the (world, arm)'s probes — see AggregateStats.blank_count. */
   blank_count: number;
+  /** Sum of errored_count across the (world, arm)'s probes — see AggregateStats.errored_count. */
+  errored_count: number;
 }
 
 function mean(xs: number[]): number | null {
@@ -497,6 +588,7 @@ export function summarizeByWorldArm(aggregates: AggregateStats[]): WorldArmSumma
       ternary_agreement_rate: mean(bucket.map((a) => a.ternary_agreement_rate)) ?? 0,
       invalid_count: bucket.reduce((s, a) => s + a.invalid_count, 0),
       blank_count: bucket.reduce((s, a) => s + a.blank_count, 0),
+      errored_count: bucket.reduce((s, a) => s + a.errored_count, 0),
     });
   }
 
@@ -519,16 +611,53 @@ export function renderMarkdownSummary(rows: WorldArmSummaryRow[], meta: SummaryM
     `Model: \`${meta.model}\`  k=${meta.k}  temperature=${meta.temperature}\n` +
     `Corpus sha256: \`${meta.corpus_sha256}\`\n\n`;
   const tableHeader =
-    "| World | Arm | Should-flip (perturbation) | False-flip (stasis) | Binary agreement | Ternary agreement | Invalid | Blank |\n" +
-    "|---|---|---|---|---|---|---|---|\n";
+    "| World | Arm | Should-flip (perturbation) | False-flip (stasis) | Binary agreement | Ternary agreement | Invalid | Blank | Errored |\n" +
+    "|---|---|---|---|---|---|---|---|---|\n";
   const tableRows = rows
     .map(
       (r) =>
         `| ${r.world_id} | ${r.arm} | ${pct(r.should_flip_rate)} | ${pct(r.false_flip_rate)} | ` +
-        `${pct(r.binary_agreement_rate)} | ${pct(r.ternary_agreement_rate)} | ${r.invalid_count} | ${r.blank_count} |`,
+        `${pct(r.binary_agreement_rate)} | ${pct(r.ternary_agreement_rate)} | ${r.invalid_count} | ${r.blank_count} | ${r.errored_count} |`,
     )
     .join("\n");
   return `${header}${tableHeader}${tableRows}\n`;
+}
+
+/**
+ * Loud, human-facing text for a run whose errored rate exceeds the warning
+ * threshold — used for both the stderr banner and the markdown prefix. The
+ * caller decides where/whether to emit it (`maybePrependHighErrorRateBanner`,
+ * and the stderr banner in `runDecisionProvenanceEval`).
+ */
+export function highErrorRateWarningText(erroredRate: number, threshold: number): string {
+  const pct = (erroredRate * 100).toFixed(1);
+  const thresholdPct = (threshold * 100).toFixed(0);
+  return (
+    `HIGH ERROR RATE: ${pct}% of runs errored (rate-limited/failed) — results are NOT trustworthy ` +
+    `(threshold: ${thresholdPct}%). Re-run once the endpoint is healthy before drawing conclusions.`
+  );
+}
+
+/** Fraction of `records` whose model call itself failed (see `GradeOutcome.errored`). */
+export function computeErroredRate(records: RunRecord[]): number {
+  if (records.length === 0) return 0;
+  const erroredCount = records.filter((r) => r.grade.errored).length;
+  return erroredCount / records.length;
+}
+
+/**
+ * Prepend a loud "⚠ HIGH ERROR RATE" banner to `markdown` when `erroredRate`
+ * exceeds `threshold`. Never silently produces a normal-looking table when
+ * infrastructure failures (rate limits, 5xx, network) dominated the run.
+ */
+export function maybePrependHighErrorRateBanner(
+  markdown: string,
+  erroredRate: number,
+  threshold: number = DEFAULT_ERRORED_RATE_WARN_THRESHOLD,
+): string {
+  if (erroredRate <= threshold) return markdown;
+  const warning = highErrorRateWarningText(erroredRate, threshold);
+  return `> ⚠ **${warning}**\n\n${markdown}`;
 }
 
 // --- End-to-end orchestration ---
@@ -548,6 +677,11 @@ export interface DecisionProvenanceRunOptions {
   chat?: ChatFn;
   /** Only consulted when `chat` is not supplied — passed through to callModel's fetch. */
   fetchImpl?: FetchLike;
+  /**
+   * Errored-rate threshold above which the run is flagged as untrustworthy
+   * (loud stderr banner + markdown prefix). Default `DEFAULT_ERRORED_RATE_WARN_THRESHOLD`.
+   */
+  erroredRateWarnThreshold?: number;
 }
 
 export interface DecisionProvenanceRunOutcome {
@@ -555,6 +689,8 @@ export interface DecisionProvenanceRunOutcome {
   aggregates: AggregateStats[];
   corpusPath: string;
   corpusSha256: string;
+  /** Fraction of records whose model call itself failed — see `computeErroredRate`. */
+  erroredRate: number;
   paths: { jsonl: string; aggregateJson: string; markdown: string };
 }
 
@@ -629,12 +765,22 @@ export async function runDecisionProvenanceEval(
   writeFileSync(aggregateJsonPath, `${JSON.stringify({ meta, aggregates }, null, 2)}\n`);
 
   const rows = summarizeByWorldArm(aggregates);
-  const markdown = renderMarkdownSummary(rows, {
+  let markdown = renderMarkdownSummary(rows, {
     model: opts.model,
     k: opts.k,
     temperature,
     corpus_sha256: sha256,
   });
+
+  const erroredRateWarnThreshold = opts.erroredRateWarnThreshold ?? DEFAULT_ERRORED_RATE_WARN_THRESHOLD;
+  const erroredRate = computeErroredRate(records);
+  if (erroredRate > erroredRateWarnThreshold) {
+    const warning = highErrorRateWarningText(erroredRate, erroredRateWarnThreshold);
+    // Loud, impossible-to-miss stderr banner — never let a high-error-rate run
+    // produce output that silently looks like a normal, trustworthy summary.
+    console.error(`\n${"!".repeat(72)}\n⚠ ${warning}\n${"!".repeat(72)}\n`);
+    markdown = maybePrependHighErrorRateBanner(markdown, erroredRate, erroredRateWarnThreshold);
+  }
   writeFileSync(markdownPath, markdown);
 
   return {
@@ -642,6 +788,7 @@ export async function runDecisionProvenanceEval(
     aggregates,
     corpusPath: opts.corpusPath,
     corpusSha256: sha256,
+    erroredRate,
     paths: { jsonl: jsonlPath, aggregateJson: aggregateJsonPath, markdown: markdownPath },
   };
 }

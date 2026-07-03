@@ -11,14 +11,23 @@ import {
   runDecisionProvenanceEval,
   resolveBaseUrl,
   resolveModel,
+  DEFAULT_MAX_429_RETRIES,
   type MinimalFetchResponse,
 } from "../benchmark/decision-provenance/runner.js";
 import type { RunRecord, World } from "../benchmark/decision-provenance/types.js";
 
-function jsonResponse(body: unknown, status = 200): MinimalFetchResponse {
+function jsonResponse(
+  body: unknown,
+  status = 200,
+  headers?: Record<string, string>,
+): MinimalFetchResponse {
+  const lower = headers
+    ? new Map(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]))
+    : undefined;
   return {
     ok: status >= 200 && status < 300,
     status,
+    headers: lower ? { get: (name: string) => lower.get(name.toLowerCase()) ?? null } : undefined,
     json: () => Promise.resolve(body),
     text: () => Promise.resolve(JSON.stringify(body)),
   };
@@ -219,6 +228,68 @@ describe("callModel retry behavior (dependency-injected fetch, no network)", () 
     ).rejects.toThrow(/503/);
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
+
+  it("retries a 429, honoring the Retry-After header (via injected sleep), and succeeds", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ error: "rate limited" }, 429, { "Retry-After": "1" }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          choices: [{ message: { content: 'VERDICT: {"action":"HOLD","reason":"ok"}' } }],
+        }),
+      );
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    const result = await callModel({
+      baseUrl: "http://example.test/v1",
+      model: "m",
+      temperature: 0.7,
+      messages: [{ role: "user", content: "hi" }],
+      fetchImpl,
+      sleep,
+    });
+    expect(result.content).toContain("HOLD");
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledTimes(1);
+    // Retry-After is in seconds; the sleep seam must be called with milliseconds.
+    expect(sleep).toHaveBeenCalledWith(1000);
+  });
+
+  it("exhausts the 429 retry cap and throws when the rate limit never clears", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(jsonResponse({ error: "rate limited" }, 429, { "Retry-After": "0" }));
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    await expect(
+      callModel({
+        baseUrl: "http://example.test/v1",
+        model: "m",
+        temperature: 0.7,
+        messages: [{ role: "user", content: "hi" }],
+        fetchImpl,
+        sleep,
+      }),
+    ).rejects.toThrow(/429/);
+    // 1 initial attempt + DEFAULT_MAX_429_RETRIES retries.
+    expect(fetchImpl).toHaveBeenCalledTimes(1 + DEFAULT_MAX_429_RETRIES);
+    expect(sleep).toHaveBeenCalledTimes(DEFAULT_MAX_429_RETRIES);
+  });
+
+  it("does not retry a non-429 4xx (e.g. 403) — only 429 gets the rate-limit treatment", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ error: "forbidden" }, 403));
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    await expect(
+      callModel({
+        baseUrl: "http://example.test/v1",
+        model: "m",
+        temperature: 0.7,
+        messages: [{ role: "user", content: "hi" }],
+        fetchImpl,
+        sleep,
+      }),
+    ).rejects.toThrow(/403/);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
 });
 
 function minimalWorld(id: string): World {
@@ -409,6 +480,115 @@ describe("aggregateRuns", () => {
     expect(aggregates[0].invalid_count).toBe(1);
     expect(aggregates[0].invalid_rate).toBe(1);
   });
+
+  it("classifies errored runs separately from blank and malformed (mutually exclusive counts)", () => {
+    const records: RunRecord[] = [
+      {
+        world_id: "w1",
+        domain: "engineering",
+        arm: "A",
+        probe_id: "w1-p",
+        probe_kind: "perturbation",
+        probe_attacks: "rejected-branch",
+        expected: "REOPEN_SWITCH",
+        run_index: 0,
+        model: "m",
+        temperature: 0.7,
+        ts: "2026-01-01T00:00:00.000Z",
+        latency_ms: 1,
+        raw_response: "",
+        error: "Decision-provenance runner: model call failed with HTTP 429: rate limited",
+        grade: { parsed_action: "INVALID", ternary_match: false, binary_match: false, errored: true },
+      },
+      {
+        world_id: "w1",
+        domain: "engineering",
+        arm: "A",
+        probe_id: "w1-p",
+        probe_kind: "perturbation",
+        probe_attacks: "rejected-branch",
+        expected: "REOPEN_SWITCH",
+        run_index: 1,
+        model: "m",
+        temperature: 0.7,
+        ts: "2026-01-01T00:00:00.000Z",
+        latency_ms: 1,
+        raw_response: "",
+        grade: { parsed_action: "INVALID", ternary_match: false, binary_match: false, blank: true },
+      },
+      {
+        world_id: "w1",
+        domain: "engineering",
+        arm: "A",
+        probe_id: "w1-p",
+        probe_kind: "perturbation",
+        probe_attacks: "rejected-branch",
+        expected: "REOPEN_SWITCH",
+        run_index: 2,
+        model: "m",
+        temperature: 0.7,
+        ts: "2026-01-01T00:00:00.000Z",
+        latency_ms: 1,
+        raw_response: "no verdict",
+        grade: { parsed_action: "INVALID", ternary_match: false, binary_match: false },
+      },
+      {
+        world_id: "w1",
+        domain: "engineering",
+        arm: "A",
+        probe_id: "w1-p",
+        probe_kind: "perturbation",
+        probe_attacks: "rejected-branch",
+        expected: "REOPEN_SWITCH",
+        run_index: 3,
+        model: "m",
+        temperature: 0.7,
+        ts: "2026-01-01T00:00:00.000Z",
+        latency_ms: 1,
+        raw_response: 'VERDICT: {"action":"REOPEN_SWITCH","reason":"ok"}',
+        grade: { parsed_action: "REOPEN_SWITCH", ternary_match: true, binary_match: true },
+      },
+    ];
+    const aggregates = aggregateRuns(records);
+    const stats = aggregates[0];
+    expect(stats.k).toBe(4);
+    expect(stats.errored_count).toBe(1);
+    expect(stats.errored_rate).toBeCloseTo(0.25, 6);
+    expect(stats.blank_count).toBe(1);
+    expect(stats.invalid_count).toBe(1);
+    // should_flip_rate must be computed over DECIDED runs only (k - errored = 3),
+    // never treating the errored run as a decision.
+    expect(stats.should_flip_rate).toBeCloseTo(1 / 3, 6);
+  });
+
+  it("reports errored_rate=1 and no decisions for an all-429 cell", () => {
+    const records: RunRecord[] = Array.from({ length: 3 }, (_, i) => ({
+      world_id: "w1",
+      domain: "engineering",
+      arm: "A",
+      probe_id: "w1-s",
+      probe_kind: "stasis" as const,
+      probe_attacks: "none" as const,
+      expected: "HOLD" as const,
+      run_index: i,
+      model: "m",
+      temperature: 0.7,
+      ts: "2026-01-01T00:00:00.000Z",
+      latency_ms: 1,
+      raw_response: "",
+      error: "Decision-provenance runner: model call failed with HTTP 429: rate limited",
+      grade: { parsed_action: "INVALID" as const, ternary_match: false, binary_match: false, errored: true },
+    }));
+    const aggregates = aggregateRuns(records);
+    const stats = aggregates[0];
+    expect(stats.errored_count).toBe(3);
+    expect(stats.errored_rate).toBe(1);
+    expect(stats.blank_count).toBe(0);
+    expect(stats.invalid_count).toBe(0);
+    // No decision was ever made in this cell — false_flip_rate must not report 0
+    // (which would falsely read as "correctly held").
+    expect(stats.false_flip_rate).toBeUndefined();
+  });
 });
 
 describe("summarizeByWorldArm + renderMarkdownSummary", () => {
@@ -447,6 +627,7 @@ describe("summarizeByWorldArm + renderMarkdownSummary", () => {
     expect(md).toContain("test-model");
     expect(md).toContain("| World | Arm |");
     expect(md).toContain("Blank");
+    expect(md).toContain("Errored");
     expect(md).toContain("w1");
   });
 });
@@ -521,6 +702,107 @@ describe("runDecisionProvenanceEval (fully injected chat, no network)", () => {
       const armAPrompts = seenPrompts;
       expect(armAPrompts.length).toBeGreaterThan(0);
       expect(armAPrompts.some((p) => p.includes("40k msgs/sec"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("classifies a run whose chat call throws as errored — not blank, not malformed — and excludes it from decisions", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "decision-provenance-run-"));
+    try {
+      const corpusPath = join(__dirname, "..", "benchmark", "decision-provenance", "corpus", "toy.json");
+      const chat = vi
+        .fn()
+        .mockRejectedValue(
+          new Error("Decision-provenance runner: model call failed with HTTP 429: rate limited"),
+        );
+
+      const outcome = await runDecisionProvenanceEval({
+        corpusPath,
+        arms: ["A"],
+        k: 1,
+        outDir: dir,
+        model: "m",
+        chat,
+      });
+
+      expect(outcome.records.length).toBeGreaterThan(0);
+      expect(outcome.records.every((r) => r.error !== undefined)).toBe(true);
+      expect(outcome.records.every((r) => r.grade.errored === true)).toBe(true);
+      expect(outcome.records.every((r) => r.grade.blank !== true)).toBe(true);
+      expect(outcome.records.every((r) => r.grade.parsed_action === "INVALID")).toBe(true);
+
+      for (const agg of outcome.aggregates) {
+        expect(agg.errored_count).toBe(agg.k);
+        expect(agg.blank_count).toBe(0);
+        expect(agg.invalid_count).toBe(0);
+        // No decision was possible in an all-errored cell — should_flip/false_flip
+        // must never read as 0 (which would misreport "correctly held/flipped").
+        if (agg.should_flip_rate !== undefined) {
+          expect(agg.should_flip_rate).toBeUndefined();
+        }
+        if (agg.false_flip_rate !== undefined) {
+          expect(agg.false_flip_rate).toBeUndefined();
+        }
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("prepends a high-error-rate warning banner to the markdown and logs to stderr when errored_rate exceeds the threshold", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "decision-provenance-run-"));
+    try {
+      const corpusPath = join(__dirname, "..", "benchmark", "decision-provenance", "corpus", "toy.json");
+      let call = 0;
+      const chat = vi.fn().mockImplementation(async () => {
+        call++;
+        if (call % 2 === 0) {
+          return { content: 'VERDICT: {"action":"HOLD","reason":"ok"}' };
+        }
+        throw new Error("Decision-provenance runner: model call failed with HTTP 429: rate limited");
+      });
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+      const outcome = await runDecisionProvenanceEval({
+        corpusPath,
+        arms: ["A"],
+        k: 2,
+        outDir: dir,
+        model: "m",
+        chat,
+      });
+
+      const markdown = readFileSync(outcome.paths.markdown, "utf-8");
+      expect(markdown).toMatch(/HIGH ERROR RATE/i);
+      expect(markdown).toMatch(/NOT trustworthy/i);
+      expect(errorSpy).toHaveBeenCalled();
+      const loggedText = errorSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(loggedText).toMatch(/HIGH ERROR RATE/i);
+
+      errorSpy.mockRestore();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not add a high-error-rate banner when errored_rate is at/under the threshold", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "decision-provenance-run-"));
+    try {
+      const corpusPath = join(__dirname, "..", "benchmark", "decision-provenance", "corpus", "toy.json");
+      const chat = vi.fn().mockResolvedValue({ content: 'VERDICT: {"action":"HOLD","reason":"ok"}' });
+
+      const outcome = await runDecisionProvenanceEval({
+        corpusPath,
+        arms: ["A"],
+        k: 2,
+        outDir: dir,
+        model: "m",
+        chat,
+      });
+
+      const markdown = readFileSync(outcome.paths.markdown, "utf-8");
+      expect(markdown).not.toMatch(/HIGH ERROR RATE/i);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

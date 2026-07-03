@@ -106,9 +106,21 @@ Per (world × arm × probe), aggregated over `k` runs (`runner.ts`):
 - **binary / ternary agreement rate** — overall correctness at each
   granularity.
 - **invalid rate** — fraction of runs whose response had no parseable
-  `VERDICT:` line. A high invalid rate means the model isn't following the
-  output contract, not that it's making bad decisions — inspect before
-  trusting the flip rates.
+  `VERDICT:` line (present but malformed). A high invalid rate means the
+  model isn't following the output contract, not that it's making bad
+  decisions — inspect before trusting the flip rates.
+- **blank rate** — fraction of runs whose response came back HTTP 200 but
+  empty/whitespace-only (e.g. a thinking model starved by a too-tight
+  `max_tokens`). Distinct from invalid: the call succeeded, the model just
+  produced nothing.
+- **errored rate** — fraction of runs whose *call itself* failed (HTTP error
+  after exhausting retries, or a network error) — infrastructure noise, not a
+  model decision. Mutually exclusive with blank/invalid. Should-flip and
+  false-flip rates are computed over decided runs only (`k - errored`) and
+  are `undefined` (not `0`) when a cell has no decisions at all. If the
+  overall errored rate exceeds a threshold (default 20%), the runner prints a
+  loud stderr banner and prepends a warning to the markdown summary — a high
+  errored rate means the results are not trustworthy, full stop.
 
 Two metric extensions are motivated by the #186 prior-art spike (see
 **Prior-art grounding** below) and are tracked as Follow-ups — not yet in
@@ -186,14 +198,25 @@ by default), `DECISION_PROVENANCE_MODEL` (required — no default, since silentl
 picking a model would make flip-rate numbers across runs incomparable),
 `OPENROUTER_API_KEY` (optional bearer token, omitted entirely when unset).
 
-Requests are sequential with a basic retry (one retry by default) on a 5xx
-response or a network-level error; 4xx responses and malformed-JSON bodies
-fail immediately. No concurrency in v1 — see Follow-ups.
+Requests are sequential with retry: a 5xx response or a network-level error
+gets one retry by default (`--max-retries`); a **429** gets its own separate
+retry budget (up to 4 attempts), honoring the `Retry-After` header (falling
+back to a body hint, then a fixed default), capped at 30s per wait so a run
+can't hang forever. Other 4xx responses and malformed-JSON bodies fail
+immediately — no concurrency in v1 — see Follow-ups.
+
+A run whose call ultimately fails (rate-limited past its retry budget, 5xx,
+network) is recorded as `error` on the `RunRecord` and graded as **errored**
+— never as a blank or malformed model response, and never counted as a
+decision in should-flip/false-flip rates (see Metrics above).
 
 Output per run: a timestamped JSONL of raw `RunRecord`s, an aggregate JSON
 (`AggregateStats[]` plus a `meta` block with model/temperature/k/corpus
 lineage), and a compact markdown summary table (one row per world × arm:
-should-flip rate, false-flip rate, binary/ternary agreement, invalid count).
+should-flip rate, false-flip rate, binary/ternary agreement, invalid count,
+blank count, errored count). If the overall errored rate is high, the
+markdown is prefixed with a loud warning banner and the same warning is
+printed to stderr.
 
 ## Prior-art grounding & positioning (2026-07-02 spike)
 

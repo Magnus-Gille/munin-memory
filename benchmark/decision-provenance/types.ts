@@ -145,6 +145,20 @@ export interface GradeOutcome {
    * (e.g. in tests) continue to compile without change.
    */
   blank?: boolean;
+  /**
+   * True when the request itself failed — HTTP error (e.g. a 429 that
+   * exhausted its retry budget, or a non-retryable 4xx/5xx), or a network
+   * error — so the model was never successfully queried for this run. Set
+   * directly by the runner (never by `grade()`, which is only ever called on
+   * a response that came back with HTTP 200); mutually exclusive with
+   * `blank` and with "malformed" (a present-but-unparseable response).
+   * `parsed_action` is always `"INVALID"` and no match is ever credited.
+   * Distinguishing this from `blank` matters: an errored run is an
+   * infrastructure failure (rate limit, network, 5xx), not a signal about
+   * model behavior — counting it as a decision (or as the model "blanking
+   * out") silently launders infrastructure noise into the results table.
+   */
+  errored?: boolean;
 }
 
 /** One run: one (world, arm, probe, k-index) call against the model under test. */
@@ -188,32 +202,47 @@ export interface AggregateStats {
   /** Fraction of the k runs whose binary reopen/hold class matches `expected`'s class. */
   binary_agreement_rate: number;
   /**
-   * For perturbation probes only: fraction of runs that correctly reopened
-   * (binary match, and expected is a reopen action). Undefined for stasis
-   * probes (there is nothing to "should-flip" on).
+   * For perturbation probes only: fraction of DECIDED runs (k minus
+   * `errored_count`) that correctly reopened (binary match, and expected is
+   * a reopen action). Undefined for stasis probes (there is nothing to
+   * "should-flip" on), and also undefined when every run in the cell errored
+   * (no decisions were made — reporting 0 would misleadingly read as "the
+   * model correctly held").
    */
   should_flip_rate?: number;
   /**
-   * For stasis probes only: fraction of runs that incorrectly reopened
-   * (parsed action is REOPEN_SWITCH or REOPEN_HOLD when expected is HOLD).
-   * Undefined for perturbation probes.
+   * For stasis probes only: fraction of DECIDED runs (k minus
+   * `errored_count`) that incorrectly reopened (parsed action is
+   * REOPEN_SWITCH or REOPEN_HOLD when expected is HOLD). Undefined for
+   * perturbation probes, and also undefined when every run in the cell
+   * errored.
    */
   false_flip_rate?: number;
   /**
    * Count/rate of runs whose response was present but did not parse as a
    * valid VERDICT (malformed only — excludes blank/empty responses, which
-   * are counted separately in `blank_count`/`blank_rate`). Keeping the two
-   * apart matters: a blank response is starvation (e.g. `max_tokens` too
-   * tight for a thinking model on the longest prompts), not "the model tried
-   * and failed to follow the output contract" — conflating them silently
-   * zeroed whole (world, arm) cells and made a starved run indistinguishable
-   * from a genuinely-decided-but-malformed one.
+   * are counted separately in `blank_count`/`blank_rate`, and excludes
+   * errored requests, counted in `errored_count`/`errored_rate`). Keeping
+   * these apart matters: a blank response is starvation (e.g. `max_tokens`
+   * too tight for a thinking model on the longest prompts), not "the model
+   * tried and failed to follow the output contract" — conflating them
+   * silently zeroed whole (world, arm) cells and made a starved run
+   * indistinguishable from a genuinely-decided-but-malformed one. An errored
+   * request is an infrastructure failure (rate limit, network, 5xx) — it
+   * measures nothing about the model at all.
    */
   invalid_count: number;
   invalid_rate: number;
   /** Count/rate of runs whose raw response was empty or whitespace-only. */
   blank_count: number;
   blank_rate: number;
+  /**
+   * Count/rate of runs whose request itself failed (HTTP error after
+   * exhausting retries, or a network error) — see `GradeOutcome.errored`.
+   * Mutually exclusive with `blank_count` and `invalid_count`.
+   */
+  errored_count: number;
+  errored_rate: number;
 }
 
 /** True when a verdict action counts as "the agent chose to reopen". */
