@@ -1,5 +1,5 @@
 /**
- * Domain types for the memory-evolvability outcome-eval benchmark layer
+ * Domain types for the decision-provenance outcome-eval benchmark layer
  * (issue #186).
  *
  * Concept: measures whether an agent that holds a decision's PATH (rationale
@@ -10,7 +10,7 @@
  * NOT (`stasis`) trigger reconsideration.
  *
  * This is a separate schema family from `BenchmarkReport` (IR metrics) and
- * `AnswerQualityReport` (RAG answer correctness): evolvability grades a
+ * `AnswerQualityReport` (RAG answer correctness): decision-provenance grades a
  * decision-revision *action*, not a retrieval rank or a factual answer.
  */
 

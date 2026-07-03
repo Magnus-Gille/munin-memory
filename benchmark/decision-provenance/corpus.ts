@@ -1,5 +1,5 @@
 /**
- * Load and validate an evolvability corpus JSON file.
+ * Load and validate a decision-provenance corpus JSON file.
  *
  * Hand-rolled validation (no external schema-validator dependency, per repo
  * convention of minimal deps) that produces clear, actionable error messages
@@ -40,7 +40,7 @@ function isStringArray(v: unknown): v is string[] {
 
 /** Fail with a message that names both the failing field and the world it came from. */
 function fail(worldLabel: string, message: string): never {
-  throw new Error(`Evolvability corpus: World ${worldLabel}: ${message}`);
+  throw new Error(`Decision-provenance corpus: World ${worldLabel}: ${message}`);
 }
 
 function validateRejectedOption(
@@ -76,7 +76,7 @@ function validateDecision(raw: unknown, worldLabel: string): World["decision"] {
   if (!Array.isArray(raw.rejected) || raw.rejected.length === 0) {
     fail(
       worldLabel,
-      `decision.rejected must be a non-empty array — evolvability probes need at least one ` +
+      `decision.rejected must be a non-empty array — decision-provenance probes need at least one ` +
         `rejected alternative to attack. Got: ${Array.isArray(raw.rejected) ? "empty array" : typeof raw.rejected}.`,
     );
   }
@@ -242,12 +242,12 @@ function validateWorld(raw: unknown, index: number): World {
 export function validateCorpus(data: unknown): World[] {
   if (!Array.isArray(data)) {
     throw new Error(
-      `Evolvability corpus: top-level value must be an array of World objects ` +
+      `Decision-provenance corpus: top-level value must be an array of World objects ` +
         `(got ${isPlainObject(data) ? "object" : typeof data}).`,
     );
   }
   if (data.length === 0) {
-    throw new Error(`Evolvability corpus: must contain at least one World.`);
+    throw new Error(`Decision-provenance corpus: must contain at least one World.`);
   }
 
   const worlds = data.map((raw, i) => validateWorld(raw, i));
@@ -257,7 +257,7 @@ export function validateCorpus(data: unknown): World[] {
     const firstIndex = seen.get(w.id);
     if (firstIndex !== undefined) {
       throw new Error(
-        `Evolvability corpus: duplicate world id "${w.id}" at indices ${firstIndex} and ${i} — ` +
+        `Decision-provenance corpus: duplicate world id "${w.id}" at indices ${firstIndex} and ${i} — ` +
           `world ids must be unique.`,
       );
     }
@@ -278,7 +278,7 @@ export function loadCorpus(path: string): CorpusLoadResult {
     bytes = readFileSync(path);
   } catch (err) {
     throw new Error(
-      `Evolvability corpus: could not read ${path}: ${err instanceof Error ? err.message : String(err)}`,
+      `Decision-provenance corpus: could not read ${path}: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
 
@@ -287,7 +287,7 @@ export function loadCorpus(path: string): CorpusLoadResult {
     parsed = JSON.parse(bytes.toString("utf-8"));
   } catch (err) {
     throw new Error(
-      `Evolvability corpus: ${path} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+      `Decision-provenance corpus: ${path} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
 

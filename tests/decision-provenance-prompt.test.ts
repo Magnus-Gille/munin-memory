@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildAgentPrompt, VERDICT_MARKER } from "../benchmark/evolvability/prompt.js";
+import { buildAgentPrompt, VERDICT_MARKER } from "../benchmark/decision-provenance/prompt.js";
 
 describe("buildAgentPrompt", () => {
   const prompt = buildAgentPrompt("<memory payload>", "<probe text>");

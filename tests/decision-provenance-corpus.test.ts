@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { validateCorpus, loadCorpus } from "../benchmark/evolvability/corpus.js";
+import { validateCorpus, loadCorpus } from "../benchmark/decision-provenance/corpus.js";
 
 function validWorld(id = "w1") {
   return {
@@ -123,7 +123,7 @@ describe("validateCorpus", () => {
 
 describe("loadCorpus", () => {
   it("loads and validates a corpus JSON file from disk", () => {
-    const dir = mkdtempSync(join(tmpdir(), "evolvability-corpus-"));
+    const dir = mkdtempSync(join(tmpdir(), "decision-provenance-corpus-"));
     try {
       const path = join(dir, "corpus.json");
       writeFileSync(path, JSON.stringify([validWorld()]));
@@ -137,7 +137,7 @@ describe("loadCorpus", () => {
   });
 
   it("throws a clear error on malformed JSON", () => {
-    const dir = mkdtempSync(join(tmpdir(), "evolvability-corpus-"));
+    const dir = mkdtempSync(join(tmpdir(), "decision-provenance-corpus-"));
     try {
       const path = join(dir, "corpus.json");
       writeFileSync(path, "{ not valid json");
@@ -148,7 +148,7 @@ describe("loadCorpus", () => {
   });
 
   it("loads the committed toy corpus without error", () => {
-    const result = loadCorpus(join(__dirname, "..", "benchmark", "evolvability", "corpus", "toy.json"));
+    const result = loadCorpus(join(__dirname, "..", "benchmark", "decision-provenance", "corpus", "toy.json"));
     expect(result.worlds.length).toBeGreaterThanOrEqual(2);
   });
 });

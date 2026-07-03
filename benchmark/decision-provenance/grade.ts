@@ -4,7 +4,7 @@
  * Parser-based, not LLM-judge: the output contract (`VERDICT: {...}` as the
  * final line) is strict enough that a hand-rolled parser is both cheaper and
  * more auditable than an LLM judge for the primary metric. See
- * benchmark/evolvability/README.md for the rationale.
+ * benchmark/decision-provenance/README.md for the rationale.
  */
 
 import type { VerdictAction, GradeOutcome } from "./types.js";

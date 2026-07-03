@@ -119,13 +119,13 @@ npm run benchmark:locomo:dialog:hybrid   # dialog + hybrid
 
 `benchmark:fetch:locomo` is a prerequisite the combined scripts already run.
 
-## Memory Evolvability (outcome eval — #186)
+## Decision-Provenance Value (outcome eval — #186)
 
 A separate benchmark layer from the R@k/nDCG/MRR retrieval-quality tables
 above: instead of "did the right content come back", it asks "does an agent
 holding the decision's PATH (rationale + rejected alternatives) revise a
 decision correctly when the world changes, versus an agent holding only the
-DESTINATION (what was chosen)". See `evolvability/README.md` for the full
+DESTINATION (what was chosen)". See `decision-provenance/README.md` for the full
 design (3-arm ablation, perturbation/stasis probes, should-flip / false-flip
 metrics, parser-based grading).
 
@@ -140,7 +140,7 @@ metrics, parser-based grading).
 
 ### Toy-corpus scaffold (v1)
 
-`evolvability/corpus/toy.json`, 2 invented worlds (message-queue library
+`decision-provenance/corpus/toy.json`, 2 invented worlds (message-queue library
 choice; sensor-vendor choice), 4 probes each (2 perturbation: one attacking
 rationale, one attacking a rejected branch; 2 stasis controls). No live-model
 numbers yet — this priority is the harness itself (`arms.ts`, `grade.ts`,
@@ -148,7 +148,7 @@ numbers yet — this priority is the harness itself (`arms.ts`, `grade.ts`,
 against a real model with:
 
 ```bash
-EVOLVABILITY_MODEL=<model> npx tsx benchmark/evolvability/runner.ts \
-  --corpus benchmark/evolvability/corpus/toy.json --arms A,B,C --k 5 \
-  --out benchmark/reports/evolvability
+DECISION_PROVENANCE_MODEL=<model> npx tsx benchmark/decision-provenance/runner.ts \
+  --corpus benchmark/decision-provenance/corpus/toy.json --arms A,B,C --k 5 \
+  --out benchmark/reports/decision-provenance
 ```

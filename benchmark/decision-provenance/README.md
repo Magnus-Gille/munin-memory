@@ -1,4 +1,4 @@
-# Memory Evolvability — Outcome Eval (#186)
+# Decision-Provenance Value — Outcome Eval (#186)
 
 This is a separate benchmark layer from the retrieval-quality harness
 (`benchmark/` R@k / nDCG / MRR, `benchmark/ci-gate.ts`) and from the RAG
@@ -155,11 +155,11 @@ live Munin instance under test.
 
 ```bash
 # Smoke run against the toy corpus, all three arms, k=5 (defaults)
-EVOLVABILITY_MODEL=some-model \
-  npx tsx benchmark/evolvability/runner.ts \
-  --corpus benchmark/evolvability/corpus/toy.json \
+DECISION_PROVENANCE_MODEL=some-model \
+  npx tsx benchmark/decision-provenance/runner.ts \
+  --corpus benchmark/decision-provenance/corpus/toy.json \
   --arms A,B,C --k 5 \
-  --out benchmark/reports/evolvability
+  --out benchmark/reports/decision-provenance
   # ^ benchmark/reports/ is already gitignored — reuse it rather than adding
   #   a new ignore rule for this layer specifically.
 
@@ -167,22 +167,22 @@ EVOLVABILITY_MODEL=some-model \
 # global instructions for auth/base-URL conventions; this eval defaults to
 # the M5 loopback endpoint already):
 MUNIN_LLM_BASE_URL=http://127.0.0.1:8091/v1 \
-EVOLVABILITY_MODEL=qwen3-coder-next-80b \
-  npx tsx benchmark/evolvability/runner.ts \
-  --corpus benchmark/evolvability/corpus/toy.json \
+DECISION_PROVENANCE_MODEL=qwen3-coder-next-80b \
+  npx tsx benchmark/decision-provenance/runner.ts \
+  --corpus benchmark/decision-provenance/corpus/toy.json \
   --arms A,B,C --k 10 \
-  --out benchmark/reports/evolvability
+  --out benchmark/reports/decision-provenance
 ```
 
 Flags: `--corpus <file>` (default: the toy corpus), `--arms A,B,C` (default:
 all three), `--k <n>` (default: 5), `--out <dir>` (**required**), `--model
-<name>` (overrides `EVOLVABILITY_MODEL`), `--temperature <n>` (default 0.7),
+<name>` (overrides `DECISION_PROVENANCE_MODEL`), `--temperature <n>` (default 0.7),
 `--max-retries <n>` (default 1).
 
 Env: `MUNIN_LLM_BASE_URL` (default `http://127.0.0.1:8091/v1` — **note this
 differs from the shared `src/internal/openrouter.ts` client's default**,
 which points at the OpenRouter API; this eval is built to run local sweeps
-by default), `EVOLVABILITY_MODEL` (required — no default, since silently
+by default), `DECISION_PROVENANCE_MODEL` (required — no default, since silently
 picking a model would make flip-rate numbers across runs incomparable),
 `OPENROUTER_API_KEY` (optional bearer token, omitted entirely when unset).
 

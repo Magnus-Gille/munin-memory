@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseVerdict, grade } from "../benchmark/evolvability/grade.js";
+import { parseVerdict, grade } from "../benchmark/decision-provenance/grade.js";
 
 describe("parseVerdict", () => {
   it("parses a clean VERDICT line", () => {

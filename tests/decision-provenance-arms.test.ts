@@ -3,8 +3,8 @@ import {
   buildArmPayload,
   armBPathPayload,
   extractDistinctiveTokens,
-} from "../benchmark/evolvability/arms.js";
-import type { World } from "../benchmark/evolvability/types.js";
+} from "../benchmark/decision-provenance/arms.js";
+import type { World } from "../benchmark/decision-provenance/types.js";
 
 function makeWorld(overrides: Partial<World> = {}): World {
   return {

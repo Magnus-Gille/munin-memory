@@ -8,12 +8,12 @@ import {
   aggregateRuns,
   summarizeByWorldArm,
   renderMarkdownSummary,
-  runEvolvabilityEval,
+  runDecisionProvenanceEval,
   resolveBaseUrl,
   resolveModel,
   type MinimalFetchResponse,
-} from "../benchmark/evolvability/runner.js";
-import type { RunRecord, World } from "../benchmark/evolvability/types.js";
+} from "../benchmark/decision-provenance/runner.js";
+import type { RunRecord, World } from "../benchmark/decision-provenance/types.js";
 
 function jsonResponse(body: unknown, status = 200): MinimalFetchResponse {
   return {
@@ -76,16 +76,16 @@ describe("resolveBaseUrl", () => {
 });
 
 describe("resolveModel", () => {
-  it("requires EVOLVABILITY_MODEL (or --model) and throws an actionable error otherwise", () => {
-    expect(() => resolveModel(undefined, {})).toThrow(/EVOLVABILITY_MODEL/);
+  it("requires DECISION_PROVENANCE_MODEL (or --model) and throws an actionable error otherwise", () => {
+    expect(() => resolveModel(undefined, {})).toThrow(/DECISION_PROVENANCE_MODEL/);
   });
 
   it("prefers an explicit --model over the env var", () => {
-    expect(resolveModel("cli-model", { EVOLVABILITY_MODEL: "env-model" })).toBe("cli-model");
+    expect(resolveModel("cli-model", { DECISION_PROVENANCE_MODEL: "env-model" })).toBe("cli-model");
   });
 
   it("falls back to the env var when no --model given", () => {
-    expect(resolveModel(undefined, { EVOLVABILITY_MODEL: "env-model" })).toBe("env-model");
+    expect(resolveModel(undefined, { DECISION_PROVENANCE_MODEL: "env-model" })).toBe("env-model");
   });
 });
 
@@ -329,16 +329,16 @@ describe("summarizeByWorldArm + renderMarkdownSummary", () => {
   });
 });
 
-describe("runEvolvabilityEval (fully injected chat, no network)", () => {
+describe("runDecisionProvenanceEval (fully injected chat, no network)", () => {
   it("produces world x arm x probe x k RunRecords and writes JSONL + aggregate + markdown", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "evolvability-run-"));
+    const dir = mkdtempSync(join(tmpdir(), "decision-provenance-run-"));
     try {
-      const corpusPath = join(__dirname, "..", "benchmark", "evolvability", "corpus", "toy.json");
+      const corpusPath = join(__dirname, "..", "benchmark", "decision-provenance", "corpus", "toy.json");
       const chat = vi.fn().mockResolvedValue({
         content: 'VERDICT: {"action":"HOLD","reason":"scripted response"}',
       });
 
-      const outcome = await runEvolvabilityEval({
+      const outcome = await runDecisionProvenanceEval({
         corpusPath,
         arms: ["A", "B"],
         k: 2,
@@ -374,16 +374,16 @@ describe("runEvolvabilityEval (fully injected chat, no network)", () => {
   });
 
   it("never calls chat for arm A with content from a path_log (sanity: arm exclusion holds end-to-end)", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "evolvability-run-"));
+    const dir = mkdtempSync(join(tmpdir(), "decision-provenance-run-"));
     try {
-      const corpusPath = join(__dirname, "..", "benchmark", "evolvability", "corpus", "toy.json");
+      const corpusPath = join(__dirname, "..", "benchmark", "decision-provenance", "corpus", "toy.json");
       const seenPrompts: string[] = [];
       const chat = vi.fn().mockImplementation(async (req: { messages: Array<{ content: string }> }) => {
         seenPrompts.push(req.messages[0].content);
         return { content: 'VERDICT: {"action":"HOLD","reason":"x"}' };
       });
 
-      await runEvolvabilityEval({
+      await runDecisionProvenanceEval({
         corpusPath,
         arms: ["A"],
         k: 1,

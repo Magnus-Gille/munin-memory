@@ -1,10 +1,10 @@
 /**
- * Evolvability outcome-eval runner (issue #186).
+ * Decision-provenance outcome-eval runner (issue #186).
  *
  * CLI:
- *   npx tsx benchmark/evolvability/runner.ts \
- *     --corpus benchmark/evolvability/corpus/toy.json \
- *     --arms A,B,C --k 5 --out benchmark/evolvability/reports
+ *   npx tsx benchmark/decision-provenance/runner.ts \
+ *     --corpus benchmark/decision-provenance/corpus/toy.json \
+ *     --arms A,B,C --k 5 --out benchmark/decision-provenance/reports
  *
  * For each (world x arm x probe x k) it builds the arm-specific memory
  * payload (arms.ts), renders the neutral agent prompt (prompt.ts), calls an
@@ -17,7 +17,7 @@
  *     (the M5 llama-swap loopback endpoint — NOT the same default as
  *     src/internal/openrouter.ts, which defaults to the OpenRouter API; this
  *     eval is built to run local sweeps by default).
- *   - `EVOLVABILITY_MODEL` — required (env var or `--model`). No default:
+ *   - `DECISION_PROVENANCE_MODEL` — required (env var or `--model`). No default:
  *     silently picking a model would make flip-rate numbers across runs
  *     incomparable.
  *   - `OPENROUTER_API_KEY` — optional bearer token, omitted entirely when
@@ -74,17 +74,17 @@ export function resolveApiKey(env: NodeJS.ProcessEnv = process.env): string | nu
 }
 
 /**
- * Resolve the model under test. `--model` wins over `EVOLVABILITY_MODEL`.
+ * Resolve the model under test. `--model` wins over `DECISION_PROVENANCE_MODEL`.
  * Throws when neither is set — there is deliberately no default model.
  */
 export function resolveModel(
   cliModel: string | undefined,
   env: NodeJS.ProcessEnv = process.env,
 ): string {
-  const model = cliModel ?? env.EVOLVABILITY_MODEL;
+  const model = cliModel ?? env.DECISION_PROVENANCE_MODEL;
   if (!model || model.trim().length === 0) {
     throw new Error(
-      "Evolvability runner: EVOLVABILITY_MODEL is required (set the env var, or pass --model). " +
+      "Decision-provenance runner: DECISION_PROVENANCE_MODEL is required (set the env var, or pass --model). " +
         "There is no default model — silently picking one would make flip-rate numbers across runs incomparable.",
     );
   }
@@ -108,7 +108,7 @@ function getFlag(argv: string[], name: string): string | undefined {
   if (idx === -1) return undefined;
   const value = argv[idx + 1];
   if (value === undefined || value.startsWith("--")) {
-    throw new Error(`Evolvability runner: ${name} requires a value.`);
+    throw new Error(`Decision-provenance runner: ${name} requires a value.`);
   }
   return value;
 }
@@ -125,19 +125,19 @@ export function parseArgs(argv: string[]): ParsedArgs {
     .map((s) => {
       if (!(ALL_ARMS as readonly string[]).includes(s)) {
         throw new Error(
-          `Evolvability runner: invalid arm "${s}" in --arms — must be one of ${ALL_ARMS.join(", ")}.`,
+          `Decision-provenance runner: invalid arm "${s}" in --arms — must be one of ${ALL_ARMS.join(", ")}.`,
         );
       }
       return s as Arm;
     });
   if (arms.length === 0) {
-    throw new Error("Evolvability runner: --arms must name at least one arm (A, B, and/or C).");
+    throw new Error("Decision-provenance runner: --arms must name at least one arm (A, B, and/or C).");
   }
 
   const kRaw = getFlag(argv, "--k");
   const k = kRaw !== undefined ? Number(kRaw) : DEFAULT_K;
   if (!Number.isInteger(k) || k <= 0) {
-    throw new Error(`Evolvability runner: --k must be a positive integer (got "${kRaw}").`);
+    throw new Error(`Decision-provenance runner: --k must be a positive integer (got "${kRaw}").`);
   }
 
   const outDir = getFlag(argv, "--out");
@@ -147,7 +147,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   const temperature = temperatureRaw !== undefined ? Number(temperatureRaw) : DEFAULT_TEMPERATURE;
   if (!Number.isFinite(temperature) || temperature < 0) {
     throw new Error(
-      `Evolvability runner: --temperature must be a non-negative number (got "${temperatureRaw}").`,
+      `Decision-provenance runner: --temperature must be a non-negative number (got "${temperatureRaw}").`,
     );
   }
 
@@ -155,7 +155,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   const maxRetries = maxRetriesRaw !== undefined ? Number(maxRetriesRaw) : DEFAULT_MAX_RETRIES;
   if (!Number.isInteger(maxRetries) || maxRetries < 0) {
     throw new Error(
-      `Evolvability runner: --max-retries must be a non-negative integer (got "${maxRetriesRaw}").`,
+      `Decision-provenance runner: --max-retries must be a non-negative integer (got "${maxRetriesRaw}").`,
     );
   }
 
@@ -234,7 +234,7 @@ async function attemptModelCall(opts: CallModelOptions): Promise<{ content: stri
     });
   } catch (err) {
     throw new ModelCallError(
-      `Evolvability runner: network error calling ${endpoint}: ${err instanceof Error ? err.message : String(err)}`,
+      `Decision-provenance runner: network error calling ${endpoint}: ${err instanceof Error ? err.message : String(err)}`,
       true,
     );
   }
@@ -242,7 +242,7 @@ async function attemptModelCall(opts: CallModelOptions): Promise<{ content: stri
   if (!response.ok) {
     const text = await response.text().catch(() => "");
     throw new ModelCallError(
-      `Evolvability runner: model call to ${endpoint} failed with HTTP ${response.status}: ${text.slice(0, 200)}`,
+      `Decision-provenance runner: model call to ${endpoint} failed with HTTP ${response.status}: ${text.slice(0, 200)}`,
       response.status >= 500,
     );
   }
@@ -252,7 +252,7 @@ async function attemptModelCall(opts: CallModelOptions): Promise<{ content: stri
     json = (await response.json()) as RawChatCompletionResponse;
   } catch (err) {
     throw new ModelCallError(
-      `Evolvability runner: response from ${endpoint} was not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+      `Decision-provenance runner: response from ${endpoint} was not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
       false,
     );
   }
@@ -492,7 +492,7 @@ export interface SummaryMeta {
 export function renderMarkdownSummary(rows: WorldArmSummaryRow[], meta: SummaryMeta): string {
   const pct = (n: number | null): string => (n === null ? "—" : `${(n * 100).toFixed(1)}%`);
   const header =
-    `# Evolvability Summary\n\n` +
+    `# Decision-Provenance Summary\n\n` +
     `Model: \`${meta.model}\`  k=${meta.k}  temperature=${meta.temperature}\n` +
     `Corpus sha256: \`${meta.corpus_sha256}\`\n\n`;
   const tableHeader =
@@ -510,7 +510,7 @@ export function renderMarkdownSummary(rows: WorldArmSummaryRow[], meta: SummaryM
 
 // --- End-to-end orchestration ---
 
-export interface EvolvabilityRunOptions {
+export interface DecisionProvenanceRunOptions {
   corpusPath: string;
   arms: Arm[];
   k: number;
@@ -526,7 +526,7 @@ export interface EvolvabilityRunOptions {
   fetchImpl?: FetchLike;
 }
 
-export interface EvolvabilityRunOutcome {
+export interface DecisionProvenanceRunOutcome {
   records: RunRecord[];
   aggregates: AggregateStats[];
   corpusPath: string;
@@ -535,13 +535,13 @@ export interface EvolvabilityRunOutcome {
 }
 
 /**
- * Run the full evolvability eval: load + validate the corpus, iterate every
+ * Run the full decision-provenance eval: load + validate the corpus, iterate every
  * (world, arm, probe, k) case sequentially, grade each response, aggregate,
  * and write JSONL + aggregate-JSON + markdown-summary reports to `outDir`.
  */
-export async function runEvolvabilityEval(
-  opts: EvolvabilityRunOptions,
-): Promise<EvolvabilityRunOutcome> {
+export async function runDecisionProvenanceEval(
+  opts: DecisionProvenanceRunOptions,
+): Promise<DecisionProvenanceRunOutcome> {
   const { worlds, sha256 } = loadCorpus(opts.corpusPath);
   const temperature = opts.temperature ?? DEFAULT_TEMPERATURE;
   const baseUrl = opts.baseUrl ?? resolveBaseUrl();
@@ -580,9 +580,9 @@ export async function runEvolvabilityEval(
   mkdirSync(opts.outDir, { recursive: true });
   const runAt = new Date().toISOString();
   const stamp = runAt.replace(/[:.]/g, "-").slice(0, 19);
-  const jsonlPath = join(opts.outDir, `evolvability-${stamp}.jsonl`);
-  const aggregateJsonPath = join(opts.outDir, `evolvability-${stamp}.aggregate.json`);
-  const markdownPath = join(opts.outDir, `evolvability-${stamp}.summary.md`);
+  const jsonlPath = join(opts.outDir, `decision-provenance-${stamp}.jsonl`);
+  const aggregateJsonPath = join(opts.outDir, `decision-provenance-${stamp}.aggregate.json`);
+  const markdownPath = join(opts.outDir, `decision-provenance-${stamp}.summary.md`);
 
   writeFileSync(
     jsonlPath,
@@ -624,7 +624,7 @@ export async function runEvolvabilityEval(
 async function main(): Promise<void> {
   const parsed = parseArgs(process.argv.slice(2));
   if (!parsed.outDir) {
-    console.error("Evolvability runner: --out <dir> is required.");
+    console.error("Decision-provenance runner: --out <dir> is required.");
     process.exitCode = 2;
     return;
   }
@@ -634,11 +634,11 @@ async function main(): Promise<void> {
   const apiKey = resolveApiKey();
 
   console.log(
-    `Evolvability runner: corpus=${parsed.corpusPath} arms=${parsed.arms.join(",")} k=${parsed.k} ` +
+    `Decision-provenance runner: corpus=${parsed.corpusPath} arms=${parsed.arms.join(",")} k=${parsed.k} ` +
       `model=${model} baseUrl=${baseUrl} temperature=${parsed.temperature}`,
   );
 
-  const outcome = await runEvolvabilityEval({
+  const outcome = await runDecisionProvenanceEval({
     corpusPath: parsed.corpusPath,
     arms: parsed.arms,
     k: parsed.k,
@@ -657,10 +657,10 @@ async function main(): Promise<void> {
   console.log(readFileSync(outcome.paths.markdown, "utf-8"));
 }
 
-// Run only when invoked directly (tsx benchmark/evolvability/runner.ts), not when imported
+// Run only when invoked directly (tsx benchmark/decision-provenance/runner.ts), not when imported
 // by the test suite.
 const invokedPath = process.argv[1] ?? "";
-if (/evolvability[\\/]runner\.(ts|js|mjs)$/.test(invokedPath)) {
+if (/decision-provenance[\\/]runner\.(ts|js|mjs)$/.test(invokedPath)) {
   main().catch((err) => {
     console.error(err);
     process.exitCode = 1;
