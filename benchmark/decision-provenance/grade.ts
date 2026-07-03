@@ -119,9 +119,23 @@ export function parseVerdict(response: string): ParsedVerdict {
  * both the exact (ternary) and reopen-vs-hold (binary) comparisons.
  *
  * An INVALID parse never credits a lucky guess: both match flags are false
- * regardless of `expected`.
+ * regardless of `expected`. An empty/whitespace-only response is classified
+ * as `blank: true` — distinct from a present-but-unparseable response
+ * (malformed) — so a starved run (e.g. a thinking model that blanked out
+ * under a tight `max_tokens` budget) is never silently lumped in with a
+ * genuine output-contract failure. A blank response is still INVALID and
+ * still never credits a match.
  */
 export function grade(response: string, expected: VerdictAction): GradeOutcome {
+  if (response.trim().length === 0) {
+    return {
+      parsed_action: "INVALID",
+      ternary_match: false,
+      binary_match: false,
+      blank: true,
+    };
+  }
+
   const parsed = parseVerdict(response);
   if (parsed.action === "INVALID") {
     return {

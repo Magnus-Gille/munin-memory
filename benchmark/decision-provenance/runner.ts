@@ -47,7 +47,7 @@ export const DEFAULT_CORPUS_PATH = join(HERE, "corpus", "toy.json");
 export const DEFAULT_TEMPERATURE = 0.7;
 export const DEFAULT_K = 5;
 export const DEFAULT_MAX_RETRIES = 1;
-const DEFAULT_MAX_TOKENS = 1024;
+export const DEFAULT_MAX_TOKENS = 2048;
 
 // --- Env resolution ---
 
@@ -101,6 +101,7 @@ export interface ParsedArgs {
   model?: string;
   temperature: number;
   maxRetries: number;
+  maxTokens: number;
 }
 
 function getFlag(argv: string[], name: string): string | undefined {
@@ -159,7 +160,16 @@ export function parseArgs(argv: string[]): ParsedArgs {
     );
   }
 
-  return { corpusPath, arms, k, outDir, model, temperature, maxRetries };
+  const maxTokensRaw = getFlag(argv, "--max-tokens");
+  const maxTokens = maxTokensRaw !== undefined ? Number(maxTokensRaw) : DEFAULT_MAX_TOKENS;
+  if (!Number.isInteger(maxTokens) || maxTokens <= 0) {
+    throw new Error(
+      `Decision-provenance runner: --max-tokens must be a positive integer (got "${maxTokensRaw}"). ` +
+        "A thinking model can blank out on the longest prompts if this is too tight.",
+    );
+  }
+
+  return { corpusPath, arms, k, outDir, model, temperature, maxRetries, maxTokens };
 }
 
 // --- Minimal OpenAI-compatible chat-completions client (no new deps — plain fetch) ---
@@ -297,6 +307,7 @@ export interface ChatRequest {
   baseUrl: string;
   apiKey?: string | null;
   maxRetries?: number;
+  maxTokens?: number;
   fetchImpl?: FetchLike;
 }
 
@@ -317,6 +328,7 @@ interface RunOneCaseOptions {
   baseUrl: string;
   apiKey: string | null;
   maxRetries: number;
+  maxTokens: number;
   chat: ChatFn;
 }
 
@@ -333,6 +345,7 @@ async function runOneCase(opts: RunOneCaseOptions): Promise<RunRecord> {
       baseUrl: opts.baseUrl,
       apiKey: opts.apiKey,
       maxRetries: opts.maxRetries,
+      maxTokens: opts.maxTokens,
     });
     rawResponse = result.content;
   } catch (err) {
@@ -388,15 +401,20 @@ export function aggregateRuns(records: RunRecord[]): AggregateStats[] {
     let ternaryHits = 0;
     let binaryHits = 0;
     let reopenCount = 0;
+    let blankCount = 0;
     for (const r of bucket) {
       verdictCounts[r.grade.parsed_action]++;
       if (r.grade.ternary_match) ternaryHits++;
       if (r.grade.binary_match) binaryHits++;
+      if (r.grade.blank) blankCount++;
       if (r.grade.parsed_action !== "INVALID" && isReopenAction(r.grade.parsed_action)) {
         reopenCount++;
       }
     }
-    const invalidCount = verdictCounts.INVALID;
+    // verdictCounts.INVALID includes both blank and malformed responses (it
+    // buckets purely on parsed_action); invalid_count narrows to malformed
+    // only so blank and invalid are visibly distinct, non-overlapping signals.
+    const invalidCount = verdictCounts.INVALID - blankCount;
 
     const stats: AggregateStats = {
       world_id: first.world_id,
@@ -412,6 +430,8 @@ export function aggregateRuns(records: RunRecord[]): AggregateStats[] {
       binary_agreement_rate: binaryHits / k,
       invalid_count: invalidCount,
       invalid_rate: invalidCount / k,
+      blank_count: blankCount,
+      blank_rate: blankCount / k,
     };
     if (first.probe_kind === "perturbation") {
       stats.should_flip_rate = binaryHits / k;
@@ -442,6 +462,8 @@ export interface WorldArmSummaryRow {
   binary_agreement_rate: number;
   ternary_agreement_rate: number;
   invalid_count: number;
+  /** Sum of blank_count across the (world, arm)'s probes — see AggregateStats.blank_count. */
+  blank_count: number;
 }
 
 function mean(xs: number[]): number | null {
@@ -474,6 +496,7 @@ export function summarizeByWorldArm(aggregates: AggregateStats[]): WorldArmSumma
       binary_agreement_rate: mean(bucket.map((a) => a.binary_agreement_rate)) ?? 0,
       ternary_agreement_rate: mean(bucket.map((a) => a.ternary_agreement_rate)) ?? 0,
       invalid_count: bucket.reduce((s, a) => s + a.invalid_count, 0),
+      blank_count: bucket.reduce((s, a) => s + a.blank_count, 0),
     });
   }
 
@@ -496,13 +519,13 @@ export function renderMarkdownSummary(rows: WorldArmSummaryRow[], meta: SummaryM
     `Model: \`${meta.model}\`  k=${meta.k}  temperature=${meta.temperature}\n` +
     `Corpus sha256: \`${meta.corpus_sha256}\`\n\n`;
   const tableHeader =
-    "| World | Arm | Should-flip (perturbation) | False-flip (stasis) | Binary agreement | Ternary agreement | Invalid |\n" +
-    "|---|---|---|---|---|---|---|\n";
+    "| World | Arm | Should-flip (perturbation) | False-flip (stasis) | Binary agreement | Ternary agreement | Invalid | Blank |\n" +
+    "|---|---|---|---|---|---|---|---|\n";
   const tableRows = rows
     .map(
       (r) =>
         `| ${r.world_id} | ${r.arm} | ${pct(r.should_flip_rate)} | ${pct(r.false_flip_rate)} | ` +
-        `${pct(r.binary_agreement_rate)} | ${pct(r.ternary_agreement_rate)} | ${r.invalid_count} |`,
+        `${pct(r.binary_agreement_rate)} | ${pct(r.ternary_agreement_rate)} | ${r.invalid_count} | ${r.blank_count} |`,
     )
     .join("\n");
   return `${header}${tableHeader}${tableRows}\n`;
@@ -520,6 +543,7 @@ export interface DecisionProvenanceRunOptions {
   baseUrl?: string;
   apiKey?: string | null;
   maxRetries?: number;
+  maxTokens?: number;
   /** Injected chat function — tests supply a mock; default calls callModel. */
   chat?: ChatFn;
   /** Only consulted when `chat` is not supplied — passed through to callModel's fetch. */
@@ -547,6 +571,7 @@ export async function runDecisionProvenanceEval(
   const baseUrl = opts.baseUrl ?? resolveBaseUrl();
   const apiKey = opts.apiKey === undefined ? resolveApiKey() : opts.apiKey;
   const maxRetries = opts.maxRetries ?? DEFAULT_MAX_RETRIES;
+  const maxTokens = opts.maxTokens ?? DEFAULT_MAX_TOKENS;
   const chat: ChatFn = opts.chat ?? ((req) => defaultChat({ ...req, fetchImpl: opts.fetchImpl }));
 
   const records: RunRecord[] = [];
@@ -567,6 +592,7 @@ export async function runDecisionProvenanceEval(
             baseUrl,
             apiKey,
             maxRetries,
+            maxTokens,
             chat,
           });
           records.push(record);
@@ -594,6 +620,7 @@ export async function runDecisionProvenanceEval(
     model: opts.model,
     temperature,
     k: opts.k,
+    max_tokens: maxTokens,
     arms: opts.arms,
     corpus_path: opts.corpusPath,
     corpus_sha256: sha256,
@@ -635,7 +662,7 @@ async function main(): Promise<void> {
 
   console.log(
     `Decision-provenance runner: corpus=${parsed.corpusPath} arms=${parsed.arms.join(",")} k=${parsed.k} ` +
-      `model=${model} baseUrl=${baseUrl} temperature=${parsed.temperature}`,
+      `model=${model} baseUrl=${baseUrl} temperature=${parsed.temperature} maxTokens=${parsed.maxTokens}`,
   );
 
   const outcome = await runDecisionProvenanceEval({
@@ -648,6 +675,7 @@ async function main(): Promise<void> {
     baseUrl,
     apiKey,
     maxRetries: parsed.maxRetries,
+    maxTokens: parsed.maxTokens,
   });
 
   console.log(`Wrote ${outcome.records.length} run records -> ${outcome.paths.jsonl}`);

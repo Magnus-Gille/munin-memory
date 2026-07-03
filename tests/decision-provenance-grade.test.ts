@@ -89,4 +89,26 @@ describe("grade", () => {
     expect(result.ternary_match).toBe(false);
     expect(result.binary_match).toBe(false);
   });
+
+  it("classifies an empty response as blank, distinct from malformed", () => {
+    const result = grade("", "HOLD");
+    expect(result.parsed_action).toBe("INVALID");
+    expect(result.blank).toBe(true);
+    expect(result.ternary_match).toBe(false);
+    expect(result.binary_match).toBe(false);
+  });
+
+  it("classifies a whitespace-only response as blank", () => {
+    const result = grade("   \n\t  ", "REOPEN_SWITCH");
+    expect(result.parsed_action).toBe("INVALID");
+    expect(result.blank).toBe(true);
+    expect(result.ternary_match).toBe(false);
+    expect(result.binary_match).toBe(false);
+  });
+
+  it("still classifies a present-but-unparseable response as malformed, not blank", () => {
+    const result = grade("no verdict here", "HOLD");
+    expect(result.parsed_action).toBe("INVALID");
+    expect(result.blank).toBeFalsy();
+  });
 });

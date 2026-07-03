@@ -134,6 +134,17 @@ export interface GradeOutcome {
    * False whenever parsed_action is INVALID.
    */
   binary_match: boolean;
+  /**
+   * True when the raw model response was empty or whitespace-only (e.g. a
+   * thinking model that blanked out because `max_tokens` was too tight for
+   * its reasoning + the longest prompts). Distinct from a response that was
+   * present but failed to parse as a valid VERDICT line — that case is
+   * `blank` falsy/omitted with `parsed_action: "INVALID"`. A blank response
+   * always has `parsed_action: "INVALID"` and never credits a match; kept
+   * optional (rather than required) so existing `GradeOutcome` literals
+   * (e.g. in tests) continue to compile without change.
+   */
+  blank?: boolean;
 }
 
 /** One run: one (world, arm, probe, k-index) call against the model under test. */
@@ -188,8 +199,21 @@ export interface AggregateStats {
    * Undefined for perturbation probes.
    */
   false_flip_rate?: number;
+  /**
+   * Count/rate of runs whose response was present but did not parse as a
+   * valid VERDICT (malformed only — excludes blank/empty responses, which
+   * are counted separately in `blank_count`/`blank_rate`). Keeping the two
+   * apart matters: a blank response is starvation (e.g. `max_tokens` too
+   * tight for a thinking model on the longest prompts), not "the model tried
+   * and failed to follow the output contract" — conflating them silently
+   * zeroed whole (world, arm) cells and made a starved run indistinguishable
+   * from a genuinely-decided-but-malformed one.
+   */
   invalid_count: number;
   invalid_rate: number;
+  /** Count/rate of runs whose raw response was empty or whitespace-only. */
+  blank_count: number;
+  blank_rate: number;
 }
 
 /** True when a verdict action counts as "the agent chose to reopen". */

@@ -61,6 +61,24 @@ describe("parseArgs", () => {
   it("rejects a non-positive k", () => {
     expect(() => parseArgs(["--k", "0"])).toThrow(/k/i);
   });
+
+  it("parses --max-tokens", () => {
+    const args = parseArgs(["--max-tokens", "512"]);
+    expect(args.maxTokens).toBe(512);
+  });
+
+  it("defaults --max-tokens to 2048 when omitted", () => {
+    const args = parseArgs([]);
+    expect(args.maxTokens).toBe(2048);
+  });
+
+  it("rejects a non-positive --max-tokens", () => {
+    expect(() => parseArgs(["--max-tokens", "0"])).toThrow(/max-tokens/i);
+  });
+
+  it("rejects a non-numeric --max-tokens", () => {
+    expect(() => parseArgs(["--max-tokens", "abc"])).toThrow(/max-tokens/i);
+  });
 });
 
 describe("resolveBaseUrl", () => {
@@ -152,6 +170,39 @@ describe("callModel retry behavior (dependency-injected fetch, no network)", () 
       }),
     ).rejects.toThrow(/ECONNREFUSED/);
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("defaults max_tokens to 2048 in the request body", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse({ choices: [{ message: { content: "VERDICT: {\"action\":\"HOLD\",\"reason\":\"x\"}" } }] }),
+    );
+    await callModel({
+      baseUrl: "http://example.test/v1",
+      model: "m",
+      temperature: 0.7,
+      messages: [{ role: "user", content: "hi" }],
+      fetchImpl,
+    });
+    const [, init] = fetchImpl.mock.calls[0];
+    const body = JSON.parse(init.body);
+    expect(body.max_tokens).toBe(2048);
+  });
+
+  it("honors an explicit maxTokens override in the request body", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse({ choices: [{ message: { content: "VERDICT: {\"action\":\"HOLD\",\"reason\":\"x\"}" } }] }),
+    );
+    await callModel({
+      baseUrl: "http://example.test/v1",
+      model: "m",
+      temperature: 0.7,
+      messages: [{ role: "user", content: "hi" }],
+      fetchImpl,
+      maxTokens: 4096,
+    });
+    const [, init] = fetchImpl.mock.calls[0];
+    const body = JSON.parse(init.body);
+    expect(body.max_tokens).toBe(4096);
   });
 
   it("exhausts retries and fails after repeated 500s", async () => {
@@ -288,6 +339,76 @@ describe("aggregateRuns", () => {
     expect(aggregates[0].invalid_rate).toBe(1);
     expect(aggregates[0].false_flip_rate).toBe(0);
   });
+
+  it("counts blank responses separately from malformed-invalid, without crediting should/false-flip", () => {
+    const records: RunRecord[] = [
+      {
+        world_id: "w1",
+        domain: "engineering",
+        arm: "A",
+        probe_id: "w1-p",
+        probe_kind: "perturbation",
+        probe_attacks: "rejected-branch",
+        expected: "REOPEN_SWITCH",
+        run_index: 0,
+        model: "m",
+        temperature: 0.7,
+        ts: "2026-01-01T00:00:00.000Z",
+        latency_ms: 1,
+        raw_response: "",
+        grade: { parsed_action: "INVALID", ternary_match: false, binary_match: false, blank: true },
+      },
+      {
+        world_id: "w1",
+        domain: "engineering",
+        arm: "A",
+        probe_id: "w1-p",
+        probe_kind: "perturbation",
+        probe_attacks: "rejected-branch",
+        expected: "REOPEN_SWITCH",
+        run_index: 1,
+        model: "m",
+        temperature: 0.7,
+        ts: "2026-01-01T00:00:00.000Z",
+        latency_ms: 1,
+        raw_response: "   ",
+        grade: { parsed_action: "INVALID", ternary_match: false, binary_match: false, blank: true },
+      },
+    ];
+    const aggregates = aggregateRuns(records);
+    expect(aggregates[0].blank_count).toBe(2);
+    expect(aggregates[0].blank_rate).toBe(1);
+    expect(aggregates[0].invalid_count).toBe(0);
+    expect(aggregates[0].invalid_rate).toBe(0);
+    // A fully-starved cell must not report as if the model actually decided.
+    expect(aggregates[0].should_flip_rate).toBe(0);
+  });
+
+  it("keeps a malformed (present but unparseable) response out of blank_count", () => {
+    const records: RunRecord[] = [
+      {
+        world_id: "w1",
+        domain: "engineering",
+        arm: "A",
+        probe_id: "w1-s",
+        probe_kind: "stasis",
+        probe_attacks: "none",
+        expected: "HOLD",
+        run_index: 0,
+        model: "m",
+        temperature: 0.7,
+        ts: "2026-01-01T00:00:00.000Z",
+        latency_ms: 1,
+        raw_response: "no verdict",
+        grade: { parsed_action: "INVALID", ternary_match: false, binary_match: false },
+      },
+    ];
+    const aggregates = aggregateRuns(records);
+    expect(aggregates[0].blank_count).toBe(0);
+    expect(aggregates[0].blank_rate).toBe(0);
+    expect(aggregates[0].invalid_count).toBe(1);
+    expect(aggregates[0].invalid_rate).toBe(1);
+  });
 });
 
 describe("summarizeByWorldArm + renderMarkdownSummary", () => {
@@ -325,6 +446,7 @@ describe("summarizeByWorldArm + renderMarkdownSummary", () => {
     });
     expect(md).toContain("test-model");
     expect(md).toContain("| World | Arm |");
+    expect(md).toContain("Blank");
     expect(md).toContain("w1");
   });
 });
@@ -364,6 +486,7 @@ describe("runDecisionProvenanceEval (fully injected chat, no network)", () => {
 
       const aggregateJson = JSON.parse(readFileSync(outcome.paths.aggregateJson, "utf-8"));
       expect(aggregateJson.meta.model).toBe("scripted-model");
+      expect(aggregateJson.meta.max_tokens).toBe(2048);
       expect(aggregateJson.aggregates.length).toBeGreaterThan(0);
 
       const markdown = readFileSync(outcome.paths.markdown, "utf-8");
