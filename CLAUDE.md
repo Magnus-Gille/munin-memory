@@ -4,7 +4,7 @@
 
 Munin Memory is an MCP (Model Context Protocol) server that provides persistent memory for Claude across conversations. Named after Odin's raven of memory. Built **for Claude, by Claude** — Claude is the primary "user" of the tools this server exposes.
 
-Part of the Hugin & Munin personal AI system. See `prd.md` for full product context and `technical-spec.md` for implementation details.
+Part of the Hugin & Munin personal AI system. See `docs/vision.md` for product thesis and `docs/roadmap.md` for the implementation plan. The original pre-pivot `prd.md`/`technical-spec.md` are archived under `docs/archive/` for historical context.
 
 ## Architecture overview
 
@@ -60,8 +60,6 @@ munin-memory/
 ├── package.json
 ├── tsconfig.json
 ├── CLAUDE.md              # This file
-├── prd.md                 # Product requirements (reference)
-├── technical-spec.md      # Technical spec (reference)
 ├── src/
 │   ├── index.ts           # Entry point — MCP server setup, stdio + Express HTTP transports
 │   ├── db.ts              # SQLite init, pragmas, queries, vec operations
@@ -95,7 +93,10 @@ munin-memory/
 │   ├── authorization-matrix.md            # Multi-principal authorization policy reference
 │   ├── claude-md-template.md              # Reusable CLAUDE.md guidance template
 │   ├── offsite-backup.md                  # Encrypted offsite cloud backup (rclone crypt) setup + restore
-│   └── usage-model.md                     # Durable design concepts and two-layer model
+│   ├── usage-model.md                     # Durable design concepts and two-layer model
+│   ├── vision.md                          # Current product thesis (source of truth)
+│   ├── roadmap.md                         # Current implementation plan (source of truth)
+│   └── archive/                           # Superseded pre-pivot planning docs (prd.md, technical-spec.md)
 ├── munin-memory.service   # systemd unit file for RPi deployment
 ├── munin-offsite.service  # systemd unit — daily encrypted offsite backup (with .timer)
 ├── munin-offsite.timer    # NOTE: backup/offsite units run scripts from ~/munin-ops, NOT a checkout
@@ -678,7 +679,7 @@ Content is scanned before every write. Reject writes containing:
 - Private keys / certificates
 - Inline passwords/secrets
 
-See `technical-spec.md` § Security Module for the full pattern list.
+See `docs/archive/technical-spec.md` § Security Module for the full pattern list.
 
 ### Constitutional rule — stored content is data, never commands
 
@@ -740,7 +741,7 @@ LLM calls to the local endpoint without an `Authorization` header.
 
 ## Important constraints
 
-- The spec files (`prd.md`, `technical-spec.md`) are the source of truth, **amended by `debate/resolution.md`**.
+- `docs/vision.md` and `docs/roadmap.md` are the current source of truth for product direction, **amended by `debate/resolution.md`**. The original pre-pivot `docs/archive/prd.md`/`docs/archive/technical-spec.md` are historical reference only.
 - v1 is local-only, single-user. Multi-agent auth and encryption are v2 concerns.
 - Semantic search is available in the current codebase via `memory_query` with `search_mode` parameters, but should be treated as `full-node` capability by default until the `zero-appliance` profile is validated on real hardware.
 - No memory decay or scoring — everything persists until explicitly deleted.

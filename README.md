@@ -34,7 +34,7 @@ Munin is more than a key-value store for AI. The features are designed around ho
 - **Dual auth** — Bearer token (simple) + OAuth 2.1 with dynamic client registration and PKCE (for web and mobile clients).
 - **Two transports** — stdio (local) and Streamable HTTP (network).
 
-Twenty-two MCP tools in total. The full list is in [CLAUDE.md](CLAUDE.md#mcp-tools-exposed).
+Twenty-three MCP tools in total. The full list is in [CLAUDE.md](CLAUDE.md#mcp-tools-exposed).
 
 ## What it looks like in practice
 
@@ -241,7 +241,7 @@ npm run test:watch    # Watch mode
 
 Early-stage open source, but in daily use. It runs my own setup — Claude across four platforms (CLI, Desktop, Web, Mobile) sharing persistent memory through a Raspberry Pi 5 on my desk, publicly reachable via a Cloudflare Tunnel.
 
-What's live today: the full MCP tool surface (22 tools), background consolidation via OpenRouter, the computed lifecycle dashboard, retrospective synthesis tools, multi-principal access control with OAuth auto-mapping and the `munin-admin` CLI, outcome-aware retrieval signals (Phase 1, observation only), and the five-layer security stack (Cloudflare Tunnel, Cloudflare Access, Bearer/OAuth, app hardening, Pi hardening).
+What's live today: the full MCP tool surface (23 tools), background consolidation via OpenRouter, the computed lifecycle dashboard, retrospective synthesis tools, multi-principal access control with OAuth auto-mapping and the `munin-admin` CLI, outcome-aware retrieval signals (Phase 1, observation only), and the five-layer security stack (Cloudflare Tunnel, Cloudflare Access, Bearer/OAuth, app hardening, Pi hardening).
 
 What it is not: a polished mass-market product. It is optimized for a technically comfortable self-hoster. The deployment scripts assume Linux/systemd familiarity, you will need to adapt paths and network setup to your own environment, and the Pi Zero 2 W appliance direction is documented but not yet validated on hardware. Multi-principal access is implemented and tested, but in practice the server is still primarily used by a single human owner plus a handful of agent principals.
 
