@@ -45,9 +45,14 @@ rsync -avz \
   --exclude node_modules \
   --exclude .env \
   --exclude .git \
+  --exclude .codex \
+  --exclude .claude \
+  --exclude AGENTS.md \
+  --exclude STATUS.md \
   --exclude 'benchmark/data/raw/' \
   --exclude 'benchmark/data/cache/' \
   --exclude 'benchmark/generated/' \
+  --exclude 'benchmark/footprint-calculator/' \
   --exclude 'benchmark/reports/' \
   ./ "${USER}@${HOST}:${REMOTE_DIR}/"
 

@@ -1772,7 +1772,7 @@ describe("getConsolidationHealth — reflects circuit breaker state", () => {
     expect(health.last_error_at).toBeNull();
   });
 
-  it("reflects failure count and last_error after one processConsolidationBatch failure (pre-trip)", async () => {
+  it("reflects a pre-trip failure in health without persisting a chat-alert entry", async () => {
     _setApiKey("fake-key-for-test");
     _setWorkerDb(db);
 
@@ -1798,11 +1798,11 @@ describe("getConsolidationHealth — reflects circuit breaker state", () => {
     expect(health.last_error).toContain("401");
     expect(health.circuit_breaker_tripped).toBe(false);
 
-    // Persisted entry should have status "failing" (not "tripped", not "healthy")
+    // Pre-trip failures remain visible in memory_status/memory_health, but do
+    // not write the polled system-health alert entry. One transient gateway
+    // timeout should not produce a chat alert followed by a recovery alert.
     const alertEntry = readState(db, "meta/system-health", "consolidation");
-    expect(alertEntry).not.toBeNull();
-    const parsed = JSON.parse(alertEntry!.content) as { status: string };
-    expect(parsed.status).toBe("failing");
+    expect(alertEntry).toBeNull();
   });
 
   it("reflects circuit_breaker_tripped: true and last_error after batch failures", async () => {
@@ -2019,8 +2019,10 @@ describe("meta/system-health alert entry — transition-only writes", () => {
     _setApiKey(fakeKey);
     _setWorkerDb(db);
 
-    for (let i = 0; i < _consolidationConfig.minLogs; i++) {
-      appendLog(db, "projects/sanitizetest", `Log ${i}`, []);
+    for (let ns = 0; ns < _consolidationConfig.maxFailures; ns++) {
+      for (let i = 0; i < _consolidationConfig.minLogs; i++) {
+        appendLog(db, `projects/sanitizetest${ns}`, `Log ${i}`, []);
+      }
     }
 
     const originalFetch = globalThis.fetch;
@@ -2052,8 +2054,10 @@ describe("meta/system-health alert entry — transition-only writes", () => {
     _setApiKey(fakeKey);
     _setWorkerDb(db);
 
-    for (let i = 0; i < _consolidationConfig.minLogs; i++) {
-      appendLog(db, "projects/doublekey", `Log ${i}`, []);
+    for (let ns = 0; ns < _consolidationConfig.maxFailures; ns++) {
+      for (let i = 0; i < _consolidationConfig.minLogs; i++) {
+        appendLog(db, `projects/doublekey${ns}`, `Log ${i}`, []);
+      }
     }
 
     const originalFetch = globalThis.fetch;
@@ -2085,8 +2089,10 @@ describe("meta/system-health alert entry — transition-only writes", () => {
     _setApiKey(fakeKey);
     _setWorkerDb(db);
 
-    for (let i = 0; i < _consolidationConfig.minLogs; i++) {
-      appendLog(db, "projects/barekey", `Log ${i}`, []);
+    for (let ns = 0; ns < _consolidationConfig.maxFailures; ns++) {
+      for (let i = 0; i < _consolidationConfig.minLogs; i++) {
+        appendLog(db, `projects/barekey${ns}`, `Log ${i}`, []);
+      }
     }
 
     const originalFetch = globalThis.fetch;

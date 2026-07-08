@@ -210,6 +210,18 @@ function currentAlertStatus(): "healthy" | "failing" | "tripped" {
  */
 function maybeWriteHealthAlert(db: Database.Database): void {
   const status = currentAlertStatus();
+
+  // The polled state entry is for user-facing alerts, not complete telemetry.
+  // Keep pre-trip failures visible through getConsolidationHealth()/memory_health
+  // but do not persist a "failing" transition for a single transient timeout:
+  // Ratatoskr turns this entry into chat messages, so one 524 followed by a
+  // successful next run would otherwise produce noisy fail/recovered pairs.
+  if (status === "failing") return;
+
+  if (status === "healthy" && lastWrittenStatus !== "failing" && lastWrittenStatus !== "tripped") {
+    return;
+  }
+
   if (status === lastWrittenStatus) return;
 
   const content = JSON.stringify({
@@ -289,9 +301,9 @@ export function startConsolidationWorker(db: Database.Database): void {
           // malformed entry — skip reconciliation
         }
         if (persistedStatus && persistedStatus !== "healthy") {
-          // Force a write: clear lastWrittenStatus so maybeWriteHealthAlert
-          // sees a transition from the stale status to healthy.
-          lastWrittenStatus = null;
+          // Force a write by restoring the persisted non-healthy status in
+          // memory, so maybeWriteHealthAlert sees a real transition to healthy.
+          lastWrittenStatus = persistedStatus === "tripped" ? "tripped" : "failing";
           maybeWriteHealthAlert(db);
         }
       }
