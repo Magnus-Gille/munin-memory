@@ -137,6 +137,25 @@ claude mcp add --transport http \
   -s user munin-memory http://localhost:3030/mcp
 ```
 
+The HTTP bearer token configured as `MUNIN_API_KEY` is a shared owner
+credential: requests authenticated with it are intentionally attributed to
+`owner`. For tenant or service clients that need distinct attribution, provision
+an agent principal and use its one-time service token instead. Grant only the
+namespaces that client needs; this example covers both direct state entries in
+`traces/codex-tenant` and optional child namespaces below it:
+
+```bash
+npx munin-admin principals add codex-cli \
+  --type agent \
+  --rules '[{"pattern":"traces/codex-tenant","permissions":"rw"},{"pattern":"traces/codex-tenant/*","permissions":"rw"}]'
+```
+
+The command prints the raw token once. Configure the client with that token as
+`Authorization: Bearer ...`; writes and `memory_history.agent_id` will then use
+`codex-cli` rather than `owner`. If the client only writes child namespaces, omit
+the exact rule; if it only writes state keys directly in one namespace, omit the
+`/*` rule.
+
 ### Connect from Claude Web / Mobile (OAuth)
 
 When running in HTTP mode, the server exposes OAuth 2.1 endpoints. Configure your MCP client with the server URL and the OAuth flow handles authentication automatically. For public deployments, OAuth consent is now fail-closed: you must configure a trusted proxy-authenticated header/value pair for `/authorize` and `/authorize/approve`, or the server will refuse to serve public consent. See the [OAuth section in CLAUDE.md](CLAUDE.md#oauth-21-feature-3) for endpoint details.

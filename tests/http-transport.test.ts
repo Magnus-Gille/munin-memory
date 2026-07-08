@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { existsSync, unlinkSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import supertest from "supertest";
 import { initDatabase } from "../src/db.js";
@@ -57,6 +58,17 @@ function parseJsonRpcResponse(body: string): Record<string, unknown> {
     return JSON.parse(sseMatch[1]) as Record<string, unknown>;
   }
   return JSON.parse(body) as Record<string, unknown>;
+}
+
+function parseToolContent<T>(body: string): T {
+  const payload = parseJsonRpcResponse(body);
+  const result = payload.result as Record<string, unknown>;
+  const content = result.content as Array<{ text: string }>;
+  return JSON.parse(content[0].text) as T;
+}
+
+function hashToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
 }
 
 let db: Database.Database;
@@ -426,5 +438,115 @@ describe("transport-aware HTTP access context", () => {
         process.env.MUNIN_API_KEY_CONSUMER = originalConsumer;
       }
     }
+  });
+});
+
+describe("HTTP tenant service-token attribution", () => {
+  it("attributes bearer-token writes and history rows to the resolved principal", async () => {
+    const tenantToken = "codex-cli-test-service-token";
+    // DPA-covered transport gives this remote agent the same classification
+    // ceiling a dedicated DPA bearer would have; attribution still comes from
+    // the token_hash -> principal_id mapping.
+    db.prepare(
+      `INSERT INTO principals
+       (id, principal_id, principal_type, token_hash, namespace_rules, transport_type, created_at)
+       VALUES (?, ?, 'agent', ?, ?, 'dpa_covered', ?)`,
+    ).run(
+      randomUUID(),
+      "codex-cli",
+      hashToken(tenantToken),
+      JSON.stringify([
+        { pattern: "traces/codex-tenant", permissions: "rw" },
+        { pattern: "traces/codex-tenant/*", permissions: "rw" },
+      ]),
+      new Date().toISOString(),
+    );
+
+    await initializeClient(app, tenantToken);
+
+    const writeResponse = await supertest(app)
+      .post("/mcp")
+      .set({
+        ...jsonRpcHeaders(tenantToken),
+        "mcp-protocol-version": "2025-03-26",
+      })
+      .send({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: {
+          name: "memory_write",
+          arguments: {
+            namespace: "traces/codex-tenant",
+            key: "run-2026-07-04",
+            content: "tenant write attribution regression",
+            tags: ["tenant-validation"],
+          },
+        },
+      })
+      .expect(200);
+
+    const writePayload = parseToolContent<{
+      ok: boolean;
+      status: string;
+      provenance: { principal_id: string; owner_principal_id: string };
+    }>(writeResponse.text);
+    expect(writePayload.ok).toBe(true);
+    expect(writePayload.status).toBe("created");
+    expect(writePayload.provenance).toEqual({
+      principal_id: "codex-cli",
+      owner_principal_id: "codex-cli",
+    });
+
+    const stored = db
+      .prepare("SELECT agent_id, owner_principal_id FROM entries WHERE namespace = ? AND key = ?")
+      .get("traces/codex-tenant", "run-2026-07-04") as
+      | { agent_id: string; owner_principal_id: string | null }
+      | undefined;
+    expect(stored).toEqual({
+      agent_id: "codex-cli",
+      owner_principal_id: "codex-cli",
+    });
+
+    const historyResponse = await supertest(app)
+      .post("/mcp")
+      .set({
+        ...jsonRpcHeaders(tenantToken),
+        "mcp-protocol-version": "2025-03-26",
+      })
+      .send({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: {
+          name: "memory_history",
+          arguments: {
+            namespace: "traces/codex-tenant",
+            limit: 5,
+          },
+        },
+      })
+      .expect(200);
+
+    const historyPayload = parseToolContent<{
+      ok: boolean;
+      count: number;
+      entries: Array<{
+        agent_id: string;
+        provenance: { principal_id: string };
+      }>;
+    }>(historyResponse.text);
+    expect(historyPayload.ok).toBe(true);
+    expect(historyPayload.count).toBeGreaterThan(0);
+    expect(historyPayload.entries[0]).toMatchObject({
+      agent_id: "codex-cli",
+      provenance: { principal_id: "codex-cli" },
+    });
+    expect(requestLogs.at(-1)).toMatchObject({
+      authType: "bearer",
+      clientId: "principal:codex-cli",
+      toolName: "memory_history",
+      status: 200,
+    });
   });
 });

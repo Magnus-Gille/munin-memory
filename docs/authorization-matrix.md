@@ -202,6 +202,38 @@ interface NamespaceRule {
 | OAuth token | → lookup `client_id` in token table → map to principal via `principals` table. |
 | Agent service token | → lookup hashed token in `principals` table → scoped AccessContext. |
 
+For HTTP tenants and service agents, do not share the HTTP bearer credentials
+configured as `MUNIN_API_KEY`, `MUNIN_API_KEY_DPA`, or
+`MUNIN_API_KEY_CONSUMER`: those credentials all resolve to the owner principal
+and only differ by transport ceiling. Use a principal service token instead.
+Grant only the namespaces the client needs; this example covers both direct
+state entries in `traces/codex-tenant` and optional child namespaces below it:
+
+```bash
+npx munin-admin principals add codex-cli \
+  --type agent \
+  --rules '[{"pattern":"traces/codex-tenant","permissions":"rw"},{"pattern":"traces/codex-tenant/*","permissions":"rw"}]'
+```
+
+The token is displayed once and stored only as `SHA-256` in
+`principals.token_hash`. Rotate it with:
+
+```bash
+npx munin-admin principals rotate-token codex-cli
+```
+
+Revoke by revoking the principal:
+
+```bash
+npx munin-admin principals revoke codex-cli
+```
+
+Use an exact namespace rule when the tenant writes state entries directly in a
+namespace (`namespace=traces/codex-tenant`, `key=...`). A `prefix/*` rule only
+covers child namespaces such as `traces/codex-tenant/runs`, not the prefix
+namespace itself. Omit either rule when the tenant does not need that shape of
+access.
+
 **New table:** `principals`
 
 ```sql
