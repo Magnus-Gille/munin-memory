@@ -44,6 +44,27 @@ const DEFAULT_MAX_TOKENS = 4096;
 const DEFAULT_TITLE = "Munin Memory";
 const HTTP_REFERER = "https://munin-memory.gille.ai";
 
+function getHeader(response: Response, name: string): string | null {
+  return response.headers?.get(name) ?? null;
+}
+
+function summarizeErrorBody(response: Response, text: string): string {
+  const contentType = getHeader(response, "content-type") ?? "";
+  const trimmed = text.trim();
+  const looksHtml =
+    contentType.toLowerCase().includes("text/html") ||
+    /^<!doctype\s+html/i.test(trimmed) ||
+    /^<html[\s>]/i.test(trimmed);
+
+  if (!looksHtml) {
+    return trimmed.slice(0, 200);
+  }
+
+  const titleMatch = trimmed.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  const title = titleMatch?.[1]?.replace(/\s+/g, " ").trim();
+  return title ? `HTML error page: ${title}` : "HTML error page";
+}
+
 // --- Base-URL resolution ---
 
 /**
@@ -120,7 +141,8 @@ export async function callOpenRouter(opts: OpenRouterCallOptions): Promise<ChatC
 
   if (!response.ok) {
     const text = await response.text().catch(() => "");
-    throw new Error(`OpenRouter API error ${response.status}: ${text.slice(0, 200)}`);
+    const detail = summarizeErrorBody(response, text);
+    throw new Error(`LLM API error ${response.status}${detail ? `: ${detail}` : ""}`);
   }
 
   return response.json() as Promise<ChatCompletionResponse>;

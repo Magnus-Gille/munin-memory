@@ -430,7 +430,7 @@ describe("callOpenRouter — full-endpoint URL normalization (FIX 4)", () => {
 // ---------------------------------------------------------------------------
 
 describe("callOpenRouter — error handling", () => {
-  it("throws with 'OpenRouter API error <status>:' message on non-ok response", async () => {
+  it("throws with 'LLM API error <status>:' message on non-ok response", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: false,
       status: 401,
@@ -444,7 +444,28 @@ describe("callOpenRouter — error handling", () => {
         messages: [{ role: "user", content: "hi" }],
         apiKey: "sk-test",
       }),
-    ).rejects.toThrow("OpenRouter API error 401:");
+    ).rejects.toThrow("LLM API error 401:");
+  });
+
+  it("summarizes HTML error bodies instead of exposing page markup", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 524,
+      headers: { get: (name: string) => (name.toLowerCase() === "content-type" ? "text/html; charset=UTF-8" : null) },
+      text: () =>
+        Promise.resolve(
+          '<!DOCTYPE html><!--[if lt IE 7]> <html class="no-js ie6 oldie" lang="en-US"> <![endif]--><title>A timeout occurred</title><body>cloudflare</body>',
+        ),
+    } as unknown as Response);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(
+      callOpenRouter({
+        model: "test-model",
+        messages: [{ role: "user", content: "hi" }],
+        apiKey: "sk-test",
+      }),
+    ).rejects.toThrow("LLM API error 524: HTML error page: A timeout occurred");
   });
 });
 
