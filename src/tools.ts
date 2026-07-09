@@ -3261,7 +3261,7 @@ function compactConventions(updatedAt: string): string {
     `Full conventions: memory_read("meta/conventions", "conventions") — last updated ${updatedAt.slice(0, 10)}`,
     "",
     "## Key Rules",
-    "- **Handshake:** memory_orient first, then memory_read for specifics, memory_query for search.",
+    "- **Handshake:** memory_orient first when callable; if your host did not expose it, use memory_status or memory_resume as the fallback, then memory_read for specifics and memory_query for search.",
     "- **Read vs get:** `memory_read` uses namespace+key. `memory_get` uses an entry UUID from query results.",
     "- **State entries** = current truth (mutable). **Log entries** = chronological (append-only).",
     "- **Write vs update_status:** use `memory_update_status` for tracked `projects/*`/`clients/*` status entries; use `memory_write` for other state.",
@@ -3310,7 +3310,7 @@ function universalConventions(full: boolean): string {
     "- **Tags** label entries for retrieval — reuse the same tag for the same idea so search stays coherent.",
     "",
     "## Working with it",
-    "- **Start with `memory_orient`**, then `memory_read` (namespace + key) for a specific entry, or `memory_query` to search (lexical / semantic / hybrid).",
+    "- **Start with `memory_orient` when callable.** If your host did not expose it, use `memory_status` or `memory_resume` as the fallback, then `memory_read` (namespace + key) for a specific entry, or `memory_query` to search (lexical / semantic / hybrid).",
     "- **`memory_read` vs `memory_get`:** read uses namespace + key; get uses an entry UUID from query results.",
     "- **Write protocol:** record decisions and events with `memory_log`; keep current facts in `memory_write`.",
     "- **CAS:** pass `expected_updated_at` on a state write so you don't blindly overwrite a concurrent change.",
@@ -3467,7 +3467,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_orient",
     description:
-      `START HERE. Call this at the beginning of every conversation before using any other memory tool. Returns conventions, a computed project dashboard (grouped by lifecycle from status entries), optional curated notes, actionable maintenance suggestions, and optionally a namespace overview — everything needed to orient yourself in one call. Use \`memory_resume\` after this when you want a targeted continuation pack for a project, namespace, or opener.\n\nThe dashboard is computed automatically from status entries in projects/* and clients/* namespaces. No manual workbench maintenance needed. Demo namespaces and completed task-run namespaces are hidden by default.\n\nUse \`detail\` to control response size. \`${DEFAULT_ORIENT_DETAIL}\` is the default for token-sensitive handshakes, \`standard\` includes the full dashboard and namespace overview, and \`full\` includes the full conventions document.`,
+      `\`memory_orient\` is the session handshake and first memory operation. START HERE: call this at the beginning of every conversation before using any other memory tool when it is callable. If a host/deferred tool discovery layer does not expose \`memory_orient\`, use \`memory_status\` to inspect available tools or \`memory_resume\` for targeted context as a fallback. Returns conventions, a computed project dashboard (grouped by lifecycle from status entries), optional curated notes, actionable maintenance suggestions, and optionally a namespace overview — everything needed to orient yourself in one call. Use \`memory_resume\` after this when you want a targeted continuation pack for a project, namespace, or opener.\n\nThe dashboard is computed automatically from status entries in projects/* and clients/* namespaces. No manual workbench maintenance needed. Demo namespaces and completed task-run namespaces are hidden by default.\n\nUse \`detail\` to control response size. \`${DEFAULT_ORIENT_DETAIL}\` is the default for token-sensitive handshakes, \`standard\` includes the full dashboard and namespace overview, and \`full\` includes the full conventions document.`,
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -3514,7 +3514,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_resume",
     description:
-      "Build a compact, targeted continuation pack after `memory_orient`. Use this when you have a project hint, namespace, or opener and want the most relevant current status, recent decision context, open loops, and optional recent namespace history without running broad search.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Build a compact, targeted continuation pack after `memory_orient`. Use this when you have a project hint, namespace, or opener and want the most relevant current status, recent decision context, open loops, and optional recent namespace history without running broad search.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -3555,7 +3555,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_extract",
     description:
-      "Suggest reviewable memory operations from explicit conversation signals. Use this after `memory_orient` when you have messy notes or transcript text and want proposed `memory_log`, `memory_write`, or `memory_update_status` calls. This tool is suggestion-only: it never writes to memory.\n\nUse `memory_extract` when you have unstructured text and are unsure what (if anything) is worth persisting or where it belongs — it proposes the ops for you to review. When you already know the single decision or event to record, skip extraction and call `memory_log` directly. Extraction proposes; it does not persist — you must issue the returned calls yourself.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Suggest reviewable memory operations from explicit conversation signals. Use this after `memory_orient` when you have messy notes or transcript text and want proposed `memory_log`, `memory_write`, or `memory_update_status` calls. This tool is suggestion-only: it never writes to memory.\n\nUse `memory_extract` when you have unstructured text and are unsure what (if anything) is worth persisting or where it belongs — it proposes the ops for you to review. When you already know the single decision or event to record, skip extraction and call `memory_log` directly. Extraction proposes; it does not persist — you must issue the returned calls yourself.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -3586,7 +3586,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_narrative",
     description:
-      "Derive a compact narrative view for one namespace from current status, recent logs, and audit history. Use this when you want project-arc signals such as blocker age, decision churn, reversals, or long gaps without pretending that Munin has a hidden planning model. Every signal is source-backed.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Derive a compact narrative view for one namespace from current status, recent logs, and audit history. Use this when you want project-arc signals such as blocker age, decision churn, reversals, or long gaps without pretending that Munin has a hidden planning model. Every signal is source-backed.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -3617,7 +3617,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_commitments",
     description:
-      "Surface explicit commitments derived from tracked next steps and dated, attributable source text. Use this when you want to review open, at-risk, overdue, or recently completed follow-through items rather than rely on fuzzy prose search.\n\nRead-only: this tool derives and reports commitments from existing entries — it does not create, store, or modify commitments. To add a commitment, record it as a Next Step via `memory_update_status` (or in a `memory_log` entry); it will then surface here.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Surface explicit commitments derived from tracked next steps and dated, attributable source text. Use this when you want to review open, at-risk, overdue, or recently completed follow-through items rather than rely on fuzzy prose search.\n\nRead-only: this tool derives and reports commitments from existing entries — it does not create, store, or modify commitments. To add a commitment, record it as a Next Step via `memory_update_status` (or in a `memory_log` entry); it will then surface here.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -3643,7 +3643,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_patterns",
     description:
-      "Derive conservative, reviewable patterns from repeated decision logs, tracked-status follow-through, and commitment outcomes. Use this for compressed summaries, not hidden policy: every surfaced pattern stays tied to explicit source entries.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Derive conservative, reviewable patterns from repeated decision logs, tracked-status follow-through, and commitment outcomes. Use this for compressed summaries, not hidden policy: every surfaced pattern stays tied to explicit source entries.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -3674,7 +3674,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_handoff",
     description:
-      "Assemble a source-backed handoff pack for one namespace: current state, recent decisions, open loops, recent actors, and recommended next actions. Use this when one agent or environment is handing work to another.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Assemble a source-backed handoff pack for one namespace: current state, recent decisions, open loops, recent actors, and recommended next actions. Use this when one agent or environment is handing work to another.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -3700,7 +3700,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_write",
     description:
-      "Store or update a state entry in memory. If an entry with the same namespace+key exists, it will be overwritten. Use this for mutable facts and non-tracked state. For `status` entries under `projects/*` or `clients/*`, prefer `memory_update_status`. Optional `valid_until` adds soft expiry for temporary state; direct reads still work after expiry, but broad search hides expired state by default.\n\nIf this is your first memory operation in this conversation, call memory_orient first.\n\nNamespace conventions: projects/<name> for project state, people/<name> for context about people, decisions/<topic> for cross-cutting decisions, meta/<topic> for system notes.\n\nKey conventions: 'status' = compact resumption summary (Phase / Current work / Blockers / Next — keep brief, move details to other keys like 'architecture', 'workflow', 'research'). 'index' = directory of important keys in this namespace and their purpose.\n\nTag vocabulary: Use canonical lifecycle tags on status entries: active, blocked, completed, stopped, maintenance, archived. Aliases are auto-normalized (done→completed, paused→stopped, inactive→archived). Category tags: decision, architecture, preference, milestone, convention. Type tags: bug, feature, research. Prefixed tags for cross-referencing: client:<name>, person:<name>, topic:<topic>, type:<artifact> (pdf, presentation, meeting-notes), source:external/internal.\n\nThe project dashboard is computed automatically from status entries with lifecycle tags. No manual workbench maintenance needed. Compare-and-swap via expected_updated_at is OPTIONAL and supported for any state write (all namespaces), not only 'status' in projects/* or clients/*; omit it for a plain write and to create a new entry — only pass it when you want the write to fail if the entry changed since your last read.\n\nTo start a new project: (1) write projects/<name>/status with a lifecycle tag (e.g. 'active'), (2) optionally write projects/<name>/index listing the keys.",
+      "Store or update a state entry in memory. If an entry with the same namespace+key exists, it will be overwritten. Use this for mutable facts and non-tracked state. For `status` entries under `projects/*` or `clients/*`, prefer `memory_update_status`. Optional `valid_until` adds soft expiry for temporary state; direct reads still work after expiry, but broad search hides expired state by default.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.\n\nNamespace conventions: projects/<name> for project state, people/<name> for context about people, decisions/<topic> for cross-cutting decisions, meta/<topic> for system notes.\n\nKey conventions: 'status' = compact resumption summary (Phase / Current work / Blockers / Next — keep brief, move details to other keys like 'architecture', 'workflow', 'research'). 'index' = directory of important keys in this namespace and their purpose.\n\nTag vocabulary: Use canonical lifecycle tags on status entries: active, blocked, completed, stopped, maintenance, archived. Aliases are auto-normalized (done→completed, paused→stopped, inactive→archived). Category tags: decision, architecture, preference, milestone, convention. Type tags: bug, feature, research. Prefixed tags for cross-referencing: client:<name>, person:<name>, topic:<topic>, type:<artifact> (pdf, presentation, meeting-notes), source:external/internal.\n\nThe project dashboard is computed automatically from status entries with lifecycle tags. No manual workbench maintenance needed. Compare-and-swap via expected_updated_at is OPTIONAL and supported for any state write (all namespaces), not only 'status' in projects/* or clients/*; omit it for a plain write and to create a new entry — only pass it when you want the write to fail if the entry changed since your last read.\n\nTo start a new project: (1) write projects/<name>/status with a lifecycle tag (e.g. 'active'), (2) optionally write projects/<name>/index listing the keys.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -3763,7 +3763,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_update_status",
     description:
-      "Update a tracked status entry in `projects/*` or `clients/*` namespaces only. Uses a server-enforced structure with canonical sections: Phase, Current Work, Blockers, Next Steps, and optional Notes. Prefer this over `memory_write` for status updates — it supports reliable partial updates without read-modify-write on markdown blobs.\n\nCall this only when the project's phase, current work, blockers, next steps, or lifecycle actually changes — NOT after every `memory_log`. Logging a decision and updating the status are independent: log the decision (history), and separately update the status only if the change moves the project's current state. Every field is optional; supply just the sections that changed. Compare-and-swap (`expected_updated_at`) is optional — omit it for an unconditional update. Status changes are not auto-logged; call `memory_log` separately when recording a decision or milestone.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Update a tracked status entry in `projects/*` or `clients/*` namespaces only. Uses a server-enforced structure with canonical sections: Phase, Current Work, Blockers, Next Steps, and optional Notes. Prefer this over `memory_write` for status updates — it supports reliable partial updates without read-modify-write on markdown blobs.\n\nCall this only when the project's phase, current work, blockers, next steps, or lifecycle actually changes — NOT after every `memory_log`. Logging a decision and updating the status are independent: log the decision (history), and separately update the status only if the change moves the project's current state. Every field is optional; supply just the sections that changed. Compare-and-swap (`expected_updated_at`) is optional — omit it for an unconditional update. Status changes are not auto-logged; call `memory_log` separately when recording a decision or milestone.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -3817,7 +3817,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_read",
     description:
-      "Retrieve a specific state entry by namespace and key. Use this when you already know both — it only reads state entries (not logs). If instead you have an entry UUID from `memory_query` results, use `memory_get` (which also works for log entries). Returns the full content, tags, and timestamps. Returns a clear 'not found' message if the entry doesn't exist (not an error). Note: results carry a system-injected `classification:internal` (or higher) tag marking the entry's classification floor — it is set by the server, not by you.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Retrieve a specific state entry by namespace and key. Use this when you already know both — it only reads state entries (not logs). If instead you have an entry UUID from `memory_query` results, use `memory_get` (which also works for log entries). Returns the full content, tags, and timestamps. Returns a clear 'not found' message if the entry doesn't exist (not an error). Note: results carry a system-injected `classification:internal` (or higher) tag marking the entry's classification floor — it is set by the server, not by you.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -3836,7 +3836,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_read_batch",
     description:
-      "Retrieve multiple state entries in a single call. Returns an array of results (found or not found) in the same order as the input. Use this to orient on multiple projects at once instead of making sequential memory_read calls.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Retrieve multiple state entries in a single call. Returns an array of results (found or not found) in the same order as the input. Use this to orient on multiple projects at once instead of making sequential memory_read calls.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -3859,7 +3859,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_get",
     description:
-      "Retrieve the full content of a single memory entry by its UUID. Use this after `memory_query` returns truncated previews and you have an entry ID. If you already know namespace+key, use `memory_read` instead. Works for both state and log entries.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Retrieve the full content of a single memory entry by its UUID. Use this after `memory_query` returns truncated previews and you have an entry ID. If you already know namespace+key, use `memory_read` instead. Works for both state and log entries.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -3874,7 +3874,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_query",
     description:
-      "Search and filter memories. Supports lexical (keyword), semantic (vector similarity), and hybrid (RRF fusion of both) search modes, selected with the `search_mode` parameter (`\"lexical\"` | `\"semantic\"` | `\"hybrid\"`; default `\"hybrid\"`). Note it is `search_mode: \"semantic\"`, not a `semantic: true` flag. Filters by namespace prefix, entry type, tags, time range (since/until), and optional expiry handling. Can be used without a query to browse by filters alone (e.g. all entries with a specific tag, or all entries updated today). `limit` caps results (default 10, max 50); narrow with filters or `since`/`until` rather than paging if 50 is not enough. Broad retrieval hides expired state entries by default; use `include_expired: true` to include them. Pass `explain: true` to include retrieval metadata and per-result match explanations.\n\nRetrieval tips (the most common formulation failures):\n- **If you get zero results, widen before giving up.** Drop the `namespace` filter first, then drop `tags`, then try different phrasing. Tight namespace filters pointed at the wrong tier (e.g. `meta/` when the entry is in `decisions/`) are the #1 cause of false-negative searches.\n- **Prefer natural-language phrasing.** Default `search_mode` is hybrid, so semantic recall bridges vocabulary gaps — you do not need to guess exact tokens.\n- **Lexical queries are tokenized, not raw FTS5.** The server splits your query into terms, preserves quoted phrases, and requires all terms to match (implicit AND). Boolean operators like `AND`, `OR`, `NOT`, and `NEAR` are not supported in user queries — write term lists or natural language, not FTS5 expressions.\n- **Use concrete tokens likely present in the entry**, not abstract paraphrase (\"explored\", \"examined\") — lexical still wins on structured-vocabulary content like research notes.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Search and filter memories. Supports lexical (keyword), semantic (vector similarity), and hybrid (RRF fusion of both) search modes, selected with the `search_mode` parameter (`\"lexical\"` | `\"semantic\"` | `\"hybrid\"`; default `\"hybrid\"`). Note it is `search_mode: \"semantic\"`, not a `semantic: true` flag. Filters by namespace prefix, entry type, tags, time range (since/until), and optional expiry handling. Can be used without a query to browse by filters alone (e.g. all entries with a specific tag, or all entries updated today). `limit` caps results (default 10, max 50); narrow with filters or `since`/`until` rather than paging if 50 is not enough. Broad retrieval hides expired state entries by default; use `include_expired: true` to include them. Pass `explain: true` to include retrieval metadata and per-result match explanations.\n\nRetrieval tips (the most common formulation failures):\n- **If you get zero results, widen before giving up.** Drop the `namespace` filter first, then drop `tags`, then try different phrasing. Tight namespace filters pointed at the wrong tier (e.g. `meta/` when the entry is in `decisions/`) are the #1 cause of false-negative searches.\n- **Prefer natural-language phrasing.** Default `search_mode` is hybrid, so semantic recall bridges vocabulary gaps — you do not need to guess exact tokens.\n- **Lexical queries are tokenized, not raw FTS5.** The server splits your query into terms, preserves quoted phrases, and requires all terms to match (implicit AND). Boolean operators like `AND`, `OR`, `NOT`, and `NEAR` are not supported in user queries — write term lists or natural language, not FTS5 expressions.\n- **Use concrete tokens likely present in the entry**, not abstract paraphrase (\"explored\", \"examined\") — lexical still wins on structured-vocabulary content like research notes.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -3947,7 +3947,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_attention",
     description:
-      "Return deterministic triage items for tracked work. Surfaces blocked statuses, stale active work, expiring or expired tracked statuses, near-term event staleness, and tracked namespaces missing status or lifecycle structure. Use this instead of broad natural-language search when you explicitly want what needs attention.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Return deterministic triage items for tracked work. Surfaces blocked statuses, stale active work, expiring or expired tracked statuses, near-term event staleness, and tracked namespaces missing status or lifecycle structure. Use this instead of broad natural-language search when you explicitly want what needs attention.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -3998,7 +3998,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_log",
     description:
-      "Append a chronological log entry. Log entries are immutable and timestamped. Use for decisions, events, and milestones with rationale. Status changes do NOT auto-log — log explicitly when decisions are made. Pair with memory_write: state entries hold current truth, log entries hold the history of how you got there.\n\nTag vocabulary: Use canonical tags — decision, milestone, blocker, discovery, correction. Add at most one freeform tag when it clearly improves retrieval.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Append a chronological log entry. Log entries are immutable and timestamped. Use for decisions, events, and milestones with rationale. Status changes do NOT auto-log — log explicitly when decisions are made. Pair with memory_write: state entries hold current truth, log entries hold the history of how you got there.\n\nTag vocabulary: Use canonical tags — decision, milestone, blocker, discovery, correction. Add at most one freeform tag when it clearly improves retrieval.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -4033,7 +4033,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_list",
     description:
-      "Browse memory contents. Without a namespace: shows all namespaces with entry counts and last_activity_at (demo/* and completed task-run namespaces hidden by default). With a namespace: shows all state keys, log count, and the 5 most recent log entry previews.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Browse memory contents. Without a namespace: shows all namespaces with entry counts and last_activity_at (demo/* and completed task-run namespaces hidden by default). With a namespace: shows all state keys, log count, and the 5 most recent log entry previews.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -4103,7 +4103,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_delete",
     description:
-      "Delete a specific state entry by namespace+key, or all entries in a namespace. First call without delete_token to preview what will be deleted. Then call with the returned delete_token to execute.\n\nIf this is your first memory operation in this conversation, call memory_orient first.",
+      "Delete a specific state entry by namespace+key, or all entries in a namespace. First call without delete_token to preview what will be deleted. Then call with the returned delete_token to execute.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -4212,7 +4212,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_status",
     description:
-      "Returns server capabilities, version, and feature availability. Use to discover what search modes, tools, and features are available on this server instance.",
+      "`memory_status` returns server capabilities, version, and feature availability. Use to discover what search modes, tools, and features are available on this server instance. It is a safe fallback orientation check when a host/deferred tool discovery layer tells you to call `memory_orient` but did not expose `memory_orient` as callable.",
     inputSchema: {
       type: "object" as const,
       properties: {},
@@ -4239,6 +4239,9 @@ const TOOL_DEFINITIONS = [
 export const REGISTERED_TOOL_NAMES: readonly string[] = TOOL_DEFINITIONS.map(
   (t) => t.name,
 );
+
+export const REGISTERED_TOOL_METADATA: readonly { name: string; description: string }[] =
+  TOOL_DEFINITIONS.map((t) => ({ name: t.name, description: t.description }));
 
 function okResult(action: string, data: Record<string, unknown>) {
   return { content: [{ type: "text" as const, text: JSON.stringify({ ok: true, action, ...data }) }] };
