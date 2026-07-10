@@ -2159,6 +2159,8 @@ export interface EntryInsightRow {
   entry_id: string;
   namespace: string | null;
   key: string | null;
+  entry_type: EntryType | null;
+  classification: ClassificationLevel | null;
   content_preview: string | null;
   /** Raw tags string of the source entry (comma-separated), for read-time trust evaluation (#152). */
   tags: string | null;
@@ -2169,6 +2171,7 @@ export interface EntryInsightRow {
   /** Events where any follow-through action occurred (open, write, or log). Always ≤ impressions. */
   followthrough_events: number;
   opened_when_stale_count: number;
+  created_at: string | null;
   updated_at: string;
 }
 
@@ -2383,6 +2386,8 @@ export function getInsightsByEntry(
       imp.entry_id,
       e.namespace,
       e.key,
+      e.entry_type,
+      e.classification,
       SUBSTR(e.content, 1, 60) AS content_preview,
       e.tags AS tags,
       COUNT(DISTINCT imp.event_id) AS impressions,
@@ -2405,6 +2410,7 @@ export function getInsightsByEntry(
           AND (julianday(ro_open.timestamp) - julianday(e.updated_at)) > 14
         THEN op.retrieval_event_id
       END) AS opened_when_stale_count,
+      e.created_at,
       COALESCE(e.updated_at, '') AS updated_at
     FROM impressions_cte imp
     LEFT JOIN entries e ON e.id = imp.entry_id

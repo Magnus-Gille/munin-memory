@@ -57,6 +57,7 @@ import {
   logRetrievalEvent,
   logRetrievalOutcome,
   getInsightsByEntry,
+  type EntryInsightRow,
   logRetrievalFeedback,
   getRetrievalAggregates,
   logToolCall,
@@ -81,6 +82,7 @@ import {
 } from "./db.js";
 import {
   CLASSIFICATION_LEVELS,
+  FALLBACK_RESTRICTED_CLASSIFICATION,
   buildLibrarianRuntimeSummary,
   checkWriteVisibility,
   enforceClassification,
@@ -532,6 +534,47 @@ function filterDerivedSources<T>(
   return {
     allowed: filtered.allowed,
     redacted: filtered.redacted.map((entry) => entry.metadata),
+  };
+}
+
+/**
+ * Apply the shared classification gate to analytics rows before any derived
+ * surface turns them into previews, counts, source IDs, or namespace lists.
+ * Rows whose source entry has since been deleted carry no entry content or
+ * namespace metadata and remain visible as anonymous historical analytics.
+ */
+function filterInsightRows(
+  db: Database.Database,
+  ctx: AccessContext,
+  rows: EntryInsightRow[],
+  toolName: string,
+  sessionId?: string,
+): { allowed: EntryInsightRow[]; redacted: RedactableEntryMetadata[] } {
+  const materializedRows = rows.filter(
+    (row): row is EntryInsightRow & { namespace: string } => row.namespace !== null,
+  );
+  const orphanedRows = rows.filter((row) => row.namespace === null);
+  const filtered = filterDerivedSources(
+    db,
+    ctx,
+    materializedRows,
+    toolName,
+    (row) => ({
+      id: row.entry_id,
+      namespace: row.namespace,
+      key: row.key,
+      entry_type: row.entry_type ?? undefined,
+      classification: row.classification ?? FALLBACK_RESTRICTED_CLASSIFICATION,
+      tags: row.tags ? parseTags(row.tags) : [],
+      created_at: row.created_at ?? undefined,
+      updated_at: row.updated_at || undefined,
+    }),
+    sessionId,
+  );
+
+  return {
+    allowed: [...filtered.allowed, ...orphanedRows],
+    redacted: filtered.redacted,
   };
 }
 
@@ -4540,7 +4583,19 @@ export function registerTools(
 
                 // Enrich with synthesis — skip entirely in compact mode
                 if (detail !== "compact") {
-                  const synthesis = readState(db, assessment.row.namespace, "synthesis");
+                  const synthesisSource = readState(db, assessment.row.namespace, "synthesis");
+                  const visibleSynthesis = synthesisSource
+                    ? filterDerivedSources(
+                        db,
+                        ctx,
+                        [synthesisSource],
+                        "memory_orient",
+                        (source) => buildRedactableEntryMetadata(parseEntry(source)),
+                        sessionId,
+                      )
+                    : { allowed: [], redacted: [] };
+                  orientRedactedSources.push(...visibleSynthesis.redacted);
+                  const synthesis = visibleSynthesis.allowed[0];
                   if (synthesis) {
                     const synthesisMeta = getConsolidationMetadata(db, assessment.row.namespace);
                     const synthesisAgeMs = Date.now() - new Date(synthesis.updated_at).getTime();
@@ -4688,10 +4743,19 @@ export function registerTools(
                 {
                   const sinceWindowOrient = new Date(Date.now() - RETRIEVED_UNUSED_SINCE_DAYS * 86400000).toISOString();
                   const hasRecent = db.prepare("SELECT 1 FROM retrieval_events WHERE timestamp >= ? LIMIT 1").get(sinceWindowOrient);
-                  const unusedOrient = hasRecent
+                  const unusedOrientRows = hasRecent
                     ? getInsightsByEntry(db, undefined, RETRIEVED_UNUSED_MIN_IMPRESSIONS, 10, sinceWindowOrient, true, orientTrackedPatterns)
-                        .filter((r) => r.followthrough_events === 0)
                     : [];
+                  const visibleUnusedOrient = filterInsightRows(
+                    db,
+                    ctx,
+                    unusedOrientRows,
+                    "memory_orient",
+                    sessionId,
+                  );
+                  orientRedactedSources.push(...visibleUnusedOrient.redacted);
+                  const unusedOrient = visibleUnusedOrient.allowed
+                    .filter((row) => row.followthrough_events === 0);
                   if (unusedOrient.length >= RETRIEVED_UNUSED_ORIENT_MIN) {
                     const unusedOrientItem: MaintenanceItem = {
                       namespace: null,
@@ -5612,9 +5676,19 @@ export function registerTools(
               // mislabelled, or that retrieval recall is too aggressive.
               // Restricted to tracked namespaces (projects/*, clients/*) in SQL to
               // avoid false positives from reference namespaces (meta/*, documents/*, etc.).
+              const insightRedactedSources: RedactableEntryMetadata[] = [];
               if (ctx.principalType === "owner") {
                 const sinceWindow = new Date(Date.now() - RETRIEVED_UNUSED_SINCE_DAYS * 86400000).toISOString();
-                const unused = getInsightsByEntry(db, namespace, RETRIEVED_UNUSED_MIN_IMPRESSIONS, 20, sinceWindow, true, patternsTrackedPatterns)
+                const insightRows = getInsightsByEntry(db, namespace, RETRIEVED_UNUSED_MIN_IMPRESSIONS, 20, sinceWindow, true, patternsTrackedPatterns);
+                const visibleInsightRows = filterInsightRows(
+                  db,
+                  ctx,
+                  insightRows,
+                  "memory_patterns",
+                  sessionId,
+                );
+                insightRedactedSources.push(...visibleInsightRows.redacted);
+                const unused = visibleInsightRows.allowed
                   .filter((r) => r.followthrough_events === 0);
                 if (unused.length >= RETRIEVED_UNUSED_PATTERN_MIN) {
                   const unusedIds = unused.slice(0, 6).map((r) => r.entry_id);
@@ -5711,6 +5785,7 @@ export function registerTools(
                   filteredEntries.redacted,
                   visibleTrackedStatuses.redacted,
                   redactedCommitmentSources,
+                  insightRedactedSources,
                 ),
               );
               if (redactedSourcesSummary) {
@@ -7385,7 +7460,8 @@ export function registerTools(
               const insightsLimit = clampOptionalLimit(insightsArgs.limit, 50) ?? 20;
 
               const rows = getInsightsByEntry(db, insightsArgs.namespace, minImpressions, insightsLimit);
-              const entries: EntryInsight[] = rows.map(computeEntryInsight);
+              const visibleRows = filterInsightRows(db, ctx, rows, "memory_insights", sessionId);
+              const entries: EntryInsight[] = visibleRows.allowed.map(computeEntryInsight);
 
               // Include aggregate retrieval health metrics
               const rawAgg = getRetrievalAggregates(db);
@@ -7421,7 +7497,8 @@ export function registerTools(
                 multi_event_sessions: rawAgg.multi_event_sessions,
               };
 
-              const insightsMessage = entries.length === 0
+              const redactedSourcesSummary = summarizeRedactedSources(ctx, visibleRows.redacted);
+              const insightsMessage = entries.length === 0 && !redactedSourcesSummary
                 ? `No retrieval data yet: no entries have reached the min_impressions threshold (${minImpressions}). Entries appear here only after they have been shown in memory_query results at least ${minImpressions} time(s) (orient/attention do not count toward per-entry impressions). Lower min_impressions to surface entries with fewer impressions.`
                 : undefined;
 
@@ -7431,6 +7508,7 @@ export function registerTools(
                 min_impressions: minImpressions,
                 ...(insightsMessage ? { message: insightsMessage } : {}),
                 aggregates,
+                ...(redactedSourcesSummary ? { redacted_sources: redactedSourcesSummary } : {}),
               });
             };
             return handleMemoryInsights();
