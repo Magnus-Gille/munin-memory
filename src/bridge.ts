@@ -31,6 +31,7 @@ import {
   StreamableHTTPError,
 } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import { SERVER_VERSION } from "./version.js";
 
 // --- Credential loading ---
 
@@ -362,7 +363,7 @@ export function createBridge(config: BridgeConfig) {
                 capabilities: {},
                 clientInfo: {
                   name: "munin-bridge",
-                  version: "0.1.0",
+                  version: SERVER_VERSION,
                 },
               },
             })

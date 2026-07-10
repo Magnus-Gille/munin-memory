@@ -6331,6 +6331,7 @@ describe("reference index (memory_orient)", () => {
 
 describe("memory_status", () => {
   it("returns all expected top-level fields", async () => {
+    const packageVersion = (await import("../package.json", { with: { type: "json" } })).default.version;
     const raw = await callTool("memory_status", {});
     const result = parseToolResponse(raw) as {
       server: { name: string; version: string };
@@ -6348,7 +6349,7 @@ describe("memory_status", () => {
 
     expect(result.server).toBeDefined();
     expect(result.server.name).toBe("munin-memory");
-    expect(result.server.version).toBe("0.1.0");
+    expect(result.server.version).toBe(packageVersion);
 
     expect(typeof result.schema_version).toBe("number");
     expect(result.schema_version).toBeGreaterThan(0);

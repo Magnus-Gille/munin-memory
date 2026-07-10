@@ -8,6 +8,8 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-07-10
+
 ### Added
 
 - **Offsite cloud backup of the memory DB — encrypted third copy (3-2-1; closes #172).** Munin now replicates its own SQLite DB to cloud (OneDrive) through an rclone **crypt** remote, reusing the reference offsite mechanism from mimir#10. `scripts/offsite-backup.sh` is a **verbatim copy** of mimir's script (kept diffable so shared safety fixes propagate): rclone crypt client-side encryption of contents *and* filenames that **fails closed** if the remote isn't a verified crypt remote; mirror `current/` + 30-day history in per-run `archive/<utc-timestamp>/` **pruned by dir name, not object mtime**; preflight delete-count gate + `--max-delete`; heartbeat stamp + `pass`/`fail` Heimdall panel; fail-loud on every preflight/mirror error. The one munin-specific addition is `scripts/offsite-snapshot.sh`, a thin wrapper that takes a consistent point-in-time snapshot (`VACUUM INTO`, safe under concurrent WAL writes) into a staging dir, verifies it with `PRAGMA integrity_check`, then hands off to the shared script with `MIMIR_OFFSITE_ROOT` set to the staging dir — so a live DB is never uploaded mid-write. Uses munin's **own** crypt remote (`munin-crypt`, `onedrive:Grimnir/munin`) and **own key**, backed up independently of mimir's. Ships `munin-offsite.service` + `munin-offsite.timer` (Pi, daily 03:45) and `docs/offsite-backup.md` (setup, key custody, restore test). Runs on huginmunin where the DB lives; Heimdall service `munin`.
@@ -50,6 +52,7 @@ changelog is the canonical record of what moved.
 
 ### Fixed
 
+- **Runtime version reporting now follows `package.json`.** The MCP initialize handshake, `memory_status`, and `munin-bridge` client identity previously remained hard-coded at `0.1.0` across later releases. They now share one runtime version source backed by the package metadata, so deployed instances report the version that was actually tagged and shipped.
 - **MCP/deferred tool discovery guidance no longer requires an undiscovered `memory_orient` (#195).** The `memory_orient` tool metadata now names itself as the session-handshake / first-memory-operation tool so deferred discovery can surface it by name and purpose. Other first-call guidance is now fallback-safe: if a host does not expose `memory_orient`, agents are told to use `memory_status` or `memory_resume` instead of stalling or violating the protocol. `memory_status` also documents that fallback role.
 - **Self-heal orphaned `processing` embedding rows on worker startup (#155).** The embedding worker now resets any `embedding_status = 'processing'` rows back to `'pending'` when it starts (`resetOrphanedProcessingRows`). A `processing` status is only ever held by a live in-process worker mid-batch, so any such row at startup is an orphan from a prior crash/restart — and the claim query never re-picks `processing`, so the row would otherwise stay un-embedded forever (and, under the model-identity guard, invisible to semantic search). `updated_at` is left untouched so CAS timestamps are undisturbed. Clears the 16 real orphans observed during the bge-small migration on the next restart.
 - **`memory_health.embedding.coverage_pct` is now `null` on an empty corpus instead of a misleading `0` (#159).** `0%` falsely implied "0% covered" when the true answer is "nothing to cover". `getEmbeddingQueueCounts` returns `null` when `total == 0`.
@@ -764,7 +767,11 @@ Initial public release (commit `c40c127`). Core MCP tool surface
 `memory_list`, `memory_delete`), SQLite + FTS5 storage, Bearer token auth,
 stdio transport, and the first HTTP transport for Raspberry Pi deployment.
 
-[Unreleased]: https://github.com/Magnus-Gille/munin-memory/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/Magnus-Gille/munin-memory/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/Magnus-Gille/munin-memory/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/Magnus-Gille/munin-memory/compare/v0.3.4...v0.4.0
+[0.3.4]: https://github.com/Magnus-Gille/munin-memory/compare/v0.3.3...v0.3.4
+[0.3.3]: https://github.com/Magnus-Gille/munin-memory/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/Magnus-Gille/munin-memory/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/Magnus-Gille/munin-memory/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Magnus-Gille/munin-memory/compare/v0.2.0...v0.3.0

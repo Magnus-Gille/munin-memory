@@ -124,9 +124,11 @@ describe("stateless HTTP transport", () => {
 
     expect(initializeResponse.headers["mcp-session-id"]).toBeUndefined();
 
+    const packageVersion = (await import("../package.json", { with: { type: "json" } })).default.version;
     const initPayload = parseJsonRpcResponse(initializeResponse.text);
     expect((initPayload.result as Record<string, unknown>).serverInfo).toMatchObject({
       name: "munin-memory",
+      version: packageVersion,
     });
 
     const toolResponse = await supertest(app)

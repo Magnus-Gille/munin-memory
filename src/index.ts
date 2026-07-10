@@ -18,6 +18,7 @@ import { getConfiguredLegacyBearerTransportType, resolveAccessContext } from "./
 import type { AccessContext } from "./access.js";
 import { getLibrarianConfigWarnings, type LibrarianRuntimeConfig } from "./librarian.js";
 import { MuninOAuthProvider, type ExtendedAuthInfo } from "./oauth.js";
+import { SERVER_VERSION } from "./version.js";
 
 // Analytics retention (default 90 days)
 function getAnalyticsRetentionDays(): number {
@@ -150,7 +151,7 @@ function createMcpServer(
   runtimeConfig?: LibrarianRuntimeConfig,
 ): Server {
   const server = new Server(
-    { name: "munin-memory", version: "0.1.0" },
+    { name: "munin-memory", version: SERVER_VERSION },
     { capabilities: { tools: {} } },
   );
   registerTools(server, database, sessionId, accessContext, runtimeConfig);

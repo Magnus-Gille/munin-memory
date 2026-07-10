@@ -6,6 +6,7 @@ import {
 import { getSchemaVersion } from "./migrations.js";
 import type { CallToolRequest } from "@modelcontextprotocol/sdk/types.js";
 import type Database from "better-sqlite3";
+import { SERVER_VERSION } from "./version.js";
 import {
   type AccessContext,
   type NamespaceRule,
@@ -7688,7 +7689,7 @@ export function registerTools(
               const statusResponse: Record<string, unknown> = {
                 server: {
                   name: "munin-memory",
-                  version: "0.1.0",
+                  version: SERVER_VERSION,
                 },
                 schema_version: schemaVersion,
                 features: {
