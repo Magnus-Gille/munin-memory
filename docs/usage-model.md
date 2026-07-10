@@ -65,8 +65,11 @@ Status entries use lifecycle tags (`active`, `blocked`, `completed`, `stopped`,
 
 Munin now separates **broad orientation** from **targeted continuation**.
 
-Use `memory_orient` first when a session starts. It is the handshake tool: conventions,
-dashboard, maintenance items, and namespace overview in one place.
+Use `memory_orient` first when a session starts and the host exposes it as callable. It is
+the handshake tool: conventions, dashboard, maintenance items, and namespace overview in
+one place. If a host or deferred tool-discovery layer does not expose `memory_orient`, use
+`memory_status` to inspect available tools or `memory_resume` for targeted context as the
+fallback.
 
 Use `memory_resume` after that when you already have a likely direction — a project
 name, a namespace, or a user opener such as "continue grimnir parser rollout." It

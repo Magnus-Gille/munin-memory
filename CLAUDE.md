@@ -29,7 +29,7 @@ All 23 tools registered in `TOOL_DEFINITIONS` (`src/tools.ts`) are listed below.
 
 | Tool | Purpose |
 |------|---------|
-| `memory_orient` | **Start here.** Dashboard, conventions, maintenance suggestions, namespace overview. Pass `include_full_conventions: true` for the full guide. |
+| `memory_orient` | **Start here when callable.** Dashboard, conventions, maintenance suggestions, namespace overview. Pass `include_full_conventions: true` for the full guide. If a host does not expose it, use `memory_status` or `memory_resume` as fallback. |
 | `memory_resume` | Targeted continuation pack — most relevant state + next steps for a namespace/opener. |
 | `memory_extract` | Propose reviewable memory ops from conversation signals. Does not write directly. |
 | `memory_narrative` | Narrative + momentum view from status, logs, and audit history for a namespace. |
@@ -50,7 +50,7 @@ All 23 tools registered in `TOOL_DEFINITIONS` (`src/tools.ts`) are listed below.
 | `memory_insights` | Per-entry retrieval analytics: impressions, opens, follow-through, staleness. |
 | `memory_retrieval_feedback` | Submit explicit retrieval feedback. Owner-only. |
 | `memory_consolidate` | Synthesize unincorporated logs into `synthesis` key via OpenRouter. Owner-only. |
-| `memory_status` | Server capabilities, version, feature availability. |
+| `memory_status` | Server capabilities, version, feature availability. Safe fallback when `memory_orient` is not exposed by host discovery. |
 | `memory_health` | Owner-only. Memory-engine health snapshot: embedding queue (incl. model-relative stale counts), memory size, retrieval metrics, classification distribution, maintenance counts, consolidation health, security events. Per-section graceful degradation. |
 
 ## Project structure
