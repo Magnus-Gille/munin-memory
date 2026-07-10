@@ -47,6 +47,7 @@ import {
   type RequestLogEntry,
 } from "../src/index.js";
 import type { ExtendedAuthInfo } from "../src/oauth.js";
+import { SERVER_VERSION } from "../src/version.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -550,6 +551,8 @@ describe("createHttpApp — HTTP app endpoints", () => {
         repo: "https://github.com/Magnus-Gille/munin-memory",
       },
     });
+    expect(res.body.version).toBe(SERVER_VERSION);
+    expect(HEIMDALL_DESCRIPTOR.version).toBe(SERVER_VERSION);
   });
 
   it("sets X-Content-Type-Options and Cache-Control security headers", async () => {

@@ -58,7 +58,6 @@ export const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 // --- Heimdall self-descriptor ---
 // Served at GET /heimdall.json for Tier-1 discovery by the Heimdall dashboard.
 // Shape must satisfy Heimdall's validateDescriptor (schema/service/v1).
-// Keep version in sync with package.json when bumping.
 export const HEIMDALL_DESCRIPTOR = {
   _schema: 'https://heimdall.gille.ai/schema/service/v1',
   service: {
@@ -70,7 +69,7 @@ export const HEIMDALL_DESCRIPTOR = {
   },
   kind: 'mcp',
   status: 'pass',
-  version: '0.4.0',
+  version: SERVER_VERSION,
   deploy: {
     host: 'huginmunin',
     systemd_unit: 'munin-memory',
