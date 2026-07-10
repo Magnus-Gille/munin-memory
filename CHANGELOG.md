@@ -8,6 +8,10 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The public Heimdall service descriptor now reports the runtime package version.** `/heimdall.json` previously carried a manually maintained `0.4.0` string after v0.5.0 shipped, so operator dashboards displayed the wrong release even though MCP initialize and `memory_status` were correct. It now uses the same `SERVER_VERSION` source as the other runtime surfaces, with a regression test tying it to `package.json`.
+
 ## [0.5.0] — 2026-07-10
 
 ### Added
