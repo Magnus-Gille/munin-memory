@@ -1439,6 +1439,135 @@ describe("Librarian Pattern B enforcement for derived tools", () => {
     expect(result.redacted_sources?.namespaces).toContain("clients/lofalk");
   });
 
+  it("omits a synthesis that exceeds the visible status entry's transport ceiling", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/orient-synthesis-classification",
+      key: "status",
+      content: "## Phase\nActive\n\n## Current Work\nVisible internal work",
+      tags: ["active"],
+      classification: "internal",
+    });
+    const synthesisRaw = await callTool("memory_write", {
+      namespace: "projects/orient-synthesis-classification",
+      key: "synthesis",
+      content: "CONFIDENTIAL_SYNTHESIS_MARKER that must not cross a consumer transport.",
+      classification: "client-confidential",
+    });
+    const synthesisResult = parseToolResponse(synthesisRaw) as { id: string };
+
+    const consumerOwnerCall = makeContextCallTool({
+      ...ownerContext(),
+      transportType: "consumer",
+      maxClassification: "internal",
+    }, "orient-synthesis-classification-session");
+
+    const raw = await consumerOwnerCall("memory_orient", { detail: "standard" });
+    const result = parseToolResponse(raw) as {
+      dashboard: Record<string, Array<{ namespace: string; synthesis?: unknown }>>;
+      redacted_sources?: { count: number; namespaces?: string[] };
+    };
+    const dashboardEntry = Object.values(result.dashboard)
+      .flat()
+      .find((entry) => entry.namespace === "projects/orient-synthesis-classification");
+
+    expect(dashboardEntry).toBeTruthy();
+    expect(dashboardEntry!.synthesis).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain("CONFIDENTIAL_SYNTHESIS_MARKER");
+    expect(result.redacted_sources?.count).toBeGreaterThan(0);
+
+    const redaction = db.prepare(
+      "SELECT tool_name, entry_id FROM redaction_log WHERE entry_id = ?",
+    ).get(synthesisResult.id) as { tool_name: string; entry_id: string } | undefined;
+    expect(redaction).toMatchObject({
+      tool_name: "memory_orient",
+      entry_id: synthesisResult.id,
+    });
+  });
+
+  it("filters memory_insights entries above an owner connection's classification ceiling", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/private-insight",
+      key: "status",
+      content: "PRIVATE_INSIGHT_MARKER secret telemetry",
+      tags: ["active"],
+      classification: "client-confidential",
+    });
+
+    for (let i = 0; i < 3; i++) {
+      const localOwnerCall = makeContextCallTool(ownerContext(), `private-insight-impression-${i}`);
+      await localOwnerCall("memory_query", {
+        query: "secret telemetry",
+        namespace: "projects/private-insight",
+      });
+    }
+
+    const consumerOwnerCall = makeContextCallTool({
+      ...ownerContext(),
+      transportType: "consumer",
+      maxClassification: "internal",
+    }, "private-insight-consumer-session");
+    const raw = await consumerOwnerCall("memory_insights", {
+      namespace: "projects/private-insight",
+      min_impressions: 1,
+    });
+    const result = parseToolResponse(raw) as {
+      entries: Array<{ namespace: string; content_preview: string | null }>;
+      redacted_sources?: { count: number; namespaces?: string[] };
+    };
+
+    expect(result.entries).toHaveLength(0);
+    expect(JSON.stringify(result)).not.toContain("PRIVATE_INSIGHT_MARKER");
+    expect(result.redacted_sources).toMatchObject({ count: 1 });
+    expect(result.redacted_sources?.namespaces).toContain("projects/private-insight");
+
+    const redactionCount = db.prepare(
+      "SELECT COUNT(*) AS count FROM redaction_log WHERE tool_name = 'memory_insights' AND entry_namespace = ?",
+    ).get("projects/private-insight") as { count: number };
+    expect(redactionCount.count).toBe(1);
+  });
+
+  it("excludes above-ceiling insight rows from retrieved-unused aggregate signals", async () => {
+    for (let entryIndex = 0; entryIndex < 3; entryIndex++) {
+      const namespace = `projects/private-unused-${entryIndex}`;
+      await callTool("memory_write", {
+        namespace,
+        key: "status",
+        content: `PRIVATE_UNUSED_MARKER_${entryIndex} secret telemetry`,
+        tags: ["active"],
+        classification: "client-confidential",
+      });
+
+      for (let impressionIndex = 0; impressionIndex < 5; impressionIndex++) {
+        const localOwnerCall = makeContextCallTool(
+          ownerContext(),
+          `private-unused-${entryIndex}-${impressionIndex}`,
+        );
+        await localOwnerCall("memory_query", {
+          query: `PRIVATE_UNUSED_MARKER_${entryIndex}`,
+          namespace,
+        });
+      }
+    }
+
+    const consumerOwnerCall = makeContextCallTool({
+      ...ownerContext(),
+      transportType: "consumer",
+      maxClassification: "internal",
+    }, "private-unused-consumer-session");
+
+    const patternsRaw = await consumerOwnerCall("memory_patterns", {});
+    const patterns = parseToolResponse(patternsRaw) as {
+      patterns: Array<{ kind: string }>;
+    };
+    expect(patterns.patterns.some((pattern) => pattern.kind === "retrieved_unused")).toBe(false);
+
+    const orientRaw = await consumerOwnerCall("memory_orient", { detail: "standard" });
+    const orient = parseToolResponse(orientRaw) as {
+      maintenance_needed?: Array<{ issue: string }>;
+    };
+    expect(orient.maintenance_needed?.some((item) => item.issue === "retrieved_unused") ?? false).toBe(false);
+  });
+
   it("hides classified-only namespaces from orient namespace overview and missing-status synthesis", async () => {
     await callTool("memory_write", {
       namespace: "projects/visible-no-status",

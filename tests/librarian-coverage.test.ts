@@ -44,7 +44,7 @@ const ENFORCEMENT_EXPECTATIONS: Record<string, string[]> = {
   // commitmentTrustOverride) inline in the case block (#152).
   memory_handoff: ["getVisibleTrackedStatusAssessments(", "filterDerivedSources(", "extractResumeOpenLoops(", "commitmentTrustOverride("],
   memory_attention: ["getVisibleTrackedStatusAssessments(", "listVisibleNamespaces(", "attentionUntrustedOverride"],
-  memory_insights: ["computeEntryInsight"],
+  memory_insights: ["filterInsightRows(", "computeEntryInsight"],
 };
 
 // Helper functions defined outside the switch statement (e.g. shared between
