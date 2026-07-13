@@ -822,7 +822,7 @@ CREATE INDEX IF NOT EXISTS idx_entries_ns_classification
 | `MUNIN_BEARER_TRANSPORT_TYPE` | `dpa_covered` | Transport type for legacy `MUNIN_API_KEY` connections (deprecated — use dedicated keys) |
 | `MUNIN_OAUTH_TRANSPORT_TYPE` | `consumer` | Transport type for OAuth connections |
 | `MUNIN_REDACTION_LOG_ENABLED` | `true` | Log redaction events (disable for performance if needed) |
-| `MUNIN_REDACTION_LOG_RETENTION_DAYS` | `365` | Retention for redaction audit logs. Invalid or non-positive values fall back to 365 days. |
+| `MUNIN_REDACTION_LOG_RETENTION_DAYS` | `365` | Retention for redaction audit logs. Surrounding whitespace is ignored; otherwise the whole value must be a positive safe integer in decimal digits, or it falls back to 365 days. |
 
 **Credential priority:** If both `MUNIN_API_KEY_DPA` and `MUNIN_API_KEY` are set, the server checks DPA key first, then consumer key, then legacy key. A request matching the legacy key is logged with a deprecation warning.
 

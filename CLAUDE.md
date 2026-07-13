@@ -725,7 +725,7 @@ Enforcement is three-layered (#150 added the third):
 | `MUNIN_OAUTH_REFRESH_TOKEN_TTL` | `2592000` | Refresh token lifetime (30 days, seconds) |
 | `MUNIN_OAUTH_IDENTITY_HEADER` | — | Header with authenticated user's email for multi-user consent (e.g. `cf-access-authenticated-user-email`) |
 | `MUNIN_ANALYTICS_RETENTION_DAYS` | `90` | Retention for retrieval_events/outcomes. Sessions pruned at 7 days. |
-| `MUNIN_REDACTION_LOG_RETENTION_DAYS` | `365` | Retention for Librarian redaction audit records. Invalid or non-positive values fall back to 365 days. |
+| `MUNIN_REDACTION_LOG_RETENTION_DAYS` | `365` | Retention for Librarian redaction audit records. Surrounding whitespace is ignored; otherwise the whole value must be a positive safe integer in decimal digits, or it falls back to 365 days. |
 | `MUNIN_ALLOW_NAMESPACE_DELETE` | `false` | Enable namespace-wide bulk deletes (`memory_delete` with namespace but no key). Default `false` — namespace-wide deletes are disabled to prevent stored-content prompt-injection payloads from driving the full preview→token→confirm flow in a single agent loop. Set to `true` to re-enable. Single-entry deletes (namespace+key) are always allowed. (#150) |
 | `MUNIN_DISPLAY_TIMEZONE` | `Europe/Stockholm` | IANA timezone for display timestamps (storage stays UTC) |
 | `MUNIN_LLM_BASE_URL` | `https://openrouter.ai/api/v1` | OpenAI-compatible chat-completions base URL used by the answer-quality eval and the consolidation worker. Point at a local llama.cpp / Ollama / vLLM server to run without calling OpenRouter. `OPENROUTER_API_KEY` becomes optional when this is set to a non-default URL. Trailing slashes are trimmed automatically. |
