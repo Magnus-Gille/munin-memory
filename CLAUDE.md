@@ -97,7 +97,9 @@ munin-memory/
 │   ├── vision.md                          # Current product thesis (source of truth)
 │   ├── roadmap.md                         # Current implementation plan (source of truth)
 │   └── archive/                           # Superseded pre-pivot planning docs (prd.md, technical-spec.md)
-├── munin-memory.service   # systemd unit file for RPi deployment
+├── munin-memory.service   # Public systemd template rendered by deploy-rpi.sh
+├── systemd/
+│   └── munin-memory.service # Rendered unit installed verbatim by Grimnir
 ├── munin-offsite.service  # systemd unit — daily encrypted offsite backup (with .timer)
 ├── munin-offsite.timer    # NOTE: backup/offsite units run scripts from ~/munin-ops, NOT a checkout
 ├── scripts/
@@ -197,6 +199,13 @@ npm run dev      # tsx watch src/index.ts
 # One-time database migration
 ./scripts/migrate-db.sh <your-pi-hostname>
 ```
+
+The root `munin-memory.service` is the portable public template;
+`scripts/deploy-rpi.sh` renders its `<user>` and `<install-dir>` placeholders
+before installation. The Grimnir fleet controller instead prefers
+`systemd/munin-memory.service` and installs it verbatim. That fleet copy is
+pre-rendered for the canonical `magnus` deployment and is contract-tested
+against the rendered public template so the two paths cannot silently drift.
 
 ### On-Pi layout — one owner per role (munin-memory#175)
 

@@ -222,6 +222,9 @@ This is how I run it today — a `full-node` deployment on a Pi 5 on my desk, ac
 4. **Configure OAuth** — set `MUNIN_OAUTH_ISSUER_URL` to your public domain and configure `MUNIN_OAUTH_TRUSTED_USER_HEADER` + `MUNIN_OAUTH_TRUSTED_USER_VALUE` so browser consent is only available to your authenticated user
 
 The deploy script and service file are tailored to my setup. You will likely need to adjust paths, usernames, and network configuration for yours.
+The separate `systemd/munin-memory.service` is the already-rendered unit used
+by the Grimnir fleet controller; self-hosted installations should continue to
+use the root template through `scripts/deploy-rpi.sh`.
 
 For the broader appliance direction, the project now distinguishes between `full-node` and `zero-appliance` deployments. A Pi Zero 2 W is being treated as a constrained profile that needs explicit hardware validation rather than assumed feature parity. See [docs/appliance-profiles.md](docs/appliance-profiles.md).
 

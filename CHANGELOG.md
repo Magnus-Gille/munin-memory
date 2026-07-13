@@ -10,6 +10,7 @@ changelog is the canonical record of what moved.
 
 ### Fixed
 
+- **Grimnir fleet deploys can no longer install the public systemd template literally.** The portable root `munin-memory.service` intentionally contains `<user>` and `<install-dir>` placeholders that `scripts/deploy-rpi.sh` renders, while Grimnir installs its selected unit verbatim. A concrete canonical fleet unit now lives at the controller-preferred `systemd/munin-memory.service`, with a regression contract proving it has no unresolved placeholders and remains behaviorally aligned with the rendered public template.
 - **The public Heimdall service descriptor now reports the runtime package version.** `/heimdall.json` previously carried a manually maintained `0.4.0` string after v0.5.0 shipped, so operator dashboards displayed the wrong release even though MCP initialize and `memory_status` were correct. It now uses the same `SERVER_VERSION` source as the other runtime surfaces, with a regression test tying it to `package.json`.
 - **Librarian redaction audit logs now retain 365 days by default, matching the documented compliance contract.** The pruning path previously fell back to 90 days when `MUNIN_REDACTION_LOG_RETENTION_DAYS` was unset or invalid, silently discarding audit evidence earlier than documented. Configuration is now accepted only when its trimmed, complete value is a positive safe integer in decimal digits; malformed, fractional, zero, negative, and unsafe values fall back to 365 days.
 
