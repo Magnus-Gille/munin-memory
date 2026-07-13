@@ -26,9 +26,17 @@ function getAnalyticsRetentionDays(): number {
   return Number.isFinite(val) && val > 0 ? val : 90;
 }
 
+const DEFAULT_REDACTION_LOG_RETENTION_DAYS = 365;
+
 function getRedactionLogRetentionDays(): number {
-  const val = parseInt(process.env.MUNIN_REDACTION_LOG_RETENTION_DAYS ?? "90", 10);
-  return Number.isFinite(val) && val > 0 ? val : 90;
+  const configured = process.env.MUNIN_REDACTION_LOG_RETENTION_DAYS;
+  if (configured === undefined) return DEFAULT_REDACTION_LOG_RETENTION_DAYS;
+
+  const normalized = configured.trim();
+  if (!/^[1-9]\d*$/.test(normalized)) return DEFAULT_REDACTION_LOG_RETENTION_DAYS;
+
+  const val = Number(normalized);
+  return Number.isSafeInteger(val) ? val : DEFAULT_REDACTION_LOG_RETENTION_DAYS;
 }
 
 export function runMaintenancePrune(database: Database.Database): void {

@@ -822,7 +822,7 @@ CREATE INDEX IF NOT EXISTS idx_entries_ns_classification
 | `MUNIN_BEARER_TRANSPORT_TYPE` | `dpa_covered` | Transport type for legacy `MUNIN_API_KEY` connections (deprecated — use dedicated keys) |
 | `MUNIN_OAUTH_TRANSPORT_TYPE` | `consumer` | Transport type for OAuth connections |
 | `MUNIN_REDACTION_LOG_ENABLED` | `true` | Log redaction events (disable for performance if needed) |
-| `MUNIN_REDACTION_LOG_RETENTION_DAYS` | `365` | Retention for redaction audit log |
+| `MUNIN_REDACTION_LOG_RETENTION_DAYS` | `365` | Retention for redaction audit logs. Surrounding whitespace is ignored; otherwise the whole value must be a positive safe integer in decimal digits, or it falls back to 365 days. |
 
 **Credential priority:** If both `MUNIN_API_KEY_DPA` and `MUNIN_API_KEY` are set, the server checks DPA key first, then consumer key, then legacy key. A request matching the legacy key is logged with a deprecation warning.
 
@@ -1096,14 +1096,13 @@ docs/
 2. **~~How should transport be attested?~~** → Dedicated credentials per transport class (§5.2). Codex critique C01: auth method alone is not a trustworthy signal.
 3. **~~Should derived tools redact output or filter input?~~** → Filter input before synthesis (§7.1.1). Codex critique C02: post-synthesis redaction is insufficient.
 4. **~~What metadata should redacted entries expose?~~** → Tiered by principal type (§6.2). Codex critique C03: full metadata leaks relationships for non-owner.
+7. **~~How long should redaction logs be retained?~~** → 365 days. Compliance evidence needs a longer window than retrieval analytics, which default to 90 days.
 
 ### Still open
 
 5. **Should `memory_query` return redacted entries in search results, or omit them entirely?** Current proposal: include them (with metadata only) so the user knows relevant results exist. Alternative: omit and add a `redacted_count` field. The tiered metadata policy (§6.2) mitigates the leakage concern for non-owner principals.
 
 6. **Should classification be settable as a tool parameter on `memory_write`, or only via tags?** A dedicated parameter is cleaner but adds schema complexity. A tag-only approach uses existing infrastructure but is easier to accidentally omit.
-
-7. **Redaction log retention.** 365 days proposed for compliance evidence. This is intentionally longer than `MUNIN_ANALYTICS_RETENTION_DAYS` (90 days) because redaction logs serve a legal purpose.
 
 8. **Should `client-restricted` entries be completely invisible (like namespace denial) rather than redacted?** The tiered metadata policy reduces this concern — non-owner principals already get minimal metadata. For owner on downgraded transport, visibility is desired.
 
