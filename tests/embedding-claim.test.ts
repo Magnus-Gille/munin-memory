@@ -1,21 +1,29 @@
 /**
- * Regression tests for multi-worker embedding claim safety (#170).
+ * Multi-worker embedding claim safety tests (#170).
  *
- * Validates:
- * 1. A fresh in-flight claim is NOT reclaimed by resetOrphanedProcessingRows.
- * 2. A stale claim (past the timeout) IS reclaimed.
- * 3. An old owner cannot finalize after its claim has been reassigned.
+ * Uses TWO independent better-sqlite3 connections to the SAME temp database
+ * file with WAL mode. Tests invoke production claim/reset/finalize helpers —
+ * no hand-written claim SQL.
  *
- * All tests use deterministic timestamps and direct DB manipulation — no real
- * network/model calls, no setTimeout races.
+ * Covers:
+ *  1. Fresh A claim not reclaimed by B
+ *  2. Stale A reset then B claims
+ *  3. A cannot finalize success after B owns
+ *  4. A cannot finalize failure after B owns
+ *  5. A cannot finalize after content update/requeue
+ *  6. Correct success persists entries_vec and clears claim
+ *  7. Correct failure reaches 'failed' and clears claim
+ *  8. Stale threshold validation (boundary tests)
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
-import { randomUUID } from "node:crypto";
-import { initDatabase, writeState, storeEmbedding } from "../src/db.js";
+import { initDatabase, writeState } from "../src/db.js";
 import {
   resetOrphanedProcessingRows,
+  claimBatch,
+  finalizeSuccess,
+  finalizeFailure,
   STALE_CLAIM_MS,
   _setExtractorForTesting,
   resetCircuitBreaker,
@@ -47,40 +55,11 @@ function makeEmbedding(seed: number): Float32Array {
   return arr;
 }
 
-function mockExtractor(text: string, _options: { pooling: string; normalize: boolean }) {
+function mockExtractor(
+  _text: string,
+  _options: { pooling: string; normalize: boolean },
+) {
   return Promise.resolve({ data: makeEmbedding(42) });
-}
-
-let db: Database.Database;
-
-beforeEach(() => {
-  cleanupTestDb();
-  db = initDatabase(TEST_DB_PATH);
-  resetCircuitBreaker();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  _setExtractorForTesting(mockExtractor as any);
-});
-
-afterEach(async () => {
-  await stopEmbeddingWorker();
-  _setExtractorForTesting(null);
-  db.close();
-  cleanupTestDb();
-});
-
-// ─── Helper: simulate a claim on a row ──────────────────────────────────────
-function claimRow(
-  entryId: string,
-  claimToken: string,
-  claimedAt: string,
-): void {
-  db.prepare(
-    `UPDATE entries
-       SET embedding_status = 'processing',
-           embedding_claim_token = ?,
-           embedding_claimed_at = ?
-     WHERE id = ?`,
-  ).run(claimToken, claimedAt, entryId);
 }
 
 type ClaimRow = {
@@ -89,7 +68,7 @@ type ClaimRow = {
   embedding_claimed_at: string | null;
 };
 
-function getClaimState(entryId: string): ClaimRow {
+function getClaimState(db: Database.Database, entryId: string): ClaimRow {
   return db
     .prepare(
       "SELECT embedding_status, embedding_claim_token, embedding_claimed_at FROM entries WHERE id = ?",
@@ -97,259 +76,382 @@ function getClaimState(entryId: string): ClaimRow {
     .get(entryId) as ClaimRow;
 }
 
-describe("embedding claim ownership (#170)", () => {
-  // ── 1. Fresh in-flight claim must NOT be reclaimed ──────────────────────
-  it("does not reset a fresh in-flight claim", () => {
-    const { id } = writeState(db, "test/ns", "fresh", "content", []);
-    const token = randomUUID();
-    const freshTimestamp = new Date().toISOString(); // just now — well within STALE_CLAIM_MS
-    claimRow(id, token, freshTimestamp);
+/** Connection A — used for initial writes and as "worker A". */
+let dbA: Database.Database;
+/** Connection B — independent WAL connection acting as "worker B". */
+let dbB: Database.Database;
 
-    const reset = resetOrphanedProcessingRows(db);
+beforeEach(() => {
+  cleanupTestDb();
+  // Connection A: initDatabase creates schema, enables WAL
+  dbA = initDatabase(TEST_DB_PATH);
+  // Connection B: raw better-sqlite3 open on the same file, WAL mode inherited
+  dbB = new Database(TEST_DB_PATH);
+  dbB.pragma("journal_mode = WAL");
+  dbB.pragma("busy_timeout = 5000");
+  resetCircuitBreaker();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  _setExtractorForTesting(mockExtractor as any);
+});
+
+afterEach(async () => {
+  await stopEmbeddingWorker();
+  _setExtractorForTesting(null);
+  dbB.close();
+  dbA.close();
+  cleanupTestDb();
+});
+
+describe("embedding claim ownership (#170)", () => {
+  // ── 1. Fresh A claim NOT reclaimed by B ─────────────────────────────────
+  it("does not reset a fresh in-flight claim", () => {
+    writeState(dbA, "test/ns", "fresh", "content", []);
+
+    // Worker A claims via production helper
+    const { claimToken, rows } = claimBatch(dbA, "test-model", 10);
+    expect(rows).toHaveLength(1);
+
+    // Worker B runs reset — should NOT reclaim a fresh claim
+    const reset = resetOrphanedProcessingRows(dbB);
     expect(reset).toBe(0);
 
-    const state = getClaimState(id);
+    // Verify A's claim is intact (read from B's connection to prove WAL visibility)
+    const state = getClaimState(dbB, rows[0].id);
     expect(state.embedding_status).toBe("processing");
-    expect(state.embedding_claim_token).toBe(token);
-    expect(state.embedding_claimed_at).toBe(freshTimestamp);
+    expect(state.embedding_claim_token).toBe(claimToken);
   });
 
-  // ── 2. Stale claim IS reclaimed ─────────────────────────────────────────
-  it("resets a stale claim whose timestamp exceeds the threshold", () => {
-    const { id } = writeState(db, "test/ns", "stale", "content", []);
-    const token = randomUUID();
-    // Timestamp well in the past — older than STALE_CLAIM_MS
-    const staleTimestamp = new Date(
-      Date.now() - STALE_CLAIM_MS - 60_000,
-    ).toISOString();
-    claimRow(id, token, staleTimestamp);
+  // ── 2. Stale A reset then B claims ──────────────────────────────────────
+  it("resets a stale A claim, then B claims the row", () => {
+    const { id } = writeState(dbA, "test/ns", "stale", "content", []);
 
-    const reset = resetOrphanedProcessingRows(db);
+    // Worker A claims
+    const claimA = claimBatch(dbA, "test-model", 10);
+    expect(claimA.rows).toHaveLength(1);
+
+    // Manually backdate A's claim to make it stale
+    dbA
+      .prepare("UPDATE entries SET embedding_claimed_at = ? WHERE id = ?")
+      .run(
+        new Date(Date.now() - STALE_CLAIM_MS - 60_000).toISOString(),
+        id,
+      );
+
+    // Worker B resets stale claims
+    const reset = resetOrphanedProcessingRows(dbB);
     expect(reset).toBe(1);
 
-    const state = getClaimState(id);
+    // Worker B now claims the row
+    const claimB = claimBatch(dbB, "test-model", 10);
+    expect(claimB.rows).toHaveLength(1);
+    expect(claimB.rows[0].id).toBe(id);
+
+    // Verify B owns it
+    const state = getClaimState(dbA, id);
+    expect(state.embedding_status).toBe("processing");
+    expect(state.embedding_claim_token).toBe(claimB.claimToken);
+  });
+
+  // ── 3. A cannot finalize success after B owns ───────────────────────────
+  it("prevents A from finalizing success after B owns the row", () => {
+    const { id } = writeState(dbA, "test/ns", "contested", "content", []);
+
+    // Worker A claims
+    const claimA = claimBatch(dbA, "test-model", 10);
+    const rowA = claimA.rows[0];
+
+    // Backdate A's claim, reset, B claims
+    dbA
+      .prepare("UPDATE entries SET embedding_claimed_at = ? WHERE id = ?")
+      .run(
+        new Date(Date.now() - STALE_CLAIM_MS - 60_000).toISOString(),
+        id,
+      );
+    resetOrphanedProcessingRows(dbB);
+    const claimB = claimBatch(dbB, "test-model", 10);
+    expect(claimB.rows).toHaveLength(1);
+
+    // Worker A belatedly tries to finalize success — must fail
+    const buf = embeddingToBuffer(makeEmbedding(1));
+    const stored = finalizeSuccess(
+      dbA,
+      rowA.id,
+      claimA.claimToken,
+      rowA.updated_at,
+      buf,
+      "test-model",
+    );
+    expect(stored).toBe(false);
+
+    // Row still owned by B
+    const state = getClaimState(dbB, id);
+    expect(state.embedding_status).toBe("processing");
+    expect(state.embedding_claim_token).toBe(claimB.claimToken);
+  });
+
+  // ── 4. A cannot finalize failure after B owns ───────────────────────────
+  it("prevents A from finalizing failure after B owns the row", () => {
+    const { id } = writeState(dbA, "test/ns", "fail-guard", "content", []);
+
+    // Worker A claims
+    const claimA = claimBatch(dbA, "test-model", 10);
+    const rowA = claimA.rows[0];
+
+    // Backdate A's claim, reset, B claims
+    dbA
+      .prepare("UPDATE entries SET embedding_claimed_at = ? WHERE id = ?")
+      .run(
+        new Date(Date.now() - STALE_CLAIM_MS - 60_000).toISOString(),
+        id,
+      );
+    resetOrphanedProcessingRows(dbB);
+    claimBatch(dbB, "test-model", 10);
+
+    // Worker A belatedly tries to finalize failure — must fail
+    const failed = finalizeFailure(
+      dbA,
+      rowA.id,
+      claimA.claimToken,
+      rowA.updated_at,
+    );
+    expect(failed).toBe(false);
+
+    // Row still processing (owned by B)
+    const state = getClaimState(dbB, id);
+    expect(state.embedding_status).toBe("processing");
+  });
+
+  // ── 5. A cannot finalize after content update/requeue ───────────────────
+  it("prevents A from finalizing success after content update/requeue", () => {
+    writeState(dbA, "test/ns", "requeue", "v1", []);
+
+    // Worker A claims
+    const claimA = claimBatch(dbA, "test-model", 10);
+    const rowA = claimA.rows[0];
+
+    // Content update via writeState requeues as pending + clears claim
+    writeState(dbA, "test/ns", "requeue", "v2", []);
+
+    // A's claim token should be gone and status should be pending
+    const state = getClaimState(dbA, rowA.id);
     expect(state.embedding_status).toBe("pending");
+    expect(state.embedding_claim_token).toBeNull();
+    expect(state.embedding_claimed_at).toBeNull();
+
+    // Worker A tries to finalize success with stale updated_at — must fail
+    const buf = embeddingToBuffer(makeEmbedding(1));
+    const stored = finalizeSuccess(
+      dbA,
+      rowA.id,
+      claimA.claimToken,
+      rowA.updated_at,
+      buf,
+      "test-model",
+    );
+    expect(stored).toBe(false);
+
+    // Also verify failure finalization is blocked
+    const failed = finalizeFailure(
+      dbA,
+      rowA.id,
+      claimA.claimToken,
+      rowA.updated_at,
+    );
+    expect(failed).toBe(false);
+
+    // Entry still pending for re-embedding
+    expect(getClaimState(dbA, rowA.id).embedding_status).toBe("pending");
+  });
+
+  // ── 6. Correct success persists entries_vec and clears claim ────────────
+  it("correct success finalization persists vector and clears claim", () => {
+    const { id } = writeState(dbA, "test/ns", "success", "content", []);
+
+    // Worker A claims
+    const claimA = claimBatch(dbA, "test-model", 10);
+    const rowA = claimA.rows[0];
+
+    // Generate and finalize
+    const embedding = makeEmbedding(7);
+    const buf = embeddingToBuffer(embedding);
+    const stored = finalizeSuccess(
+      dbA,
+      rowA.id,
+      claimA.claimToken,
+      rowA.updated_at,
+      buf,
+      "test-model",
+    );
+    expect(stored).toBe(true);
+
+    // Verify entries row
+    const state = getClaimState(dbA, id);
+    expect(state.embedding_status).toBe("generated");
+    expect(state.embedding_claim_token).toBeNull();
+    expect(state.embedding_claimed_at).toBeNull();
+
+    // Verify embedding_model was set
+    const model = (
+      dbA
+        .prepare("SELECT embedding_model FROM entries WHERE id = ?")
+        .get(id) as { embedding_model: string }
+    ).embedding_model;
+    expect(model).toBe("test-model");
+
+    // Verify vector persisted in entries_vec (readable from connection B)
+    const vecRow = dbB
+      .prepare("SELECT entry_id FROM entries_vec WHERE entry_id = ?")
+      .get(id) as { entry_id: string } | undefined;
+    expect(vecRow).toBeDefined();
+    expect(vecRow!.entry_id).toBe(id);
+  });
+
+  // ── 7. Correct failure reaches 'failed' and clears claim ───────────────
+  it("correct failure finalization sets failed and clears claim", () => {
+    const { id } = writeState(dbA, "test/ns", "failure", "content", []);
+
+    // Worker A claims
+    const claimA = claimBatch(dbA, "test-model", 10);
+    const rowA = claimA.rows[0];
+
+    // Finalize failure
+    const failed = finalizeFailure(
+      dbA,
+      rowA.id,
+      claimA.claimToken,
+      rowA.updated_at,
+    );
+    expect(failed).toBe(true);
+
+    // Verify state
+    const state = getClaimState(dbA, id);
+    expect(state.embedding_status).toBe("failed");
     expect(state.embedding_claim_token).toBeNull();
     expect(state.embedding_claimed_at).toBeNull();
   });
 
-  // ── 2b. NULL claimed_at is treated as stale (pre-v20 leftovers) ─────────
-  it("resets a processing row with NULL embedding_claimed_at as stale", () => {
-    const { id } = writeState(db, "test/ns", "legacy", "content", []);
-    // Simulate a pre-migration-v20 orphan: status=processing, no claim metadata
-    db.prepare(
-      "UPDATE entries SET embedding_status = 'processing' WHERE id = ?",
-    ).run(id);
-
-    const reset = resetOrphanedProcessingRows(db);
-    expect(reset).toBe(1);
-
-    const state = getClaimState(id);
-    expect(state.embedding_status).toBe("pending");
-  });
-
-  // ── 3. Old owner cannot finalize after reassignment ─────────────────────
-  it("prevents a stale owner from finalizing after its claim is reassigned", () => {
-    const { id } = writeState(db, "test/ns", "contested", "content", []);
-
-    // Worker A claims the row
-    const tokenA = randomUUID();
-    const claimedAtA = new Date(
-      Date.now() - STALE_CLAIM_MS - 60_000,
-    ).toISOString();
-    claimRow(id, tokenA, claimedAtA);
-
-    // Record the updated_at that Worker A captured
-    const workerAUpdatedAt = (
-      db.prepare("SELECT updated_at FROM entries WHERE id = ?").get(id) as {
-        updated_at: string;
-      }
-    ).updated_at;
-
-    // Worker B reclaims the stale row
-    const reclaimed = resetOrphanedProcessingRows(db);
-    expect(reclaimed).toBe(1);
-
-    // Worker B now claims it with its own token
-    const tokenB = randomUUID();
-    const claimedAtB = new Date().toISOString();
-    claimRow(id, tokenB, claimedAtB);
-
-    // Worker A belatedly tries to finalize with its old token — the claim
-    // token guard must reject it.
-    const txn = db.transaction(() => {
-      const current = db
-        .prepare(
-          "SELECT updated_at, embedding_claim_token FROM entries WHERE id = ?",
-        )
-        .get(id) as {
-        updated_at: string;
-        embedding_claim_token: string | null;
-      };
-
-      if (current.embedding_claim_token !== tokenA) {
-        return "rejected_claim_mismatch";
-      }
-
-      if (current.updated_at !== workerAUpdatedAt) {
-        return "rejected_updated_at";
-      }
-
-      // Would call storeEmbedding here — should never reach this point
-      return "stored";
-    });
-
-    const result = txn();
-    expect(result).toBe("rejected_claim_mismatch");
-
-    // Verify the row still belongs to Worker B
-    const state = getClaimState(id);
-    expect(state.embedding_status).toBe("processing");
-    expect(state.embedding_claim_token).toBe(tokenB);
-  });
-
-  // ── 3b. Old owner failure path also guarded by claim token ──────────────
-  it("prevents a stale owner from marking as failed after reassignment", () => {
-    const { id } = writeState(db, "test/ns", "fail-guard", "content", []);
-
-    // Worker A claims the row
-    const tokenA = randomUUID();
-    claimRow(id, tokenA, new Date().toISOString());
-
-    // Worker B steals it (simulating stale reclaim + re-claim)
-    const tokenB = randomUUID();
-    claimRow(id, tokenB, new Date().toISOString());
-
-    // Worker A tries to mark as failed with its old token
-    const result = db
-      .prepare(
-        `UPDATE entries
-           SET embedding_status = 'failed',
-               embedding_claim_token = NULL,
-               embedding_claimed_at = NULL
-         WHERE id = ? AND embedding_claim_token = ?`,
-      )
-      .run(id, tokenA);
-
-    // Should update 0 rows — token mismatch
-    expect(result.changes).toBe(0);
-
-    // Row still owned by Worker B, still processing
-    const state = getClaimState(id);
-    expect(state.embedding_status).toBe("processing");
-    expect(state.embedding_claim_token).toBe(tokenB);
-  });
-
-  // ── 4. Custom stale threshold ───────────────────────────────────────────
-  it("respects a custom staleThresholdMs parameter", () => {
-    const { id } = writeState(db, "test/ns", "custom", "content", []);
-    const token = randomUUID();
-    // 10 seconds ago
-    const tenSecsAgo = new Date(Date.now() - 10_000).toISOString();
-    claimRow(id, token, tenSecsAgo);
-
-    // With a 1-second threshold, 10 seconds is stale
-    const resetShort = resetOrphanedProcessingRows(db, 1_000);
-    expect(resetShort).toBe(1);
-  });
-
-  it("does not reset a claim within a custom short threshold", () => {
-    const { id } = writeState(db, "test/ns", "custom2", "content", []);
-    const token = randomUUID();
-    const justNow = new Date().toISOString();
-    claimRow(id, token, justNow);
-
-    // With a 60-second threshold, a claim from just now is fresh
-    const resetLong = resetOrphanedProcessingRows(db, 60_000);
-    expect(resetLong).toBe(0);
-  });
-
-  // ── 5. Mixed batch: stale + fresh ──────────────────────────────────────
+  // ── 8. Mixed batch: only stale claims are reset ─────────────────────────
   it("only resets stale claims in a mixed batch of stale and fresh", () => {
-    const { id: freshId } = writeState(db, "test/ns", "mix-fresh", "content", []);
-    const { id: staleId } = writeState(db, "test/ns", "mix-stale", "content", []);
-
-    const freshToken = randomUUID();
-    claimRow(freshId, freshToken, new Date().toISOString());
-
-    const staleToken = randomUUID();
-    claimRow(
-      staleId,
-      staleToken,
-      new Date(Date.now() - STALE_CLAIM_MS - 60_000).toISOString(),
+    const { id: freshId } = writeState(
+      dbA,
+      "test/ns",
+      "mix-fresh",
+      "content",
+      [],
+    );
+    const { id: staleId } = writeState(
+      dbA,
+      "test/ns",
+      "mix-stale",
+      "content",
+      [],
     );
 
-    const reset = resetOrphanedProcessingRows(db);
+    // Claim both via production helper
+    const claim = claimBatch(dbA, "test-model", 10);
+    expect(claim.rows).toHaveLength(2);
+
+    // Backdate only the stale entry
+    dbA
+      .prepare("UPDATE entries SET embedding_claimed_at = ? WHERE id = ?")
+      .run(
+        new Date(Date.now() - STALE_CLAIM_MS - 60_000).toISOString(),
+        staleId,
+      );
+
+    const reset = resetOrphanedProcessingRows(dbB);
     expect(reset).toBe(1);
 
     // Fresh claim untouched
-    const freshState = getClaimState(freshId);
+    const freshState = getClaimState(dbA, freshId);
     expect(freshState.embedding_status).toBe("processing");
-    expect(freshState.embedding_claim_token).toBe(freshToken);
+    expect(freshState.embedding_claim_token).toBe(claim.claimToken);
 
     // Stale claim reset
-    const staleState = getClaimState(staleId);
+    const staleState = getClaimState(dbA, staleId);
     expect(staleState.embedding_status).toBe("pending");
     expect(staleState.embedding_claim_token).toBeNull();
   });
 
-  // ── 6. writeState clears claim metadata on content update ───────────────
+  // ── 9. NULL claimed_at treated as stale (pre-v20 leftovers) ─────────────
+  it("resets a processing row with NULL embedding_claimed_at as stale", () => {
+    const { id } = writeState(dbA, "test/ns", "legacy", "content", []);
+    // Simulate a pre-migration-v20 orphan: status=processing, no claim metadata
+    dbA
+      .prepare(
+        "UPDATE entries SET embedding_status = 'processing' WHERE id = ?",
+      )
+      .run(id);
+
+    const reset = resetOrphanedProcessingRows(dbB);
+    expect(reset).toBe(1);
+
+    const state = getClaimState(dbA, id);
+    expect(state.embedding_status).toBe("pending");
+  });
+
+  // ── 10. writeState clears claim metadata on content update ──────────────
   it("writeState clears claim metadata when updating an entry", () => {
-    const { id } = writeState(db, "test/ns", "ws-clear", "v1", []);
-    const token = randomUUID();
-    claimRow(id, token, new Date().toISOString());
+    const { id } = writeState(dbA, "test/ns", "ws-clear", "v1", []);
 
-    // Update the entry content
-    writeState(db, "test/ns", "ws-clear", "v2", []);
+    // Claim via production helper
+    claimBatch(dbA, "test-model", 10);
 
-    const state = getClaimState(id);
+    // Verify claimed
+    expect(getClaimState(dbA, id).embedding_status).toBe("processing");
+
+    // Update entry content
+    writeState(dbA, "test/ns", "ws-clear", "v2", []);
+
+    // Claim should be cleared and status reset to pending
+    const state = getClaimState(dbA, id);
     expect(state.embedding_status).toBe("pending");
     expect(state.embedding_claim_token).toBeNull();
     expect(state.embedding_claimed_at).toBeNull();
   });
+});
 
-  // ── 7. storeEmbedding terminal transition clears claim metadata ─────────
-  it("storeEmbedding clears claim metadata on generated transition", () => {
-    // Verify that after the full processBatch-like flow, claim metadata is
-    // cleared in the terminal 'generated' state. We simulate this directly
-    // since we can't run the worker without a real model.
-    const { id } = writeState(db, "test/ns", "terminal", "content", []);
-    const token = randomUUID();
-    claimRow(id, token, new Date().toISOString());
+describe("stale threshold validation (#170)", () => {
+  it("STALE_CLAIM_MS is the fixed 300000 production constant", () => {
+    expect(STALE_CLAIM_MS).toBe(300_000);
+  });
 
-    const buf = embeddingToBuffer(makeEmbedding(1));
-    const updatedAt = (
-      db.prepare("SELECT updated_at FROM entries WHERE id = ?").get(id) as {
-        updated_at: string;
-      }
-    ).updated_at;
+  it("rejects zero threshold", () => {
+    expect(() => resetOrphanedProcessingRows(dbA, 0)).toThrow(RangeError);
+  });
 
-    // Simulate the processBatch finalization transaction
-    const txn = db.transaction(() => {
-      const current = db
-        .prepare(
-          "SELECT updated_at, embedding_claim_token FROM entries WHERE id = ?",
-        )
-        .get(id) as {
-        updated_at: string;
-        embedding_claim_token: string | null;
-      };
-      if (current.embedding_claim_token !== token) return;
-      if (current.updated_at !== updatedAt) return;
+  it("rejects negative threshold", () => {
+    expect(() => resetOrphanedProcessingRows(dbA, -1)).toThrow(RangeError);
+  });
 
-      storeEmbedding(db, id, buf, "test-model");
-      db.prepare(
-        `UPDATE entries
-           SET embedding_claim_token = NULL,
-               embedding_claimed_at = NULL
-         WHERE id = ?`,
-      ).run(id);
-    });
-    txn();
+  it("rejects NaN threshold", () => {
+    expect(() => resetOrphanedProcessingRows(dbA, NaN)).toThrow(RangeError);
+  });
 
-    const state = getClaimState(id);
-    expect(state.embedding_status).toBe("generated");
-    expect(state.embedding_claim_token).toBeNull();
-    expect(state.embedding_claimed_at).toBeNull();
+  it("rejects Infinity threshold", () => {
+    expect(() => resetOrphanedProcessingRows(dbA, Infinity)).toThrow(
+      RangeError,
+    );
+  });
+
+  it("rejects non-integer threshold", () => {
+    expect(() => resetOrphanedProcessingRows(dbA, 1.5)).toThrow(RangeError);
+  });
+
+  it("rejects unsafe integer threshold", () => {
+    expect(() =>
+      resetOrphanedProcessingRows(dbA, Number.MAX_SAFE_INTEGER + 1),
+    ).toThrow(RangeError);
+  });
+
+  it("accepts 1ms boundary threshold", () => {
+    // Should not throw — 1 is a finite positive safe integer
+    expect(() => resetOrphanedProcessingRows(dbA, 1)).not.toThrow();
+  });
+
+  it("accepts MAX_SAFE_INTEGER threshold", () => {
+    expect(() =>
+      resetOrphanedProcessingRows(dbA, Number.MAX_SAFE_INTEGER),
+    ).not.toThrow();
   });
 });

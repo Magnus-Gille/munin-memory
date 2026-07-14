@@ -8,6 +8,10 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Changed
+
+- **Embedding worker claim/finalize operations hardened for multi-worker safety (#170).** Batch claim, success finalization, and failure finalization are now extracted production helpers with atomic CAS guards (id + claim token + expected updated\_at + processing status). Success finalization persists the vector and transitions the row in a single SQLite transaction that rolls back entirely on failure. Failure finalization uses a conditional UPDATE guarded by the same CAS tuple. The stale-claim threshold is a fixed 300 000 ms production constant (no longer parsed from an unvalidated env var); explicit helper thresholds are validated as finite positive safe integers. Migration v20 (claim columns) remains safe and idempotent. writeState/patchState requeue behavior preserved — content updates clear the old claim and prevent stale finalization.
+
 ### Fixed
 
 - **Grimnir fleet deploys can no longer install the public systemd template literally.** The portable root `munin-memory.service` intentionally contains `<user>` and `<install-dir>` placeholders that `scripts/deploy-rpi.sh` renders, while Grimnir installs its selected unit verbatim. A concrete canonical fleet unit now lives at the controller-preferred `systemd/munin-memory.service`, with a regression contract proving it has no unresolved placeholders and remains behaviorally aligned with the rendered public template.
