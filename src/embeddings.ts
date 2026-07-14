@@ -75,10 +75,25 @@ export const STALE_CLAIM_MS = 300_000;
  * Validate a stale-claim threshold: must be a finite, positive safe integer.
  * Throws a descriptive error on invalid values.
  */
+/**
+ * Maximum threshold value that produces a valid Date when subtracted from
+ * Date.now(). ECMAScript Date objects accept timestamps in
+ * [-8_640_000_000_000_000, 8_640_000_000_000_000] ms relative to epoch.
+ * Date.now() is ~1.7 × 10¹² in 2026, so `Date.now() - ms` overflows the
+ * negative Date boundary around ms ≈ 8.64 × 10¹⁵ + Date.now(). We compute
+ * the exact ceiling at validation time rather than using a hard constant.
+ */
 function validateStaleThreshold(ms: number): void {
   if (!Number.isSafeInteger(ms) || ms <= 0) {
     throw new RangeError(
       `staleThresholdMs must be a finite positive safe integer, got ${ms}`,
+    );
+  }
+  // Ensure Date.now() - ms won't produce an Invalid Date for toISOString().
+  const cutoffTs = Date.now() - ms;
+  if (Number.isNaN(new Date(cutoffTs).getTime())) {
+    throw new RangeError(
+      `staleThresholdMs ${ms} overflows Date range (Date.now() - ms is out of bounds)`,
     );
   }
 }

@@ -16,7 +16,7 @@
  *  8. Stale threshold validation (boundary tests)
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import Database from "better-sqlite3";
+import type Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
 import { initDatabase, writeState } from "../src/db.js";
 import {
@@ -85,10 +85,8 @@ beforeEach(() => {
   cleanupTestDb();
   // Connection A: initDatabase creates schema, enables WAL
   dbA = initDatabase(TEST_DB_PATH);
-  // Connection B: raw better-sqlite3 open on the same file, WAL mode inherited
-  dbB = new Database(TEST_DB_PATH);
-  dbB.pragma("journal_mode = WAL");
-  dbB.pragma("busy_timeout = 5000");
+  // Connection B: fully initialized independent connection (WAL, sqlite-vec, UDFs)
+  dbB = initDatabase(TEST_DB_PATH);
   resetCircuitBreaker();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   _setExtractorForTesting(mockExtractor as any);
@@ -449,9 +447,27 @@ describe("stale threshold validation (#170)", () => {
     expect(() => resetOrphanedProcessingRows(dbA, 1)).not.toThrow();
   });
 
-  it("accepts MAX_SAFE_INTEGER threshold", () => {
+  it("rejects MAX_SAFE_INTEGER threshold (Date overflow)", () => {
+    // Date.now() - MAX_SAFE_INTEGER overflows ECMAScript Date range
     expect(() =>
       resetOrphanedProcessingRows(dbA, Number.MAX_SAFE_INTEGER),
+    ).toThrow(RangeError);
+  });
+
+  it("accepts a large but Date-representable threshold", () => {
+    // 8.64e15 is the max absolute timestamp ECMAScript Date supports.
+    // A threshold of 1e12 (≈11.6 days) is well within Date range.
+    expect(() =>
+      resetOrphanedProcessingRows(dbA, 1_000_000_000_000),
     ).not.toThrow();
+  });
+
+  it("rejects threshold that barely overflows Date range", () => {
+    // Max ECMAScript Date timestamp is ±8_640_000_000_000_000.
+    // Date.now() ≈ 1.75e12, so Date.now() - 8.642e15 is < -8.64e15 → invalid.
+    const barelyOverflows = 8_642_000_000_000_000;
+    expect(() =>
+      resetOrphanedProcessingRows(dbA, barelyOverflows),
+    ).toThrow(RangeError);
   });
 });
