@@ -400,7 +400,8 @@ export function writeState(
       const nextValidUntil = validUntil === undefined ? existing.valid_until : validUntil;
       db.prepare(
         `UPDATE entries SET content = ?, tags = ?, updated_at = ?, valid_until = ?, classification = ?, agent_id = ?,
-         embedding_status = 'pending', embedding_model = NULL
+         embedding_status = 'pending', embedding_model = NULL,
+         embedding_claim_token = NULL, embedding_claimed_at = NULL
          WHERE namespace = ? AND key = ? AND entry_type = 'state'`,
       ).run(
         content,
@@ -552,7 +553,8 @@ export function patchState(
   const txn = db.transaction(() => {
     db.prepare(
       `UPDATE entries SET content = ?, tags = ?, updated_at = ?, classification = ?, agent_id = ?,
-       embedding_status = 'pending', embedding_model = NULL
+       embedding_status = 'pending', embedding_model = NULL,
+       embedding_claim_token = NULL, embedding_claimed_at = NULL
        WHERE namespace = ? AND key = ? AND entry_type = 'state'`,
     ).run(
       content,

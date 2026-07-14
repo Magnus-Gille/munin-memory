@@ -1,4 +1,5 @@
 import { mkdirSync, existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { getDataDir, vecLoaded, storeEmbedding } from "./db.js";
 import { resolveKnob } from "./profiles.js";
@@ -59,6 +60,19 @@ const config = {
 };
 
 const EMBEDDING_DIM = 384;
+
+/**
+ * How long a claim must be held before it is considered stale and eligible for
+ * reclaim by another worker (or the same worker after restart). 5 minutes is
+ * conservative: the slowest observed single-entry embedding (cold pipeline +
+ * large content) takes ~30 s on a Pi 4. Configurable via
+ * MUNIN_EMBEDDINGS_STALE_CLAIM_MS for testing; production should never need to
+ * change it.
+ */
+export const STALE_CLAIM_MS = parseInt(
+  process.env.MUNIN_EMBEDDINGS_STALE_CLAIM_MS ?? "300000",
+  10,
+) || 300_000;
 
 // --- State ---
 
@@ -322,37 +336,37 @@ export function _forceCircuitBreakerTrippedForTesting(tripped: boolean): void {
 // --- Background worker ---
 
 /**
- * Reset orphaned `processing` rows back to `pending` so they get re-claimed.
+ * Reset genuinely stale `processing` claims back to `pending` so they get
+ * re-claimed.
  *
- * A row is only set to `processing` by the in-process worker while it holds it
- * mid-batch; the status is never persisted as a stable state. Therefore any row
- * found in `processing` at worker startup is an orphan from a prior process that
- * crashed or was restarted mid-batch — no live worker can legitimately own it.
- * Left alone, such rows are never re-claimed (the claim query only picks up
- * `pending`/`failed`/stale-`generated`), so they stay un-embedded forever and,
- * under the model-identity guard, invisible to semantic search (#155).
+ * A claim is considered stale when its `embedding_claimed_at` timestamp is
+ * older than `staleThresholdMs` (default: `STALE_CLAIM_MS`, 5 minutes). This
+ * is multi-worker safe: a fresh in-flight claim owned by another process is
+ * NOT reset. Rows with no `embedding_claimed_at` (pre-migration-v20 leftovers
+ * or rows that somehow lost claim metadata) are treated as stale — they have
+ * no live owner.
  *
- * Returns the number of rows reset. `updated_at` is deliberately NOT touched so
- * the reset does not disturb CAS timestamps or surface as a content change.
+ * Claim metadata (`embedding_claim_token`, `embedding_claimed_at`) is cleared
+ * on reset so the row returns to the unclaimed pool.
  *
- * ASSUMPTION — single embedding worker per database. This treats *every*
- * `processing` row as an orphan, which is correct when at most one worker
- * process runs against a given DB (the production deployment: one HTTP server
- * on the Pi, many clients). It does NOT distinguish an orphan from a row a
- * *concurrent* worker in another process legitimately holds in-flight, so two
- * embedding workers sharing one DB file (only possible via concurrent stdio
- * sessions — a dev-only footgun, see CLAUDE.md "Concurrent Sessions") could
- * race: a second startup resets the first's in-flight row. Self-heals on the
- * next pass (the row re-embeds), but wastes work and can transiently leave a
- * row `failed` with a vector present. Hardening this to true multi-worker
- * safety needs an explicit claim token (`embedding_claimed_at`/worker id) and
- * age-bounded reset — tracked as a fast-follow, deliberately out of scope for
- * this single-worker self-heal (#155).
+ * Returns the number of rows reset. `updated_at` is deliberately NOT touched
+ * so the reset does not disturb CAS timestamps or surface as a content change.
  */
-export function resetOrphanedProcessingRows(db: Database.Database): number {
+export function resetOrphanedProcessingRows(
+  db: Database.Database,
+  staleThresholdMs: number = STALE_CLAIM_MS,
+): number {
+  const cutoff = new Date(Date.now() - staleThresholdMs).toISOString();
   const result = db
-    .prepare("UPDATE entries SET embedding_status = 'pending' WHERE embedding_status = 'processing'")
-    .run();
+    .prepare(
+      `UPDATE entries
+         SET embedding_status = 'pending',
+             embedding_claim_token = NULL,
+             embedding_claimed_at = NULL
+       WHERE embedding_status = 'processing'
+         AND (embedding_claimed_at IS NULL OR embedding_claimed_at <= ?)`,
+    )
+    .run(cutoff);
   return result.changes;
 }
 
@@ -399,6 +413,13 @@ async function processBatch(): Promise<void> {
   try {
     const db = workerDb;
 
+    // Generate a unique claim token for this batch so finalization can verify
+    // that the row is still owned by *this* worker. A stale worker whose claim
+    // was reclaimed by another process will fail the token check and silently
+    // skip (no data corruption).
+    const claimToken = randomUUID();
+    const claimedAt = new Date().toISOString();
+
     // Atomically claim rows: UPDATE with subquery for LIMIT.
     // In addition to 'pending'/'failed' entries, also claim entries that were
     // previously embedded with a DIFFERENT model (embedding_model != current) or
@@ -409,7 +430,10 @@ async function processBatch(): Promise<void> {
     // from the old model are replaced and no longer served via the model filter.
     const claimed = db
       .prepare(
-        `UPDATE entries SET embedding_status = 'processing'
+        `UPDATE entries
+           SET embedding_status = 'processing',
+               embedding_claim_token = ?,
+               embedding_claimed_at = ?
          WHERE id IN (
            SELECT id FROM entries
            WHERE embedding_status IN ('pending', 'failed')
@@ -420,7 +444,7 @@ async function processBatch(): Promise<void> {
          )
          RETURNING id, content, updated_at`,
       )
-      .all(config.model, config.batchSize) as Array<{ id: string; content: string; updated_at: string }>;
+      .all(claimToken, claimedAt, config.model, config.batchSize) as Array<{ id: string; content: string; updated_at: string }>;
 
     if (claimed.length === 0) return;
 
@@ -429,27 +453,45 @@ async function processBatch(): Promise<void> {
 
       const embedding = await generateEmbedding(row.content);
       if (!embedding) {
-        // Mark as failed if embedding generation failed
+        // Mark as failed if embedding generation failed — guarded by claim token
+        // so a stale worker cannot overwrite a newer claim's status.
         db.prepare(
-          "UPDATE entries SET embedding_status = 'failed' WHERE id = ? AND updated_at = ?",
-        ).run(row.id, row.updated_at);
+          `UPDATE entries
+             SET embedding_status = 'failed',
+                 embedding_claim_token = NULL,
+                 embedding_claimed_at = NULL
+           WHERE id = ? AND embedding_claim_token = ?`,
+        ).run(row.id, claimToken);
         continue;
       }
 
       const buf = embeddingToBuffer(embedding);
 
-      // Guarded by updated_at to prevent stale embeddings
+      // Guarded by claim token AND updated_at to prevent both stale-worker
+      // overwrites and content-race stale embeddings.
       const txn = db.transaction(() => {
         const current = db
-          .prepare("SELECT updated_at FROM entries WHERE id = ?")
-          .get(row.id) as { updated_at: string } | undefined;
+          .prepare("SELECT updated_at, embedding_claim_token FROM entries WHERE id = ?")
+          .get(row.id) as { updated_at: string; embedding_claim_token: string | null } | undefined;
 
-        if (!current || current.updated_at !== row.updated_at) {
+        if (!current || current.embedding_claim_token !== claimToken) {
+          // Claim was taken by another worker — skip silently
+          return;
+        }
+
+        if (current.updated_at !== row.updated_at) {
           // Entry was modified since we claimed it — skip, it'll be re-queued as 'pending'
           return;
         }
 
         storeEmbedding(db, row.id, buf, config.model);
+        // Clear claim metadata now that we've reached a terminal state
+        db.prepare(
+          `UPDATE entries
+             SET embedding_claim_token = NULL,
+                 embedding_claimed_at = NULL
+           WHERE id = ?`,
+        ).run(row.id);
       });
 
       txn();
