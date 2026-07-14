@@ -802,6 +802,40 @@ export const migrations: Migration[] = [
       ).run();
     },
   },
+  {
+    version: 20,
+    description:
+      "Add embedding claim ownership columns for multi-worker safety (#170)",
+    up: (db) => {
+      // Guard: entries table may not exist in synthetic baselines that mark
+      // earlier migrations as applied without materialising tables (e.g. the
+      // v19 table-absent regression test).
+      const hasEntries = db
+        .prepare(
+          "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'entries'",
+        )
+        .get();
+      if (!hasEntries) return;
+
+      // Guard: columns may already exist if the migration was partially applied.
+      const cols = (
+        db.prepare("PRAGMA table_info(entries)").all() as Array<{ name: string }>
+      ).map((c) => c.name);
+
+      if (!cols.includes("embedding_claim_token")) {
+        db.prepare(
+          "ALTER TABLE entries ADD COLUMN embedding_claim_token TEXT",
+        ).run();
+      }
+      if (!cols.includes("embedding_claimed_at")) {
+        db.prepare(
+          "ALTER TABLE entries ADD COLUMN embedding_claimed_at TEXT",
+        ).run();
+      }
+      // No index — claim columns are only checked inside the claim/finalize
+      // transactions, which already locate rows via the embedding_status index.
+    },
+  },
 ];
 
 /**
