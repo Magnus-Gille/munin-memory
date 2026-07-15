@@ -34,7 +34,7 @@ Munin is more than a key-value store for AI. The features are designed around ho
 - **Dual auth** — Bearer token (simple) + OAuth 2.1 with dynamic client registration and PKCE (for web and mobile clients).
 - **Two transports** — stdio (local) and Streamable HTTP (network).
 
-Twenty-three MCP tools in total. The full list is in [CLAUDE.md](CLAUDE.md#mcp-tools-exposed).
+Twenty-three MCP tools in total. The compact checked inventory is in [AGENTS.md](AGENTS.md#mcp-tools-exposed).
 
 ## What it looks like in practice
 
@@ -158,7 +158,7 @@ the exact rule; if it only writes state keys directly in one namespace, omit the
 
 ### Connect from Claude Web / Mobile (OAuth)
 
-When running in HTTP mode, the server exposes OAuth 2.1 endpoints. Configure your MCP client with the server URL and the OAuth flow handles authentication automatically. For public deployments, OAuth consent is now fail-closed: you must configure a trusted proxy-authenticated header/value pair for `/authorize` and `/authorize/approve`, or the server will refuse to serve public consent. See the [OAuth section in CLAUDE.md](CLAUDE.md#oauth-21-feature-3) for endpoint details.
+When running in HTTP mode, the server exposes OAuth 2.1 endpoints. Configure your MCP client with the server URL and the OAuth flow handles authentication automatically. For public deployments, OAuth consent is now fail-closed: you must configure a trusted proxy-authenticated header/value pair for `/authorize` and `/authorize/approve`, or the server will refuse to serve public consent. See the configuration below and the route/provider contracts in `src/index.ts` and `src/oauth.ts` for details.
 
 ## Configuration
 
@@ -242,7 +242,7 @@ The `debate/` directory holds the resolutions and round summaries. Highlights:
 - `debate/computed-dashboard-summary.md` — computed lifecycle dashboard
 - `debate/admin-cli-summary.md` — `munin-admin` CLI
 
-See `CLAUDE.md` for the full technical reference, including architecture details, spec amendments from the debates, and implementation notes.
+See [AGENTS.md](AGENTS.md#sources-of-truth) for the concise source-of-truth map; detailed architecture and spec amendments remain in `docs/`, `debate/`, and the implementation itself.
 
 ## Opinionated workflow
 
