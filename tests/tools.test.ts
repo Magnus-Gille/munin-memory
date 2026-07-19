@@ -5557,6 +5557,140 @@ describe("staleness flag", () => {
 });
 
 describe("compare-and-swap (memory_write)", () => {
+  it("advertises create_if_absent in the MCP input schema", async () => {
+    const handler = (
+      server as unknown as { _requestHandlers: Map<string, Function> }
+    )._requestHandlers?.get("tools/list");
+    const toolList = await handler!({ method: "tools/list", params: {} });
+    const memoryWrite = (
+      toolList as {
+        tools: Array<{
+          name: string;
+          inputSchema: { properties?: Record<string, unknown> };
+        }>;
+      }
+    ).tools.find((tool) => tool.name === "memory_write");
+
+    expect(memoryWrite?.inputSchema.properties).toMatchObject({
+      create_if_absent: { type: "boolean" },
+    });
+  });
+
+  it("provides an explicit create-if-absent contract and typed winner conflict", async () => {
+    const firstRaw = await callTool("memory_write", {
+      namespace: "feedback/tasks/first-review",
+      key: "receipt-ledger",
+      content: "first reviewer",
+      create_if_absent: true,
+    });
+    const first = parseToolResponse(firstRaw) as {
+      status: string;
+      updated_at: string;
+    };
+    expect(first.status).toBe("created");
+
+    const secondRaw = await callTool("memory_write", {
+      namespace: "feedback/tasks/first-review",
+      key: "receipt-ledger",
+      content: "second reviewer",
+      create_if_absent: true,
+    });
+    const second = parseToolResponse(secondRaw) as {
+      ok: boolean;
+      error: string;
+      conflict_reason: string;
+      current_updated_at: string;
+    };
+    expect(second).toMatchObject({
+      ok: false,
+      error: "conflict",
+      conflict_reason: "already_exists",
+      current_updated_at: first.updated_at,
+    });
+
+    const readRaw = await callTool("memory_read", {
+      namespace: "feedback/tasks/first-review",
+      key: "receipt-ledger",
+    });
+    const winner = parseToolResponse(readRaw) as {
+      content: string;
+      updated_at: string;
+    };
+    expect(winner.content).toBe("first reviewer");
+
+    const retryRaw = await callTool("memory_write", {
+      namespace: "feedback/tasks/first-review",
+      key: "receipt-ledger",
+      content: "first reviewer + reconciled second review",
+      expected_updated_at: winner.updated_at,
+    });
+    expect(parseToolResponse(retryRaw)).toMatchObject({ status: "updated" });
+  });
+
+  it("rejects ambiguous create-if-absent combinations", async () => {
+    const wrongTypeRaw = await callTool("memory_write", {
+      namespace: "feedback/tasks/ambiguous",
+      key: "receipt-ledger",
+      content: "receipt",
+      create_if_absent: "true",
+    });
+    expect(parseToolResponse(wrongTypeRaw)).toMatchObject({
+      ok: false,
+      error: "validation_error",
+    });
+
+    const withVersionRaw = await callTool("memory_write", {
+      namespace: "feedback/tasks/ambiguous",
+      key: "receipt-ledger",
+      content: "receipt",
+      create_if_absent: true,
+      expected_updated_at: "2026-07-19T12:00:00.000Z",
+    });
+    expect(parseToolResponse(withVersionRaw)).toMatchObject({
+      ok: false,
+      error: "validation_error",
+    });
+
+    await callTool("memory_write", {
+      namespace: "feedback/tasks/ambiguous",
+      key: "receipt-ledger",
+      content: "receipt",
+    });
+    const withPatchRaw = await callTool("memory_write", {
+      namespace: "feedback/tasks/ambiguous",
+      key: "receipt-ledger",
+      patch: { content_append: "second" },
+      create_if_absent: true,
+    });
+    expect(parseToolResponse(withPatchRaw)).toMatchObject({
+      ok: false,
+      error: "validation_error",
+    });
+  });
+
+  it("treats a soft-expired state row as existing for create-if-absent", async () => {
+    const firstRaw = await callTool("memory_write", {
+      namespace: "feedback/tasks/expired-ledger",
+      key: "receipt-ledger",
+      content: "expired but retained",
+      valid_until: "2020-01-01T00:00:00.000Z",
+    });
+    const first = parseToolResponse(firstRaw) as { updated_at: string };
+
+    const retryRaw = await callTool("memory_write", {
+      namespace: "feedback/tasks/expired-ledger",
+      key: "receipt-ledger",
+      content: "replacement",
+      create_if_absent: true,
+    });
+    expect(parseToolResponse(retryRaw)).toMatchObject({
+      ok: false,
+      error: "conflict",
+      conflict_reason: "already_exists",
+      current_updated_at: first.updated_at,
+    });
+  });
+
   it("write succeeds with correct expected_updated_at", async () => {
     await callTool("memory_write", { namespace: "projects/cas", key: "status", content: "v1", tags: ["active"] });
     const readRaw = await callTool("memory_read", { namespace: "projects/cas", key: "status" });
@@ -5573,6 +5707,17 @@ describe("compare-and-swap (memory_write)", () => {
     expect(result.status).toBe("updated");
   });
 
+  it("preserves legacy CAS creation when expected_updated_at is supplied for an absent key", async () => {
+    const raw = await callTool("memory_write", {
+      namespace: "projects/cas-absent",
+      key: "status",
+      content: "first version",
+      tags: ["active"],
+      expected_updated_at: "2020-01-01T00:00:00.000Z",
+    });
+    expect(parseToolResponse(raw)).toMatchObject({ status: "created" });
+  });
+
   it("write returns conflict with wrong expected_updated_at", async () => {
     await callTool("memory_write", { namespace: "projects/cas", key: "status", content: "v1", tags: ["active"] });
 
@@ -5586,6 +5731,7 @@ describe("compare-and-swap (memory_write)", () => {
     const result = parseToolResponse(raw) as { ok: boolean; error: string; current_updated_at: string; message: string };
     expect(result.ok).toBe(false);
     expect(result.error).toBe("conflict");
+    expect(result).toMatchObject({ conflict_reason: "version_mismatch" });
     expect(result.current_updated_at).toBeTruthy();
     expect(result.message).toContain("was updated at");
   });

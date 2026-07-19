@@ -100,6 +100,26 @@ over history instead of appending to it. If you find yourself wondering "what ha
 you needed log entries. If you find yourself wondering "where does this stand," you needed
 a state entry.
 
+### Concurrent state writes
+
+The full-content `memory_write` path has three explicit write modes. Patch writes retain
+their existing optional `expected_updated_at` CAS contract.
+
+| Intent | Parameters | Result when the key already exists |
+|--------|------------|------------------------------------|
+| Unconditional upsert | omit both preconditions | Overwrites the current state |
+| Update the version you read | `expected_updated_at: "<updated_at>"` | Updates only when the current version matches; otherwise returns `error: "conflict"`, `conflict_reason: "version_mismatch"`, and `current_updated_at` |
+| Win the first write | `create_if_absent: true` | Never overwrites; returns `error: "conflict"`, `conflict_reason: "already_exists"`, and `current_updated_at` |
+
+Do not combine `create_if_absent: true` with `expected_updated_at` or `patch`. After a
+create-if-absent conflict, read the winner, reconcile it, and use its `updated_at` for a
+normal CAS update. The absence check and insert occur in one SQLite transaction, so callers
+must not invent a special timestamp to represent an absent entry. For compatibility,
+`expected_updated_at` still creates the entry when the key is absent; it is an update-version
+guard for an entry you have read, not an assertion that a key exists or is absent.
+Soft expiry also does not make a key absent: a state row past `valid_until` remains directly
+addressable, so `create_if_absent: true` returns `already_exists` until that row is deleted.
+
 ---
 
 ## Namespace categories

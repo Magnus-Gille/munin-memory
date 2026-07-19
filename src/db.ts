@@ -242,11 +242,16 @@ export interface WriteStateResult {
   tags?: string[];
   message?: string;
   current_updated_at?: string;
+  conflict_reason?: "already_exists" | "version_mismatch";
 }
 
 export interface ClassificationWriteOptions {
   classification?: ClassificationLevel;
   classificationOverride?: boolean;
+}
+
+export interface WriteStateOptions extends ClassificationWriteOptions {
+  createIfAbsent?: boolean;
 }
 
 export interface ExpirableEntryLike {
@@ -361,41 +366,57 @@ export function writeState(
   agentId = "default",
   expectedUpdatedAt?: string,
   validUntil?: string | null,
-  classificationOptions?: ClassificationWriteOptions,
+  writeOptions?: WriteStateOptions,
 ): WriteStateResult {
-  const now = nowUTC();
-
-  // Check if exists
-  const existing = db.prepare(
-    "SELECT id, content, updated_at, valid_until, owner_principal_id, classification FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'",
-  ).get(namespace, key) as {
-    id: string;
-    content: string;
-    updated_at: string;
-    valid_until: string | null;
-    owner_principal_id: string | null;
-    classification: string | null;
-  } | undefined;
-
-  // Compare-and-swap: reject if entry was modified since caller last read it
-  if (expectedUpdatedAt && existing && existing.updated_at !== expectedUpdatedAt) {
-    return {
-      status: "conflict",
-      message: `Entry was updated at ${existing.updated_at}, expected ${expectedUpdatedAt}. Read the current version before overwriting.`,
-      current_updated_at: existing.updated_at,
-    };
+  if (writeOptions?.createIfAbsent === true && expectedUpdatedAt !== undefined) {
+    throw new Error("createIfAbsent and expectedUpdatedAt are mutually exclusive write preconditions");
   }
 
-  const resolvedClassification = resolveWriteClassification(
-    db,
-    namespace,
-    tags,
-    classificationOptions,
-    existing?.classification,
-  );
-  const tagsJson = JSON.stringify(resolvedClassification.tags);
-
   const txn = db.transaction(() => {
+    // The existence/version read and the matching write share one IMMEDIATE
+    // transaction. In WAL mode this serializes competing writers before either
+    // can observe absence, so create-if-absent has one unambiguous winner.
+    const existing = db.prepare(
+      "SELECT id, content, updated_at, valid_until, classification FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'",
+    ).get(namespace, key) as {
+      id: string;
+      content: string;
+      updated_at: string;
+      valid_until: string | null;
+      classification: string | null;
+    } | undefined;
+
+    if (writeOptions?.createIfAbsent === true && existing) {
+      return {
+        status: "conflict" as const,
+        conflict_reason: "already_exists" as const,
+        message: `Entry already exists and was updated at ${existing.updated_at}. Read the current version before retrying with normal compare-and-swap.`,
+        current_updated_at: existing.updated_at,
+      };
+    }
+
+    // Compare-and-swap: reject if entry was modified since caller last read it.
+    // Historical compatibility is preserved: expectedUpdatedAt on an absent
+    // entry still creates it; callers that require absence use createIfAbsent.
+    if (expectedUpdatedAt && existing && existing.updated_at !== expectedUpdatedAt) {
+      return {
+        status: "conflict" as const,
+        conflict_reason: "version_mismatch" as const,
+        message: `Entry was updated at ${existing.updated_at}, expected ${expectedUpdatedAt}. Read the current version before overwriting.`,
+        current_updated_at: existing.updated_at,
+      };
+    }
+
+    const resolvedClassification = resolveWriteClassification(
+      db,
+      namespace,
+      tags,
+      writeOptions,
+      existing?.classification,
+    );
+    const tagsJson = JSON.stringify(resolvedClassification.tags);
+    const now = nowUTC();
+
     if (existing) {
       const nextValidUntil = validUntil === undefined ? existing.valid_until : validUntil;
       db.prepare(
@@ -461,7 +482,7 @@ export function writeState(
     }
   });
 
-  return txn();
+  return txn.immediate();
 }
 
 export interface PatchParams {

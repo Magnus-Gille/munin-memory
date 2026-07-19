@@ -57,6 +57,9 @@ memory_read namespace:<ns> key:status
 
 Check `updated_at`. If it is newer than expected, read and reconcile before writing.
 Use `memory_write` with `expected_updated_at` for compare-and-swap protection.
+When a state entry must have exactly one first writer, use `memory_write` with
+`create_if_absent: true`; on conflict, read the winner and continue with normal CAS.
+Never invent a timestamp to mean "absent."
 
 ---
 

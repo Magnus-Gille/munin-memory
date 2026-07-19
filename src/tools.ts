@@ -3315,7 +3315,7 @@ function compactConventions(updatedAt: string): string {
     "- **Tracked namespaces** (dashboard): projects/*, clients/*. Must have status key + lifecycle tag.",
     "- **Prefixed tags:** client:<name>, person:<name>, topic:<topic>, type:<artifact>, source:external/internal.",
     "- **No secrets** — API keys, tokens, passwords rejected by server.",
-    "- **CAS (compare-and-swap)** — pass expected_updated_at on any state write to prevent blind overwrites (enforced for all namespaces, not just tracked statuses).",
+    "- **Write preconditions** — pass expected_updated_at to update only the version you read, or create_if_absent:true for an atomic first write. Never invent a timestamp to mean absent.",
     "- **`classification:internal` tag** — system-injected on read results to mark the entry's classification floor. You do not set or remove it; ignore it unless auditing access.",
     "",
     "## Example workflows",
@@ -3357,7 +3357,7 @@ function universalConventions(full: boolean): string {
     "- **Start with `memory_orient` when callable.** If your host did not expose it, use `memory_status` or `memory_resume` as the fallback, then `memory_read` (namespace + key) for a specific entry, or `memory_query` to search (lexical / semantic / hybrid).",
     "- **`memory_read` vs `memory_get`:** read uses namespace + key; get uses an entry UUID from query results.",
     "- **Write protocol:** record decisions and events with `memory_log`; keep current facts in `memory_write`.",
-    "- **CAS:** pass `expected_updated_at` on a state write so you don't blindly overwrite a concurrent change.",
+    "- **Write preconditions:** pass `expected_updated_at` to update only the version you read, or `create_if_absent:true` for an atomic first write.",
     "",
     "## Two rules that always hold",
     "- **No secrets** — API keys, tokens, and passwords are rejected on write.",
@@ -3393,7 +3393,7 @@ function universalConventions(full: boolean): string {
     "- **Be specific.** \"Chose SQLite over X because ARM64 support was missing\" is worth keeping; \"discussed the database\" is not.",
     "- **Persist at natural breakpoints** — when a decision is made or an artifact produced, not batched at the very end.",
     "- **Don't over-store.** Keep decisions and durable context, not transient chatter.",
-    "- **CAS** — pass `expected_updated_at` on a state write to avoid clobbering a concurrent change from another device.",
+    "- **Write preconditions** — pass `expected_updated_at` to update only the version you read, or `create_if_absent:true` for an atomic first write.",
     "",
     "## Two invariants that never bend",
     "1. **No secrets in memory.** API keys, tokens, passwords, and private keys are rejected on write. Never try to store them.",
@@ -3744,7 +3744,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_write",
     description:
-      "Store or update a state entry in memory. If an entry with the same namespace+key exists, it will be overwritten. Use this for mutable facts and non-tracked state. For `status` entries under `projects/*` or `clients/*`, prefer `memory_update_status`. Optional `valid_until` adds soft expiry for temporary state; direct reads still work after expiry, but broad search hides expired state by default.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.\n\nNamespace conventions: projects/<name> for project state, people/<name> for context about people, decisions/<topic> for cross-cutting decisions, meta/<topic> for system notes.\n\nKey conventions: 'status' = compact resumption summary (Phase / Current work / Blockers / Next — keep brief, move details to other keys like 'architecture', 'workflow', 'research'). 'index' = directory of important keys in this namespace and their purpose.\n\nTag vocabulary: Use canonical lifecycle tags on status entries: active, blocked, completed, stopped, maintenance, archived. Aliases are auto-normalized (done→completed, paused→stopped, inactive→archived). Category tags: decision, architecture, preference, milestone, convention. Type tags: bug, feature, research. Prefixed tags for cross-referencing: client:<name>, person:<name>, topic:<topic>, type:<artifact> (pdf, presentation, meeting-notes), source:external/internal.\n\nThe project dashboard is computed automatically from status entries with lifecycle tags. No manual workbench maintenance needed. Compare-and-swap via expected_updated_at is OPTIONAL and supported for any state write (all namespaces), not only 'status' in projects/* or clients/*; omit it for a plain write and to create a new entry — only pass it when you want the write to fail if the entry changed since your last read.\n\nTo start a new project: (1) write projects/<name>/status with a lifecycle tag (e.g. 'active'), (2) optionally write projects/<name>/index listing the keys.",
+      "Store or update a state entry in memory. If an entry with the same namespace+key exists, it will be overwritten. Use this for mutable facts and non-tracked state. For `status` entries under `projects/*` or `clients/*`, prefer `memory_update_status`. Optional `valid_until` adds soft expiry for temporary state; direct reads still work after expiry, but broad search hides expired state by default.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.\n\nNamespace conventions: projects/<name> for project state, people/<name> for context about people, decisions/<topic> for cross-cutting decisions, meta/<topic> for system notes.\n\nKey conventions: 'status' = compact resumption summary (Phase / Current work / Blockers / Next — keep brief, move details to other keys like 'architecture', 'workflow', 'research'). 'index' = directory of important keys in this namespace and their purpose.\n\nTag vocabulary: Use canonical lifecycle tags on status entries: active, blocked, completed, stopped, maintenance, archived. Aliases are auto-normalized (done→completed, paused→stopped, inactive→archived). Category tags: decision, architecture, preference, milestone, convention. Type tags: bug, feature, research. Prefixed tags for cross-referencing: client:<name>, person:<name>, topic:<topic>, type:<artifact> (pdf, presentation, meeting-notes), source:external/internal.\n\nThe project dashboard is computed automatically from status entries with lifecycle tags. No manual workbench maintenance needed. Compare-and-swap via expected_updated_at is OPTIONAL and supported for any state write (all namespaces), not only 'status' in projects/* or clients/*; omit it for a plain write — only pass it when you want the write to fail if the entry changed since your last read. For an atomic first write, pass create_if_absent:true instead: exactly one competing writer creates the entry, and losers receive error:'conflict', conflict_reason:'already_exists', and current_updated_at. Do not combine create_if_absent:true with expected_updated_at or patch.\n\nTo start a new project: (1) write projects/<name>/status with a lifecycle tag (e.g. 'active'), (2) optionally write projects/<name>/index listing the keys.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -3789,6 +3789,11 @@ const TOOL_DEFINITIONS = [
           type: "string",
           description:
             "Optional compare-and-swap guard for any state write (all namespaces, not only tracked projects/*/clients/* statuses): pass the updated_at from your last read to prevent blind overwrites. Returns a conflict error if the entry was modified since. OPTIONAL — omit it entirely for an unconditional write; it is never required to create a new entry.",
+        },
+        create_if_absent: {
+          type: "boolean",
+          description:
+            "Optional atomic first-write guard. When true, creates the state entry only if namespace+key is absent. If another writer already created it, returns error:'conflict', conflict_reason:'already_exists', and current_updated_at without overwriting the winner. Soft-expired state rows still exist and therefore conflict. Mutually exclusive with expected_updated_at and patch.",
         },
         patch: {
           type: "object",
@@ -5975,11 +5980,12 @@ export function registerTools(
                 tags,
                 valid_until,
                 expected_updated_at,
+                create_if_absent,
                 patch,
                 classification,
                 classification_override,
               } =
-                args as unknown as WriteParams & { expected_updated_at?: string; patch?: PatchParams };
+                args as unknown as WriteParams & { patch?: PatchParams };
 
               // Validate namespace and key (always required)
               const nsCheck = validateNamespace(namespace);
@@ -5997,6 +6003,15 @@ export function registerTools(
               }
               if (patch !== undefined && valid_until !== undefined) {
                 return errResult("write", "validation_error", "valid_until is only supported on full memory_write calls, not patch updates.");
+              }
+              if (create_if_absent !== undefined && typeof create_if_absent !== "boolean") {
+                return errResult("write", "validation_error", "create_if_absent must be a boolean when provided.");
+              }
+              if (create_if_absent === true && expected_updated_at !== undefined) {
+                return errResult("write", "validation_error", "create_if_absent:true and expected_updated_at are mutually exclusive. Use create_if_absent for a first write or expected_updated_at for an existing-entry CAS update.");
+              }
+              if (create_if_absent === true && patch !== undefined) {
+                return errResult("write", "validation_error", "create_if_absent:true and patch are mutually exclusive. Patch requires an existing entry; use content for an atomic first write.");
               }
               const classificationInputError = validateClassificationInput(classification, classification_override);
               if (classificationInputError) {
@@ -6214,6 +6229,7 @@ export function registerTools(
                   {
                     classification,
                     classificationOverride: classification_override,
+                    createIfAbsent: create_if_absent === true,
                   },
                 );
               } catch (error) {
@@ -6225,6 +6241,7 @@ export function registerTools(
                   namespace,
                   key,
                   current_updated_at: result.current_updated_at,
+                  conflict_reason: result.conflict_reason,
                 });
               }
 
@@ -6464,6 +6481,7 @@ export function registerTools(
                   namespace,
                   key: "status",
                   current_updated_at: result.current_updated_at,
+                  conflict_reason: result.conflict_reason,
                 });
               }
 

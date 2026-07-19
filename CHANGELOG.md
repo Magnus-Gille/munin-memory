@@ -23,6 +23,10 @@ changelog is the canonical record of what moved.
 - Deployment, backup, offsite, service-descriptor, and model-evaluation examples now
   use generic, configurable hosts, identities, paths, remotes, and URLs.
 
+### Added
+
+- **Explicit atomic create-if-absent state writes (#211).** `memory_write` now accepts `create_if_absent: true` as a first-writer-wins precondition owned by Munin, rather than requiring callers to fake absence with a magic `expected_updated_at` timestamp. The existence check and insert execute in one SQLite `IMMEDIATE` transaction. A losing writer receives the normal typed `error: "conflict"` plus `conflict_reason: "already_exists"` and the winner's `current_updated_at`; full-content `memory_write` and `memory_update_status` version-CAS conflicts now identify `conflict_reason: "version_mismatch"` (patch-mode response shape is unchanged). The new mode is mutually exclusive with `expected_updated_at` and patch writes, and soft-expired rows still count as existing. Unconditional upserts and the existing CAS behavior, including creation when an expected version is supplied for an absent entry, remain compatible.
+
 ### Fixed
 
 - **Public-release compatibility and deployment safety.** Owner aliases and the

@@ -1,6 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
-import { unlinkSync, existsSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { unlinkSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import {
   initDatabase,
   parsePragmaInt,
@@ -211,6 +216,116 @@ describe("writeState + readState", () => {
     expect(JSON.parse(entry!.tags)).toEqual(["updated", "classification:internal"]);
     expect(entry!.classification).toBe("internal");
     expect(entry!.id).toBe(first.id);
+  });
+
+  it("creates only once when two independent writers race with create-if-absent", async () => {
+    const gateDir = mkdtempSync(join(tmpdir(), "munin-create-if-absent-"));
+    const goPath = join(gateDir, "go");
+    const readyPaths = [
+      join(gateDir, "ready-a"),
+      join(gateDir, "ready-b"),
+    ];
+
+    const fixturePath = fileURLToPath(
+      new URL("fixtures/create-if-absent-writer.ts", import.meta.url),
+    );
+    const runWriter = (label: string, readyPath: string) =>
+      new Promise<ReturnType<typeof writeState>>((resolve, reject) => {
+        const child = spawn(
+          process.execPath,
+          [
+            "--import",
+            "tsx",
+            fixturePath,
+            TEST_DB_PATH,
+            goPath,
+            readyPath,
+            label,
+          ],
+          { stdio: ["ignore", "pipe", "pipe"] },
+        );
+        let stdout = "";
+        let stderr = "";
+        child.stdout.setEncoding("utf8");
+        child.stderr.setEncoding("utf8");
+        child.stdout.on("data", (chunk: string) => {
+          stdout += chunk;
+        });
+        child.stderr.on("data", (chunk: string) => {
+          stderr += chunk;
+        });
+        child.once("error", reject);
+        child.once("exit", (code) => {
+          if (code !== 0) {
+            reject(new Error(`writer ${label} exited ${code}: ${stderr}`));
+            return;
+          }
+          resolve(JSON.parse(stdout.trim()) as ReturnType<typeof writeState>);
+        });
+      });
+
+    try {
+      const writers = readyPaths.map((readyPath, index) =>
+        runWriter(index === 0 ? "writer-a" : "writer-b", readyPath),
+      );
+      for (let attempt = 0; attempt < 1_000; attempt++) {
+        if (readyPaths.every((path) => existsSync(path))) break;
+        await delay(10);
+      }
+      const allWritersReady = readyPaths.every((path) => existsSync(path));
+      // Release any writer that did become ready even when setup failed, so a
+      // failed assertion cannot leave a child waiting and hang the test run.
+      writeFileSync(goPath, "go", { mode: 0o600 });
+      const results = await Promise.all(writers);
+      expect(allWritersReady).toBe(true);
+      expect(results.map((result) => result.status).sort()).toEqual([
+        "conflict",
+        "created",
+      ]);
+      const conflict = results.find((result) => result.status === "conflict");
+      const created = results.find((result) => result.status === "created");
+      expect(conflict).toMatchObject({
+        status: "conflict",
+        conflict_reason: "already_exists",
+        current_updated_at: created?.updated_at,
+      });
+
+      const winner = readState(db, "feedback/tasks/race", "receipt-ledger");
+      expect(winner?.content).toMatch(/^writer-[ab]$/);
+
+      const retry = writeState(
+        db,
+        "feedback/tasks/race",
+        "receipt-ledger",
+        `${winner!.content}-plus-retry`,
+        ["quality:receipt-v1"],
+        "retry-writer",
+        winner!.updated_at,
+      );
+      expect(retry.status).toBe("updated");
+      expect(readState(db, "feedback/tasks/race", "receipt-ledger")?.content)
+        .toBe(`${winner!.content}-plus-retry`);
+    } finally {
+      rmSync(gateDir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("rejects combining DB create-if-absent with an expected version", () => {
+    expect(() =>
+      writeState(
+        db,
+        "feedback/tasks/ambiguous-db-call",
+        "receipt-ledger",
+        "receipt",
+        [],
+        "writer",
+        "2026-07-19T12:00:00.000Z",
+        undefined,
+        { createIfAbsent: true },
+      )
+    ).toThrow(/mutually exclusive/);
+    expect(readState(db, "feedback/tasks/ambiguous-db-call", "receipt-ledger"))
+      .toBeNull();
   });
 
   it("returns null for non-existent entry", () => {
