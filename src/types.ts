@@ -49,6 +49,8 @@ export interface WriteParams {
   content?: string;
   tags?: string[];
   valid_until?: string | null;
+  expected_updated_at?: string;
+  create_if_absent?: boolean;
   classification?: ClassificationLevel;
   classification_override?: boolean;
 }

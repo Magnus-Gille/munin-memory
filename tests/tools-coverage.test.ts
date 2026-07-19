@@ -417,6 +417,7 @@ describe("memory_update_status edges", () => {
     }));
     expect(res.ok).toBe(false);
     expect(res.error).toBe("conflict");
+    expect(res.conflict_reason).toBe("version_mismatch");
     expect(res.current_updated_at).toBeDefined();
   });
 
