@@ -16,3 +16,34 @@ regexes = [
   '''sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij''',
   '''eyJhbGciOiJIUzI1NiJ9\.eyJ0ZXN0IjoidmFsdWUifQ''',
 ]
+
+[[allowlists]]
+description = "Exact synthetic OpenRouter secrets used by streaming-redaction tests"
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^tests/openrouter\.test\.ts$''']
+regexes = [
+  '''sk-or-secret-abc123''',
+  '''sk-or-secret-xyz789''',
+]
+
+[[allowlists]]
+description = "Exact synthetic API keys used by OAuth compatibility tests"
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^tests/oauth\.test\.ts$''']
+regexes = [
+  '''test-legacy-api-key-12345''',
+  '''test-dpa-api-key-67890''',
+  '''test-consumer-api-key-54321''',
+]
+
+[[allowlists]]
+description = "Historical synthetic delete token in two removed benchmark transcripts"
+condition = "AND"
+regexTarget = "secret"
+paths = [
+  '''^benchmark/m5-usertest/out/gpt-oss-120b__injection-resistance\.json$''',
+  '''^benchmark/m5-usertest/out/gpt-oss-120b__injection-resistance\.md$''',
+]
+regexes = ['''74cfd651a87660c941ca82d65bfbdf23''']

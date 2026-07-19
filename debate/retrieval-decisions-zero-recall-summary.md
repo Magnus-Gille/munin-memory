@@ -44,11 +44,11 @@ None material on facts. One process disagreement remained and shaped the final v
 
 | # | Action | Owner | Done when |
 |---|---|---|---|
-| 1 | Edit #38 title and body in place. Title should reference "v3/v3b prose-weighted/formulator-generated decision queries" (not "meta-intents"). Drop "across three pilots." | Magnus | Title/body updated, three-failure-mode taxonomy visible in body. |
-| 2 | Post a findings comment on #38 with: v2 contradiction (10/12 pooled, Sonnet 4/4); corrected tokenizer-aware overlap table over `content + namespace + key + tags`; decomposition of three failure modes; T29 scope correction; consolidation worker scope note. | Magnus | Comment posted, links to this debate. |
-| 3 | Open an owned issue in the munin-zero repo (or commit the artifact directly) for the topical-decision benchmark subset. Acceptance: versioned benchmark file alongside v3/v3b (do not retire them), with ≥N topical intents for the decision targets. Due date tied to the gate memo cadence. | Magnus | Issue open with acceptance + due, or benchmark file checked in and linked from #38. |
-| 4 | When drafting the findings comment, do NOT tag v3/v3b as "expected failure under lexical." Only split strata by cause; tag after the three failure modes are separated into distinct targets. | Magnus | Findings comment avoids premature "expected failure" framing. |
-| 5 | Define the re-entry condition for the bm25 / title-indexing / consolidation-expansion defer. Example: "Reassess after the topical-decision benchmark is in place AND rerun shows T29/T49-class partial-overlap cases still miss top-20 lexical." Put this in the #38 body. | Magnus | Re-entry condition stated in #38. |
+| 1 | Edit #38 title and body in place. Title should reference "v3/v3b prose-weighted/formulator-generated decision queries" (not "meta-intents"). Drop "across three pilots." | Maintainer | Title/body updated, three-failure-mode taxonomy visible in body. |
+| 2 | Post a findings comment on #38 with: v2 contradiction (10/12 pooled, Sonnet 4/4); corrected tokenizer-aware overlap table over `content + namespace + key + tags`; decomposition of three failure modes; T29 scope correction; consolidation worker scope note. | Maintainer | Comment posted, links to this debate. |
+| 3 | Open an owned issue in the munin-zero repo (or commit the artifact directly) for the topical-decision benchmark subset. Acceptance: versioned benchmark file alongside v3/v3b (do not retire them), with ≥N topical intents for the decision targets. Due date tied to the gate memo cadence. | Maintainer | Issue open with acceptance + due, or benchmark file checked in and linked from #38. |
+| 4 | When drafting the findings comment, do NOT tag v3/v3b as "expected failure under lexical." Only split strata by cause; tag after the three failure modes are separated into distinct targets. | Maintainer | Findings comment avoids premature "expected failure" framing. |
+| 5 | Define the re-entry condition for the bm25 / title-indexing / consolidation-expansion defer. Example: "Reassess after the topical-decision benchmark is in place AND rerun shows T29/T49-class partial-overlap cases still miss top-20 lexical." Put this in the #38 body. | Maintainer | Re-entry condition stated in #38. |
 
 ## Debate files
 

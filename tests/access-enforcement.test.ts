@@ -346,12 +346,12 @@ describe("memory_get — access enforcement", () => {
     });
     restrictedEntryId = (parse(ownerRaw) as { id: string }).id;
 
-    const saraRaw = await ownerCall("memory_write", {
+    const aliceRaw = await ownerCall("memory_write", {
       namespace: "users/alice/notes",
       key: "today",
       content: "Alice's own entry",
     });
-    ownerEntryId = (parse(saraRaw) as { id: string }).id;
+    ownerEntryId = (parse(aliceRaw) as { id: string }).id;
   });
 
   it("owner gets by ID from any namespace → succeeds", async () => {
@@ -1187,12 +1187,12 @@ describe("memory_delete — access enforcement", () => {
     const ownerStillThere = parse(ownerStillThereRaw) as { found: boolean };
     expect(ownerStillThere.found).toBe(true);
 
-    const saraGoneRaw = await familyCall("memory_read", {
+    const aliceGoneRaw = await familyCall("memory_read", {
       namespace: "shared/family/board",
       key: "alice-note",
     });
-    const saraGone = parse(saraGoneRaw) as { found: boolean };
-    expect(saraGone.found).toBe(false);
+    const aliceGone = parse(aliceGoneRaw) as { found: boolean };
+    expect(aliceGone.found).toBe(false);
     delete process.env.MUNIN_ALLOW_NAMESPACE_DELETE;
   });
 
@@ -1225,12 +1225,12 @@ describe("memory_delete — access enforcement", () => {
     const ownerGone = parse(ownerGoneRaw) as { found: boolean };
     expect(ownerGone.found).toBe(false);
 
-    const saraGoneRaw = await familyCall("memory_read", {
+    const aliceGoneRaw = await familyCall("memory_read", {
       namespace: "shared/family/board",
       key: "alice-note",
     });
-    const saraGone = parse(saraGoneRaw) as { found: boolean };
-    expect(saraGone.found).toBe(false);
+    const aliceGone = parse(aliceGoneRaw) as { found: boolean };
+    expect(aliceGone.found).toBe(false);
     delete process.env.MUNIN_ALLOW_NAMESPACE_DELETE;
   });
 
@@ -1634,7 +1634,7 @@ describe("end-to-end: profile onboarding → per-principal orient", () => {
 // ---------------------------------------------------------------------------
 
 describe("per-principal tracked patterns — extract + commitments (#164)", () => {
-  function onboardSaraHousehold(): void {
+  function onboardAliceHousehold(): void {
     addPrincipal(db, {
       principalId: "alice",
       principalType: "family",
@@ -1644,7 +1644,7 @@ describe("per-principal tracked patterns — extract + commitments (#164)", () =
   }
 
   it("memory_extract suggests memory_update_status for a household tracked namespace", async () => {
-    onboardSaraHousehold();
+    onboardAliceHousehold();
 
     const result = parse(
       await familyCall("memory_extract", {
@@ -1676,7 +1676,7 @@ describe("per-principal tracked patterns — extract + commitments (#164)", () =
   });
 
   it("a household next-step becomes a commitment surfaced by memory_commitments", async () => {
-    onboardSaraHousehold();
+    onboardAliceHousehold();
 
     await familyCall("memory_update_status", {
       namespace: "users/alice/home/garden",
@@ -1699,7 +1699,7 @@ describe("per-principal tracked patterns — extract + commitments (#164)", () =
 
   it("owner calling memory_commitments does not close a family principal's tracked_next_step (#164 Finding 1)", async () => {
     // Onboard Alice with household profile so users/alice/home/* is tracked for her.
-    onboardSaraHousehold();
+    onboardAliceHousehold();
 
     // Alice writes a status with a next step → creates an open tracked_next_step commitment.
     await familyCall("memory_update_status", {

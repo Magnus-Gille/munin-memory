@@ -29,7 +29,7 @@
   {
     "id": "ortelius-C04",
     "source": "codex-round-1",
-    "text": "Magnus's security/productionization skills (OAuth, circuit breaker, dual auth) undervalued in fit analysis",
+    "text": "The maintainer's security and productionization experience (OAuth, circuit breaker, dual auth) was undervalued in the fit analysis",
     "classification": "valid",
     "impact": "changed",
     "severity": "major",

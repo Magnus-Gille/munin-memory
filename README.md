@@ -3,6 +3,7 @@
 Persistent memory for AI assistants, self-hosted and provider-portable.
 
 Named after Munin, one of Odin's two ravens — the one responsible for memory.
+Munin Memory is unrelated to the established Munin network-monitoring project.
 
 ## Why
 

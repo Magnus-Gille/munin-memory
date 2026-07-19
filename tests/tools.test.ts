@@ -7520,7 +7520,7 @@ describe("memory_health", () => {
     // Drive a classification_override denial for memory_write (non-owner using override)
     const familyCall = makeContextCallTool({
       ...ownerContext(),
-      principalId: "principal:sara2",
+      principalId: "principal:alice2",
       principalType: "family",
     });
     await familyCall("memory_write", {

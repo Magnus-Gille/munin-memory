@@ -6,7 +6,7 @@
 
 ## Question
 
-What is the best and most effective way to give information to Claude, given Magnus's mix of repo-local files, skills, `inbox/` experiments, and Munin memory?
+What is the best way to give information to Claude when an operator uses a mix of repo-local files, skills, `inbox/` experiments, and Munin memory?
 
 ## Concessions accepted by both sides
 
@@ -40,8 +40,8 @@ Create an `ask-claude` skill first. It has immediate value because it can encode
 
 ## Action items
 
-- Magnus/Codex: treat `CLAUDE.md` + Munin as the default pair for informing Claude.
-- Magnus/Codex: only formalize an `inbox/` convention if repeated handoff volume justifies lifecycle rules.
+- Maintainer: treat `CLAUDE.md` + Munin as the default pair for informing Claude.
+- Maintainer: only formalize an `inbox/` convention if repeated handoff volume justifies lifecycle rules.
 - Codex: when designing the future `ask-claude` skill, include the headless-Claude findings from this session.
 
 ## Debate files

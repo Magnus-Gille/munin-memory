@@ -3,14 +3,14 @@
 - **Status:** Accepted — Phases 1–3 implemented; layer-2 adaptation (observe → propose → crystallize) first increment implemented (2026-06-30; see Implementation status)
 - **Date:** 2026-06-29
 - **Context:** Productizing Munin Memory (SW and SW-in-HW appliance). The current
-  implementation is "Magnus-shaped" — it encodes one solo-consultant's taxonomy.
+  implementation began deployment-shaped — it encoded one solo consultant's taxonomy.
   This ADR sets the design stance for how much users shape their own conventions,
   and whether conventions are learned, stated, or both.
 
 ## Problem
 
 "Conventions" is overloaded. Treating it as one configurable surface leads to either
-(a) a rigid, Magnus-only product, or (b) a blank-canvas knowledge graveyard. The
+(a) a rigid, installation-specific product, or (b) a blank-canvas knowledge graveyard. The
 question — *learned organically vs. stated explicitly?* — is a false binary.
 
 ## Decision
@@ -24,7 +24,7 @@ is the data model, not a convention. Making it configurable would reduce Munin t
 database with a README." Every user gets identical physics.
 
 ### Layer 2 — Taxonomy (what namespaces mean + what is "tracked"). **Seeded by profile, refined organically, crystallized explicitly.**
-This is where the Magnus-shape lives. The sharpest example: **`projects/*` and
+This is where the initial deployment assumptions live. The sharpest example: **`projects/*` and
 `clients/*` are hardcoded as the "tracked" namespaces** that feed the dashboard —
 which encodes a consultant who bills clients. A researcher (`papers/`, `experiments/`),
 a parent (`kids/`, `house/`, `health/`), or a student (`courses/`) has a different
@@ -72,10 +72,10 @@ maintains it, not a blank canvas. Therefore:
    explicitly, but the user didn't author it," and it solves organic learning's
    cold-start (nothing to learn from on day one).
 2. **Then adapt** via observe → propose → confirm → crystallize.
-3. **De-hardcode the Magnus-isms in code**: move "tracked patterns," lifecycle
+3. **De-hardcode installation-specific defaults**: move "tracked patterns," lifecycle
    vocabulary, and taxonomy into a `meta/config` entry the dashboard logic *reads*,
    defaulting to today's `projects/*|clients/*` so nothing breaks. This single change
-   turns "Magnus's dashboard" into "a dashboard." (First concrete step — tracked as a
+   turns "one operator's dashboard" into "a dashboard." (First concrete step — tracked as a
    GitHub issue.)
 
 ## Hardware implication
@@ -99,7 +99,7 @@ hardest.
 
 ## Provenance
 
-Design discussion 2026-06-29 (Magnus + Claude), during pocket-grimnir Cardputer work.
+Design discussion 2026-06-29 between the maintainer and Claude.
 Indexed in Munin: `decisions/munin-conventions-productization`.
 
 ## Implementation status (2026-06-30)

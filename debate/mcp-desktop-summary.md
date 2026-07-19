@@ -53,11 +53,11 @@ If stateless mode fails → the problem is almost certainly on the client side, 
 
 | # | Action | Owner | Priority |
 |---|--------|-------|----------|
-| 1 | Investigate SDK stateless HTTP mode — read docs, prototype branch | Claude/Magnus | High |
-| 2 | Fix `onsessionclosed` to call `server.close()` | Claude/Magnus | Medium |
-| 3 | Add auth mechanism + client identity to request logs | Claude/Magnus | Low |
-| 4 | If stateless works, deploy to Pi and test all 4 platforms | Claude/Magnus | High (after #1) |
-| 5 | If stateless fails, test native connector without dual registration | Claude/Magnus | Fallback |
+| 1 | Investigate SDK stateless HTTP mode — read docs, prototype branch | Maintainer | High |
+| 2 | Fix `onsessionclosed` to call `server.close()` | Maintainer | Medium |
+| 3 | Add auth mechanism + client identity to request logs | Maintainer | Low |
+| 4 | If stateless works, deploy and test supported clients | Maintainer | High (after #1) |
+| 5 | If stateless fails, test native connector without dual registration | Maintainer | Fallback |
 
 ## All Debate Files
 

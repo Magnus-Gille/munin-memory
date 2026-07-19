@@ -22,7 +22,7 @@ function readState(db: Database.Database, namespace: string, key: string) {
     | undefined;
 }
 
-const saraRules: NamespaceRule[] = [{ pattern: "users/alice/*", permissions: "rw" }];
+const aliceRules: NamespaceRule[] = [{ pattern: "users/alice/*", permissions: "rw" }];
 
 describe("addPrincipal --profile seeding", () => {
   it("seeds per-principal conventions + tracked-pattern config under <home>/meta", () => {
@@ -30,7 +30,7 @@ describe("addPrincipal --profile seeding", () => {
     const result = addPrincipal(db, {
       principalId: "alice",
       principalType: "family",
-      rules: saraRules,
+      rules: aliceRules,
       profile: "household",
     });
 
@@ -61,7 +61,7 @@ describe("addPrincipal --profile seeding", () => {
     addPrincipal(db, {
       principalId: "alice",
       principalType: "family",
-      rules: saraRules,
+      rules: aliceRules,
       profile: "researcher",
     });
     const rows = db
@@ -80,7 +80,7 @@ describe("addPrincipal --profile seeding", () => {
       addPrincipal(db, {
         principalId: "x",
         principalType: "family",
-        rules: saraRules,
+        rules: aliceRules,
         profile: "astronaut",
       }),
     ).toThrow(/Unknown profile/);
@@ -104,7 +104,7 @@ describe("addPrincipal --profile seeding", () => {
     const result = addPrincipal(db, {
       principalId: "alice",
       principalType: "family",
-      rules: saraRules,
+      rules: aliceRules,
     });
     expect(result.seeded).toBeUndefined();
     expect(readState(db, "users/alice/meta", "conventions")).toBeUndefined();

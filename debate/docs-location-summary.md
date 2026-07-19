@@ -36,7 +36,7 @@ Codex proposed: README framing → repo concepts doc → Munin runtime conventio
 
 ### D2 — `docs/claude-md-template.md` can exist with proper framing
 
-Permissible if explicitly labeled as an opinionated Magnus-style workflow starter, not a generic product companion. Must not be linked prominently enough to imply normative status.
+Permissible if explicitly labeled as an opinionated operator workflow starter, not a generic product companion. It must not be linked prominently enough to imply normative status.
 
 ---
 
@@ -47,7 +47,7 @@ Permissible if explicitly labeled as an opinionated Magnus-style workflow starte
 The revised position holds as the right overall shape. Conditions from Codex:
 1. **Layer 2 (`docs/usage-model.md`) needs a hard inclusion test** before being written. A statement belongs in Layer 2 only if it survives tool renames, protocol revisions, and ecosystem changes — i.e., it's a design principle, not an operational rule.
 2. **Layer precedence must be explicit:** Layer 3 (Munin conventions) wins for live operational behavior. Layer 2 explains why the system is designed as it is. Layer 1 (README) summarizes.
-3. **Namespace taxonomy is a smuggling risk:** `documents/*`, `signals/*`, `digests/*`, `reading/*` are Magnus's ecosystem, not Munin's core semantics. If namespace taxonomy appears in Layer 2, restrict it to the five structural categories (`projects/*`, `clients/*`, `people/*`, `meta/*`, `decisions/*`).
+3. **Namespace taxonomy is a smuggling risk:** `documents/*`, `signals/*`, `digests/*`, and `reading/*` came from one deployment, not Munin's core semantics. If namespace taxonomy appears in Layer 2, restrict it to the five structural categories (`projects/*`, `clients/*`, `people/*`, `meta/*`, `decisions/*`).
 
 ---
 

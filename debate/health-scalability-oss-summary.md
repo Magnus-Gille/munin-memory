@@ -2,11 +2,14 @@
 
 **Date:** 2026-03-23
 **Participants:** Claude Opus 4.6 (assessment + synthesis) vs Codex GPT-5.4 (adversarial review)
-**Trigger:** Magnus asked for health check, scalability assessment, and open-source readiness evaluation
+**Trigger:** Maintainer requested a health, scalability, and open-source readiness evaluation
 
 ## Context
 
-Munin Memory has been running in production on a Raspberry Pi 5 for 2+ months. Usage is accelerating — ~400 entries across 115 namespaces, with ~60 task entries/week from Hugin automation. The question: does the architecture hold, and is it ready for broader open-source release?
+At the time of this review, a reference Raspberry Pi 5 deployment had run for
+more than two months with roughly 400 entries across 115 namespaces. These are
+historical sizing inputs, not claims about a current installation. The question
+was whether the architecture held and was ready for broader release.
 
 ## Current Health (Consensus)
 

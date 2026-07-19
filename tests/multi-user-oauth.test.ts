@@ -409,8 +409,8 @@ describe("admin CLI — email", () => {
 
   it("updatePrincipal updates email", () => {
     addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
-    updatePrincipal(db, "alice", { email: "alice@newdomain.com" });
-    expect(showPrincipal(db, "alice")!.email).toBe("alice@newdomain.com");
+    updatePrincipal(db, "alice", { email: "alice@newdomain.example" });
+    expect(showPrincipal(db, "alice")!.email).toBe("alice@newdomain.example");
   });
 
   it("updatePrincipal clears email with null", () => {

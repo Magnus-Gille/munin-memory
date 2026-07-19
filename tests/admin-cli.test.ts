@@ -854,9 +854,9 @@ describe("listOAuthClients", () => {
     insertOAuthClientMapping(db, "client-alice-2", "alice");
     insertOAuthClientMapping(db, "client-bob-1", "bob");
 
-    const saraClients = listOAuthClients(db, "alice");
-    expect(saraClients).toHaveLength(2);
-    expect(saraClients.every((c) => c.oauthClientId.startsWith("client-alice"))).toBe(true);
+    const aliceClients = listOAuthClients(db, "alice");
+    expect(aliceClients).toHaveLength(2);
+    expect(aliceClients.every((c) => c.oauthClientId.startsWith("client-alice"))).toBe(true);
   });
 
   it("returns mapped fields correctly", () => {
@@ -1232,11 +1232,11 @@ describe("updatePrincipal — additional edge cases", () => {
     addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
     updatePrincipal(db, "alice", {
       rules: [{ pattern: "shared/*", permissions: "read" }],
-      email: "alice@new.com",
+      email: "alice@new.example",
     });
     const detail = showPrincipal(db, "alice")!;
     expect(detail.namespaceRules).toHaveLength(1);
-    expect(detail.email).toBe("alice@new.com");
+    expect(detail.email).toBe("alice@new.example");
   });
 
   it("clears expires-at by passing null directly to updatePrincipal", () => {

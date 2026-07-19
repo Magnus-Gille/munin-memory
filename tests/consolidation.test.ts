@@ -1320,7 +1320,7 @@ describe("scanMentions", () => {
 
   it("does not match substrings inside words", () => {
     const logs: Entry[] = [
-      makeEntry({ content: "resara and saracen and saragossa — no standalone tokens." }),
+      makeEntry({ content: "malice and alicante and calico — no standalone tokens." }),
     ];
     const hits = scanMentions(logs, targets);
     const alice = hits.find((h) => h.targetNamespace === "people/alice");

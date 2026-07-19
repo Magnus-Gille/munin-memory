@@ -52,7 +52,7 @@ function seed(db: Database.Database): void {
     notes: "",
   }), ["active"]);
 
-  writeState(db, "meta/telos", "telos", "Magnus wants resilient AI memory.", ["meta"]);
+  writeState(db, "meta/telos", "telos", "The owner wants resilient AI memory.", ["meta"]);
 
   // Several log entries under projects/demo (exercises consolidation backlog)
   for (let i = 0; i < 5; i++) {

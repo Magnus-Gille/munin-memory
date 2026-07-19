@@ -95,8 +95,8 @@ describe("namespaceMatchesPattern", () => {
     expect(namespaceMatchesPattern("users/alice/notes/daily", "users/alice/*")).toBe(true);
   });
 
-  it("prefix match: 'users/alice/*' does NOT match 'users/saramore'", () => {
-    expect(namespaceMatchesPattern("users/saramore", "users/alice/*")).toBe(false);
+  it("prefix match: 'users/alice/*' does NOT match 'users/alicemore'", () => {
+    expect(namespaceMatchesPattern("users/alicemore", "users/alice/*")).toBe(false);
   });
 
   it("prefix match: 'users/alice/*' does NOT match 'users/alice' (no trailing slash)", () => {
@@ -189,7 +189,7 @@ describe("canRead / canWrite", () => {
     expect(canWrite(owner, "anything")).toBe(true);
   });
 
-  const saraCtx: AccessContext = {
+  const aliceCtx: AccessContext = {
     principalId: "alice",
     principalType: "family",
     accessibleNamespaces: [
@@ -199,19 +199,19 @@ describe("canRead / canWrite", () => {
   };
 
   it("family principal with rw rule can read under matching namespace", () => {
-    expect(canRead(saraCtx, "users/alice/inbox")).toBe(true);
+    expect(canRead(aliceCtx, "users/alice/inbox")).toBe(true);
   });
 
   it("family principal with rw rule can write under matching namespace", () => {
-    expect(canWrite(saraCtx, "users/alice/inbox")).toBe(true);
+    expect(canWrite(aliceCtx, "users/alice/inbox")).toBe(true);
   });
 
   it("family principal with read-only rule can read", () => {
-    expect(canRead(saraCtx, "shared/family/photos")).toBe(true);
+    expect(canRead(aliceCtx, "shared/family/photos")).toBe(true);
   });
 
   it("family principal with read-only rule cannot write", () => {
-    expect(canWrite(saraCtx, "shared/family/photos")).toBe(false);
+    expect(canWrite(aliceCtx, "shared/family/photos")).toBe(false);
   });
 
   it("principal with empty rules has no access", () => {
@@ -225,16 +225,16 @@ describe("canRead / canWrite", () => {
   });
 
   it("multiple rules: principal can access namespace matched by first rule", () => {
-    expect(canRead(saraCtx, "users/alice/notes")).toBe(true);
+    expect(canRead(aliceCtx, "users/alice/notes")).toBe(true);
   });
 
   it("multiple rules: principal can access namespace matched by second rule", () => {
-    expect(canRead(saraCtx, "shared/family/calendar")).toBe(true);
+    expect(canRead(aliceCtx, "shared/family/calendar")).toBe(true);
   });
 
   it("principal cannot access unmatched namespace", () => {
-    expect(canRead(saraCtx, "projects/munin")).toBe(false);
-    expect(canWrite(saraCtx, "projects/munin")).toBe(false);
+    expect(canRead(aliceCtx, "projects/munin")).toBe(false);
+    expect(canWrite(aliceCtx, "projects/munin")).toBe(false);
   });
 });
 
@@ -250,22 +250,22 @@ describe("canReadSubtree", () => {
     expect(canReadSubtree(owner, "anything/")).toBe(true);
   });
 
-  const saraCtx: AccessContext = {
+  const aliceCtx: AccessContext = {
     principalId: "alice",
     principalType: "family",
     accessibleNamespaces: [{ pattern: "users/alice/*", permissions: "rw" }],
   };
 
   it("rule 'users/alice/*' overlaps with broad prefix 'users/' (rule is within queried scope)", () => {
-    expect(canReadSubtree(saraCtx, "users/")).toBe(true);
+    expect(canReadSubtree(aliceCtx, "users/")).toBe(true);
   });
 
   it("rule 'users/alice/*' overlaps with narrow prefix 'users/alice/inbox/' (prefix within rule scope)", () => {
-    expect(canReadSubtree(saraCtx, "users/alice/inbox/")).toBe(true);
+    expect(canReadSubtree(aliceCtx, "users/alice/inbox/")).toBe(true);
   });
 
   it("rule 'users/alice/*' does NOT overlap with disjoint prefix 'projects/'", () => {
-    expect(canReadSubtree(saraCtx, "projects/")).toBe(false);
+    expect(canReadSubtree(aliceCtx, "projects/")).toBe(false);
   });
 
   it("lone '*' rule overlaps with any prefix", () => {

@@ -68,7 +68,7 @@ describe("addPrincipal --profile — shared-home hardening (#164 part 2)", () =>
 
     // Alice is (mis)configured with the SHARED rule first, so her home would
     // derive to shared/family — readable by Bob.
-    const saraRules: NamespaceRule[] = [
+    const aliceRules: NamespaceRule[] = [
       { pattern: "shared/family/*", permissions: "rw" },
       { pattern: "users/alice/*", permissions: "rw" },
     ];
@@ -77,7 +77,7 @@ describe("addPrincipal --profile — shared-home hardening (#164 part 2)", () =>
       addPrincipal(db, {
         principalId: "alice",
         principalType: "family",
-        rules: saraRules,
+        rules: aliceRules,
         profile: "household",
       }),
     ).toThrow(/shared/i);

@@ -62,7 +62,7 @@ function seed(db: Database.Database): void {
     notes: "",
   }), ["active"]);
 
-  writeState(db, "meta/telos", "telos", "Magnus wants resilient AI memory.", ["meta"]);
+  writeState(db, "meta/telos", "telos", "The owner wants resilient AI memory.", ["meta"]);
 
   for (let i = 0; i < 5; i++) {
     appendLog(db, "projects/demo", `Decision log entry ${i + 1}: chose approach A over B`, ["decision"]);

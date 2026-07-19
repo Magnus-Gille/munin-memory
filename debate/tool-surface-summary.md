@@ -75,7 +75,7 @@ a narrow docs-drift PR:
 
 | Action | Owner | Status |
 |---|---|---|
-| Docs-drift PR: list 22 tools + fix stale line + CI name check | Magnus/Claude | proposed (file GitHub issue) |
+| Docs-drift PR: list 22 tools + fix stale line + CI name check | Maintainer | proposed (file GitHub issue) |
 | read_batch→read: internal `readOne` helper refactor (no public change) | — | deferred, non-urgent |
 | Establish per-tool telemetry baseline before any future curation | — | deferred |
 
