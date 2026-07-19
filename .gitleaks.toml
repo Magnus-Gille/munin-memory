@@ -1,0 +1,18 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Exact synthetic credentials used by secret-redaction tests"
+regexTarget = "match"
+regexes = [
+  '''AKIAIOSFODNN7EXAMPLE''',
+  '''gh[op]_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij''',
+  '''ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa''',
+  '''sk-abcdEFGH1234567890wxyz''',
+  '''sk-abc123def456ghi789jkl012mno345''',
+  '''sk-abcdefghijklmnopqrstuvwx''',
+  '''sk-abcdefghijklmnopqrstuvwxyz''',
+  '''sk-or-v1-(?:abcdefghijklmnopqrstuv|supersecretkey12345678)''',
+  '''sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij''',
+  '''eyJhbGciOiJIUzI1NiJ9\.eyJ0ZXN0IjoidmFsdWUifQ''',
+]

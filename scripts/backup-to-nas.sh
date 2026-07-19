@@ -1,16 +1,16 @@
 #!/bin/bash
 set -euo pipefail
 
-# Munin Memory SQLite backup to NAS Pi
+# Munin Memory SQLite backup to a local or mounted backup directory
 # Uses sqlite3 .backup for a consistent snapshot (no file locking issues)
 # Filename format: memory-YYYY-MM-DD-HHMM.db (Heimdall parses this for freshness)
 
-DB="/home/magnus/.munin-memory/memory.db"
-NAS_HOST="100.99.119.52"
-NAS_DIR="/mnt/timemachine/backups/munin-memory"
+DB="${MUNIN_BACKUP_DB:-${HOME}/.munin-memory/memory.db}"
+BACKUP_DIR="${MUNIN_BACKUP_DIR:-${HOME}/backups/munin-memory}"
 TIMESTAMP=$(date -u +%Y-%m-%d-%H%M)
 FILENAME="memory-${TIMESTAMP}.db"
-LOCAL_TMP="/tmp/${FILENAME}"
+LOCAL_TMP=$(mktemp "${TMPDIR:-/tmp}/munin-memory-backup.XXXXXX.db")
+trap 'rm -f "$LOCAL_TMP"' EXIT
 
 echo "$(date -Iseconds) Starting Munin backup..."
 
@@ -25,14 +25,14 @@ if [ "$INTEGRITY" != "ok" ]; then
     exit 1
 fi
 
-# 3. Ensure target dir exists, then rsync to NAS
-ssh "magnus@${NAS_HOST}" "mkdir -p '${NAS_DIR}'"
-rsync -az "$LOCAL_TMP" "magnus@${NAS_HOST}:${NAS_DIR}/${FILENAME}"
+# 3. Copy to the configured directory. It may be a local disk or a mounted NAS.
+mkdir -p "$BACKUP_DIR"
+install -m 600 "$LOCAL_TMP" "$BACKUP_DIR/$FILENAME"
 
 # 4. Cleanup local temp
 rm -f "$LOCAL_TMP"
 
-# 5. Prune old backups on NAS — GFS retention:
+# 5. Prune old backups — GFS retention:
 #    - keep the 14 most recent daily snapshots
 #    - plus the 4 most recent Sunday snapshots (rolling monthly coverage)
 #
@@ -43,9 +43,9 @@ rm -f "$LOCAL_TMP"
 # reported failure nightly and retention never ran (dailies piled up). The fix:
 # read the full `ls` output into a bash array (no live pipe for a producer to
 # die on), then slice the first N with array indexing. No `head`, no SIGPIPE.
-ssh "magnus@${NAS_HOST}" "bash -s '${NAS_DIR}'" <<'REMOTE'
+(
 set -euo pipefail
-cd "$1" || exit 0
+cd "$BACKUP_DIR" || exit 0
 
 keep=$(mktemp)
 trap 'rm -f "$keep"' EXIT
@@ -99,6 +99,6 @@ done < <(ls -1 memory-*.db 2>/dev/null | grep -vxFf "$keep" || true)
 if [ "${#prune[@]}" -gt 0 ]; then
     printf '%s\0' "${prune[@]}" | xargs -0 -r rm --
 fi
-REMOTE
+)
 
 echo "$(date -Iseconds) Backup complete: ${FILENAME}"

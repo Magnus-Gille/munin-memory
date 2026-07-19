@@ -2,7 +2,7 @@
 """Summarize sweep-ram.jsonl into a compact markdown table + callouts."""
 import json, sys
 
-path = sys.argv[1] if len(sys.argv) > 1 else "/home/magnus/munin-ramfit/results/sweep-ram.jsonl"
+path = sys.argv[1] if len(sys.argv) > 1 else "benchmark/ramfit/results/sweep-ram.jsonl"
 rows = [json.loads(l) for l in open(path) if l.strip()]
 
 def cap_mb(c):

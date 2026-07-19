@@ -38,7 +38,7 @@ const INJECTION_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
     //  - "{keep|hide|conceal|withhold} … from {the user}";
     //  - "without {telling|informing|…}" the target.
     // (Input is whitespace-collapsed before scanning, so newline-split phrases match.)
-    pattern: /(?:\bdo\s+not\s+|\bdon['’]t\s+|\bnever\s+)(?:tell|inform|alert|notify|reveal|mention|disclose|report)\b[^.\n]{0,30}?\b(?:user|owner|human|magnus|principal)\b|\b(?:keep|hide|conceal|withhold)\b[^.\n]{0,25}?\bfrom\b[^.\n]{0,20}?\b(?:user|owner|human|magnus|principal)\b|\bwithout\s+(?:telling|informing|alerting|notifying|letting)\b[^.\n]{0,20}?\b(?:user|owner|human|magnus|principal)\b/i,
+    pattern: /(?:\bdo\s+not\s+|\bdon['’]t\s+|\bnever\s+)(?:tell|inform|alert|notify|reveal|mention|disclose|report)\b[^.\n]{0,30}?\b(?:user|owner|human|principal)\b|\b(?:keep|hide|conceal|withhold)\b[^.\n]{0,25}?\bfrom\b[^.\n]{0,20}?\b(?:user|owner|human|principal)\b|\bwithout\s+(?:telling|informing|alerting|notifying|letting)\b[^.\n]{0,20}?\b(?:user|owner|human|principal)\b/i,
     label: "concealment instruction",
   },
   {

@@ -36,7 +36,9 @@ const config = {
     (resolveKnob("MUNIN_EMBEDDINGS_ENABLED", "true") ?? "true") === "true",
   semanticEnabled: (process.env.MUNIN_SEMANTIC_ENABLED ?? "true") === "true",
   hybridEnabled: (process.env.MUNIN_HYBRID_ENABLED ?? "true") === "true",
-  model: process.env.MUNIN_EMBEDDINGS_MODEL ?? "Xenova/bge-small-en-v1.5",
+  model:
+    resolveKnob("MUNIN_EMBEDDINGS_MODEL", "Xenova/bge-small-en-v1.5") ??
+    "Xenova/bge-small-en-v1.5",
   // ONNX weight precision for the embedding model. Unset = library default
   // (fp32 for all-MiniLM). Lower precision (e.g. "q8"/"int8") cuts resident
   // model memory ~3-4x, the primary lever for fitting embeddings on

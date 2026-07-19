@@ -1115,7 +1115,7 @@ Return ONLY valid JSON (no markdown fences, no commentary):
   "tags": ["<lifecycle tag>", "<other relevant tags>"],
   "cross_references": [
     {
-      "target_namespace": "<namespace path, e.g. projects/hugin or people/sara>",
+      "target_namespace": "<namespace path, e.g. projects/hugin or people/alice>",
       "reference_type": "<one of: depends_on, blocks, related_to, supersedes, feeds_into>",
       "context": "<one sentence explaining this connection>",
       "confidence": <0.0 to 1.0>

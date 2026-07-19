@@ -87,20 +87,20 @@ describe("namespaceMatchesPattern", () => {
     expect(namespaceMatchesPattern("projects/foo", "projects/foobar")).toBe(false);
   });
 
-  it("prefix match: 'users/sara/*' matches 'users/sara/inbox'", () => {
-    expect(namespaceMatchesPattern("users/sara/inbox", "users/sara/*")).toBe(true);
+  it("prefix match: 'users/alice/*' matches 'users/alice/inbox'", () => {
+    expect(namespaceMatchesPattern("users/alice/inbox", "users/alice/*")).toBe(true);
   });
 
-  it("prefix match: 'users/sara/*' matches deeply nested namespace", () => {
-    expect(namespaceMatchesPattern("users/sara/notes/daily", "users/sara/*")).toBe(true);
+  it("prefix match: 'users/alice/*' matches deeply nested namespace", () => {
+    expect(namespaceMatchesPattern("users/alice/notes/daily", "users/alice/*")).toBe(true);
   });
 
-  it("prefix match: 'users/sara/*' does NOT match 'users/saramore'", () => {
-    expect(namespaceMatchesPattern("users/saramore", "users/sara/*")).toBe(false);
+  it("prefix match: 'users/alice/*' does NOT match 'users/saramore'", () => {
+    expect(namespaceMatchesPattern("users/saramore", "users/alice/*")).toBe(false);
   });
 
-  it("prefix match: 'users/sara/*' does NOT match 'users/sara' (no trailing slash)", () => {
-    expect(namespaceMatchesPattern("users/sara", "users/sara/*")).toBe(false);
+  it("prefix match: 'users/alice/*' does NOT match 'users/alice' (no trailing slash)", () => {
+    expect(namespaceMatchesPattern("users/alice", "users/alice/*")).toBe(false);
   });
 
   it("lone wildcard '*' matches any namespace", () => {
@@ -127,7 +127,7 @@ describe("validateNamespaceRules", () => {
 
   it("accepts '/*' suffix pattern", () => {
     expect(() =>
-      validateNamespaceRules([{ pattern: "users/sara/*", permissions: "write" }])
+      validateNamespaceRules([{ pattern: "users/alice/*", permissions: "write" }])
     ).not.toThrow();
   });
 
@@ -137,9 +137,9 @@ describe("validateNamespaceRules", () => {
     ).not.toThrow();
   });
 
-  it("rejects 'users/sara*' (missing '/' before '*')", () => {
+  it("rejects 'users/alice*' (missing '/' before '*')", () => {
     expect(() =>
-      validateNamespaceRules([{ pattern: "users/sara*", permissions: "read" }])
+      validateNamespaceRules([{ pattern: "users/alice*", permissions: "read" }])
     ).toThrow(/Ambiguous/);
   });
 
@@ -181,7 +181,7 @@ describe("canRead / canWrite", () => {
 
   it("owner can read any namespace", () => {
     expect(canRead(owner, "projects/secret")).toBe(true);
-    expect(canRead(owner, "users/magnus/private")).toBe(true);
+    expect(canRead(owner, "users/owner/private")).toBe(true);
   });
 
   it("owner can write any namespace", () => {
@@ -190,20 +190,20 @@ describe("canRead / canWrite", () => {
   });
 
   const saraCtx: AccessContext = {
-    principalId: "sara",
+    principalId: "alice",
     principalType: "family",
     accessibleNamespaces: [
-      { pattern: "users/sara/*", permissions: "rw" },
+      { pattern: "users/alice/*", permissions: "rw" },
       { pattern: "shared/family/*", permissions: "read" },
     ],
   };
 
   it("family principal with rw rule can read under matching namespace", () => {
-    expect(canRead(saraCtx, "users/sara/inbox")).toBe(true);
+    expect(canRead(saraCtx, "users/alice/inbox")).toBe(true);
   });
 
   it("family principal with rw rule can write under matching namespace", () => {
-    expect(canWrite(saraCtx, "users/sara/inbox")).toBe(true);
+    expect(canWrite(saraCtx, "users/alice/inbox")).toBe(true);
   });
 
   it("family principal with read-only rule can read", () => {
@@ -225,7 +225,7 @@ describe("canRead / canWrite", () => {
   });
 
   it("multiple rules: principal can access namespace matched by first rule", () => {
-    expect(canRead(saraCtx, "users/sara/notes")).toBe(true);
+    expect(canRead(saraCtx, "users/alice/notes")).toBe(true);
   });
 
   it("multiple rules: principal can access namespace matched by second rule", () => {
@@ -251,20 +251,20 @@ describe("canReadSubtree", () => {
   });
 
   const saraCtx: AccessContext = {
-    principalId: "sara",
+    principalId: "alice",
     principalType: "family",
-    accessibleNamespaces: [{ pattern: "users/sara/*", permissions: "rw" }],
+    accessibleNamespaces: [{ pattern: "users/alice/*", permissions: "rw" }],
   };
 
-  it("rule 'users/sara/*' overlaps with broad prefix 'users/' (rule is within queried scope)", () => {
+  it("rule 'users/alice/*' overlaps with broad prefix 'users/' (rule is within queried scope)", () => {
     expect(canReadSubtree(saraCtx, "users/")).toBe(true);
   });
 
-  it("rule 'users/sara/*' overlaps with narrow prefix 'users/sara/inbox/' (prefix within rule scope)", () => {
-    expect(canReadSubtree(saraCtx, "users/sara/inbox/")).toBe(true);
+  it("rule 'users/alice/*' overlaps with narrow prefix 'users/alice/inbox/' (prefix within rule scope)", () => {
+    expect(canReadSubtree(saraCtx, "users/alice/inbox/")).toBe(true);
   });
 
-  it("rule 'users/sara/*' does NOT overlap with disjoint prefix 'projects/'", () => {
+  it("rule 'users/alice/*' does NOT overlap with disjoint prefix 'projects/'", () => {
     expect(canReadSubtree(saraCtx, "projects/")).toBe(false);
   });
 
@@ -275,7 +275,7 @@ describe("canReadSubtree", () => {
       accessibleNamespaces: [{ pattern: "*", permissions: "read" }],
     };
     expect(canReadSubtree(ctx, "projects/")).toBe(true);
-    expect(canReadSubtree(ctx, "users/sara/")).toBe(true);
+    expect(canReadSubtree(ctx, "users/alice/")).toBe(true);
   });
 
   it("write-only rule does not satisfy canReadSubtree", () => {
@@ -294,8 +294,8 @@ describe("canReadSubtree", () => {
 
 describe("filterByAccess", () => {
   const entries = [
-    { namespace: "users/sara/inbox", id: "1" },
-    { namespace: "users/sara/notes", id: "2" },
+    { namespace: "users/alice/inbox", id: "1" },
+    { namespace: "users/alice/notes", id: "2" },
     { namespace: "projects/munin", id: "3" },
     { namespace: "shared/family/photos", id: "4" },
   ];
@@ -308,9 +308,9 @@ describe("filterByAccess", () => {
 
   it("non-owner: filters to only accessible namespaces", () => {
     const ctx: AccessContext = {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
-      accessibleNamespaces: [{ pattern: "users/sara/*", permissions: "rw" }],
+      accessibleNamespaces: [{ pattern: "users/alice/*", permissions: "rw" }],
     };
     const result = filterByAccess(ctx, entries);
     expect(result).toHaveLength(2);
@@ -385,29 +385,29 @@ describe("resolveAccessContext", () => {
 
   it("known oauth_client_id resolves to correct AccessContext", () => {
     insertPrincipal(db, {
-      principal_id: "sara",
+      principal_id: "alice",
       principal_type: "family",
-      oauth_client_id: "client-sara-123",
-      namespace_rules: [{ pattern: "users/sara/*", permissions: "rw" }],
+      oauth_client_id: "client-alice-123",
+      namespace_rules: [{ pattern: "users/alice/*", permissions: "rw" }],
     });
 
-    const ctx = resolveAccessContext(db, "client-sara-123");
-    expect(ctx.principalId).toBe("sara");
+    const ctx = resolveAccessContext(db, "client-alice-123");
+    expect(ctx.principalId).toBe("alice");
     expect(ctx.principalType).toBe("family");
     expect(ctx.accessibleNamespaces).toHaveLength(1);
-    expect(ctx.accessibleNamespaces[0].pattern).toBe("users/sara/*");
+    expect(ctx.accessibleNamespaces[0].pattern).toBe("users/alice/*");
   });
 
   it("oauth clients respect the consumer transport ceiling", () => {
     insertPrincipal(db, {
-      principal_id: "sara",
+      principal_id: "alice",
       principal_type: "family",
-      oauth_client_id: "client-sara-consumer",
-      namespace_rules: [{ pattern: "users/sara/*", permissions: "rw" }],
+      oauth_client_id: "client-alice-consumer",
+      namespace_rules: [{ pattern: "users/alice/*", permissions: "rw" }],
       max_classification: "client-confidential",
     });
 
-    const ctx = resolveAccessContext(db, "client-sara-consumer", undefined, undefined, "oauth");
+    const ctx = resolveAccessContext(db, "client-alice-consumer", undefined, undefined, "oauth");
     expect(ctx.transportType).toBe("consumer");
     expect(ctx.maxClassification).toBe("internal");
   });
@@ -575,11 +575,11 @@ describe("principalHomePrefix / principalMetaNamespace", () => {
 
   it("derives home from the first writable prefix rule", () => {
     const ctx = ctxWith([
-      { pattern: "users/sara/*", permissions: "rw" },
+      { pattern: "users/alice/*", permissions: "rw" },
       { pattern: "shared/family/*", permissions: "rw" },
     ]);
-    expect(principalHomePrefix(ctx)).toBe("users/sara");
-    expect(principalMetaNamespace(ctx)).toBe("users/sara/meta");
+    expect(principalHomePrefix(ctx)).toBe("users/alice");
+    expect(principalMetaNamespace(ctx)).toBe("users/alice/meta");
   });
 
   it("skips read-only and lone-wildcard rules, taking the first rw prefix", () => {

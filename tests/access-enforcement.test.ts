@@ -22,10 +22,10 @@ import { addPrincipal } from "../src/admin-cli.js";
 
 function familyContext(): AccessContext {
   return {
-    principalId: "sara",
+    principalId: "alice",
     principalType: "family",
     accessibleNamespaces: [
-      { pattern: "users/sara/*", permissions: "rw" },
+      { pattern: "users/alice/*", permissions: "rw" },
       { pattern: "shared/family/*", permissions: "rw" },
     ],
   };
@@ -114,9 +114,9 @@ describe("memory_write — access enforcement", () => {
     expect(result.status).toBe("created");
   });
 
-  it("family writes to users/sara/notes → succeeds", async () => {
+  it("family writes to users/alice/notes → succeeds", async () => {
     const raw = await familyCall("memory_write", {
-      namespace: "users/sara/notes",
+      namespace: "users/alice/notes",
       key: "today",
       content: "Family note",
     });
@@ -188,9 +188,9 @@ describe("memory_update_status — access enforcement", () => {
     expect(result.key).toBe("status");
   });
 
-  it("family updates users/sara/notes → validation error because namespace is not tracked", async () => {
+  it("family updates users/alice/notes → validation error because namespace is not tracked", async () => {
     const raw = await familyCall("memory_update_status", {
-      namespace: "users/sara/notes",
+      namespace: "users/alice/notes",
       current_work: "Should fail before write path",
     });
     const result = parse(raw) as { error: string };
@@ -230,9 +230,9 @@ describe("memory_read — access enforcement", () => {
       content: "Owner-only data",
     });
     await ownerCall("memory_write", {
-      namespace: "users/sara/notes",
+      namespace: "users/alice/notes",
       key: "today",
-      content: "Sara's note",
+      content: "Alice's note",
     });
   });
 
@@ -246,14 +246,14 @@ describe("memory_read — access enforcement", () => {
     expect(result.content).toBe("Owner-only data");
   });
 
-  it("family reads from users/sara/notes → succeeds", async () => {
+  it("family reads from users/alice/notes → succeeds", async () => {
     const raw = await familyCall("memory_read", {
-      namespace: "users/sara/notes",
+      namespace: "users/alice/notes",
       key: "today",
     });
     const result = parse(raw) as { found: boolean; content: string };
     expect(result.found).toBe(true);
-    expect(result.content).toBe("Sara's note");
+    expect(result.content).toBe("Alice's note");
   });
 
   it("family reads from projects/foo → { found: false } with NO hint about sibling keys", async () => {
@@ -293,16 +293,16 @@ describe("memory_read_batch — access enforcement", () => {
     entryId = (parse(raw) as { id: string }).id;
 
     await ownerCall("memory_write", {
-      namespace: "users/sara/notes",
+      namespace: "users/alice/notes",
       key: "today",
-      content: "Sara data",
+      content: "Alice data",
     });
   });
 
   it("mixed batch: accessible items return data, inaccessible return { found: false }", async () => {
     const raw = await familyCall("memory_read_batch", {
       reads: [
-        { namespace: "users/sara/notes", key: "today" },
+        { namespace: "users/alice/notes", key: "today" },
         { namespace: "projects/foo", key: "status" },
       ],
     });
@@ -311,7 +311,7 @@ describe("memory_read_batch — access enforcement", () => {
 
     const accessible = result.results[0];
     expect(accessible.found).toBe(true);
-    expect(accessible.content).toBe("Sara data");
+    expect(accessible.content).toBe("Alice data");
 
     const inaccessible = result.results[1];
     expect(inaccessible.found).toBe(false);
@@ -321,7 +321,7 @@ describe("memory_read_batch — access enforcement", () => {
   it("owner batch: all items return data", async () => {
     const raw = await ownerCall("memory_read_batch", {
       reads: [
-        { namespace: "users/sara/notes", key: "today" },
+        { namespace: "users/alice/notes", key: "today" },
         { namespace: "projects/foo", key: "status" },
       ],
     });
@@ -347,9 +347,9 @@ describe("memory_get — access enforcement", () => {
     restrictedEntryId = (parse(ownerRaw) as { id: string }).id;
 
     const saraRaw = await ownerCall("memory_write", {
-      namespace: "users/sara/notes",
+      namespace: "users/alice/notes",
       key: "today",
-      content: "Sara's own entry",
+      content: "Alice's own entry",
     });
     ownerEntryId = (parse(saraRaw) as { id: string }).id;
   });
@@ -361,11 +361,11 @@ describe("memory_get — access enforcement", () => {
     expect(result.content).toBe("Owner-only");
   });
 
-  it("family gets ID of entry in users/sara/notes → succeeds", async () => {
+  it("family gets ID of entry in users/alice/notes → succeeds", async () => {
     const raw = await familyCall("memory_get", { id: ownerEntryId });
     const result = parse(raw) as { found: boolean; content: string };
     expect(result.found).toBe(true);
-    expect(result.content).toBe("Sara's own entry");
+    expect(result.content).toBe("Alice's own entry");
   });
 
   it("family gets ID of entry in projects/foo (inaccessible) → { found: false }", async () => {
@@ -388,7 +388,7 @@ describe("memory_query — access enforcement", () => {
       tags: ["active"],
     });
     await ownerCall("memory_write", {
-      namespace: "users/sara/notes",
+      namespace: "users/alice/notes",
       key: "today",
       content: "Project moonbeam family note",
       tags: ["note"],
@@ -406,10 +406,10 @@ describe("memory_query — access enforcement", () => {
     const result = parse(raw) as { results: Array<{ namespace: string }> };
     const namespaces = result.results.map((r) => r.namespace);
     expect(namespaces).not.toContain("projects/foo");
-    // Should contain sara's accessible namespaces
+    // Should contain alice's accessible namespaces
     for (const ns of namespaces) {
       expect(
-        ns.startsWith("users/sara/") || ns.startsWith("shared/family/")
+        ns.startsWith("users/alice/") || ns.startsWith("shared/family/")
       ).toBe(true);
     }
   });
@@ -425,14 +425,14 @@ describe("memory_query — access enforcement", () => {
     expect(result.total).toBe(1);
     expect(result.results[0].namespace).not.toBe("projects/foo");
     expect(
-      result.results[0].namespace.startsWith("users/sara/") ||
+      result.results[0].namespace.startsWith("users/alice/") ||
         result.results[0].namespace.startsWith("shared/family/"),
     ).toBe(true);
   });
 
   it("family filter-only browse fills limit from accessible results when newest entry is inaccessible", async () => {
     db.prepare("UPDATE entries SET updated_at = ? WHERE namespace = 'projects/foo'").run("2026-03-03T00:00:00.000Z");
-    db.prepare("UPDATE entries SET updated_at = ? WHERE namespace = 'users/sara/notes'").run("2026-03-02T00:00:00.000Z");
+    db.prepare("UPDATE entries SET updated_at = ? WHERE namespace = 'users/alice/notes'").run("2026-03-02T00:00:00.000Z");
     db.prepare("UPDATE entries SET updated_at = ? WHERE namespace = 'shared/family/calendar'").run("2026-03-01T00:00:00.000Z");
 
     const raw = await familyCall("memory_query", {
@@ -444,7 +444,7 @@ describe("memory_query — access enforcement", () => {
     expect(result.total).toBe(1);
     expect(result.results[0].namespace).not.toBe("projects/foo");
     expect(
-      result.results[0].namespace.startsWith("users/sara/") ||
+      result.results[0].namespace.startsWith("users/alice/") ||
         result.results[0].namespace.startsWith("shared/family/"),
     ).toBe(true);
   });
@@ -471,10 +471,10 @@ describe("memory_log — access enforcement", () => {
     expect(result.status).toBe("logged");
   });
 
-  it("family logs to users/sara/notes → succeeds", async () => {
+  it("family logs to users/alice/notes → succeeds", async () => {
     const raw = await familyCall("memory_log", {
-      namespace: "users/sara/notes",
-      content: "Sara log entry",
+      namespace: "users/alice/notes",
+      content: "Alice log entry",
     });
     const result = parse(raw) as { status: string };
     expect(result.status).toBe("logged");
@@ -522,9 +522,9 @@ describe("memory_list — access enforcement", () => {
       content: "Owner project",
     });
     await ownerCall("memory_write", {
-      namespace: "users/sara/notes",
+      namespace: "users/alice/notes",
       key: "today",
-      content: "Sara notes",
+      content: "Alice notes",
     });
   });
 
@@ -533,7 +533,7 @@ describe("memory_list — access enforcement", () => {
     const result = parse(raw) as { namespaces: Array<{ namespace: string }> };
     const nsList = result.namespaces.map((n) => n.namespace);
     expect(nsList).not.toContain("projects/foo");
-    expect(nsList).toContain("users/sara/notes");
+    expect(nsList).toContain("users/alice/notes");
   });
 
   it("owner lists without namespace → all namespaces returned", async () => {
@@ -541,7 +541,7 @@ describe("memory_list — access enforcement", () => {
     const result = parse(raw) as { namespaces: Array<{ namespace: string }> };
     const nsList = result.namespaces.map((n) => n.namespace);
     expect(nsList).toContain("projects/foo");
-    expect(nsList).toContain("users/sara/notes");
+    expect(nsList).toContain("users/alice/notes");
   });
 
   it("family lists with namespace projects/foo → empty state/log structure (no error, no data)", async () => {
@@ -577,9 +577,9 @@ describe("memory_orient — access enforcement", () => {
       tags: ["active"],
     });
     await ownerCall("memory_write", {
-      namespace: "users/sara/notes",
+      namespace: "users/alice/notes",
       key: "status",
-      content: "Sara namespace active",
+      content: "Alice namespace active",
       tags: ["active"],
     });
   });
@@ -604,32 +604,32 @@ describe("memory_orient — access enforcement", () => {
   });
 
   it("family with personal conventions → full reveals them; compact stays neutral with a hint", async () => {
-    // Owner seeds Sara's personal conventions in her own meta namespace.
+    // Owner seeds Alice's personal conventions in her own meta namespace.
     await ownerCall("memory_write", {
-      namespace: "users/sara/meta",
+      namespace: "users/alice/meta",
       key: "conventions",
-      content: "# Sara's world\nGroceries live in shared/family/shopping.",
+      content: "# Alice's world\nGroceries live in shared/family/shopping.",
     });
 
     const full = parse(await familyCall("memory_orient", { include_full_conventions: true })) as {
       conventions: { content: string; source?: string };
     };
     expect(full.conventions.source).toBe("principal");
-    expect(full.conventions.content).toContain("Sara's world");
+    expect(full.conventions.content).toContain("Alice's world");
 
     const compact = parse(await familyCall("memory_orient")) as {
       conventions: { content: string; compact?: boolean; source?: string; full_conventions_hint?: string };
     };
     expect(compact.conventions.compact).toBe(true);
     expect(compact.conventions.source).toBe("principal");
-    expect(compact.conventions.full_conventions_hint).toContain("users/sara/meta");
+    expect(compact.conventions.full_conventions_hint).toContain("users/alice/meta");
     // Compact stays the neutral baseline — personal detail only surfaces on `full`.
-    expect(compact.conventions.content).not.toContain("Sara's world");
+    expect(compact.conventions.content).not.toContain("Alice's world");
   });
 
   it("family can write its own conventions and see them on full orient", async () => {
     await familyCall("memory_write", {
-      namespace: "users/sara/meta",
+      namespace: "users/alice/meta",
       key: "conventions",
       content: "# My rules\nKeep it tidy.",
     });
@@ -748,8 +748,8 @@ describe("memory_resume — access enforcement", () => {
       tags: ["decision"],
     });
     await ownerCall("memory_log", {
-      namespace: "users/sara/notes",
-      content: "Decided on Sara's own family note.",
+      namespace: "users/alice/notes",
+      content: "Decided on Alice's own family note.",
       tags: ["decision"],
     });
   });
@@ -762,7 +762,7 @@ describe("memory_resume — access enforcement", () => {
     expect(namespaces).not.toContain("projects/foo");
     for (const namespace of namespaces) {
       expect(
-        namespace.startsWith("users/sara/") || namespace.startsWith("shared/family/"),
+        namespace.startsWith("users/alice/") || namespace.startsWith("shared/family/"),
       ).toBe(true);
     }
   });
@@ -791,9 +791,9 @@ describe("memory_extract — access enforcement", () => {
       tags: ["active"],
     });
     await ownerCall("memory_write", {
-      namespace: "users/sara/notes",
+      namespace: "users/alice/notes",
       key: "profile",
-      content: "Sara family notes.",
+      content: "Alice family notes.",
     });
   });
 
@@ -1053,9 +1053,9 @@ describe("memory_attention — access enforcement", () => {
       tags: ["blocked"],
     });
     await ownerCall("memory_write", {
-      namespace: "users/sara/notes",
+      namespace: "users/alice/notes",
       key: "status",
-      content: "Sara notes blocked",
+      content: "Alice notes blocked",
       tags: ["blocked"],
     });
   });
@@ -1087,9 +1087,9 @@ describe("memory_delete — access enforcement", () => {
       content: "To be deleted",
     });
     await familyCall("memory_write", {
-      namespace: "users/sara/notes",
+      namespace: "users/alice/notes",
       key: "today",
-      content: "Sara's deletable note",
+      content: "Alice's deletable note",
     });
     await ownerCall("memory_write", {
       namespace: "shared/family/board",
@@ -1098,8 +1098,8 @@ describe("memory_delete — access enforcement", () => {
     });
     await familyCall("memory_write", {
       namespace: "shared/family/board",
-      key: "sara-note",
-      content: "Sara family note",
+      key: "alice-note",
+      content: "Alice family note",
     });
     await ownerCall("memory_log", {
       namespace: "shared/family/board",
@@ -1107,7 +1107,7 @@ describe("memory_delete — access enforcement", () => {
     });
     await familyCall("memory_log", {
       namespace: "shared/family/board",
-      content: "Sara log entry",
+      content: "Alice log entry",
     });
   });
 
@@ -1129,16 +1129,16 @@ describe("memory_delete — access enforcement", () => {
     expect(del.deleted_count).toBe(1);
   });
 
-  it("family deletes from users/sara/notes → preview then delete succeeds", async () => {
+  it("family deletes from users/alice/notes → preview then delete succeeds", async () => {
     const previewRaw = await familyCall("memory_delete", {
-      namespace: "users/sara/notes",
+      namespace: "users/alice/notes",
       key: "today",
     });
     const preview = parse(previewRaw) as { action: string; phase: string; delete_token: string };
     expect(preview.phase).toBe("preview");
 
     const deleteRaw = await familyCall("memory_delete", {
-      namespace: "users/sara/notes",
+      namespace: "users/alice/notes",
       key: "today",
       delete_token: preview.delete_token,
     });
@@ -1171,7 +1171,7 @@ describe("memory_delete — access enforcement", () => {
     expect(preview.phase).toBe("preview");
     expect(preview.will_delete.state_count).toBe(1);
     expect(preview.will_delete.log_count).toBe(1);
-    expect(preview.will_delete.keys).toEqual(["sara-note"]);
+    expect(preview.will_delete.keys).toEqual(["alice-note"]);
 
     const deleteRaw = await familyCall("memory_delete", {
       namespace: "shared/family/board",
@@ -1189,7 +1189,7 @@ describe("memory_delete — access enforcement", () => {
 
     const saraGoneRaw = await familyCall("memory_read", {
       namespace: "shared/family/board",
-      key: "sara-note",
+      key: "alice-note",
     });
     const saraGone = parse(saraGoneRaw) as { found: boolean };
     expect(saraGone.found).toBe(false);
@@ -1227,7 +1227,7 @@ describe("memory_delete — access enforcement", () => {
 
     const saraGoneRaw = await familyCall("memory_read", {
       namespace: "shared/family/board",
-      key: "sara-note",
+      key: "alice-note",
     });
     const saraGone = parse(saraGoneRaw) as { found: boolean };
     expect(saraGone.found).toBe(false);
@@ -1301,9 +1301,9 @@ describe("memory_history — access enforcement", () => {
       content: "History test entry",
     });
     await ownerCall("memory_write", {
-      namespace: "users/sara/notes",
+      namespace: "users/alice/notes",
       key: "today",
-      content: "Sara history entry",
+      content: "Alice history entry",
     });
   });
 
@@ -1321,10 +1321,10 @@ describe("memory_history — access enforcement", () => {
     const result = parse(raw) as { entries: Array<{ namespace: string }> };
     const namespaces = result.entries.map((e) => e.namespace);
     expect(namespaces).not.toContain("projects/foo");
-    // All returned entries must be in sara-accessible namespaces
+    // All returned entries must be in alice-accessible namespaces
     for (const ns of namespaces) {
       expect(
-        ns.startsWith("users/sara/") || ns.startsWith("shared/family/")
+        ns.startsWith("users/alice/") || ns.startsWith("shared/family/")
       ).toBe(true);
     }
   });
@@ -1524,34 +1524,34 @@ describe("memory_orient — configurable tracked patterns (#157)", () => {
 
   it("family with personal config sees their own tracked namespaces in the dashboard", async () => {
     await ownerCall("memory_write", {
-      namespace: "users/sara/meta",
+      namespace: "users/alice/meta",
       key: "config",
-      content: JSON.stringify({ tracked_patterns: ["users/sara/projects/*"] }),
+      content: JSON.stringify({ tracked_patterns: ["users/alice/projects/*"] }),
     });
     await ownerCall("memory_write", {
-      namespace: "users/sara/projects/garden",
+      namespace: "users/alice/projects/garden",
       key: "status",
       content: "Garden redesign",
       tags: ["active"],
     });
     const ns = dashboardNamespaces(parse(await familyCall("memory_orient")));
-    expect(ns).toContain("users/sara/projects/garden");
-    // Owner's projects/foo (from beforeEach) is not Sara's and not readable by her.
+    expect(ns).toContain("users/alice/projects/garden");
+    // Owner's projects/foo (from beforeEach) is not Alice's and not readable by her.
     expect(ns).not.toContain("projects/foo");
   });
 
   it("family without personal config does not auto-track its own sub-namespaces (must opt in)", async () => {
-    // No users/sara/meta config written. The default patterns (projects/*, clients/*)
-    // do NOT match users/sara/projects/*, so Sara's own project is not tracked until
+    // No users/alice/meta config written. The default patterns (projects/*, clients/*)
+    // do NOT match users/alice/projects/*, so Alice's own project is not tracked until
     // she (or a profile) seeds a config selecting it.
     await ownerCall("memory_write", {
-      namespace: "users/sara/projects/garden",
+      namespace: "users/alice/projects/garden",
       key: "status",
       content: "Garden",
       tags: ["active"],
     });
     const ns = dashboardNamespaces(parse(await familyCall("memory_orient")));
-    expect(ns).not.toContain("users/sara/projects/garden");
+    expect(ns).not.toContain("users/alice/projects/garden");
   });
 });
 
@@ -1561,16 +1561,16 @@ describe("memory_orient — configurable tracked patterns (#157)", () => {
 
 describe("end-to-end: profile onboarding → per-principal orient", () => {
   it("a household-profile onboarding gives the principal their own conventions + dashboard", async () => {
-    // Onboard Sara with the household profile — seeds users/sara/meta conventions + config.
+    // Onboard Alice with the household profile — seeds users/alice/meta conventions + config.
     addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
-      rules: [{ pattern: "users/sara/*", permissions: "rw" }],
+      rules: [{ pattern: "users/alice/*", permissions: "rw" }],
       profile: "household",
     });
     // She records a tracked item within her seeded taxonomy.
     await ownerCall("memory_write", {
-      namespace: "users/sara/home/garden",
+      namespace: "users/alice/home/garden",
       key: "status",
       content: "Replant the back beds",
       tags: ["active"],
@@ -1582,7 +1582,7 @@ describe("end-to-end: profile onboarding → per-principal orient", () => {
     };
     expect(full.conventions.source).toBe("principal");
     expect(full.conventions.content).toContain("Household");
-    expect(full.conventions.content).toContain("users/sara/home");
+    expect(full.conventions.content).toContain("users/alice/home");
 
     // Dashboard tracks her seeded namespace (config-driven, canRead-filtered).
     const ns = Object.values(
@@ -1592,22 +1592,22 @@ describe("end-to-end: profile onboarding → per-principal orient", () => {
     )
       .flat()
       .map((e) => e.namespace);
-    expect(ns).toContain("users/sara/home/garden");
+    expect(ns).toContain("users/alice/home/garden");
   });
 
   it("a household principal can memory_update_status its own configured tracked namespace", async () => {
     addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
-      rules: [{ pattern: "users/sara/*", permissions: "rw" }],
+      rules: [{ pattern: "users/alice/*", permissions: "rw" }],
       profile: "household",
     });
-    // users/sara/home/* is tracked by Sara's seeded config, so the write-side
+    // users/alice/home/* is tracked by Alice's seeded config, so the write-side
     // guard must accept update_status here (it used to hard-reject anything
     // outside projects/*|clients/*).
     const ok = parse(
       await familyCall("memory_update_status", {
-        namespace: "users/sara/home/cleanup",
+        namespace: "users/alice/home/cleanup",
         phase: "Active",
         current_work: "Declutter the garage",
         next_steps: ["Sort tools"],
@@ -1620,7 +1620,7 @@ describe("end-to-end: profile onboarding → per-principal orient", () => {
     // A namespace NOT in her tracked patterns is still rejected.
     const rejected = parse(
       await familyCall("memory_update_status", {
-        namespace: "users/sara/notes/random",
+        namespace: "users/alice/notes/random",
         current_work: "x",
       }),
     ) as { error?: string };
@@ -1636,9 +1636,9 @@ describe("end-to-end: profile onboarding → per-principal orient", () => {
 describe("per-principal tracked patterns — extract + commitments (#164)", () => {
   function onboardSaraHousehold(): void {
     addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
-      rules: [{ pattern: "users/sara/*", permissions: "rw" }],
+      rules: [{ pattern: "users/alice/*", permissions: "rw" }],
       profile: "household",
     });
   }
@@ -1654,23 +1654,23 @@ describe("per-principal tracked patterns — extract + commitments (#164)", () =
           "- Buy paint",
           "- Sand the boards",
         ].join("\n"),
-        namespace_hint: "users/sara/home/fence",
+        namespace_hint: "users/alice/home/fence",
       }),
     ) as {
       suggestions: Array<{ action: string; namespace: string; status_patch?: { next_steps?: string[] } }>;
     };
 
-    // users/sara/home/* is tracked by Sara's household config, so the suggestion
+    // users/alice/home/* is tracked by Alice's household config, so the suggestion
     // must be a status update, not a plain memory_write.
     expect(result.suggestions).toContainEqual(
       expect.objectContaining({
         action: "memory_update_status",
-        namespace: "users/sara/home/fence",
+        namespace: "users/alice/home/fence",
       }),
     );
     expect(
       result.suggestions.some(
-        (s) => s.action === "memory_write" && s.namespace === "users/sara/home/fence",
+        (s) => s.action === "memory_write" && s.namespace === "users/alice/home/fence",
       ),
     ).toBe(false);
   });
@@ -1679,7 +1679,7 @@ describe("per-principal tracked patterns — extract + commitments (#164)", () =
     onboardSaraHousehold();
 
     await familyCall("memory_update_status", {
-      namespace: "users/sara/home/garden",
+      namespace: "users/alice/home/garden",
       phase: "Active",
       current_work: "Replant the back beds",
       next_steps: ["Buy compost"],
@@ -1693,38 +1693,38 @@ describe("per-principal tracked patterns — extract + commitments (#164)", () =
     const openTexts = (commitments.open ?? []).map((c) => c.text);
     expect(openTexts).toContain("Buy compost");
     expect(
-      (commitments.open ?? []).some((c) => c.namespace === "users/sara/home/garden"),
+      (commitments.open ?? []).some((c) => c.namespace === "users/alice/home/garden"),
     ).toBe(true);
   });
 
   it("owner calling memory_commitments does not close a family principal's tracked_next_step (#164 Finding 1)", async () => {
-    // Onboard Sara with household profile so users/sara/home/* is tracked for her.
+    // Onboard Alice with household profile so users/alice/home/* is tracked for her.
     onboardSaraHousehold();
 
-    // Sara writes a status with a next step → creates an open tracked_next_step commitment.
+    // Alice writes a status with a next step → creates an open tracked_next_step commitment.
     await familyCall("memory_update_status", {
-      namespace: "users/sara/home/garden",
+      namespace: "users/alice/home/garden",
       phase: "Active",
       current_work: "Plant herbs",
       next_steps: ["Buy seedlings"],
       lifecycle: "active",
     });
 
-    // Confirm Sara's commitment is open in the DB before owner reads.
+    // Confirm Alice's commitment is open in the DB before owner reads.
     const dbBefore = listCommitments(db, { includeResolved: true, limit: 10 });
     expect(dbBefore.some((r) => r.text === "Buy seedlings" && r.status === "open")).toBe(true);
 
     // Owner calls unscoped memory_commitments. Owner's tracked patterns are
-    // projects/* and clients/* — does NOT include users/sara/home/*.
-    // This must NOT close Sara's open commitment in the DB.
+    // projects/* and clients/* — does NOT include users/alice/home/*.
+    // This must NOT close Alice's open commitment in the DB.
     await ownerCall("memory_commitments", {});
 
-    // Check the DB DIRECTLY — before Sara's next sync could re-open the commitment.
-    // If the bug is present, Sara's tracked_next_step will be "done" here.
+    // Check the DB DIRECTLY — before Alice's next sync could re-open the commitment.
+    // If the bug is present, Alice's tracked_next_step will be "done" here.
     const dbAfter = listCommitments(db, { includeResolved: true, limit: 10 });
     expect(
       dbAfter.some((r) => r.text === "Buy seedlings" && r.status === "open"),
-      "Sara's commitment must remain open in the DB after owner calls memory_commitments",
+      "Alice's commitment must remain open in the DB after owner calls memory_commitments",
     ).toBe(true);
   });
 });

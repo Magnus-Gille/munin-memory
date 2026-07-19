@@ -77,7 +77,7 @@ let requestLogs: RequestLogEntry[];
 
 beforeEach(() => {
   process.env.MUNIN_OAUTH_TRUSTED_USER_HEADER = "x-auth-user";
-  process.env.MUNIN_OAUTH_TRUSTED_USER_VALUE = "magnus@example.com";
+  process.env.MUNIN_OAUTH_TRUSTED_USER_VALUE = "owner@example.com";
   cleanupTestDb();
   db = initDatabase(TEST_DB_PATH);
   requestLogs = [];

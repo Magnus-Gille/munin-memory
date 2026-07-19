@@ -536,7 +536,7 @@ function runLexical(
  * across queries would be incorrect because the predicate gate differs.
  *
  * The pipeline order is load-bearing:
- *   1. Inject canonical entries (reference-index, magnus profile, …)
+ *   1. Inject canonical entries (reference-index, owner profile, …)
  *   2. Inject blocked/attention statuses if the query is a triage query
  *   3. Filter completed-task namespaces if default suppression applies
  *   4. Rerank by heuristic + freshness, then slice to requestedLimit

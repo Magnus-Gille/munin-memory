@@ -30,6 +30,7 @@ export type ProfileName = (typeof PROFILE_NAMES)[number];
  */
 export interface ProfileKnobs {
   MUNIN_EMBEDDINGS_ENABLED?: string;
+  MUNIN_EMBEDDINGS_MODEL?: string;
   MUNIN_EMBEDDINGS_DTYPE?: string;
   MUNIN_EMBEDDINGS_BATCH_SIZE?: string;
   MUNIN_SQLITE_CACHE_KIB?: string;
@@ -60,6 +61,7 @@ const PROFILE_DEFAULTS: Record<ProfileName, ResolvedProfile> = {
   "zero-appliance": {
     knobs: {
       MUNIN_EMBEDDINGS_ENABLED: "true",
+      MUNIN_EMBEDDINGS_MODEL: "Xenova/all-MiniLM-L6-v2",
       MUNIN_EMBEDDINGS_DTYPE: "q8",
       MUNIN_EMBEDDINGS_BATCH_SIZE: "1",
       MUNIN_SQLITE_CACHE_KIB: "1024",
@@ -70,6 +72,7 @@ const PROFILE_DEFAULTS: Record<ProfileName, ResolvedProfile> = {
   "zero-plus": {
     knobs: {
       MUNIN_EMBEDDINGS_ENABLED: "true",
+      MUNIN_EMBEDDINGS_MODEL: "Xenova/all-MiniLM-L6-v2",
       MUNIN_EMBEDDINGS_DTYPE: "q8",
       MUNIN_EMBEDDINGS_BATCH_SIZE: "4",
       MUNIN_SQLITE_CACHE_KIB: "4096",

@@ -157,58 +157,58 @@ describe("resolveAccessContext — token-bound principal", () => {
 
   it("resolves principal from tokenPrincipalId (step 3)", () => {
     addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
-      rules: [{ pattern: "users/sara/*", permissions: "rw" }],
+      rules: [{ pattern: "users/alice/*", permissions: "rw" }],
     });
 
-    const ctx = resolveAccessContext(db, "some-client-id", undefined, "sara");
-    expect(ctx.principalId).toBe("sara");
+    const ctx = resolveAccessContext(db, "some-client-id", undefined, "alice");
+    expect(ctx.principalId).toBe("alice");
     expect(ctx.principalType).toBe("family");
-    expect(canWrite(ctx, "users/sara/notes")).toBe(true);
+    expect(canWrite(ctx, "users/alice/notes")).toBe(true);
     expect(canRead(ctx, "projects/foo")).toBe(false);
   });
 
   it("resolves via principal_oauth_clients mapping table (step 4)", () => {
     addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
-      rules: [{ pattern: "users/sara/*", permissions: "rw" }],
+      rules: [{ pattern: "users/alice/*", permissions: "rw" }],
     });
     insertOAuthClient(db, "client-abc");
-    insertOAuthMapping(db, "client-abc", "sara");
+    insertOAuthMapping(db, "client-abc", "alice");
 
     const ctx = resolveAccessContext(db, "client-abc");
-    expect(ctx.principalId).toBe("sara");
+    expect(ctx.principalId).toBe("alice");
     expect(ctx.principalType).toBe("family");
   });
 
   it("returns ZERO_ACCESS for revoked principal via token-bound", () => {
     addPrincipal(db, {
-      principalId: "revoked-sara",
+      principalId: "revoked-alice",
       principalType: "family",
-      rules: [{ pattern: "users/sara/*", permissions: "rw" }],
+      rules: [{ pattern: "users/alice/*", permissions: "rw" }],
     });
     // Revoke
     db.prepare("UPDATE principals SET revoked_at = datetime('now') WHERE principal_id = ?")
-      .run("revoked-sara");
+      .run("revoked-alice");
 
-    const ctx = resolveAccessContext(db, "any-client", undefined, "revoked-sara");
+    const ctx = resolveAccessContext(db, "any-client", undefined, "revoked-alice");
     expect(ctx.principalId).toBe("anonymous");
     expect(ctx.principalType).toBe("external");
   });
 
   it("returns ZERO_ACCESS for revoked mapping", () => {
     addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
-      rules: [{ pattern: "users/sara/*", permissions: "rw" }],
+      rules: [{ pattern: "users/alice/*", permissions: "rw" }],
     });
     insertOAuthClient(db, "revoked-client");
     db.prepare(
       `INSERT INTO principal_oauth_clients (oauth_client_id, principal_id, mapped_at, mapped_by, revoked_at)
        VALUES (?, ?, datetime('now'), 'consent', datetime('now'))`,
-    ).run("revoked-client", "sara");
+    ).run("revoked-client", "alice");
 
     const ctx = resolveAccessContext(db, "revoked-client");
     expect(ctx.principalId).toBe("anonymous");
@@ -216,26 +216,26 @@ describe("resolveAccessContext — token-bound principal", () => {
 
   it("multiple clients mapped to same principal all resolve correctly", () => {
     addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
-      rules: [{ pattern: "users/sara/*", permissions: "rw" }],
+      rules: [{ pattern: "users/alice/*", permissions: "rw" }],
     });
     insertOAuthClient(db, "client-mobile");
     insertOAuthClient(db, "client-web");
-    insertOAuthMapping(db, "client-mobile", "sara");
-    insertOAuthMapping(db, "client-web", "sara");
+    insertOAuthMapping(db, "client-mobile", "alice");
+    insertOAuthMapping(db, "client-web", "alice");
 
     const ctx1 = resolveAccessContext(db, "client-mobile");
     const ctx2 = resolveAccessContext(db, "client-web");
-    expect(ctx1.principalId).toBe("sara");
-    expect(ctx2.principalId).toBe("sara");
+    expect(ctx1.principalId).toBe("alice");
+    expect(ctx2.principalId).toBe("alice");
   });
 
   it("token-bound principal takes priority over mapping table", () => {
     addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
-      rules: [{ pattern: "users/sara/*", permissions: "rw" }],
+      rules: [{ pattern: "users/alice/*", permissions: "rw" }],
     });
     addPrincipal(db, {
       principalId: "bob",
@@ -245,9 +245,9 @@ describe("resolveAccessContext — token-bound principal", () => {
     insertOAuthClient(db, "client-x");
     insertOAuthMapping(db, "client-x", "bob");
 
-    // Token says "sara" but mapping says "bob" — token wins
-    const ctx = resolveAccessContext(db, "client-x", undefined, "sara");
-    expect(ctx.principalId).toBe("sara");
+    // Token says "alice" but mapping says "bob" — token wins
+    const ctx = resolveAccessContext(db, "client-x", undefined, "alice");
+    expect(ctx.principalId).toBe("alice");
   });
 
   it("legacy-bearer still returns owner (unchanged)", () => {
@@ -272,13 +272,13 @@ describe("resolveConsentIdentity", () => {
 
   const baseConfig: ConsentAuthConfig = {
     trustedHeaderName: "x-proxy-user",
-    trustedHeaderValue: "magnus@example.com",
+    trustedHeaderValue: "owner@example.com",
     identityHeaderName: "x-user-email",
     allowLocalhost: false,
   };
 
   it("returns owner for trusted header match", () => {
-    const req = mockRequest({ "x-proxy-user": "magnus@example.com" });
+    const req = mockRequest({ "x-proxy-user": "owner@example.com" });
     const result = resolveConsentIdentity(req, baseConfig, db);
     expect(result).not.toBeNull();
     expect(result!.isOwner).toBe(true);
@@ -287,32 +287,32 @@ describe("resolveConsentIdentity", () => {
 
   it("resolves non-owner principal by email from identity header", () => {
     addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
-      rules: [{ pattern: "users/sara/*", permissions: "rw" }],
-      email: "sara@example.com",
+      rules: [{ pattern: "users/alice/*", permissions: "rw" }],
+      email: "alice@example.com",
     });
 
-    const req = mockRequest({ "x-user-email": "sara@example.com" });
+    const req = mockRequest({ "x-user-email": "alice@example.com" });
     const result = resolveConsentIdentity(req, baseConfig, db);
     expect(result).not.toBeNull();
-    expect(result!.principalId).toBe("sara");
+    expect(result!.principalId).toBe("alice");
     expect(result!.isOwner).toBe(false);
-    expect(result!.email).toBe("sara@example.com");
+    expect(result!.email).toBe("alice@example.com");
   });
 
   it("email lookup is case-insensitive", () => {
     addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
       rules: [],
-      email: "Sara@Example.COM",
+      email: "Alice@Example.COM",
     });
 
-    const req = mockRequest({ "x-user-email": "sara@example.com" });
+    const req = mockRequest({ "x-user-email": "alice@example.com" });
     const result = resolveConsentIdentity(req, baseConfig, db);
     expect(result).not.toBeNull();
-    expect(result!.principalId).toBe("sara");
+    expect(result!.principalId).toBe("alice");
   });
 
   it("returns null for unknown email (fail-closed)", () => {
@@ -391,67 +391,67 @@ describe("admin CLI — email", () => {
 
   it("addPrincipal stores email and email_lower", () => {
     addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
       rules: [],
-      email: "Sara@Example.COM",
+      email: "Alice@Example.COM",
     });
 
-    const detail = showPrincipal(db, "sara");
+    const detail = showPrincipal(db, "alice");
     expect(detail).not.toBeNull();
-    expect(detail!.email).toBe("Sara@Example.COM");
+    expect(detail!.email).toBe("Alice@Example.COM");
 
     // Verify email_lower stored correctly
-    const row = db.prepare("SELECT email_lower FROM principals WHERE principal_id = 'sara'")
+    const row = db.prepare("SELECT email_lower FROM principals WHERE principal_id = 'alice'")
       .get() as { email_lower: string };
-    expect(row.email_lower).toBe("sara@example.com");
+    expect(row.email_lower).toBe("alice@example.com");
   });
 
   it("updatePrincipal updates email", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
-    updatePrincipal(db, "sara", { email: "sara@newdomain.com" });
-    expect(showPrincipal(db, "sara")!.email).toBe("sara@newdomain.com");
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
+    updatePrincipal(db, "alice", { email: "alice@newdomain.com" });
+    expect(showPrincipal(db, "alice")!.email).toBe("alice@newdomain.com");
   });
 
   it("updatePrincipal clears email with null", () => {
     addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
       rules: [],
-      email: "sara@example.com",
+      email: "alice@example.com",
     });
-    updatePrincipal(db, "sara", { email: null });
-    expect(showPrincipal(db, "sara")!.email).toBeNull();
+    updatePrincipal(db, "alice", { email: null });
+    expect(showPrincipal(db, "alice")!.email).toBeNull();
   });
 
   it("listPrincipals includes email", () => {
     addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
       rules: [],
-      email: "sara@example.com",
+      email: "alice@example.com",
     });
 
     const list = listPrincipals(db);
-    const sara = list.find((p) => p.principalId === "sara");
-    expect(sara).toBeDefined();
-    expect(sara!.email).toBe("sara@example.com");
+    const alice = list.find((p) => p.principalId === "alice");
+    expect(alice).toBeDefined();
+    expect(alice!.email).toBe("alice@example.com");
   });
 
   it("rejects duplicate email_lower", () => {
     addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
       rules: [],
-      email: "sara@example.com",
+      email: "alice@example.com",
     });
 
     expect(() =>
       addPrincipal(db, {
-        principalId: "sara2",
+        principalId: "alice2",
         principalType: "family",
         rules: [],
-        email: "SARA@example.com", // same when lowercased
+        email: "ALICE@example.com", // same when lowercased
       }),
     ).toThrow();
   });
@@ -470,41 +470,41 @@ describe("admin CLI — oauth-clients", () => {
   });
 
   it("listOAuthClients returns all mappings", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
     insertOAuthClient(db, "client-1");
     insertOAuthClient(db, "client-2");
-    insertOAuthMapping(db, "client-1", "sara");
-    insertOAuthMapping(db, "client-2", "sara");
+    insertOAuthMapping(db, "client-1", "alice");
+    insertOAuthMapping(db, "client-2", "alice");
 
     const result = listOAuthClients(db);
     expect(result).toHaveLength(2);
   });
 
   it("listOAuthClients filters by principal", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
     addPrincipal(db, {
       principalId: "bob",
       principalType: "external",
       rules: [{ pattern: "orgs/acme/*", permissions: "rw" }],
     });
-    insertOAuthClient(db, "client-sara");
+    insertOAuthClient(db, "client-alice");
     insertOAuthClient(db, "client-bob");
-    insertOAuthMapping(db, "client-sara", "sara");
+    insertOAuthMapping(db, "client-alice", "alice");
     insertOAuthMapping(db, "client-bob", "bob");
 
-    expect(listOAuthClients(db, "sara")).toHaveLength(1);
-    expect(listOAuthClients(db, "sara")[0].oauthClientId).toBe("client-sara");
+    expect(listOAuthClients(db, "alice")).toHaveLength(1);
+    expect(listOAuthClients(db, "alice")[0].oauthClientId).toBe("client-alice");
     expect(listOAuthClients(db, "bob")).toHaveLength(1);
   });
 
   it("removeOAuthClient deletes mapping and revokes tokens", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
     insertOAuthClient(db, "client-rm");
-    insertOAuthMapping(db, "client-rm", "sara");
-    insertToken(db, "token-1", "client-rm", "sara");
+    insertOAuthMapping(db, "client-rm", "alice");
+    insertToken(db, "token-1", "client-rm", "alice");
 
     expect(removeOAuthClient(db, "client-rm")).toBe(true);
-    expect(listOAuthClients(db, "sara")).toHaveLength(0);
+    expect(listOAuthClients(db, "alice")).toHaveLength(0);
 
     // Token should be revoked
     const token = db.prepare("SELECT revoked FROM oauth_tokens WHERE client_id = 'client-rm'")
@@ -517,24 +517,24 @@ describe("admin CLI — oauth-clients", () => {
   });
 
   it("clearOAuthClients removes all mappings for principal", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
     insertOAuthClient(db, "c1");
     insertOAuthClient(db, "c2");
     insertOAuthClient(db, "c3");
-    insertOAuthMapping(db, "c1", "sara");
-    insertOAuthMapping(db, "c2", "sara");
-    insertOAuthMapping(db, "c3", "sara");
+    insertOAuthMapping(db, "c1", "alice");
+    insertOAuthMapping(db, "c2", "alice");
+    insertOAuthMapping(db, "c3", "alice");
 
-    expect(clearOAuthClients(db, "sara")).toBe(3);
-    expect(listOAuthClients(db, "sara")).toHaveLength(0);
+    expect(clearOAuthClients(db, "alice")).toBe(3);
+    expect(listOAuthClients(db, "alice")).toHaveLength(0);
   });
 
   it("showPrincipal includes oauthClients", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
     insertOAuthClient(db, "client-show");
-    insertOAuthMapping(db, "client-show", "sara");
+    insertOAuthMapping(db, "client-show", "alice");
 
-    const detail = showPrincipal(db, "sara");
+    const detail = showPrincipal(db, "alice");
     expect(detail!.oauthClients).toHaveLength(1);
     expect(detail!.oauthClients[0].oauthClientId).toBe("client-show");
     expect(detail!.oauthClients[0].mappedBy).toBe("consent");
@@ -553,24 +553,24 @@ describe("OAuth token principal binding", () => {
     insertOAuthClient(db, "test-client");
     db.prepare(
       `INSERT INTO oauth_tokens (token, token_type, client_id, scopes, expires_at, created_at, principal_id)
-       VALUES ('hash1', 'access', 'test-client', '[]', ?, datetime('now'), 'sara')`,
+       VALUES ('hash1', 'access', 'test-client', '[]', ?, datetime('now'), 'alice')`,
     ).run(Math.floor(Date.now() / 1000) + 3600);
 
     const row = db.prepare("SELECT principal_id FROM oauth_tokens WHERE token = 'hash1'")
       .get() as { principal_id: string };
-    expect(row.principal_id).toBe("sara");
+    expect(row.principal_id).toBe("alice");
   });
 
   it("oauth_auth_codes table accepts principal_id", () => {
     insertOAuthClient(db, "test-client");
     db.prepare(
       `INSERT INTO oauth_auth_codes (code, client_id, code_challenge, redirect_uri, scopes, expires_at, created_at, principal_id)
-       VALUES ('hash2', 'test-client', 'challenge', 'http://localhost/cb', '[]', ?, datetime('now'), 'sara')`,
+       VALUES ('hash2', 'test-client', 'challenge', 'http://localhost/cb', '[]', ?, datetime('now'), 'alice')`,
     ).run(Math.floor(Date.now() / 1000) + 600);
 
     const row = db.prepare("SELECT principal_id FROM oauth_auth_codes WHERE code = 'hash2'")
       .get() as { principal_id: string };
-    expect(row.principal_id).toBe("sara");
+    expect(row.principal_id).toBe("alice");
   });
 
   it("null principal_id is valid (pre-v6 compat)", () => {

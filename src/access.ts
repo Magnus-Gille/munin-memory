@@ -25,7 +25,7 @@ export interface NamespaceRule {
 }
 
 export interface AccessContext {
-  principalId: string; // "magnus", "sara", "agent:skuld"
+  principalId: string; // "owner", "alice", "agent:skuld"
   principalType: PrincipalType;
   accessibleNamespaces: NamespaceRule[];
   maxClassification?: ClassificationLevel;
@@ -174,7 +174,7 @@ export function getContextTransportType(ctx: AccessContext): TransportType {
  *   - "some/path/key"   — exact match (no "*" anywhere)
  *
  * Invalid patterns:
- *   - "users/sara*"     — ambiguous (missing "/" before "*")
+ *   - "users/alice*"     — ambiguous (missing "/" before "*")
  *   - "*foo"            — wildcard not in trailing position
  *   - anything with "*" in the middle
  */
@@ -202,7 +202,7 @@ export function validateNamespaceRules(rules: NamespaceRule[]): void {
         throw new Error(
           `Invalid namespace pattern "${pattern}". ` +
             `Patterns containing "*" must either be the lone wildcard "*" or end with "/*" ` +
-            `(e.g. "users/sara/*"). Ambiguous patterns like "users/sara*" are rejected.`
+            `(e.g. "users/alice/*"). Ambiguous patterns like "users/alice*" are rejected.`
         );
       }
 
@@ -296,9 +296,9 @@ export function canWrite(ctx: AccessContext, namespace: string): boolean {
  *
  * In practice this means:
  *   rule "*"             — always overlaps with any prefix
- *   rule "users/sara/*"  — overlaps with "users/" (rule is within it)
- *                        — overlaps with "users/sara/inbox/" (prefix is within rule)
- *   rule "users/sara/*"  — does NOT overlap with "projects/" (disjoint)
+ *   rule "users/alice/*"  — overlaps with "users/" (rule is within it)
+ *                        — overlaps with "users/alice/inbox/" (prefix is within rule)
+ *   rule "users/alice/*"  — does NOT overlap with "projects/" (disjoint)
  *
  * Owner always returns true.
  */
@@ -320,7 +320,7 @@ export function canReadSubtree(
     }
 
     if (rule.pattern.endsWith("/*")) {
-      const rulePrefix = rule.pattern.slice(0, -1); // e.g. "users/sara/"
+      const rulePrefix = rule.pattern.slice(0, -1); // e.g. "users/alice/"
       // The rule's subtree overlaps with the query prefix if:
       // 1. the query prefix starts with the rule prefix (prefix is within rule scope), OR
       // 2. the rule prefix starts with the query prefix (rule is within queried scope)
@@ -360,8 +360,8 @@ export function filterByAccess<T extends { namespace: string }>(
 /**
  * The namespace prefix under which a non-owner principal's personal settings
  * (conventions, config) live. Derived from the principal's FIRST read-write
- * (`rw`) "prefix/*" rule — e.g. a principal granted rw on "users/sara/*" has
- * home "users/sara". Read-only rules, write-only rules, and the lone "*"
+ * (`rw`) "prefix/*" rule — e.g. a principal granted rw on "users/alice/*" has
+ * home "users/alice". Read-only rules, write-only rules, and the lone "*"
  * wildcard are all skipped: a personal home must be a concrete, READABLE +
  * writable subtree the principal owns (readable so they can see their own
  * seeded settings).
@@ -377,7 +377,7 @@ export function homePrefixFromRules(rules: NamespaceRule[]): string | null {
     if (rule.permissions !== "rw") continue;
     if (rule.pattern === "*") continue;
     if (rule.pattern.endsWith("/*")) {
-      return rule.pattern.slice(0, -2); // "users/sara/*" → "users/sara"
+      return rule.pattern.slice(0, -2); // "users/alice/*" → "users/alice"
     }
   }
   return null;
@@ -390,7 +390,7 @@ export function principalHomePrefix(ctx: AccessContext): string | null {
 
 /**
  * The namespace holding a non-owner principal's personal Munin settings — the
- * "meta" sub-namespace of their home (e.g. "users/sara/meta"). The principal's
+ * "meta" sub-namespace of their home (e.g. "users/alice/meta"). The principal's
  * own conventions (key "conventions") and tracked-pattern config (key "config")
  * live here: writable by the principal, readable by the owner. Returns null
  * when the principal has no writable home (see principalHomePrefix) or is the

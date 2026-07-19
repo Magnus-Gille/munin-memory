@@ -13,7 +13,7 @@
 
 3. **Benchmark before tuning** — importing search ideas from MemPalace before measuring Munin's own retrieval quality is cargo-cult tuning. Move baseline evaluation ahead of any retrieval imports.
 
-4. **Opportunity cost is real** — every imported idea must pass a roadmap displacement test. The report understated competition with Phase 1-3 work, Sara onboarding, Librarian rollout, and Hugin fixes.
+4. **Opportunity cost is real** — every imported idea must pass a roadmap displacement test. The report understated competition with Phase 1-3 work, second-principal onboarding, Librarian rollout, and Hugin fixes.
 
 5. **The report missed more thesis-aligned ideas** — layered loading, provenance, extraction patterns are closer to Munin's continuity mission than the architecturally ambitious KG.
 

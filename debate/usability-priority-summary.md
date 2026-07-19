@@ -12,7 +12,7 @@
 1. **#3 Compact orient conventions** — `memory_orient` returns ~2,800 words of conventions unconditionally on every session. This is the largest per-session token tax and affects every environment. Make compact-by-default, full on demand.
 2. **#1 Task namespace noise** — ~102 task namespaces out of ~160 total pollute `memory_list` and the `memory_orient` namespaces field. Filter completed tasks from default listings (but keep `tasks/admin`, active tasks visible).
 3. **#2 Event-aware staleness** — Entries with near-future dates (events) are not flagged despite potentially stale status. Current 14-day threshold doesn't account for time-sensitive content.
-4. **#4 Thin people/magnus profile** — Zero-code content work, do opportunistically alongside any fix. Not an engineering priority.
+4. **#4 Thin people/owner profile** — Zero-code content work, do opportunistically alongside any fix. Not an engineering priority.
 5. **#5 Cross-referencing** — Most complex, least immediate payoff. Hybrid search + tag filters already cover part of the need.
 
 ## Key arguments that changed Claude's position

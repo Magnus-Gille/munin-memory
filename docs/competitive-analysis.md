@@ -285,7 +285,7 @@ Current Munin retrieval now applies **conservative recency-aware reranking** and
 
 #### 4. Entity / Relationship Graph Index *(mem0 graph, Zep Graphiti, MCP reference server)*
 
-Munin has hierarchical namespaces and tag cross-references, but no first-class entity model and no relationship traversal. The MCP reference server, mem0, and Zep all store typed relationships between entities (e.g., `[Magnus] --works_at--> [Gillearna AB]`).
+Munin has hierarchical namespaces and tag cross-references, but no first-class entity model and no relationship traversal. The MCP reference server, mem0, and Zep all store typed relationships between entities (e.g., `[Alex] --works_at--> [Example Co]`).
 
 **Why it matters:** Currently, connecting related facts requires either namespace co-location or tag lookups — both are lossy. A lightweight entity index would enable "what do I know about Person X?" queries that traverse linked facts automatically.
 

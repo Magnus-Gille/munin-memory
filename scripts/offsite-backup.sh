@@ -1,8 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-# Munin offsite backup — encrypted push of a directory to cloud (OneDrive) through
-# an rclone *crypt* remote. Runs on the Pi (huginmunin) via a systemd timer (daily).
+# Munin offsite backup — encrypted push of a directory through an rclone
+# *crypt* remote. It can run on any Linux host via a systemd timer.
 #
 # ┌─ SHARED offsite-backup MECHANISM (copied from mimir#10, the reference) ──────┐
 # │ This is a faithful copy of mimir's scripts/offsite-backup.sh — the shared    │
@@ -32,7 +32,7 @@ set -euo pipefail
 # ---- Config (override via environment / EnvironmentFile) ----
 SERVICE="${MIMIR_OFFSITE_SERVICE:-munin}"                # Heimdall service id
 PANEL="${MIMIR_OFFSITE_PANEL:-offsite}"                   # Heimdall panel id
-SOURCE="${MIMIR_OFFSITE_ROOT:-/home/magnus/.munin-memory/offsite-staging}"  # directory to back up
+SOURCE="${MIMIR_OFFSITE_ROOT:-$HOME/.munin-memory/offsite-staging}"  # directory to back up
 REMOTE="${MIMIR_OFFSITE_REMOTE:-munin-crypt}"            # rclone crypt remote NAME (no ':' / path)
 RETENTION_DAYS="${MIMIR_OFFSITE_RETENTION_DAYS:-30}"      # archive prune horizon (days)
 MAX_DELETE="${MIMIR_OFFSITE_MAX_DELETE:-1000}"            # abort if a run would remove ≥ this many files

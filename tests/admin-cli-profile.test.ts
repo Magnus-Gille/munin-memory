@@ -22,13 +22,13 @@ function readState(db: Database.Database, namespace: string, key: string) {
     | undefined;
 }
 
-const saraRules: NamespaceRule[] = [{ pattern: "users/sara/*", permissions: "rw" }];
+const saraRules: NamespaceRule[] = [{ pattern: "users/alice/*", permissions: "rw" }];
 
 describe("addPrincipal --profile seeding", () => {
   it("seeds per-principal conventions + tracked-pattern config under <home>/meta", () => {
     const db = makeDb();
     const result = addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
       rules: saraRules,
       profile: "household",
@@ -36,37 +36,37 @@ describe("addPrincipal --profile seeding", () => {
 
     expect(result.seeded).toEqual({
       profile: "household",
-      conventions: "users/sara/meta",
-      config: "users/sara/meta",
+      conventions: "users/alice/meta",
+      config: "users/alice/meta",
     });
 
-    const conv = readState(db, "users/sara/meta", "conventions");
+    const conv = readState(db, "users/alice/meta", "conventions");
     expect(conv).toBeDefined();
     expect(conv!.content).toContain("Household");
-    expect(conv!.content).toContain("users/sara/home");
+    expect(conv!.content).toContain("users/alice/home");
     expect(conv!.content).not.toContain("{home}");
-    expect(conv!.owner_principal_id).toBe("sara");
+    expect(conv!.owner_principal_id).toBe("alice");
     expect(JSON.parse(conv!.tags)).toContain("profile:household");
 
-    const cfg = readState(db, "users/sara/meta", "config");
+    const cfg = readState(db, "users/alice/meta", "config");
     expect(cfg).toBeDefined();
     const parsed = JSON.parse(cfg!.content) as { tracked_patterns: string[] };
-    expect(parsed.tracked_patterns).toContain("users/sara/home/*");
-    expect(parsed.tracked_patterns.every((p) => p.startsWith("users/sara/"))).toBe(true);
-    expect(cfg!.owner_principal_id).toBe("sara");
+    expect(parsed.tracked_patterns).toContain("users/alice/home/*");
+    expect(parsed.tracked_patterns.every((p) => p.startsWith("users/alice/"))).toBe(true);
+    expect(cfg!.owner_principal_id).toBe("alice");
   });
 
   it("writes a principal_profile_seed audit row", () => {
     const db = makeDb();
     addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
       rules: saraRules,
       profile: "researcher",
     });
     const rows = db
       .prepare(
-        "SELECT action, detail FROM audit_log WHERE namespace='admin/principals' AND key='sara' ORDER BY id",
+        "SELECT action, detail FROM audit_log WHERE namespace='admin/principals' AND key='alice' ORDER BY id",
       )
       .all() as { action: string; detail: string | null }[];
     expect(
@@ -102,11 +102,11 @@ describe("addPrincipal --profile seeding", () => {
   it("does not seed when --profile is omitted", () => {
     const db = makeDb();
     const result = addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
       rules: saraRules,
     });
     expect(result.seeded).toBeUndefined();
-    expect(readState(db, "users/sara/meta", "conventions")).toBeUndefined();
+    expect(readState(db, "users/alice/meta", "conventions")).toBeUndefined();
   });
 });

@@ -1,10 +1,5 @@
 /**
- * Deployment-unit contract for the two supported installation paths.
- *
- * The root unit is the public template rendered by scripts/deploy-rpi.sh.
- * Grimnir's fleet controller deliberately prefers systemd/ and installs the
- * selected file verbatim, so that copy must already be fully rendered while
- * remaining semantically identical to the public template.
+ * Deployment-unit contract for the portable public installation path.
  */
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -13,15 +8,9 @@ import { describe, expect, it } from "vitest";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const publicTemplate = readFileSync(join(repoRoot, "munin-memory.service"), "utf8");
-const fleetUnit = readFileSync(join(repoRoot, "systemd", "munin-memory.service"), "utf8");
-const placeholderPattern = /<[a-z][a-z0-9-]*>/gi;
-
-function activeLines(unit: string): string[] {
-  return unit
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line !== "" && !line.startsWith("#"));
-}
+const backupTemplate = readFileSync(join(repoRoot, "munin-backup.service"), "utf8");
+const offsiteTemplate = readFileSync(join(repoRoot, "munin-offsite.service"), "utf8");
+const opsInstaller = readFileSync(join(repoRoot, "scripts", "install-ops.sh"), "utf8");
 
 describe("systemd deployment-unit contract", () => {
   it("keeps the public service file as a renderable template", () => {
@@ -29,17 +18,19 @@ describe("systemd deployment-unit contract", () => {
     expect(publicTemplate).toContain("/home/<user>/<install-dir>");
   });
 
-  it("ships a fully rendered fleet unit with no unresolved placeholders", () => {
-    expect(fleetUnit.match(placeholderPattern)).toBeNull();
-    expect(fleetUnit).toContain("User=magnus");
-    expect(fleetUnit).toContain("WorkingDirectory=/home/magnus/munin-memory");
+  it("binds to loopback and grants write access only to the memory directory", () => {
+    expect(publicTemplate).toContain("Environment=MUNIN_HTTP_HOST=127.0.0.1");
+    expect(publicTemplate).toContain("ReadWritePaths=/home/<user>/.munin-memory");
+    expect(publicTemplate).toContain("NoNewPrivileges=true");
   });
 
-  it("keeps fleet behavior aligned with the rendered public template", () => {
-    const renderedTemplate = publicTemplate
-      .replaceAll("<user>", "magnus")
-      .replaceAll("<install-dir>", "munin-memory");
-
-    expect(activeLines(fleetUnit)).toEqual(activeLines(renderedTemplate));
+  it("keeps backup units portable and rendered by the ops installer", () => {
+    expect(backupTemplate).toContain("User=<user>");
+    expect(backupTemplate).toContain("ExecStart=<ops-dir>/scripts/backup-to-nas.sh");
+    expect(offsiteTemplate).toContain("ReadWritePaths=<home-dir>/.munin-memory");
+    expect(`${backupTemplate}\n${offsiteTemplate}`).not.toMatch(/\/home\/[a-z0-9._-]+\//i);
+    for (const placeholder of ["<user>", "<home-dir>", "<ops-dir>"]) {
+      expect(opsInstaller).toContain(`s|${placeholder}|`);
+    }
   });
 });

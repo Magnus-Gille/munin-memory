@@ -69,9 +69,9 @@ describe("listPrincipals", () => {
 
   it("returns principals with correct status derivation", () => {
     addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
-      rules: [{ pattern: "users/sara/*", permissions: "rw" }],
+      rules: [{ pattern: "users/alice/*", permissions: "rw" }],
     });
     addPrincipal(db, {
       principalId: "agent-skuld",
@@ -92,8 +92,8 @@ describe("listPrincipals", () => {
     expect(result).toHaveLength(4);
 
     const byId = Object.fromEntries(result.map((r) => [r.principalId, r]));
-    expect(byId["sara"].status).toBe("active");
-    expect(byId["sara"].rulesCount).toBe(1);
+    expect(byId["alice"].status).toBe("active");
+    expect(byId["alice"].rulesCount).toBe(1);
     expect(byId["agent-skuld"].status).toBe("revoked");
     expect(byId["expired-one"].status).toBe("expired");
   });
@@ -113,29 +113,29 @@ describe("showPrincipal", () => {
 
   it("returns full detail for existing principal", () => {
     addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
-      rules: [{ pattern: "users/sara/*", permissions: "rw" }],
+      rules: [{ pattern: "users/alice/*", permissions: "rw" }],
     });
 
-    const detail = showPrincipal(db, "sara");
+    const detail = showPrincipal(db, "alice");
     expect(detail).not.toBeNull();
-    expect(detail!.principalId).toBe("sara");
+    expect(detail!.principalId).toBe("alice");
     expect(detail!.principalType).toBe("family");
     expect(detail!.status).toBe("active");
     expect(detail!.hasToken).toBe(false);
-    expect(detail!.namespaceRules).toEqual([{ pattern: "users/sara/*", permissions: "rw" }]);
+    expect(detail!.namespaceRules).toEqual([{ pattern: "users/alice/*", permissions: "rw" }]);
   });
 
   it("shows revoked status", () => {
     addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
       rules: [],
     });
-    revokePrincipal(db, "sara");
+    revokePrincipal(db, "alice");
 
-    const detail = showPrincipal(db, "sara");
+    const detail = showPrincipal(db, "alice");
     expect(detail!.status).toBe("revoked");
     expect(detail!.revokedAt).not.toBeNull();
   });
@@ -151,15 +151,15 @@ describe("addPrincipal", () => {
 
   it("creates a family principal without token", () => {
     const result = addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
-      rules: [{ pattern: "users/sara/*", permissions: "rw" }],
+      rules: [{ pattern: "users/alice/*", permissions: "rw" }],
     });
 
-    expect(result.principalId).toBe("sara");
+    expect(result.principalId).toBe("alice");
     expect(result.token).toBeUndefined();
 
-    const detail = showPrincipal(db, "sara");
+    const detail = showPrincipal(db, "alice");
     expect(detail!.hasToken).toBe(false);
   });
 
@@ -187,21 +187,21 @@ describe("addPrincipal", () => {
       addPrincipal(db, {
         principalId: "bad",
         principalType: "family",
-        rules: [{ pattern: "users/sara*", permissions: "rw" }],
+        rules: [{ pattern: "users/alice*", permissions: "rw" }],
       }),
     ).toThrow("Ambiguous patterns");
   });
 
   it("rejects duplicate principal-id", () => {
     addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
       rules: [],
     });
 
     expect(() =>
       addPrincipal(db, {
-        principalId: "sara",
+        principalId: "alice",
         principalType: "family",
         rules: [],
       }),
@@ -230,12 +230,12 @@ describe("addPrincipal", () => {
 
   it("writes audit log entry", () => {
     addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
-      rules: [{ pattern: "users/sara/*", permissions: "rw" }],
+      rules: [{ pattern: "users/alice/*", permissions: "rw" }],
     });
 
-    const audits = getAuditRows(db, "sara");
+    const audits = getAuditRows(db, "alice");
     expect(audits).toHaveLength(1);
     expect(audits[0].action).toBe("principal_add");
     expect(audits[0].detail).toContain("type=family");
@@ -263,15 +263,15 @@ describe("revokePrincipal", () => {
   beforeEach(() => { db = makeDb(); });
 
   it("revokes an active principal", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
-    expect(revokePrincipal(db, "sara")).toBe(true);
-    expect(showPrincipal(db, "sara")!.status).toBe("revoked");
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
+    expect(revokePrincipal(db, "alice")).toBe(true);
+    expect(showPrincipal(db, "alice")!.status).toBe("revoked");
   });
 
   it("returns false for already revoked", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
-    revokePrincipal(db, "sara");
-    expect(revokePrincipal(db, "sara")).toBe(false);
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
+    revokePrincipal(db, "alice");
+    expect(revokePrincipal(db, "alice")).toBe(false);
   });
 
   it("returns false for nonexistent", () => {
@@ -279,10 +279,10 @@ describe("revokePrincipal", () => {
   });
 
   it("writes audit log entry", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
-    revokePrincipal(db, "sara");
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
+    revokePrincipal(db, "alice");
 
-    const audits = getAuditRows(db, "sara");
+    const audits = getAuditRows(db, "alice");
     expect(audits.some((a) => a.action === "principal_revoke")).toBe(true);
   });
 });
@@ -297,56 +297,56 @@ describe("updatePrincipal", () => {
 
   it("updates rules", () => {
     addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
-      rules: [{ pattern: "users/sara/*", permissions: "rw" }],
+      rules: [{ pattern: "users/alice/*", permissions: "rw" }],
     });
 
     const newRules = [
-      { pattern: "users/sara/*", permissions: "rw" as const },
+      { pattern: "users/alice/*", permissions: "rw" as const },
       { pattern: "shared/*", permissions: "read" as const },
     ];
 
-    expect(updatePrincipal(db, "sara", { rules: newRules })).toBe(true);
-    expect(showPrincipal(db, "sara")!.namespaceRules).toEqual(newRules);
+    expect(updatePrincipal(db, "alice", { rules: newRules })).toBe(true);
+    expect(showPrincipal(db, "alice")!.namespaceRules).toEqual(newRules);
   });
 
   it("updates email", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
-    updatePrincipal(db, "sara", { email: "sara@example.com" });
-    expect(showPrincipal(db, "sara")!.email).toBe("sara@example.com");
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
+    updatePrincipal(db, "alice", { email: "alice@example.com" });
+    expect(showPrincipal(db, "alice")!.email).toBe("alice@example.com");
   });
 
   it("updates expires-at", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
-    updatePrincipal(db, "sara", { expiresAt: "2027-12-31T23:59:59Z" });
-    expect(showPrincipal(db, "sara")!.expiresAt).toBe("2027-12-31T23:59:59.000Z");
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
+    updatePrincipal(db, "alice", { expiresAt: "2027-12-31T23:59:59Z" });
+    expect(showPrincipal(db, "alice")!.expiresAt).toBe("2027-12-31T23:59:59.000Z");
   });
 
   it("clears expires-at with null", () => {
     addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
       rules: [],
       expiresAt: "2027-12-31T23:59:59Z",
     });
-    updatePrincipal(db, "sara", { expiresAt: null });
-    expect(showPrincipal(db, "sara")!.expiresAt).toBeNull();
+    updatePrincipal(db, "alice", { expiresAt: null });
+    expect(showPrincipal(db, "alice")!.expiresAt).toBeNull();
   });
 
   it("rejects invalid rules", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
     expect(() =>
-      updatePrincipal(db, "sara", {
+      updatePrincipal(db, "alice", {
         rules: [{ pattern: "bad*pattern", permissions: "rw" }],
       }),
     ).toThrow();
   });
 
   it("returns false for revoked principal", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
-    revokePrincipal(db, "sara");
-    expect(updatePrincipal(db, "sara", { rules: [] })).toBe(false);
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
+    revokePrincipal(db, "alice");
+    expect(updatePrincipal(db, "alice", { rules: [] })).toBe(false);
   });
 
   it("returns false for nonexistent", () => {
@@ -354,15 +354,15 @@ describe("updatePrincipal", () => {
   });
 
   it("throws when no fields to update", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
-    expect(() => updatePrincipal(db, "sara", {})).toThrow("No fields to update");
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
+    expect(() => updatePrincipal(db, "alice", {})).toThrow("No fields to update");
   });
 
   it("writes audit log entry", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
-    updatePrincipal(db, "sara", { rules: [] });
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
+    updatePrincipal(db, "alice", { rules: [] });
 
-    const audits = getAuditRows(db, "sara");
+    const audits = getAuditRows(db, "alice");
     expect(audits.some((a) => a.action === "principal_update")).toBe(true);
   });
 });
@@ -402,8 +402,8 @@ describe("rotateToken", () => {
   });
 
   it("throws for non-agent principal", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
-    expect(() => rotateToken(db, "sara")).toThrow("only supported for agent");
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
+    expect(() => rotateToken(db, "alice")).toThrow("only supported for agent");
   });
 
   it("throws for revoked principal", () => {
@@ -443,32 +443,32 @@ describe("testPrincipalAccess", () => {
 
   it("returns correct read/write for matching rules", () => {
     addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
       rules: [
-        { pattern: "users/sara/*", permissions: "rw" },
+        { pattern: "users/alice/*", permissions: "rw" },
         { pattern: "projects/*", permissions: "read" },
       ],
     });
 
-    const rw = testPrincipalAccess(db, "sara", "users/sara/notes");
+    const rw = testPrincipalAccess(db, "alice", "users/alice/notes");
     expect(rw!.canRead).toBe(true);
     expect(rw!.canWrite).toBe(true);
     expect(rw!.matchingRules).toHaveLength(1);
 
-    const ro = testPrincipalAccess(db, "sara", "projects/munin");
+    const ro = testPrincipalAccess(db, "alice", "projects/munin");
     expect(ro!.canRead).toBe(true);
     expect(ro!.canWrite).toBe(false);
   });
 
   it("reports no access for non-matching namespace", () => {
     addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
-      rules: [{ pattern: "users/sara/*", permissions: "rw" }],
+      rules: [{ pattern: "users/alice/*", permissions: "rw" }],
     });
 
-    const result = testPrincipalAccess(db, "sara", "admin/secrets");
+    const result = testPrincipalAccess(db, "alice", "admin/secrets");
     expect(result!.canRead).toBe(false);
     expect(result!.canWrite).toBe(false);
     expect(result!.matchingRules).toHaveLength(0);
@@ -480,13 +480,13 @@ describe("testPrincipalAccess", () => {
 
   it("shows zero access for revoked principal", () => {
     addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
       rules: [{ pattern: "*", permissions: "rw" }],
     });
-    revokePrincipal(db, "sara");
+    revokePrincipal(db, "alice");
 
-    const result = testPrincipalAccess(db, "sara", "anything");
+    const result = testPrincipalAccess(db, "alice", "anything");
     expect(result!.status).toBe("revoked");
     expect(result!.canRead).toBe(false);
     expect(result!.canWrite).toBe(false);
@@ -578,9 +578,9 @@ describe("parseClassification", () => {
 
 describe("parseRules", () => {
   it("parses inline JSON", () => {
-    const rules = parseRules('[{"pattern":"users/sara/*","permissions":"rw"}]');
+    const rules = parseRules('[{"pattern":"users/alice/*","permissions":"rw"}]');
     expect(rules).toHaveLength(1);
-    expect(rules[0].pattern).toBe("users/sara/*");
+    expect(rules[0].pattern).toBe("users/alice/*");
   });
 
   it("parses @file reference", () => {
@@ -626,9 +626,9 @@ describe("parseArgs", () => {
   });
 
   it("parses add with flags", () => {
-    const parsed = parseArgs(argv('principals add sara --type family --rules []'));
+    const parsed = parseArgs(argv('principals add alice --type family --rules []'));
     expect(parsed.command).toBe("add");
-    expect(parsed.positionals[0]).toBe("sara");
+    expect(parsed.positionals[0]).toBe("alice");
     expect(parsed.flags.get("--type")).toBe("family");
     expect(parsed.flags.get("--rules")).toBe("[]");
   });
@@ -659,13 +659,13 @@ describe("parseArgs", () => {
   });
 
   it("throws on missing flag value", () => {
-    expect(() => parseArgs(argv("principals add sara --type"))).toThrow("Missing value");
+    expect(() => parseArgs(argv("principals add alice --type"))).toThrow("Missing value");
   });
 
   it("parses test command with two positionals", () => {
-    const parsed = parseArgs(argv("principals test sara projects/munin"));
+    const parsed = parseArgs(argv("principals test alice projects/munin"));
     expect(parsed.command).toBe("test");
-    expect(parsed.positionals).toEqual(["sara", "projects/munin"]);
+    expect(parsed.positionals).toEqual(["alice", "projects/munin"]);
   });
 
   it("parses classification set-floor command", () => {
@@ -836,9 +836,9 @@ describe("listOAuthClients", () => {
   });
 
   it("lists all clients when no principalId filter", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
     addPrincipal(db, { principalId: "bob", principalType: "family", rules: [] });
-    insertOAuthClientMapping(db, "client-001", "sara");
+    insertOAuthClientMapping(db, "client-001", "alice");
     insertOAuthClientMapping(db, "client-002", "bob");
 
     const clients = listOAuthClients(db);
@@ -848,22 +848,22 @@ describe("listOAuthClients", () => {
   });
 
   it("filters by principalId", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
     addPrincipal(db, { principalId: "bob", principalType: "family", rules: [] });
-    insertOAuthClientMapping(db, "client-sara-1", "sara");
-    insertOAuthClientMapping(db, "client-sara-2", "sara");
+    insertOAuthClientMapping(db, "client-alice-1", "alice");
+    insertOAuthClientMapping(db, "client-alice-2", "alice");
     insertOAuthClientMapping(db, "client-bob-1", "bob");
 
-    const saraClients = listOAuthClients(db, "sara");
+    const saraClients = listOAuthClients(db, "alice");
     expect(saraClients).toHaveLength(2);
-    expect(saraClients.every((c) => c.oauthClientId.startsWith("client-sara"))).toBe(true);
+    expect(saraClients.every((c) => c.oauthClientId.startsWith("client-alice"))).toBe(true);
   });
 
   it("returns mapped fields correctly", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
-    insertOAuthClientMapping(db, "client-x", "sara");
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
+    insertOAuthClientMapping(db, "client-x", "alice");
 
-    const clients = listOAuthClients(db, "sara");
+    const clients = listOAuthClients(db, "alice");
     expect(clients).toHaveLength(1);
     expect(clients[0].oauthClientId).toBe("client-x");
     expect(clients[0].mappedBy).toBe("consent");
@@ -873,11 +873,11 @@ describe("listOAuthClients", () => {
   });
 
   it("returns revoked clients too (no filter on revoked)", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
-    insertOAuthClientMapping(db, "client-active", "sara", null);
-    insertOAuthClientMapping(db, "client-revoked", "sara", new Date().toISOString());
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
+    insertOAuthClientMapping(db, "client-active", "alice", null);
+    insertOAuthClientMapping(db, "client-revoked", "alice", new Date().toISOString());
 
-    const clients = listOAuthClients(db, "sara");
+    const clients = listOAuthClients(db, "alice");
     expect(clients).toHaveLength(2);
     const revokedClient = clients.find((c) => c.oauthClientId === "client-revoked");
     expect(revokedClient?.revokedAt).not.toBeNull();
@@ -902,18 +902,18 @@ describe("removeOAuthClient", () => {
   });
 
   it("removes existing mapping and returns true", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
-    insertOAuthClientMapping(db, "client-to-remove", "sara");
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
+    insertOAuthClientMapping(db, "client-to-remove", "alice");
 
     expect(removeOAuthClient(db, "client-to-remove")).toBe(true);
 
-    const remaining = listOAuthClients(db, "sara");
+    const remaining = listOAuthClients(db, "alice");
     expect(remaining).toHaveLength(0);
   });
 
   it("revokes oauth tokens for the removed client", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
-    insertOAuthClientMapping(db, "client-with-tokens", "sara");
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
+    insertOAuthClientMapping(db, "client-with-tokens", "alice");
 
     // Insert a token for this client
     const now = new Date().toISOString();
@@ -931,8 +931,8 @@ describe("removeOAuthClient", () => {
   });
 
   it("writes audit log entry on removal", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
-    insertOAuthClientMapping(db, "client-audit-test", "sara");
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
+    insertOAuthClientMapping(db, "client-audit-test", "alice");
 
     removeOAuthClient(db, "client-audit-test");
 
@@ -960,34 +960,34 @@ describe("clearOAuthClients", () => {
   beforeEach(() => { db = makeDb(); });
 
   it("returns 0 when principal has no clients", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
-    expect(clearOAuthClients(db, "sara")).toBe(0);
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
+    expect(clearOAuthClients(db, "alice")).toBe(0);
   });
 
   it("removes all client mappings for a principal", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
-    insertOAuthClientMapping(db, "c1", "sara");
-    insertOAuthClientMapping(db, "c2", "sara");
-    insertOAuthClientMapping(db, "c3", "sara");
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
+    insertOAuthClientMapping(db, "c1", "alice");
+    insertOAuthClientMapping(db, "c2", "alice");
+    insertOAuthClientMapping(db, "c3", "alice");
 
-    expect(clearOAuthClients(db, "sara")).toBe(3);
-    expect(listOAuthClients(db, "sara")).toHaveLength(0);
+    expect(clearOAuthClients(db, "alice")).toBe(3);
+    expect(listOAuthClients(db, "alice")).toHaveLength(0);
   });
 
   it("does not affect clients of other principals", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
     addPrincipal(db, { principalId: "bob", principalType: "family", rules: [] });
-    insertOAuthClientMapping(db, "sara-c1", "sara");
+    insertOAuthClientMapping(db, "alice-c1", "alice");
     insertOAuthClientMapping(db, "bob-c1", "bob");
 
-    clearOAuthClients(db, "sara");
+    clearOAuthClients(db, "alice");
     expect(listOAuthClients(db, "bob")).toHaveLength(1);
   });
 
   it("revokes oauth tokens for each client being cleared", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
-    insertOAuthClientMapping(db, "c-tok1", "sara");
-    insertOAuthClientMapping(db, "c-tok2", "sara");
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
+    insertOAuthClientMapping(db, "c-tok1", "alice");
+    insertOAuthClientMapping(db, "c-tok2", "alice");
 
     const now = new Date().toISOString();
     db.prepare(
@@ -999,7 +999,7 @@ describe("clearOAuthClients", () => {
        VALUES (?, 'access', ?, ?, 0, ?, '[]')`,
     ).run("tok-2", "c-tok2", Date.now() + 3600000, now);
 
-    clearOAuthClients(db, "sara");
+    clearOAuthClients(db, "alice");
 
     const tokens = db
       .prepare("SELECT token, revoked FROM oauth_tokens WHERE token IN ('tok-1', 'tok-2')")
@@ -1008,10 +1008,10 @@ describe("clearOAuthClients", () => {
   });
 
   it("writes audit log entry when clients are cleared", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
-    insertOAuthClientMapping(db, "c-audit", "sara");
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
+    insertOAuthClientMapping(db, "c-audit", "alice");
 
-    clearOAuthClients(db, "sara");
+    clearOAuthClients(db, "alice");
 
     const rows = db
       .prepare("SELECT action FROM audit_log WHERE action = 'oauth_clients_clear'")
@@ -1020,8 +1020,8 @@ describe("clearOAuthClients", () => {
   });
 
   it("does not write audit log when no clients to clear", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
-    clearOAuthClients(db, "sara");
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
+    clearOAuthClients(db, "alice");
 
     const rows = db
       .prepare("SELECT action FROM audit_log WHERE action = 'oauth_clients_clear'")
@@ -1094,9 +1094,9 @@ describe("parseArgs — additional edge cases", () => {
   });
 
   it("parses oauth-clients list with --principal flag", () => {
-    const parsed = parseArgs(argv("oauth-clients list --principal sara"));
+    const parsed = parseArgs(argv("oauth-clients list --principal alice"));
     expect(parsed.resource).toBe("oauth-clients");
-    expect(parsed.flags.get("--principal")).toBe("sara");
+    expect(parsed.flags.get("--principal")).toBe("alice");
   });
 
   it("parses oauth-clients remove command", () => {
@@ -1107,10 +1107,10 @@ describe("parseArgs — additional edge cases", () => {
   });
 
   it("parses oauth-clients clear command", () => {
-    const parsed = parseArgs(argv("oauth-clients clear sara"));
+    const parsed = parseArgs(argv("oauth-clients clear alice"));
     expect(parsed.resource).toBe("oauth-clients");
     expect(parsed.command).toBe("clear");
-    expect(parsed.positionals[0]).toBe("sara");
+    expect(parsed.positionals[0]).toBe("alice");
   });
 
   it("parses bearer list command", () => {
@@ -1154,17 +1154,17 @@ describe("parseArgs — additional edge cases", () => {
   });
 
   it("parses principals show command", () => {
-    const parsed = parseArgs(argv("principals show sara"));
+    const parsed = parseArgs(argv("principals show alice"));
     expect(parsed.resource).toBe("principals");
     expect(parsed.command).toBe("show");
-    expect(parsed.positionals[0]).toBe("sara");
+    expect(parsed.positionals[0]).toBe("alice");
   });
 
   it("parses principals revoke command", () => {
-    const parsed = parseArgs(argv("principals revoke sara"));
+    const parsed = parseArgs(argv("principals revoke alice"));
     expect(parsed.resource).toBe("principals");
     expect(parsed.command).toBe("revoke");
-    expect(parsed.positionals[0]).toBe("sara");
+    expect(parsed.positionals[0]).toBe("alice");
   });
 
   it("parses principals rotate-token command", () => {
@@ -1175,7 +1175,7 @@ describe("parseArgs — additional edge cases", () => {
   });
 
   it("parses principals update command with --email and --expires-at", () => {
-    const parsed = parseArgs(argv("principals update sara --email new@example.com --expires-at 2027-12-31T23:59:59Z"));
+    const parsed = parseArgs(argv("principals update alice --email new@example.com --expires-at 2027-12-31T23:59:59Z"));
     expect(parsed.resource).toBe("principals");
     expect(parsed.command).toBe("update");
     expect(parsed.flags.get("--email")).toBe("new@example.com");
@@ -1222,32 +1222,32 @@ describe("updatePrincipal — additional edge cases", () => {
   beforeEach(() => { db = makeDb(); });
 
   it("clears email by passing empty string", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [], email: "sara@example.com" });
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [], email: "alice@example.com" });
     // In updatePrincipal, opts.email = "" means null
-    updatePrincipal(db, "sara", { email: null });
-    expect(showPrincipal(db, "sara")!.email).toBeNull();
+    updatePrincipal(db, "alice", { email: null });
+    expect(showPrincipal(db, "alice")!.email).toBeNull();
   });
 
   it("updates both rules and email together", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
-    updatePrincipal(db, "sara", {
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
+    updatePrincipal(db, "alice", {
       rules: [{ pattern: "shared/*", permissions: "read" }],
-      email: "sara@new.com",
+      email: "alice@new.com",
     });
-    const detail = showPrincipal(db, "sara")!;
+    const detail = showPrincipal(db, "alice")!;
     expect(detail.namespaceRules).toHaveLength(1);
-    expect(detail.email).toBe("sara@new.com");
+    expect(detail.email).toBe("alice@new.com");
   });
 
   it("clears expires-at by passing null directly to updatePrincipal", () => {
     addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
       rules: [],
       expiresAt: "2030-01-01T00:00:00Z",
     });
-    updatePrincipal(db, "sara", { expiresAt: null });
-    expect(showPrincipal(db, "sara")!.expiresAt).toBeNull();
+    updatePrincipal(db, "alice", { expiresAt: null });
+    expect(showPrincipal(db, "alice")!.expiresAt).toBeNull();
   });
 });
 
@@ -1261,18 +1261,18 @@ describe("addPrincipal — additional edge cases", () => {
 
   it("stores email and email_lower when provided", () => {
     addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
       rules: [],
-      email: "Sara@Example.COM",
+      email: "Alice@Example.COM",
     });
-    const detail = showPrincipal(db, "sara")!;
-    expect(detail.email).toBe("Sara@Example.COM");
+    const detail = showPrincipal(db, "alice")!;
+    expect(detail.email).toBe("Alice@Example.COM");
     // Verify email_lower is stored correctly
     const row = db
-      .prepare("SELECT email_lower FROM principals WHERE principal_id = 'sara'")
+      .prepare("SELECT email_lower FROM principals WHERE principal_id = 'alice'")
       .get() as { email_lower: string };
-    expect(row.email_lower).toBe("sara@example.com");
+    expect(row.email_lower).toBe("alice@example.com");
   });
 
   it("rejects invalid principal type", () => {
@@ -1295,18 +1295,18 @@ describe("showPrincipal — with OAuth clients", () => {
   beforeEach(() => { db = makeDb(); });
 
   it("includes oauth clients in detail", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
-    insertOAuthClientMapping(db, "mapped-client-1", "sara");
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
+    insertOAuthClientMapping(db, "mapped-client-1", "alice");
 
-    const detail = showPrincipal(db, "sara")!;
+    const detail = showPrincipal(db, "alice")!;
     expect(detail.oauthClients).toHaveLength(1);
     expect(detail.oauthClients[0].oauthClientId).toBe("mapped-client-1");
     expect(detail.oauthClients[0].mappedBy).toBe("consent");
   });
 
   it("returns empty oauthClients when principal has none", () => {
-    addPrincipal(db, { principalId: "sara", principalType: "family", rules: [] });
-    const detail = showPrincipal(db, "sara")!;
+    addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
+    const detail = showPrincipal(db, "alice")!;
     expect(detail.oauthClients).toHaveLength(0);
   });
 });
@@ -1484,7 +1484,7 @@ describe("parseRules — additional edge cases", () => {
 
   it("accepts multiple valid rules", () => {
     const json = JSON.stringify([
-      { pattern: "users/sara/*", permissions: "rw" },
+      { pattern: "users/alice/*", permissions: "rw" },
       { pattern: "projects/*", permissions: "read" },
       { pattern: "shared/*", permissions: "write" },
     ]);

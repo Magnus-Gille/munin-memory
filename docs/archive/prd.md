@@ -44,7 +44,7 @@ Examples:
 - `projects/hugin-munin`
 - `decisions/tech-stack`
 - `presentations/ikea`
-- `people/magnus`
+- `people/owner`
 - `meta/tool-usage-notes`
 
 Namespaces are created implicitly when a memory is stored — no need to pre-register them.
@@ -55,7 +55,7 @@ There are two fundamental types of memory:
 
 **State entries** (mutable) — represent the *current* truth about something.
 - "The consulting business is at ~20% capacity"
-- "Magnus prefers Node.js for MCP servers"  
+- "Owner prefers Node.js for MCP servers"
 - "The Hugin/Munin RPi is set up with Raspberry Pi OS Lite 64-bit"
 - These get updated/overwritten as things change
 
@@ -73,7 +73,7 @@ State entries are identified by a namespace + key combination. The key should be
 Examples:
 - Namespace: `projects/gille-consulting`, Key: `status` → current project status
 - Namespace: `projects/hugin-munin`, Key: `architecture` → current architecture decisions
-- Namespace: `people/magnus`, Key: `preferences` → known preferences
+- Namespace: `people/owner`, Key: `preferences` → known preferences
 
 Log entries don't have keys — they have timestamps and are ordered chronologically within their namespace.
 
@@ -150,7 +150,7 @@ Behavior: Requires confirmation in the response (i.e., returns what will be dele
 
 ### Scenario 1: Starting a new project
 
-Claude and Magnus begin working on a website redesign.
+Claude and Owner begin working on a website redesign.
 
 ```
 Claude calls: memory_write(
@@ -168,7 +168,7 @@ Claude calls: memory_log(
 
 ### Scenario 2: Resuming work in a new conversation
 
-Magnus says "Let's continue on the website." Claude has no context.
+Owner says "Let's continue on the website." Claude has no context.
 
 ```
 Claude calls: memory_read(namespace="projects/gille-website", key="brief")
@@ -177,12 +177,12 @@ Claude calls: memory_read(namespace="projects/gille-website", key="brief")
 Claude calls: memory_query(query="website", namespace="projects/gille-website", entry_type="log")
 → Gets chronological history of what happened
 
-Claude now has full context without Magnus repeating anything.
+Claude now has full context without Owner repeating anything.
 ```
 
 ### Scenario 3: Making a decision
 
-After evaluating options, Claude and Magnus decide on a tech stack.
+After evaluating options, Claude and Owner decide on a tech stack.
 
 ```
 Claude calls: memory_write(
@@ -206,8 +206,8 @@ Claude needs to check something that spans multiple contexts.
 Claude calls: memory_query(query="raspberry pi setup", limit=5)
 → Returns results from projects/hugin-munin, projects/nas, etc.
 
-Claude calls: memory_query(query="tech preferences", namespace="people/magnus")
-→ Returns Magnus's known preferences
+Claude calls: memory_query(query="tech preferences", namespace="people/owner")
+→ Returns Owner's known preferences
 ```
 
 ### Scenario 5: Browsing available knowledge
@@ -220,7 +220,7 @@ Claude calls: memory_list()
   projects/gille-consulting (3 state entries, 12 log entries)
   projects/hugin-munin (5 state entries, 8 log entries)
   projects/gille-website (2 state entries, 3 log entries)
-  people/magnus (2 state entries, 0 log entries)
+  people/owner (2 state entries, 0 log entries)
   decisions/tech-stack (1 state entry, 4 log entries)
 
 Claude calls: memory_list(namespace="projects/hugin-munin")
@@ -307,7 +307,7 @@ The existing Hugin/Munin architecture spec includes a Permission Guardian compon
 
 - **No vector/semantic search** — FTS5 is enough. If Claude writes good content with meaningful terms, keyword search works.
 - **No memory decay or scoring** — everything persists equally until explicitly deleted
-- **No multi-user support** — this is a single-user system (Claude working with Magnus)
+- **No multi-user support** — this is a single-user system (Claude working with Owner)
 - **No authentication** — runs locally on trusted hardware
 - **No web UI** — Claude is the interface
 - **No automatic memory creation** — Claude decides what to store (no conversation surveillance)
@@ -336,7 +336,7 @@ The existing Hugin/Munin architecture spec includes a Permission Guardian compon
 This tool is successful if:
 
 1. Claude can store and retrieve information reliably across conversations
-2. Claude stops asking Magnus questions it has already asked before
+2. Claude stops asking Owner questions it has already asked before
 3. Project context survives between sessions without manual re-briefing
 4. Decision rationale is preserved and retrievable
 5. The system runs unattended with zero maintenance

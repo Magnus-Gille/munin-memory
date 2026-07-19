@@ -17,13 +17,13 @@ resolve_host() {
     return
   fi
   # Try mDNS (.local) first — fastest on LAN
-  if ssh -o ConnectTimeout=2 -o BatchMode=yes "${USER}@${input}" true &>/dev/null; then
+  if ssh -o ConnectTimeout=2 -o BatchMode=yes "${DEPLOY_ACCOUNT}@${input}" true &>/dev/null; then
     echo "$input"
     return
   fi
   # Fall back to Tailscale MagicDNS (strip .local)
   local bare="${input%.local}"
-  if ssh -o ConnectTimeout=5 -o BatchMode=yes "${USER}@${bare}" true &>/dev/null; then
+  if ssh -o ConnectTimeout=5 -o BatchMode=yes "${DEPLOY_ACCOUNT}@${bare}" true &>/dev/null; then
     echo >&2 "Note: $input not reachable, using Tailscale ($bare)"
     echo "$bare"
     return
@@ -32,15 +32,23 @@ resolve_host() {
   exit 1
 }
 
+DEPLOY_ACCOUNT="${DEPLOY_USER:-$(id -un)}"
+case "$DEPLOY_ACCOUNT" in
+  ''|*[!a-zA-Z0-9._-]*) echo "Error: DEPLOY_USER contains unsupported characters" >&2; exit 1 ;;
+esac
 HOST=$(resolve_host "${1:?Usage: $0 <pi-hostname-or-ip> [--bridge-only|--server-only]}")
 MODE="${2:-both}"
-USER="${DEPLOY_USER:-$(whoami)}"
-REMOTE_DIR="/home/${USER}/munin-memory"
+REMOTE_DIR="/home/${DEPLOY_ACCOUNT}/munin-memory"
+
+# The deploy target must be a pure artifact. Refuse before rsync so an existing
+# checkout is never partially overwritten or cleaned up automatically.
+echo "==> Verifying deploy target carries no git metadata..."
+ssh "${DEPLOY_ACCOUNT}@${HOST}" "test ! -e '${REMOTE_DIR}/.git' || { echo 'ERROR: deploy target contains .git; choose a clean artifact directory' >&2; exit 1; }"
 
 echo "==> Building locally..."
 npm run build
 
-echo "==> Syncing to ${USER}@${HOST}:${REMOTE_DIR}..."
+echo "==> Syncing to ${DEPLOY_ACCOUNT}@${HOST}:${REMOTE_DIR}..."
 rsync -avz \
   --exclude node_modules \
   --exclude .env \
@@ -54,32 +62,24 @@ rsync -avz \
   --exclude 'benchmark/generated/' \
   --exclude 'benchmark/footprint-calculator/' \
   --exclude 'benchmark/reports/' \
-  ./ "${USER}@${HOST}:${REMOTE_DIR}/"
-
-# The deploy target is a pure ARTIFACT, never a git checkout (the git source of
-# truth is ~/repos/munin-memory). rsync excludes .git above, but a past ad-hoc
-# sync from a git worktree left a dangling `.git` gitdir-pointer file here that
-# produced phantom `git status` noise (munin-memory#175). Defensively strip any
-# .git so the artifact dir can never masquerade as a checkout.
-echo "==> Ensuring deploy target carries no git metadata (artifact, not checkout)..."
-ssh "${USER}@${HOST}" "rm -rf ${REMOTE_DIR}/.git"
+  ./ "${DEPLOY_ACCOUNT}@${HOST}:${REMOTE_DIR}/"
 
 echo "==> Installing dependencies on Pi (compiles native modules for ARM64)..."
-ssh "${USER}@${HOST}" "cd ${REMOTE_DIR} && npm install --production"
+ssh "${DEPLOY_ACCOUNT}@${HOST}" "cd '${REMOTE_DIR}' && npm ci --omit=dev"
 
 # --- Server deployment ---
 
 if [[ "$MODE" != "--bridge-only" ]]; then
   echo "==> Installing systemd service..."
-  ssh "${USER}@${HOST}" "sed -e 's|<user>|${USER}|g' -e 's|<install-dir>|munin-memory|g' ${REMOTE_DIR}/munin-memory.service | sudo tee /etc/systemd/system/munin-memory.service > /dev/null && sudo systemctl daemon-reload && sudo systemctl enable munin-memory"
+  ssh "${DEPLOY_ACCOUNT}@${HOST}" "sed -e 's|<user>|${DEPLOY_ACCOUNT}|g' -e 's|<install-dir>|munin-memory|g' '${REMOTE_DIR}/munin-memory.service' | sudo tee /etc/systemd/system/munin-memory.service > /dev/null && sudo systemctl daemon-reload && sudo systemctl enable munin-memory"
 
   echo "==> Checking for .env file..."
-  ssh "${USER}@${HOST}" "test -f ${REMOTE_DIR}/.env || (echo 'WARNING: No .env file found at ${REMOTE_DIR}/.env — create one with MUNIN_API_KEY=<key>' && exit 1)"
+  ssh "${DEPLOY_ACCOUNT}@${HOST}" "test -f '${REMOTE_DIR}/.env' || (echo 'WARNING: No .env file found at ${REMOTE_DIR}/.env — create one with MUNIN_API_KEY=<key>' && exit 1)"
 
   echo "==> Restarting service..."
-  ssh "${USER}@${HOST}" "sudo systemctl restart munin-memory"
+  ssh "${DEPLOY_ACCOUNT}@${HOST}" "sudo systemctl restart munin-memory"
   sleep 2
-  ssh "${USER}@${HOST}" "sudo systemctl status munin-memory --no-pager"
+  ssh "${DEPLOY_ACCOUNT}@${HOST}" "sudo systemctl status munin-memory --no-pager"
 
   echo ""
   echo "Server running at http://${HOST}:3030"
@@ -88,7 +88,7 @@ fi
 
 # --- Bridge configuration for Claude Code ---
 
-PI_CREDS_PATH="/home/${USER}/.config/munin/credentials.json"
+PI_CREDS_PATH="/home/${DEPLOY_ACCOUNT}/.config/munin/credentials.json"
 
 sync_credentials_file() {
   local local_path="$1"
@@ -99,9 +99,9 @@ sync_credentials_file() {
     return 1
   fi
   echo "  Syncing credentials file to ${HOST}:${PI_CREDS_PATH} (chmod 600)"
-  ssh "${USER}@${HOST}" "mkdir -p '$(dirname "${PI_CREDS_PATH}")' && chmod 700 '$(dirname "${PI_CREDS_PATH}")'"
-  scp -q "$local_path" "${USER}@${HOST}:${PI_CREDS_PATH}"
-  ssh "${USER}@${HOST}" "chmod 600 '${PI_CREDS_PATH}'"
+  ssh "${DEPLOY_ACCOUNT}@${HOST}" "mkdir -p '$(dirname "${PI_CREDS_PATH}")' && chmod 700 '$(dirname "${PI_CREDS_PATH}")'"
+  scp -q "$local_path" "${DEPLOY_ACCOUNT}@${HOST}:${PI_CREDS_PATH}"
+  ssh "${DEPLOY_ACCOUNT}@${HOST}" "chmod 600 '${PI_CREDS_PATH}'"
   return 0
 }
 
@@ -110,7 +110,7 @@ if [[ "$MODE" != "--server-only" ]]; then
   echo "==> Configuring MCP bridge for Claude Code on Pi..."
 
   # Check if Claude Code is installed
-  if ! ssh "${USER}@${HOST}" "command -v claude &>/dev/null"; then
+  if ! ssh "${DEPLOY_ACCOUNT}@${HOST}" "command -v claude &>/dev/null"; then
     echo "WARNING: 'claude' CLI not found on Pi. Install Claude Code first, then:"
     echo "  1. Create ${PI_CREDS_PATH} (chmod 600) with keys auth_token / cf_client_id / cf_client_secret"
     echo "  2. Register the bridge:"
@@ -173,7 +173,7 @@ print(json.dumps(config))
 
     if [[ -n "$BRIDGE_CONFIG" ]]; then
       echo "  Registering munin-memory MCP server on Pi..."
-      ssh "${USER}@${HOST}" "claude mcp remove munin-memory -s user 2>/dev/null; claude mcp add-json munin-memory '${BRIDGE_CONFIG}' -s user"
+      ssh "${DEPLOY_ACCOUNT}@${HOST}" "claude mcp remove munin-memory -s user 2>/dev/null; claude mcp add-json munin-memory '${BRIDGE_CONFIG}' -s user"
       echo "  Done — bridge configured for Claude Code on Pi"
     else
       echo "WARNING: Could not read local MCP config. Configure manually on Pi:"

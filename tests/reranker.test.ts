@@ -537,8 +537,8 @@ describe("getQueryHeuristicScore", () => {
   });
 
   it("boosts people profile entries", () => {
-    const profileEntry = makeEntry({ namespace: "people/magnus", key: "profile" });
-    const notesEntry = makeEntry({ namespace: "people/magnus", key: "notes" });
+    const profileEntry = makeEntry({ namespace: "people/owner", key: "profile" });
+    const notesEntry = makeEntry({ namespace: "people/owner", key: "notes" });
     const profileScore = getQueryHeuristicScore(profileEntry, "personal profile");
     const notesScore = getQueryHeuristicScore(notesEntry, "personal profile");
     expect(profileScore).toBeGreaterThan(notesScore);
@@ -636,12 +636,12 @@ describe("injectCanonicalQueryEntries", () => {
   it("injects canonical entries for broad orientation query when they exist", () => {
     // Write some canonical entries
     writeState(db, "meta", "reference-index", "All references here", ["active"]);
-    writeState(db, "people/magnus", "profile", "Magnus profile", ["profile"]);
+    writeState(db, "people/owner", "profile", "Owner profile", ["profile"]);
 
     const results = injectCanonicalQueryEntries(db, [], { query: "orient me on everything" });
     const namespaces = results.map((r) => r.namespace);
     expect(namespaces).toContain("meta");
-    expect(namespaces).toContain("people/magnus");
+    expect(namespaces).toContain("people/owner");
   });
 
   it("does not duplicate entries already in results", () => {
@@ -888,8 +888,8 @@ describe("getQueryExplainReasons — additional branches", () => {
   });
 
   it("includes profile/conventions/reference-index specific reasons", () => {
-    writeState(db, "people/magnus", "profile", "Magnus profile content", ["profile"]);
-    const profileId = (db.prepare("SELECT id FROM entries WHERE namespace='people/magnus' AND key='profile'").get() as { id: string }).id;
+    writeState(db, "people/owner", "profile", "Owner profile content", ["profile"]);
+    const profileId = (db.prepare("SELECT id FROM entries WHERE namespace='people/owner' AND key='profile'").get() as { id: string }).id;
     const profileEntry = getById(db, profileId)!;
     const match: NonNullable<QueryResult["match"]> = {
       heuristic_score: 0.5,

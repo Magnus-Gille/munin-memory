@@ -42,7 +42,12 @@ export interface ChatCompletionResponse {
 const DEFAULT_LLM_BASE_URL = "https://openrouter.ai/api/v1";
 const DEFAULT_MAX_TOKENS = 4096;
 const DEFAULT_TITLE = "Munin Memory";
-const HTTP_REFERER = "https://munin-memory.gille.ai";
+const DEFAULT_HTTP_REFERER = "https://github.com/Magnus-Gille/munin-memory";
+
+export function getLlmHttpReferer(env: NodeJS.ProcessEnv = process.env): string {
+  const configured = env.MUNIN_LLM_HTTP_REFERER?.trim();
+  return configured || DEFAULT_HTTP_REFERER;
+}
 
 function getHeader(response: Response, name: string): string | null {
   return response.headers?.get(name) ?? null;
@@ -128,7 +133,7 @@ export async function callOpenRouter(opts: OpenRouterCallOptions): Promise<ChatC
     headers["Authorization"] = `Bearer ${opts.apiKey}`;
   }
   headers["Content-Type"] = "application/json";
-  headers["HTTP-Referer"] = HTTP_REFERER;
+  headers["HTTP-Referer"] = getLlmHttpReferer();
   headers["X-Title"] = opts.title ?? DEFAULT_TITLE;
 
   const endpoint = `${getLlmBaseUrl()}/chat/completions`;
@@ -198,7 +203,7 @@ export async function checkOpenRouterKey(
       method: "GET",
       headers: {
         Authorization: `Bearer ${apiKey}`,
-        "HTTP-Referer": HTTP_REFERER,
+        "HTTP-Referer": getLlmHttpReferer(env),
         "X-Title": DEFAULT_TITLE,
       },
     });

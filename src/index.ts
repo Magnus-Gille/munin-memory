@@ -66,20 +66,21 @@ export const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 // --- Heimdall self-descriptor ---
 // Served at GET /heimdall.json for Tier-1 discovery by the Heimdall dashboard.
 // Shape must satisfy Heimdall's validateDescriptor (schema/service/v1).
-export const HEIMDALL_DESCRIPTOR = {
+export function getHeimdallDescriptor(env: NodeJS.ProcessEnv = process.env) {
+  return {
   _schema: 'https://heimdall.gille.ai/schema/service/v1',
   service: {
     name: 'munin-memory',
     label: 'Munin Memory',
-    namespace: 'grimnir',
-    instance_id: 'huginmunin',
+    namespace: env.MUNIN_HEIMDALL_NAMESPACE || 'standalone',
+    instance_id: env.MUNIN_INSTANCE_ID || 'munin-local',
     criticality: 'normal',
   },
   kind: 'mcp',
   status: 'pass',
   version: SERVER_VERSION,
   deploy: {
-    host: 'huginmunin',
+    host: env.MUNIN_DEPLOY_HOST || 'localhost',
     systemd_unit: 'munin-memory',
     platform: 'bare-metal',
   },
@@ -92,7 +93,10 @@ export const HEIMDALL_DESCRIPTOR = {
     repo: 'https://github.com/Magnus-Gille/munin-memory',
   },
   ui: { icon: 'brain', category: 'infra' },
-} as const;
+  } as const;
+}
+
+export const HEIMDALL_DESCRIPTOR = getHeimdallDescriptor();
 
 // --- Types ---
 

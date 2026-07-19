@@ -192,7 +192,7 @@ export interface BenchmarkReport {
    * Principal identifier the runner ran as. Always `"owner"` in PR 2b —
    * benchmarks run with full owner access and skip `filterByAccess`. The
    * field is typed `string` so a future multi-principal benchmarking
-   * mode can populate it (e.g. `"family:sara"`, `"agent:skuld"`) without
+   * mode can populate it (e.g. `"family:alice"`, `"agent:skuld"`) without
    * forcing every TypeScript consumer through a widening bump. Today's
    * reports always carry the literal `"owner"`.
    */

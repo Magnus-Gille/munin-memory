@@ -279,7 +279,7 @@ describe("callOpenRouter — Authorization header", () => {
     });
 
     const headers = fetchMock.mock.calls[0][1].headers as Record<string, string>;
-    expect(headers["HTTP-Referer"]).toBe("https://munin-memory.gille.ai");
+    expect(headers["HTTP-Referer"]).toBe("https://github.com/Magnus-Gille/munin-memory");
   });
 });
 

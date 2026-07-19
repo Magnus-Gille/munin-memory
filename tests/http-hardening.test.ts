@@ -222,13 +222,13 @@ describe("validateConsentAuthConfig", () => {
 describe("getConsentAuthConfig", () => {
   it("reads consent config from environment", () => {
     process.env.MUNIN_OAUTH_TRUSTED_USER_HEADER = "x-auth-user";
-    process.env.MUNIN_OAUTH_TRUSTED_USER_VALUE = "magnus@example.com";
+    process.env.MUNIN_OAUTH_TRUSTED_USER_VALUE = "owner@example.com";
     process.env.MUNIN_OAUTH_ALLOW_LOCALHOST_CONSENT = "false";
 
     try {
       expect(getConsentAuthConfig()).toEqual({
         trustedHeaderName: "x-auth-user",
-        trustedHeaderValue: "magnus@example.com",
+        trustedHeaderValue: "owner@example.com",
         allowLocalhost: false,
       });
     } finally {
@@ -242,13 +242,13 @@ describe("getConsentAuthConfig", () => {
 describe("isTrustedConsentRequest", () => {
   it("accepts matching trusted-user header", () => {
     const req = {
-      get: (name: string) => (name === "x-auth-user" ? "magnus@example.com" : undefined),
+      get: (name: string) => (name === "x-auth-user" ? "owner@example.com" : undefined),
       socket: { remoteAddress: "203.0.113.10" },
     };
 
     expect(isTrustedConsentRequest(req as any, {
       trustedHeaderName: "x-auth-user",
-      trustedHeaderValue: "magnus@example.com",
+      trustedHeaderValue: "owner@example.com",
       allowLocalhost: false,
     })).toBe(true);
   });
@@ -272,7 +272,7 @@ describe("isTrustedConsentRequest", () => {
 
     expect(isTrustedConsentRequest(req as any, {
       trustedHeaderName: "x-auth-user",
-      trustedHeaderValue: "magnus@example.com",
+      trustedHeaderValue: "owner@example.com",
       allowLocalhost: false,
     })).toBe(false);
   });

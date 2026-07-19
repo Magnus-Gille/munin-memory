@@ -1208,7 +1208,7 @@ import {
 } from "./internal/reranker.js";
 const DEFAULT_ORIENT_DETAIL: OrientDetail = "compact";
 const ISO_8601_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
-const TRANSCRIPT_SPEAKER_PREFIX_RE = /^(user|assistant|human|claude|codex|magnus|sara)\s*:\s*/i;
+const TRANSCRIPT_SPEAKER_PREFIX_RE = /^(user|assistant|human|claude|codex|owner)\s*:\s*/i;
 const PATTERN_GENERIC_TERMS = new Set([
   "about",
   "added",
@@ -3751,7 +3751,7 @@ const TOOL_DEFINITIONS = [
         namespace: {
           type: "string",
           description:
-            "Hierarchical namespace using / separator. E.g. 'projects/hugin-munin', 'people/magnus', 'decisions/tech-stack'. Grammar: must start with a letter or digit, then only letters, digits, '_', '-', and '/'. Dots and spaces are INVALID (use hyphens instead, e.g. 'testing/foo-bar' not 'testing/foo.bar').",
+            "Hierarchical namespace using / separator. E.g. 'projects/hugin-munin', 'people/owner', 'decisions/tech-stack'. Grammar: must start with a letter or digit, then only letters, digits, '_', '-', and '/'. Dots and spaces are INVALID (use hyphens instead, e.g. 'testing/foo-bar' not 'testing/foo.bar').",
         },
         key: {
           type: "string",
@@ -3767,7 +3767,7 @@ const TOOL_DEFINITIONS = [
           type: "array",
           items: { type: "string" },
           description:
-            'Optional freeform tags for cross-cutting queries. Must be a JSON array, e.g. ["decision", "active", "client:lofalk"]. Do NOT pass as a comma-separated string.',
+            'Optional freeform tags for cross-cutting queries. Must be a JSON array, e.g. ["decision", "active", "client:acme"]. Do NOT pass as a comma-separated string.',
         },
         classification: {
           type: "string",
@@ -3941,7 +3941,7 @@ const TOOL_DEFINITIONS = [
           type: "array",
           items: { type: "string" },
           description:
-            'Optional. Filter to entries that have ALL of these tags. Must be a JSON array, e.g. ["decision", "active"] or ["client:lofalk", "type:pdf"].',
+            'Optional. Filter to entries that have ALL of these tags. Must be a JSON array, e.g. ["decision", "active"] or ["client:acme", "type:pdf"].',
         },
         limit: {
           type: "number",
@@ -4059,7 +4059,7 @@ const TOOL_DEFINITIONS = [
         tags: {
           type: "array",
           items: { type: "string" },
-          description: 'Optional tags. Must be a JSON array, e.g. ["decision", "active"] or ["client:lofalk"].',
+          description: 'Optional tags. Must be a JSON array, e.g. ["decision", "active"] or ["client:acme"].',
         },
         classification: {
           type: "string",
@@ -4359,7 +4359,7 @@ const UNTRACKED_NAMESPACE_ORIENT_PREVIEW = 5;
  * non-owner principals by reading `principals.namespace_rules`. Used to augment
  * the reference allowlist when running untracked-namespace detection, so the
  * owner is never nagged about clusters that are actually a principal's personal
- * home (e.g. `family/sara/*`, `inbox/p/alice/*`) — even when the home prefix
+ * home (e.g. `family/alice/*`, `inbox/p/alice/*`) — even when the home prefix
  * is not under the hard-coded `users/*` pattern (fix #1 — Codex review).
  *
  * Query is lightweight (one SELECT without JOINs; principals table is tiny) and

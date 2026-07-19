@@ -21,9 +21,9 @@
   "version": 1,
   "references": [
     {
-      "namespace": "people/magnus",
+      "namespace": "people/owner",
       "key": "profile",
-      "title": "Magnus profile",
+      "title": "Owner profile",
       "when_to_load": "Use for collaboration style, background, and user-specific guidance"
     },
     {

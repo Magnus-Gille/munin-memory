@@ -8,9 +8,9 @@
 ## Concessions accepted by both sides
 
 1. **Aggregate tools need input-level authorization**, not output filtering. memory_orient (7 sources) and memory_attention must authorize each input before computing derived fields like dashboard_meta, maintenance_needed, summary.
-2. **memory_query canonical injection must be filtered** — injected owner-only entries (meta/reference-index, people/magnus/profile) must pass access checks.
+2. **memory_query canonical injection must be filtered** — injected owner-only entries (meta/reference-index, people/owner/profile) must pass access checks.
 3. **memory_read/get denial must use a separate clean path** — current not-found includes sibling key hints that would leak namespace contents.
-4. **Pattern validation required** — only exact strings, `/*` suffix, or lone `*` are valid. Reject ambiguous patterns like `users/sara*`.
+4. **Pattern validation required** — only exact strings, `/*` suffix, or lone `*` are valid. Reject ambiguous patterns like `users/alice*`.
 5. **Per-tool scope normalization** — access checks must be aware of each tool's namespace semantics (subtree vs exact).
 6. **Delete tokens must be principal-bound** — prevent cross-principal reuse.
 7. **OAuth binding via `oauth_client_id` column** on principals table — concrete 1:1 mapping for Phase 1.

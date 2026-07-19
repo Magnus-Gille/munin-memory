@@ -44,9 +44,9 @@ export const ORIENTATION_QUERY_PHRASES = [
   "catch-up",
   "brief me",
   "what should i know",
-  "what's magnus working on",
-  "what is magnus working on",
-  "what magnus is working on",
+  "what's owner working on",
+  "what is owner working on",
+  "what owner is working on",
 ];
 export const ATTENTION_TRIAGE_QUERY_PHRASES = [
   "what needs attention",
@@ -346,7 +346,7 @@ function scoreTrackedStatusEntry(queryLower: string, orientationQuery: boolean, 
 function scorePeopleProfileEntry(queryLower: string): number {
   let s = 18;
   if (queryMentionsAny(queryLower, ["personal", "profile", "collaboration", "style", "preference", "preferences", "context"])) s += 10;
-  if (queryMentionsAny(queryLower, ["magnus", "working on", "what should i know"])) s += 12;
+  if (queryMentionsAny(queryLower, ["owner", "working on", "what should i know"])) s += 12;
   return s;
 }
 
@@ -416,7 +416,7 @@ export function getQueryHeuristicScore(
 }
 
 /**
- * Inject canonical reference entries (reference-index, magnus profile,
+ * Inject canonical reference entries (reference-index, owner profile,
  * conventions) when the query looks like a broad orientation request.
  *
  * Exported for the benchmark runner.
@@ -431,7 +431,7 @@ export function injectCanonicalQueryEntries(
 
   const injected = [
     readState(db, "meta", "reference-index"),
-    readState(db, "people/magnus", "profile"),
+    readState(db, "people/owner", "profile"),
     readState(db, "meta/conventions", "conventions"),
   ].filter((entry): entry is Entry => entry !== null);
 

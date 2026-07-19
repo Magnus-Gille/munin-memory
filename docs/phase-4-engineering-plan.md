@@ -304,7 +304,7 @@ operator and handoff surfaces.
 
 Before implementing Phase 4, verify:
 
-- Sara or an equivalent second principal has been onboarded
+- A second principal has been onboarded
 - at least one non-owner shared namespace exists in real use
 - current access-control behavior has been exercised beyond tests
 

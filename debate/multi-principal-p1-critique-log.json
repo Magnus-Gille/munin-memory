@@ -11,7 +11,7 @@
   {
     "id": "mp1-C02",
     "source": "codex-round-1",
-    "text": "memory_query canonical injection (meta/reference-index, people/magnus/profile, meta/conventions) must be filtered through access checks",
+    "text": "memory_query canonical injection (meta/reference-index, people/owner/profile, meta/conventions) must be filtered through access checks",
     "classification": "valid",
     "impact": "changed",
     "severity": "major",
@@ -38,7 +38,7 @@
   {
     "id": "mp1-C05",
     "source": "codex-round-1",
-    "text": "Pattern validation must reject ambiguous patterns like users/sara* — require exact, /* suffix, or lone *",
+    "text": "Pattern validation must reject ambiguous patterns like users/alice* — require exact, /* suffix, or lone *",
     "classification": "valid",
     "impact": "changed",
     "severity": "major",
@@ -65,7 +65,7 @@
   {
     "id": "mp1-C08",
     "source": "codex-round-1",
-    "text": "Non-owner namespace creation (writing to users/sara/inbox/msg1) needs explicit test in Phase 1",
+    "text": "Non-owner namespace creation (writing to users/alice/inbox/msg1) needs explicit test in Phase 1",
     "classification": "valid",
     "impact": "changed",
     "severity": "minor",
