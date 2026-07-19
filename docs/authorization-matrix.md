@@ -65,6 +65,7 @@ Invisible denial is critical: non-owner principals must not be able to distingui
 | **Namespace check** | Caller must have write access to the target namespace |
 | **Unauthorized** | Invisible denial (same response as writing to a read-only or non-existent namespace would produce) |
 | **compare-and-swap** | `expected_updated_at` works normally within accessible namespaces |
+| **create-if-absent** | `create_if_absent: true` atomically creates only while the accessible namespace+key is absent; an existing entry returns a typed conflict with `current_updated_at` |
 
 ### memory_read
 
