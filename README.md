@@ -180,6 +180,8 @@ All configuration is via environment variables. Copy `.env.example` for a starti
 | `MUNIN_OAUTH_TRUSTED_USER_HEADER` | — | Trusted header name required for public OAuth consent |
 | `MUNIN_OAUTH_TRUSTED_USER_VALUE` | — | Exact trusted header value required for public OAuth consent |
 | `MUNIN_OAUTH_ALLOW_LOCALHOST_CONSENT` | `true` | Allow consent on loopback-only local development |
+| `MUNIN_OWNER_ALIASES` | legacy compatibility alias | Optional comma-separated owner names recognized by orientation and injection checks |
+| `MUNIN_OWNER_PROFILE_NAMESPACE` | `people/owner` | Canonical owner-profile namespace; lookup falls back to existing `people/magnus` data |
 
 See `.env.example` for the full list.
 
@@ -241,6 +243,13 @@ The script renders the placeholders in `munin-memory.service`, refuses to deploy
 over an existing Git checkout, and does not copy `.env` or database files. Review
 the service user, paths, reverse-proxy trust boundary, and backup location for your
 host before enabling it.
+
+The optional `munin-backup.timer` intentionally has no local-disk destination
+default. Before enabling it, set `MUNIN_BACKUP_MOUNT` to the mounted filesystem
+root and `MUNIN_BACKUP_DIR` to an absolute child directory in
+`~/munin-ops/.env`. The job verifies the mount before snapshotting or creating
+directories, so a missing mount cannot silently redirect backups to the system
+disk.
 
 For the broader appliance direction, the project now distinguishes between `full-node` and `zero-appliance` deployments. A Pi Zero 2 W is being treated as a constrained profile that needs explicit hardware validation rather than assumed feature parity. See [docs/appliance-profiles.md](docs/appliance-profiles.md).
 

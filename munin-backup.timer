@@ -1,5 +1,5 @@
 [Unit]
-Description=Daily Munin Memory local or mounted-volume backup
+Description=Daily Munin Memory off-host or mounted-volume backup
 
 [Timer]
 OnCalendar=*-*-* 03:00:00

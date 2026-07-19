@@ -1,5 +1,5 @@
 [Unit]
-Description=Munin Memory local or mounted-volume backup
+Description=Munin Memory off-host or mounted-volume backup
 After=network-online.target
 Wants=network-online.target
 
@@ -9,6 +9,10 @@ User=<user>
 # Runs from ~/munin-ops (a dedicated ops dir, NOT a git checkout) so cron never
 # executes code out of a mutable/dev checkout. Populate it with scripts/install-ops.sh.
 ExecStart=<ops-dir>/scripts/backup-to-nas.sh
+# Required: MUNIN_BACKUP_MOUNT must be an active mountpoint and
+# MUNIN_BACKUP_DIR must be a strict child. The script rejects / as the mount
+# root and fails closed for an absent mount.
+EnvironmentFile=-<ops-dir>/.env
 StandardOutput=journal
 StandardError=journal
 

@@ -1,12 +1,67 @@
 #!/bin/bash
 set -euo pipefail
 
-# Munin Memory SQLite backup to a local or mounted backup directory
+# Munin Memory SQLite backup to an explicitly configured off-host or mounted directory
 # Uses sqlite3 .backup for a consistent snapshot (no file locking issues)
 # Filename format: memory-YYYY-MM-DD-HHMM.db (Heimdall parses this for freshness)
 
 DB="${MUNIN_BACKUP_DB:-${HOME}/.munin-memory/memory.db}"
-BACKUP_DIR="${MUNIN_BACKUP_DIR:-${HOME}/backups/munin-memory}"
+BACKUP_DIR="${MUNIN_BACKUP_DIR:-}"
+if [ -z "$BACKUP_DIR" ]; then
+    echo "ERROR: MUNIN_BACKUP_DIR is required and must name an explicit off-host or mounted backup directory." >&2
+    exit 64
+fi
+BACKUP_MOUNT="${MUNIN_BACKUP_MOUNT:-}"
+if [ -z "$BACKUP_MOUNT" ]; then
+    echo "ERROR: MUNIN_BACKUP_MOUNT is required and must name the mounted backup filesystem root." >&2
+    exit 64
+fi
+MOUNTPOINT_BIN="${MUNIN_MOUNTPOINT_BIN:-mountpoint}"
+if ! command -v "$MOUNTPOINT_BIN" >/dev/null 2>&1; then
+    echo "ERROR: mountpoint checker not found: $MOUNTPOINT_BIN" >&2
+    exit 69
+fi
+
+# Both paths must be absolute and lexically normalized. Rejecting dot segments
+# prevents a configured child path from escaping the verified mount root.
+case "$BACKUP_MOUNT" in
+    /*) ;;
+    *) echo "ERROR: MUNIN_BACKUP_MOUNT must be an absolute path." >&2; exit 64 ;;
+esac
+case "$BACKUP_DIR" in
+    /*) ;;
+    *) echo "ERROR: MUNIN_BACKUP_DIR must be an absolute path." >&2; exit 64 ;;
+esac
+case "/${BACKUP_MOUNT#/}/" in
+    *"/../"*|*"/./"*) echo "ERROR: MUNIN_BACKUP_MOUNT must not contain dot path segments." >&2; exit 64 ;;
+esac
+case "/${BACKUP_DIR#/}/" in
+    *"/../"*|*"/./"*) echo "ERROR: MUNIN_BACKUP_DIR must not contain dot path segments." >&2; exit 64 ;;
+esac
+
+# Normalize trailing slashes before enforcing containment.
+while [ "$BACKUP_MOUNT" != "/" ] && [ "${BACKUP_MOUNT%/}" != "$BACKUP_MOUNT" ]; do
+    BACKUP_MOUNT="${BACKUP_MOUNT%/}"
+done
+while [ "$BACKUP_DIR" != "/" ] && [ "${BACKUP_DIR%/}" != "$BACKUP_DIR" ]; do
+    BACKUP_DIR="${BACKUP_DIR%/}"
+done
+if [ "$BACKUP_MOUNT" = "/" ]; then
+    echo "ERROR: MUNIN_BACKUP_MOUNT must not be /; configure a dedicated mounted filesystem." >&2
+    exit 64
+fi
+case "$BACKUP_DIR" in
+    "$BACKUP_MOUNT"/*) ;;
+    "$BACKUP_MOUNT") echo "ERROR: MUNIN_BACKUP_DIR must be a child of MUNIN_BACKUP_MOUNT, not the mount root itself." >&2; exit 64 ;;
+    *) echo "ERROR: MUNIN_BACKUP_DIR must be inside MUNIN_BACKUP_MOUNT." >&2; exit 64 ;;
+esac
+
+# This check is deliberately before sqlite3 and mkdir. If a removable/NAS mount
+# disappears, mkdir must never recreate the destination on the root filesystem.
+if ! "$MOUNTPOINT_BIN" -q -- "$BACKUP_MOUNT"; then
+    echo "ERROR: MUNIN_BACKUP_MOUNT is not an active mountpoint: $BACKUP_MOUNT" >&2
+    exit 69
+fi
 TIMESTAMP=$(date -u +%Y-%m-%d-%H%M)
 FILENAME="memory-${TIMESTAMP}.db"
 LOCAL_TMP=$(mktemp "${TMPDIR:-/tmp}/munin-memory-backup.XXXXXX.db")

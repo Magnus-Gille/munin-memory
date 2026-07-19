@@ -166,8 +166,10 @@ Deployment uses one owner per directory role; do not blur them:
 - `~/munin-ops`: checkout-independent backup/offsite runtime installed by `scripts/install-ops.sh`.
 
 The root `munin-memory.service` is the portable template rendered by
-`deploy-rpi.sh`. Fleet-specific rendered units belong in private deployment
-configuration, not this repository.
+`deploy-rpi.sh`. `systemd/munin-memory.service` is the install-ready,
+placeholder-free unit for the public Grimnir registry example; private fleets
+that use different paths keep their rendered overrides in private deployment
+configuration.
 
 ```bash
 ./scripts/deploy-rpi.sh <host>

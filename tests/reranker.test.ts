@@ -243,6 +243,18 @@ describe("isBroadOrientationQuery", () => {
     expect(isBroadOrientationQuery("catch me up on everything", { query: "catch me up on everything" })).toBe(true);
   });
 
+  it("recognizes legacy and configured owner aliases in orientation queries", () => {
+    const previous = process.env.MUNIN_OWNER_ALIASES;
+    try {
+      expect(isBroadOrientationQuery("what is Magnus working on", { query: "what is Magnus working on" })).toBe(true);
+      process.env.MUNIN_OWNER_ALIASES = "Alice";
+      expect(isBroadOrientationQuery("what's Alice working on", { query: "what's Alice working on" })).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.MUNIN_OWNER_ALIASES;
+      else process.env.MUNIN_OWNER_ALIASES = previous;
+    }
+  });
+
   it("detects orientation verb + summary intent combination", () => {
     expect(isBroadOrientationQuery("brief me on current work", { query: "brief me on current work" })).toBe(true);
   });
@@ -642,6 +654,29 @@ describe("injectCanonicalQueryEntries", () => {
     const namespaces = results.map((r) => r.namespace);
     expect(namespaces).toContain("meta");
     expect(namespaces).toContain("people/owner");
+  });
+
+  it("falls back to the legacy canonical owner profile for existing databases", () => {
+    writeState(db, "people/magnus", "profile", "Existing owner profile", ["profile"]);
+
+    const results = injectCanonicalQueryEntries(db, [], { query: "orient me" });
+    expect(results.map((entry) => entry.namespace)).toContain("people/magnus");
+  });
+
+  it("prefers a configured canonical owner profile namespace", () => {
+    const previous = process.env.MUNIN_OWNER_PROFILE_NAMESPACE;
+    try {
+      process.env.MUNIN_OWNER_PROFILE_NAMESPACE = "people/alice";
+      writeState(db, "people/alice", "profile", "Configured owner profile", ["profile"]);
+      writeState(db, "people/owner", "profile", "Generic owner profile", ["profile"]);
+
+      const results = injectCanonicalQueryEntries(db, [], { query: "orient me" });
+      expect(results.map((entry) => entry.namespace)).toContain("people/alice");
+      expect(results.map((entry) => entry.namespace)).not.toContain("people/owner");
+    } finally {
+      if (previous === undefined) delete process.env.MUNIN_OWNER_PROFILE_NAMESPACE;
+      else process.env.MUNIN_OWNER_PROFILE_NAMESPACE = previous;
+    }
   });
 
   it("does not duplicate entries already in results", () => {

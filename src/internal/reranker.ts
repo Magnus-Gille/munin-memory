@@ -31,6 +31,10 @@ import type {
   QueryResult,
   MaintenanceItem,
 } from "../types.js";
+import {
+  resolveOwnerAliases,
+  resolveOwnerProfileNamespaces,
+} from "../owner-config.js";
 
 // --- Constants ---
 
@@ -108,6 +112,17 @@ export function isBroadOrientationQuery(query: string, params: QueryParams): boo
 
   const normalized = query.toLowerCase();
   if (ORIENTATION_QUERY_PHRASES.some((phrase) => normalized.includes(phrase))) {
+    return true;
+  }
+  if (
+    resolveOwnerAliases().some((alias) =>
+      [
+        `what's ${alias.toLowerCase()} working on`,
+        `what is ${alias.toLowerCase()} working on`,
+        `what ${alias.toLowerCase()} is working on`,
+      ].some((phrase) => normalized.includes(phrase)),
+    )
+  ) {
     return true;
   }
 
@@ -346,7 +361,7 @@ function scoreTrackedStatusEntry(queryLower: string, orientationQuery: boolean, 
 function scorePeopleProfileEntry(queryLower: string): number {
   let s = 18;
   if (queryMentionsAny(queryLower, ["personal", "profile", "collaboration", "style", "preference", "preferences", "context"])) s += 10;
-  if (queryMentionsAny(queryLower, ["owner", "working on", "what should i know"])) s += 12;
+  if (queryMentionsAny(queryLower, ["owner", ...resolveOwnerAliases(), "working on", "what should i know"])) s += 12;
   return s;
 }
 
@@ -429,11 +444,14 @@ export function injectCanonicalQueryEntries(
   const query = params.query;
   if (!query || !isBroadOrientationQuery(query, params)) return results;
 
+  const ownerProfile = resolveOwnerProfileNamespaces()
+    .map((namespace) => readState(db, namespace, "profile"))
+    .find((entry): entry is Entry => entry !== null);
   const injected = [
     readState(db, "meta", "reference-index"),
-    readState(db, "people/owner", "profile"),
+    ownerProfile,
     readState(db, "meta/conventions", "conventions"),
-  ].filter((entry): entry is Entry => entry !== null);
+  ].filter((entry): entry is Entry => entry != null);
 
   if (injected.length === 0) return results;
 

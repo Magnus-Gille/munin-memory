@@ -25,6 +25,12 @@ changelog is the canonical record of what moved.
 
 ### Fixed
 
+- **Public-release compatibility and deployment safety.** Owner aliases and the
+  canonical owner-profile namespace are configurable while retaining existing
+  `people/magnus` data and concealment detection; the public Grimnir example has
+  an install-ready placeholder-free systemd unit again; and the operational
+  backup now requires an active `MUNIN_BACKUP_MOUNT` plus an explicit child
+  `MUNIN_BACKUP_DIR`, failing before snapshot or `mkdir` if the mount is absent.
 - **The portable systemd unit remains a renderable template.** `scripts/deploy-rpi.sh`
   replaces its `<user>` and `<install-dir>` placeholders for the selected host.
 - **The public Heimdall service descriptor now reports the runtime package version.** `/heimdall.json` previously carried a manually maintained `0.4.0` string after v0.5.0 shipped, so operator dashboards displayed the wrong release even though MCP initialize and `memory_status` were correct. It now uses the same `SERVER_VERSION` source as the other runtime surfaces, with a regression test tying it to `package.json`.
