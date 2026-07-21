@@ -307,9 +307,17 @@ if [ "$MODE" = "remote" ]; then
     # Post-transfer verification. rsync exiting 0 does not by itself prove the
     # expected bytes are readable at the destination under the expected name —
     # verify what actually landed rather than trusting the exit status.
+    # The remote may be GNU or BSD. Ask for the GNU form first and fall back,
+    # then REQUIRE a bare integer: GNU's `-f` means --file-system, so a BSD-style
+    # probe landing on a GNU host prints a filesystem report rather than failing
+    # cleanly. Comparing that against a byte count would be comparing garbage —
+    # demand a number and fail closed otherwise.
     REMOTE_BYTES=$("$SSH_BIN" "$BACKUP_HOST" \
         "stat -c '%s' '${BACKUP_REMOTE_DIR}/${FILENAME}' 2>/dev/null || stat -f '%z' '${BACKUP_REMOTE_DIR}/${FILENAME}' 2>/dev/null" || true)
     REMOTE_BYTES=$(printf '%s' "$REMOTE_BYTES" | tr -d '[:space:]')
+    case "$REMOTE_BYTES" in
+        ''|*[!0-9]*) REMOTE_BYTES="" ;;
+    esac
     if [ -z "$REMOTE_BYTES" ] || [ "$REMOTE_BYTES" != "$SNAPSHOT_BYTES" ]; then
         echo "ERROR: backup did not land intact on ${BACKUP_HOST}." >&2
         echo "       expected ${SNAPSHOT_BYTES} bytes, destination reports '${REMOTE_BYTES:-<missing>}'." >&2

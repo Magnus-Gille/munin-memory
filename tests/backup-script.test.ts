@@ -157,7 +157,7 @@ describe("backup destination safety", () => {
     const sshLog = join(scratch, "ssh.log");
     writeExecutable(
       join(binDir, "fake-ssh"),
-      `#!/bin/bash\nhost="$1"; shift\necho "$host :: $*" >> "${sshLog}"\nif [[ "$*" == *"stat -c"* ]]; then\n  f=$(printf '%s' "$*" | sed -nE "s/.*'([^']*memory-[^']*\\.db)'.*/\\1/p" | head -1)\n  b=$(basename "$f")\n  stat -f '%z' "${landed}/$b" 2>/dev/null || stat -c '%s' "${landed}/$b" 2>/dev/null\n  exit 0\nfi\nexit 0\n`,
+      `#!/bin/bash\nhost="$1"; shift\necho "$host :: $*" >> "${sshLog}"\nif [[ "$*" == *"stat -c"* ]]; then\n  f=$(printf '%s' "$*" | sed -nE "s/.*'([^']*memory-[^']*\\.db)'.*/\\1/p" | head -1)\n  b=$(basename "$f")\n  wc -c < "${landed}/$b" 2>/dev/null | tr -d ' '\n  exit 0\nfi\nexit 0\n`,
     );
     writeExecutable(
       join(binDir, "fake-rsync"),
@@ -191,6 +191,39 @@ describe("backup destination safety", () => {
     mkdirSync(binDir, { recursive: true });
     stubSqlite3(binDir);
     writeExecutable(join(binDir, "fake-ssh"), `#!/bin/bash\nif [[ "$*" == *"stat -c"* ]]; then echo 1; fi\nexit 0\n`);
+    writeExecutable(join(binDir, "fake-rsync"), `#!/bin/bash\nexit 0\n`);
+
+    const result = spawnSync("bash", [backupScript], {
+      env: {
+        ...process.env,
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HOME: scratch,
+        MUNIN_BACKUP_DB: makeDummyDb(scratch),
+        MUNIN_BACKUP_HOST: "backup@example.invalid",
+        MUNIN_BACKUP_REMOTE_DIR: "/srv/backups/munin",
+        MUNIN_SSH_BIN: join(binDir, "fake-ssh"),
+        MUNIN_RSYNC_BIN: join(binDir, "fake-rsync"),
+      },
+      encoding: "utf8",
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("did not land intact");
+    expect(result.stderr).toContain("Retention was NOT run");
+  });
+
+  it("fails closed when the remote size probe returns non-numeric output", () => {
+    // GNU stat's `-f` means --file-system, so a BSD-style probe on a GNU host
+    // prints a filesystem report instead of failing. Comparing that against a
+    // byte count would compare garbage — demand a bare integer.
+    const scratch = makeScratch();
+    const binDir = join(scratch, "bin");
+    mkdirSync(binDir, { recursive: true });
+    stubSqlite3(binDir);
+    writeExecutable(
+      join(binDir, "fake-ssh"),
+      `#!/bin/bash\nif [[ "$*" == *"stat -c"* ]]; then echo "  File: \\"/srv\\"  ID: 0 Namelen: 255"; fi\nexit 0\n`,
+    );
     writeExecutable(join(binDir, "fake-rsync"), `#!/bin/bash\nexit 0\n`);
 
     const result = spawnSync("bash", [backupScript], {
