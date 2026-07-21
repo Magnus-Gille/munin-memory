@@ -22,6 +22,12 @@ changelog is the canonical record of what moved.
 
 - Deployment, backup, offsite, service-descriptor, and model-evaluation examples now
   use generic, configurable hosts, identities, paths, remotes, and URLs.
+- **`scripts/deploy-rpi.sh` now fails before rsync when the deploy target contains
+  `.git`.** Earlier releases stripped `.git` from the artifact directory after
+  syncing. The deploy target must now already be a pure, git-free artifact
+  directory, so operators who previously pointed the deploy at a checkout must
+  select or prepare a separate artifact directory first. This prevents a deploy
+  from partially overwriting or automatically cleaning up a source checkout.
 
 ### Added
 
@@ -568,10 +574,10 @@ v14–v18.
   backwards compatibility (#25).
 - **Backup schedule reduced from hourly to daily** with GFS retention (14 most
   recent daily snapshots + 4 most recent Sunday snapshots, ~18 files total).
-  Previous policy kept 168 hourly snapshots which grew to ~50 GB and filled
-  the NAS Pi's SD card. New target is ~7 GB. Backup destination moved from
-  the configured local backup directory to
-  `/mnt/timemachine/backups/munin-memory` (1.8 TB external HDD).
+  The previous policy kept 168 hourly snapshots, which grew to ~50 GB and
+  exhausted the backup device. New target is ~7 GB. Backup destination moved
+  from the configured local backup directory to an explicitly configured
+  mounted backup volume.
   `munin-backup.{service,timer}` are now version-controlled in the repo root
   alongside `munin-memory.service`.
 - **Benchmark report schema v3 — removed the deprecated `schema_version`

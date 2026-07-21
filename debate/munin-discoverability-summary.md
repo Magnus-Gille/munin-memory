@@ -28,8 +28,8 @@
     },
     {
       "namespace": "meta",
-      "key": "mgc-soul",
-      "title": "MGC soul",
+      "key": "org-principles",
+      "title": "Organization principles",
       "when_to_load": "Use for proposals, opportunity evaluation, offers, values, and positioning"
     }
   ]

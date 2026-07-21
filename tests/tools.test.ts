@@ -6441,7 +6441,7 @@ describe("reference index (memory_orient)", () => {
       version: 1,
       references: [
         { namespace: "people/owner", key: "profile", title: "Owner profile", when_to_load: "collaboration style" },
-        { namespace: "meta", key: "mgc-soul", title: "MGC soul", when_to_load: "proposals and positioning" },
+        { namespace: "meta", key: "org-principles", title: "Organization principles", when_to_load: "proposals and positioning" },
       ],
     });
     await callTool("memory_write", { namespace: "meta", key: "reference-index", content: refIndex });

@@ -21,7 +21,7 @@ That means the right first move is **not** a full rewrite of the codebase. The r
 |---------|-----------------|----------------------|-------|
 | `zero-appliance` | Raspberry Pi 3A+ / Pi Zero 2 W (512 MB-class) — the cheapest, primary target (both sourceable to Jan 2030) | Core memory **+ q8 semantic/hybrid search** | **Updated 2026-06-18:** the 2026-06-18 on-hardware RAM-fit sweep proved q8 MiniLM semantic fits a 128 MB cgroup cap (peak anon ≈ 74–99 MB across query/write/concurrent; ≈ 91–94 MB under sustained burst at appliance caps), so this tier ships semantic ON via q8, not lexical-only. See "Validated RAM-fit findings" below. |
 | `zero-plus` | Raspberry Pi 5 2 GB-class hardware | Core memory + q8 local embeddings/hybrid search, batch 4 + larger page cache | Pilot data (v3) shows semantic materially lifts recall on prose-weighted corpora; tonight's sweep confirms the memory cost is small (peak anon ≈ 85–99 MB). |
-| `full-node` | Raspberry Pi 4/5 4GB+, mini PC, VPS, or stronger x86/ARM hardware | Full public-remote deployment, OAuth, retrieval analytics, and **full-fidelity fp32 semantic/hybrid search** | Matches the current "Pi 5 on my desk" deployment. No memory clamps; fp32 gives the best recall and fits with ~800 MB free at 1 GB. |
+| `full-node` | Raspberry Pi 4/5 4GB+, mini PC, VPS, or stronger x86/ARM hardware | Full public-remote deployment, OAuth, retrieval analytics, and **full-fidelity fp32 semantic/hybrid search** | Matches the reference Pi 5 deployment. No memory clamps; fp32 gives the best recall and fits with ~800 MB free at 1 GB. |
 
 > **`MUNIN_PROFILE` precedence.** A profile sets *default* knob values. An
 > explicit env var always wins, then the profile default, then the hard-coded
@@ -52,7 +52,7 @@ Current recommendation (revised 2026-06-18 after the on-hardware RAM-fit sweep):
 ### Validated RAM-fit findings (2026-06-18)
 
 Validated on an aarch64 / 8 GB Linux board (cgroup v2) under `systemd-run --user
---scope -p MemoryMax=<cap> -p MemorySwapMax=0`, against the pristine 1.34 GB
+--scope -p MemoryMax=<cap> -p MemorySwapMax=0`, against the pristine 1.34 GB reference
 production DB snapshot. The must-fit metric is peak **`anon + shmem`** (the
 un-reclaimable working set; `memory.current` is dominated by reclaimable file
 cache and is informational only). The dispositive fit signal is the absence of a
