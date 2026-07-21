@@ -56,12 +56,73 @@ case "$BACKUP_DIR" in
     *) echo "ERROR: MUNIN_BACKUP_DIR must be inside MUNIN_BACKUP_MOUNT." >&2; exit 64 ;;
 esac
 
+# Lexical containment above is necessary but not sufficient: a symlink anywhere
+# between the verified mount root and the destination resolves outside the mount,
+# and both mkdir and install follow it. Without this check the job can report a
+# successful mounted-volume backup while writing the plaintext database elsewhere
+# on the system.
+assert_no_symlink_components() {
+    if [ -L "$BACKUP_MOUNT" ]; then
+        echo "ERROR: MUNIN_BACKUP_MOUNT is a symlink and cannot be verified as a mount root: $BACKUP_MOUNT" >&2
+        exit 69
+    fi
+    local current="$BACKUP_MOUNT"
+    local rest="${BACKUP_DIR#"$BACKUP_MOUNT"/}"
+    local segment
+    # Manual split (no `set --`) so path segments are never glob-expanded.
+    while [ -n "$rest" ]; do
+        segment="${rest%%/*}"
+        if [ "$segment" = "$rest" ]; then
+            rest=""
+        else
+            rest="${rest#*/}"
+        fi
+        [ -z "$segment" ] && continue
+        current="$current/$segment"
+        if [ -L "$current" ]; then
+            echo "ERROR: backup destination path component is a symlink: $current" >&2
+            exit 69
+        fi
+    done
+}
+
+# Re-validate the mount immediately before every destination mutation. The
+# preflight below runs before a potentially slow SQLite snapshot, and a
+# removable/NAS mount can drop during that window — after which mkdir would
+# recreate the destination on the root filesystem and the backup would silently
+# succeed locally.
+assert_mount_active() {
+    if ! "$MOUNTPOINT_BIN" -q -- "$BACKUP_MOUNT"; then
+        echo "ERROR: MUNIN_BACKUP_MOUNT is $1: $BACKUP_MOUNT" >&2
+        exit 69
+    fi
+}
+
+# Filesystem identity of a path, on both GNU and BSD stat.
+device_id() {
+    stat -c '%d' "$1" 2>/dev/null || stat -f '%d' "$1" 2>/dev/null
+}
+
+# Bind the destination to the mounted filesystem's identity, not just to a path
+# string, so a nested mount or a race that leaves the path resolving elsewhere is
+# caught before the database is written.
+assert_dest_on_mounted_fs() {
+    local mount_dev dest_dev
+    mount_dev=$(device_id "$BACKUP_MOUNT")
+    dest_dev=$(device_id "$BACKUP_DIR")
+    if [ -z "$mount_dev" ] || [ -z "$dest_dev" ] || [ "$mount_dev" != "$dest_dev" ]; then
+        echo "ERROR: backup destination is not on the mounted backup filesystem: $BACKUP_DIR" >&2
+        exit 69
+    fi
+}
+
 # This check is deliberately before sqlite3 and mkdir. If a removable/NAS mount
 # disappears, mkdir must never recreate the destination on the root filesystem.
 if ! "$MOUNTPOINT_BIN" -q -- "$BACKUP_MOUNT"; then
     echo "ERROR: MUNIN_BACKUP_MOUNT is not an active mountpoint: $BACKUP_MOUNT" >&2
     exit 69
 fi
+assert_no_symlink_components
 TIMESTAMP=$(date -u +%Y-%m-%d-%H%M)
 FILENAME="memory-${TIMESTAMP}.db"
 LOCAL_TMP=$(mktemp "${TMPDIR:-/tmp}/munin-memory-backup.XXXXXX.db")
@@ -81,7 +142,15 @@ if [ "$INTEGRITY" != "ok" ]; then
 fi
 
 # 3. Copy to the configured directory. It may be a local disk or a mounted NAS.
+#    Revalidate immediately before each mutation — the snapshot above is slow
+#    enough for a mount to disappear, and for a symlink to be planted, after the
+#    preflight checks passed.
+assert_mount_active "no longer an active mountpoint"
+assert_no_symlink_components
 mkdir -p "$BACKUP_DIR"
+assert_mount_active "no longer an active mountpoint"
+assert_no_symlink_components
+assert_dest_on_mounted_fs
 install -m 600 "$LOCAL_TMP" "$BACKUP_DIR/$FILENAME"
 
 # 4. Cleanup local temp

@@ -1,12 +1,55 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const backupScript = join(repoRoot, "scripts", "backup-to-nas.sh");
 const backupUnit = readFileSync(join(repoRoot, "munin-backup.service"), "utf8");
+
+const scratchDirs: string[] = [];
+
+function makeScratch(): string {
+  const dir = mkdtempSync(join(tmpdir(), "munin-backup-safety-"));
+  scratchDirs.push(dir);
+  return dir;
+}
+
+function writeExecutable(path: string, body: string): string {
+  writeFileSync(path, body, { mode: 0o755 });
+  return path;
+}
+
+/**
+ * Stub `sqlite3` so the snapshot/integrity steps succeed without a real
+ * database. Keeps the destination-safety tests hermetic and independent of
+ * whether the sqlite3 CLI is installed on the runner.
+ */
+function stubSqlite3(binDir: string): void {
+  writeExecutable(
+    join(binDir, "sqlite3"),
+    `#!/bin/bash
+if [[ "\$2" == .backup* ]]; then
+  : > "\${2#.backup }"
+  exit 0
+fi
+if [[ "\$2" == *integrity_check* ]]; then
+  echo ok
+  exit 0
+fi
+exit 0
+`,
+  );
+}
+
+afterEach(() => {
+  while (scratchDirs.length > 0) {
+    const dir = scratchDirs.pop();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 describe("backup destination safety", () => {
   it("fails closed before snapshotting when no destination is explicitly configured", () => {
@@ -95,5 +138,84 @@ describe("backup destination safety", () => {
 
   it("loads the ops environment file where the explicit destination is configured", () => {
     expect(backupUnit).toContain("EnvironmentFile=-<ops-dir>/.env");
+  });
+
+  it("aborts when the mount disappears between the preflight check and the write", () => {
+    // Regression: the mount was validated once, before a potentially slow SQLite
+    // snapshot. If a removable/NAS mount dropped during the snapshot, `mkdir -p`
+    // silently recreated the destination on the root filesystem and the backup
+    // "succeeded" locally — the exact fallback README.md says cannot happen.
+    const scratch = makeScratch();
+    const mount = join(scratch, "mount");
+    const dest = join(mount, "munin-memory");
+    const binDir = join(scratch, "bin");
+    mkdirSync(mount, { recursive: true });
+    mkdirSync(binDir, { recursive: true });
+    stubSqlite3(binDir);
+
+    // Succeeds on the first call (preflight), fails on every later call.
+    const stateFile = join(scratch, "mount-calls");
+    const mountpointBin = writeExecutable(
+      join(binDir, "mountpoint-flaky"),
+      `#!/bin/bash
+n=\$(cat "${stateFile}" 2>/dev/null || echo 0)
+n=\$((n + 1))
+echo "\$n" > "${stateFile}"
+[ "\$n" -le 1 ] && exit 0
+exit 1
+`,
+    );
+
+    const result = spawnSync("bash", [backupScript], {
+      env: {
+        ...process.env,
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HOME: scratch,
+        MUNIN_BACKUP_DB: join(scratch, "memory.db"),
+        MUNIN_BACKUP_DIR: dest,
+        MUNIN_BACKUP_MOUNT: mount,
+        MUNIN_MOUNTPOINT_BIN: mountpointBin,
+      },
+      encoding: "utf8",
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("no longer an active mountpoint");
+    // The critical assertion: nothing was written to the unmounted path.
+    expect(existsSync(dest)).toBe(false);
+  });
+
+  it("rejects a destination reached through a symlinked path component", () => {
+    // Regression: containment was purely lexical, so a symlink inside the mount
+    // resolved outside it and both mkdir and install followed it — writing the
+    // plaintext database off the mounted volume while reporting success.
+    const scratch = makeScratch();
+    const mount = join(scratch, "mount");
+    const outside = join(scratch, "outside");
+    const binDir = join(scratch, "bin");
+    mkdirSync(mount, { recursive: true });
+    mkdirSync(outside, { recursive: true });
+    mkdirSync(binDir, { recursive: true });
+    stubSqlite3(binDir);
+    symlinkSync(outside, join(mount, "escape"));
+
+    const result = spawnSync("bash", [backupScript], {
+      env: {
+        ...process.env,
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HOME: scratch,
+        MUNIN_BACKUP_DB: join(scratch, "memory.db"),
+        MUNIN_BACKUP_DIR: join(mount, "escape"),
+        MUNIN_BACKUP_MOUNT: mount,
+        MUNIN_MOUNTPOINT_BIN: "true",
+      },
+      encoding: "utf8",
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("symlink");
+    // Nothing may be written through the escaping link.
+    expect(existsSync(join(outside, "memory.db"))).toBe(false);
+    expect(spawnSync("ls", [outside], { encoding: "utf8" }).stdout.trim()).toBe("");
   });
 });

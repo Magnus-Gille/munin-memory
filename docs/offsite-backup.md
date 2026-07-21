@@ -47,9 +47,19 @@ MIMIR_OFFSITE_REMOTE=munin-crypt
 MIMIR_OFFSITE_RETENTION_DAYS=30
 MIMIR_OFFSITE_MAX_DELETE=1000
 MIMIR_OFFSITE_MAX_DELETE_PCT=25
-MUNIN_OFFSITE_DB=${HOME}/.munin-memory/memory.db
-MUNIN_OFFSITE_STAGING=${HOME}/.munin-memory/offsite-staging
 ```
+
+> **A systemd `EnvironmentFile` is not a shell and performs no expansion.** A
+> value such as `${HOME}/.munin-memory/memory.db` or `~/.munin-memory/memory.db`
+> is passed through literally, the preflight then cannot find that path, and the
+> offsite job fails. Omit the database and staging overrides to use the service's
+> own `$HOME`-relative defaults, which is the normal case. Override them only
+> with fully literal absolute paths:
+>
+> ```bash
+> MUNIN_OFFSITE_DB=/home/youruser/.munin-memory/memory.db
+> MUNIN_OFFSITE_STAGING=/home/youruser/.munin-memory/offsite-staging
+> ```
 
 The `MIMIR_OFFSITE_*` prefix is retained for compatibility with the shared
 backup implementation. It does not require the Mimir service.

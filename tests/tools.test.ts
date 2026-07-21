@@ -3808,6 +3808,37 @@ describe("memory_resume", () => {
 });
 
 describe("memory_extract", () => {
+  it("strips legacy owner speaker prefixes from extracted values", async () => {
+    // Regression: the speaker-prefix matcher was narrowed to the generic `owner`
+    // role, so a legacy owner name survived into proposed status content even
+    // though resolveOwnerAliases() exists to preserve exactly those names.
+    const raw = await callTool("memory_extract", {
+      conversation_text: "Magnus: Current work: audit publication.",
+      project_hint: "munin-memory",
+    });
+    const serialized = JSON.stringify(parseToolResponse(raw));
+
+    expect(serialized).not.toContain("Magnus:");
+    expect(serialized).not.toContain("magnus:");
+  });
+
+  it("strips configured owner aliases from extracted values", async () => {
+    const previous = process.env.MUNIN_OWNER_ALIASES;
+    process.env.MUNIN_OWNER_ALIASES = "Ada Lovelace";
+    try {
+      const raw = await callTool("memory_extract", {
+        conversation_text: "Ada Lovelace: Current work: audit publication.",
+        project_hint: "munin-memory",
+      });
+      const serialized = JSON.stringify(parseToolResponse(raw));
+
+      expect(serialized).not.toContain("Ada Lovelace:");
+    } finally {
+      if (previous === undefined) delete process.env.MUNIN_OWNER_ALIASES;
+      else process.env.MUNIN_OWNER_ALIASES = previous;
+    }
+  });
+
   it("turns explicit decisions into proposed log entries", async () => {
     await callTool("memory_write", {
       namespace: "projects/grimnir",
