@@ -17,6 +17,13 @@ function makeScratch(): string {
   return dir;
 }
 
+/** The free-space preflight stats the source DB, so it must exist. */
+function makeDummyDb(dir: string): string {
+  const p = join(dir, "memory.db");
+  writeFileSync(p, "x".repeat(4096));
+  return p;
+}
+
 function writeExecutable(path: string, body: string): string {
   writeFileSync(path, body, { mode: 0o755 });
   return path;
@@ -59,7 +66,7 @@ describe("backup destination safety", () => {
     const result = spawnSync("bash", [backupScript], { env, encoding: "utf8" });
 
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain("MUNIN_BACKUP_DIR is required");
+    expect(result.stderr).toContain("no backup destination is configured");
   });
 
   it("fails closed when no mount root is explicitly configured", () => {
@@ -73,7 +80,7 @@ describe("backup destination safety", () => {
     const result = spawnSync("bash", [backupScript], { env, encoding: "utf8" });
 
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain("MUNIN_BACKUP_MOUNT is required");
+    expect(result.stderr).toContain("requires MUNIN_BACKUP_MOUNT");
   });
 
   it("fails before snapshotting when the configured mount is not active", () => {
@@ -136,6 +143,140 @@ describe("backup destination safety", () => {
     expect(result.stderr).toContain("must be a child of MUNIN_BACKUP_MOUNT");
   });
 
+  it("infers remote mode and pushes to the configured host", () => {
+    // Remote mode had no test coverage at all before the two destination models
+    // were unified: the deployed script hardcoded its host, so nothing exercised it.
+    const scratch = makeScratch();
+    const binDir = join(scratch, "bin");
+    const landed = join(scratch, "landed");
+    mkdirSync(binDir, { recursive: true });
+    mkdirSync(landed, { recursive: true });
+    stubSqlite3(binDir);
+
+    // Stub ssh/rsync as local filesystem operations against `landed`.
+    const sshLog = join(scratch, "ssh.log");
+    writeExecutable(
+      join(binDir, "fake-ssh"),
+      `#!/bin/bash\nhost="$1"; shift\necho "$host :: $*" >> "${sshLog}"\nif [[ "$*" == *"stat -c"* ]]; then\n  f=$(printf '%s' "$*" | sed -nE "s/.*'([^']*memory-[^']*\\.db)'.*/\\1/p" | head -1)\n  b=$(basename "$f")\n  wc -c < "${landed}/$b" 2>/dev/null | tr -d ' '\n  exit 0\nfi\nexit 0\n`,
+    );
+    writeExecutable(
+      join(binDir, "fake-rsync"),
+      `#!/bin/bash\nsrc="\${@: -2:1}"; dst="\${@: -1}"\ncp "$src" "${landed}/$(basename "$dst")"\n`,
+    );
+
+    const result = spawnSync("bash", [backupScript], {
+      env: {
+        ...process.env,
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HOME: scratch,
+        MUNIN_BACKUP_DB: makeDummyDb(scratch),
+        MUNIN_BACKUP_HOST: "backup@example.invalid",
+        MUNIN_BACKUP_REMOTE_DIR: "/srv/backups/munin",
+        MUNIN_SSH_BIN: join(binDir, "fake-ssh"),
+        MUNIN_RSYNC_BIN: join(binDir, "fake-rsync"),
+      },
+      encoding: "utf8",
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("mode=remote");
+    expect(spawnSync("ls", [landed], { encoding: "utf8" }).stdout).toMatch(/memory-\d{4}-\d{2}-\d{2}-\d{4}\.db/);
+  });
+
+  it("fails when the remote copy does not match the snapshot size", () => {
+    // rsync exiting 0 does not prove the expected bytes are readable at the
+    // destination under the expected name. Verify, do not trust the exit status.
+    const scratch = makeScratch();
+    const binDir = join(scratch, "bin");
+    mkdirSync(binDir, { recursive: true });
+    stubSqlite3(binDir);
+    writeExecutable(join(binDir, "fake-ssh"), `#!/bin/bash\nif [[ "$*" == *"stat -c"* ]]; then echo 1; fi\nexit 0\n`);
+    writeExecutable(join(binDir, "fake-rsync"), `#!/bin/bash\nexit 0\n`);
+
+    const result = spawnSync("bash", [backupScript], {
+      env: {
+        ...process.env,
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HOME: scratch,
+        MUNIN_BACKUP_DB: makeDummyDb(scratch),
+        MUNIN_BACKUP_HOST: "backup@example.invalid",
+        MUNIN_BACKUP_REMOTE_DIR: "/srv/backups/munin",
+        MUNIN_SSH_BIN: join(binDir, "fake-ssh"),
+        MUNIN_RSYNC_BIN: join(binDir, "fake-rsync"),
+      },
+      encoding: "utf8",
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("did not land intact");
+    expect(result.stderr).toContain("Retention was NOT run");
+  });
+
+  it("fails closed when the remote size probe returns non-numeric output", () => {
+    // GNU stat's `-f` means --file-system, so a BSD-style probe on a GNU host
+    // prints a filesystem report instead of failing. Comparing that against a
+    // byte count would compare garbage — demand a bare integer.
+    const scratch = makeScratch();
+    const binDir = join(scratch, "bin");
+    mkdirSync(binDir, { recursive: true });
+    stubSqlite3(binDir);
+    writeExecutable(
+      join(binDir, "fake-ssh"),
+      `#!/bin/bash\nif [[ "$*" == *"stat -c"* ]]; then echo "  File: \\"/srv\\"  ID: 0 Namelen: 255"; fi\nexit 0\n`,
+    );
+    writeExecutable(join(binDir, "fake-rsync"), `#!/bin/bash\nexit 0\n`);
+
+    const result = spawnSync("bash", [backupScript], {
+      env: {
+        ...process.env,
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HOME: scratch,
+        MUNIN_BACKUP_DB: makeDummyDb(scratch),
+        MUNIN_BACKUP_HOST: "backup@example.invalid",
+        MUNIN_BACKUP_REMOTE_DIR: "/srv/backups/munin",
+        MUNIN_SSH_BIN: join(binDir, "fake-ssh"),
+        MUNIN_RSYNC_BIN: join(binDir, "fake-rsync"),
+      },
+      encoding: "utf8",
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("did not land intact");
+    expect(result.stderr).toContain("Retention was NOT run");
+  });
+
+  it("rejects a remote mode that is missing its required configuration", () => {
+    const scratch = makeScratch();
+    const result = spawnSync("bash", [backupScript], {
+      env: {
+        ...process.env,
+        HOME: scratch,
+        MUNIN_BACKUP_DB: makeDummyDb(scratch),
+        MUNIN_BACKUP_MODE: "remote",
+      },
+      encoding: "utf8",
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("requires MUNIN_BACKUP_HOST");
+  });
+
+  it("rejects an unknown destination mode instead of guessing", () => {
+    const scratch = makeScratch();
+    const result = spawnSync("bash", [backupScript], {
+      env: { ...process.env, HOME: scratch, MUNIN_BACKUP_MODE: "nas" },
+      encoding: "utf8",
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("must be 'remote' or 'local'");
+  });
+
+  it("keeps rsync uncompressed — -z is a pessimisation on a fast LAN", () => {
+    // Pins the intent recorded in the script so it is not "tidied" back to -az.
+    const body = readFileSync(backupScript, "utf8");
+    expect(body).toMatch(/rsync[^\n]*-a\s/);
+    expect(body).not.toMatch(/\$RSYNC_BIN"?\s+-az/);
+  });
+
   it("loads the ops environment file where the explicit destination is configured", () => {
     expect(backupUnit).toContain("EnvironmentFile=-<ops-dir>/.env");
   });
@@ -171,7 +312,7 @@ exit 1
         ...process.env,
         PATH: `${binDir}:${process.env.PATH ?? ""}`,
         HOME: scratch,
-        MUNIN_BACKUP_DB: join(scratch, "memory.db"),
+        MUNIN_BACKUP_DB: makeDummyDb(scratch),
         MUNIN_BACKUP_DIR: dest,
         MUNIN_BACKUP_MOUNT: mount,
         MUNIN_MOUNTPOINT_BIN: mountpointBin,
@@ -216,7 +357,7 @@ exit 1
         ...process.env,
         PATH: `${binDir}:${process.env.PATH ?? ""}`,
         HOME: scratch,
-        MUNIN_BACKUP_DB: join(scratch, "memory.db"),
+        MUNIN_BACKUP_DB: makeDummyDb(scratch),
         MUNIN_BACKUP_DIR: dest,
         MUNIN_BACKUP_MOUNT: mount,
         MUNIN_MOUNTPOINT_BIN: mountpointBin,
@@ -249,7 +390,7 @@ exit 1
         ...process.env,
         PATH: `${binDir}:${process.env.PATH ?? ""}`,
         HOME: scratch,
-        MUNIN_BACKUP_DB: join(scratch, "memory.db"),
+        MUNIN_BACKUP_DB: makeDummyDb(scratch),
         MUNIN_BACKUP_DIR: join(mount, "escape"),
         MUNIN_BACKUP_MOUNT: mount,
         MUNIN_MOUNTPOINT_BIN: "true",

@@ -41,10 +41,12 @@ UNITS=(munin-backup.service munin-backup.timer munin-offsite.service munin-offsi
 #
 # Refuse instead, and say exactly what to do. Override deliberately with
 # MUNIN_OPS_ALLOW_MODEL_CHANGE=true once the host's .env matches the new model.
-backup_destination_model() {  # path → remote | local-mount | unknown | absent
+backup_destination_model() {  # path → dual | remote | local-mount | unknown | absent
   local f="$1"
   [[ -f "$f" ]] || { echo "absent"; return; }
-  if grep -qE '^[[:space:]]*NAS_HOST=' "$f"; then
+  if grep -q 'MUNIN_BACKUP_MODE' "$f"; then
+    echo "dual"          # supports both destinations, selected by configuration
+  elif grep -qE '^[[:space:]]*NAS_HOST=' "$f"; then
     echo "remote"
   elif grep -q 'MUNIN_BACKUP_MOUNT' "$f"; then
     echo "local-mount"
@@ -53,14 +55,50 @@ backup_destination_model() {  # path → remote | local-mount | unknown | absent
   fi
 }
 
+# A dual-mode script can serve either destination, but ONLY if this host is
+# actually configured for one. Installing it over a single-mode script whose
+# settings were compiled in — rather than present in the ops .env — would leave
+# the job with no destination and it would refuse to start every night. Check
+# the config before allowing that upgrade.
+ops_env_configures_a_destination() {
+  local env_file="${OPS_DIR}/.env"
+  [[ -f "$env_file" ]] || return 1
+  grep -qE '^[[:space:]]*(MUNIN_BACKUP_MODE|MUNIN_BACKUP_HOST|MUNIN_BACKUP_MOUNT)=' "$env_file"
+}
+
 echo "==> Installing operational scripts into ${OPS_DIR}/scripts (from ${REPO_DIR})"
 install -d -m 755 "${OPS_DIR}/scripts"
 for s in "${SCRIPTS[@]}"; do
   if [[ "$s" == "backup-to-nas.sh" ]]; then
     src_model=$(backup_destination_model "${REPO_DIR}/scripts/${s}")
     dst_model=$(backup_destination_model "${OPS_DIR}/scripts/${s}")
-    if [[ "$dst_model" != "absent" && "$dst_model" != "unknown" &&
-          "$src_model" != "unknown" && "$src_model" != "$dst_model" ]]; then
+    # Upgrading a single-mode deployment to the dual-mode script is allowed, but
+    # only once this host's ops .env names a destination — otherwise the new
+    # script has nothing to write to and refuses to start every night.
+    if [[ "$src_model" == "dual" && "$dst_model" != "dual" && "$dst_model" != "absent" ]]; then
+      if ! ops_env_configures_a_destination; then
+        {
+          echo "ERROR: this host is not configured for the dual-mode backup script."
+          echo "       deployed: ${dst_model}   (destination was compiled into the script)"
+          echo "       incoming: dual           (destination comes from the ops .env)"
+          echo
+          echo "       Add ONE of these to ${OPS_DIR}/.env first:"
+          echo "         MUNIN_BACKUP_MODE=remote"
+          echo "         MUNIN_BACKUP_HOST=<user@host>"
+          echo "         MUNIN_BACKUP_REMOTE_DIR=<absolute path on that host>"
+          echo "       or:"
+          echo "         MUNIN_BACKUP_MODE=local"
+          echo "         MUNIN_BACKUP_MOUNT=<active mountpoint>"
+          echo "         MUNIN_BACKUP_DIR=<a strict child of it>"
+          echo
+          echo "       Nothing has been installed; the deployed backup is untouched."
+        } >&2
+        exit 1
+      fi
+      echo "    backup-to-nas.sh: ${dst_model} -> dual (ops .env names a destination)"
+    elif [[ "$dst_model" != "absent" && "$dst_model" != "unknown" &&
+            "$src_model" != "unknown" && "$src_model" != "dual" &&
+            "$src_model" != "$dst_model" ]]; then
       if [[ "${MUNIN_OPS_ALLOW_MODEL_CHANGE:-}" != "true" ]]; then
         {
           echo "ERROR: refusing to change this host's backup destination model."

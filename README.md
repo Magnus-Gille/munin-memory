@@ -244,12 +244,24 @@ over an existing Git checkout, and does not copy `.env` or database files. Revie
 the service user, paths, reverse-proxy trust boundary, and backup location for your
 host before enabling it.
 
-The optional `munin-backup.timer` intentionally has no local-disk destination
-default. Before enabling it, set `MUNIN_BACKUP_MOUNT` to the mounted filesystem
-root and `MUNIN_BACKUP_DIR` to an absolute child directory in
-`~/munin-ops/.env`. The job verifies the mount before snapshotting or creating
-directories, so a missing mount cannot silently redirect backups to the system
-disk.
+The optional `munin-backup.timer` intentionally has no destination default. It
+supports two modes, configured in `~/munin-ops/.env`, and refuses to start if
+neither is set rather than writing nowhere:
+
+- **`remote`** — push to another host over ssh/rsync. Set `MUNIN_BACKUP_HOST` and
+  `MUNIN_BACKUP_REMOTE_DIR`. The transfer is verified by comparing the
+  destination's byte count against the snapshot, since `rsync` exiting `0` does
+  not prove the bytes are readable there. Retention only runs after that check
+  passes, so a failed transfer never prunes existing snapshots.
+- **`local`** — write to a mounted volume. Set `MUNIN_BACKUP_MOUNT` to the
+  filesystem root and `MUNIN_BACKUP_DIR` to an absolute child. The mount is
+  verified before *and* after each write, symlinked path components are rejected,
+  and the written file's filesystem identity is confirmed — so a dropped mount
+  cannot silently redirect backups to the system disk.
+
+`scripts/install-ops.sh` refuses to install a script whose destination model
+differs from what the host is configured for, because that failure would
+otherwise surface only as a missing backup days later.
 
 For the broader appliance direction, the project now distinguishes between `full-node` and `zero-appliance` deployments. A Pi Zero 2 W is being treated as a constrained profile that needs explicit hardware validation rather than assumed feature parity. See [docs/appliance-profiles.md](docs/appliance-profiles.md).
 
