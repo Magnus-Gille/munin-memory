@@ -1209,13 +1209,14 @@ export function syncCommitmentsForEntry(
   derivedCommitments: DerivedCommitmentInput[],
 ): void {
   const source = db
-    .prepare("SELECT id, namespace, key, entry_type, classification FROM entries WHERE id = ?")
+    .prepare("SELECT id, namespace, key, entry_type, classification, updated_at FROM entries WHERE id = ?")
     .get(entryId) as {
       id: string;
       namespace: string;
       key: string | null;
       entry_type: EntryType;
       classification: string | null;
+      updated_at: string;
     } | undefined;
 
   if (!source) return;
@@ -1223,7 +1224,7 @@ export function syncCommitmentsForEntry(
 
   const existingRows = db
     .prepare(
-      `SELECT id, source_type, source_fingerprint, text, due_at, status, updated_at
+      `SELECT id, source_type, source_fingerprint, text, due_at, status, confidence, updated_at
        FROM commitments
        WHERE source_entry_id = ?`,
     )
@@ -1234,6 +1235,7 @@ export function syncCommitmentsForEntry(
       text: string;
       due_at: string | null;
       status: CommitmentStatus;
+      confidence: number;
       updated_at: string;
     }>;
 
@@ -1282,14 +1284,21 @@ export function syncCommitmentsForEntry(
         // rejuvenate confidence. A resolved row reappearing is a real
         // reactivation and still follows the refresh path.
         if (!semanticRevision && existing.status === "open") {
+          const recomputedConfidence = Number.isFinite(Date.parse(existing.updated_at))
+            ? computeCommitmentConfidence(
+                existing.source_type,
+                existing.updated_at,
+                existing.due_at !== null,
+                existing.text,
+              )
+            : existing.confidence;
+          // Legacy rows may have inflated bases whose true semantic history is
+          // unrecoverable, so deliberately avoid a migration/backfill: min()
+          // gives immediate monotonicity and lets valid bases converge as they age.
+          const preservedConfidence = Math.min(existing.confidence, recomputedConfidence);
           preserveCommitmentDerivation.run(
             source.namespace,
-            computeCommitmentConfidence(
-              existing.source_type,
-              existing.updated_at,
-              existing.due_at !== null,
-              existing.text,
-            ),
+            preservedConfidence,
             sourceClassification,
             existing.id,
           );
@@ -1319,7 +1328,7 @@ export function syncCommitmentsForEntry(
         commitment.dueAt ?? null,
         commitment.confidence,
         now,
-        now,
+        source.updated_at,
         sourceClassification,
       );
     }
