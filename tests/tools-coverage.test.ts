@@ -1444,6 +1444,9 @@ describe("memory_commitments edges", () => {
       namespace: "projects/commit-lowconf",
       content: "Will draft the Summary notes by 2099-06-01.",
     }));
+    // memory_log eagerly derives commitments. Remove that fresh derivative so
+    // the classification pass below first derives it from the aged source.
+    db.prepare("DELETE FROM commitments WHERE source_entry_id = ?").run(lowConf.id);
     backdateEntry(lowConf.id, 70);
     // Completed recently: tracked next step that later disappears resolves as done.
     await callTool("memory_update_status", {

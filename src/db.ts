@@ -1171,11 +1171,18 @@ export function syncCommitmentsForEntry(
 
   const existingRows = db
     .prepare(
-      `SELECT id, source_type, source_fingerprint, status
+      `SELECT id, source_type, source_fingerprint, text, due_at, status
        FROM commitments
        WHERE source_entry_id = ?`,
     )
-    .all(entryId) as Array<{ id: string; source_type: string; source_fingerprint: string; status: CommitmentStatus }>;
+    .all(entryId) as Array<{
+      id: string;
+      source_type: string;
+      source_fingerprint: string;
+      text: string;
+      due_at: string | null;
+      status: CommitmentStatus;
+    }>;
 
   const existingByFingerprint = new Map(existingRows.map((row) => [row.source_fingerprint, row]));
   const nextFingerprints = new Set(derivedCommitments.map((commitment) => commitment.fingerprint));
@@ -1189,6 +1196,11 @@ export function syncCommitmentsForEntry(
   const updateCommitment = db.prepare(
     `UPDATE commitments
      SET namespace = ?, source_type = ?, text = ?, due_at = ?, confidence = ?, status = 'open', updated_at = ?, resolved_at = NULL, source_classification = ?
+     WHERE id = ?`,
+  );
+  const preserveCommitmentDerivation = db.prepare(
+    `UPDATE commitments
+     SET namespace = ?, source_classification = ?
      WHERE id = ?`,
   );
   const resolveCommitment = db.prepare(
@@ -1206,11 +1218,30 @@ export function syncCommitmentsForEntry(
     for (const commitment of derivedCommitments) {
       const existing = existingByFingerprint.get(commitment.fingerprint);
       if (existing) {
+        const dueAt = commitment.dueAt ?? null;
+        const semanticRevision = existing.source_type !== commitment.sourceType
+          || existing.text !== commitment.text
+          || existing.due_at !== dueAt;
+
+        // Reconciliation runs on every memory_commitments read. Preserve the
+        // original recency-derived confidence and updated_at while the actual
+        // commitment identity is unchanged; metadata-only touches to the source
+        // entry (such as valid_until) are not semantic revisions. A resolved row
+        // reappearing is a real reactivation and still follows the refresh path.
+        if (!semanticRevision && existing.status === "open") {
+          preserveCommitmentDerivation.run(
+            source.namespace,
+            sourceClassification,
+            existing.id,
+          );
+          continue;
+        }
+
         updateCommitment.run(
           source.namespace,
           commitment.sourceType,
           commitment.text,
-          commitment.dueAt ?? null,
+          dueAt,
           commitment.confidence,
           now,
           sourceClassification,

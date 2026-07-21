@@ -927,7 +927,7 @@ describe("memory_update_status valid_until (#217)", () => {
     expect(after.valid_until).toBe("2027-08-01T00:00:00.000Z");
   });
 
-  it("does not resync commitments for a valid_until-only update", async () => {
+  it("preserves commitment confidence through post-expiry sync and refreshes it on a real text change", async () => {
     await callTool("memory_update_status", {
       namespace: "projects/status-expiry-commitment",
       phase: "Active",
@@ -937,6 +937,12 @@ describe("memory_update_status valid_until (#217)", () => {
       lifecycle: "active",
     });
     db.prepare(
+      `DELETE FROM commitments
+       WHERE source_entry_id = (
+         SELECT id FROM entries WHERE namespace = ? AND key = 'status'
+       )`,
+    ).run("projects/status-expiry-commitment");
+    db.prepare(
       "UPDATE entries SET updated_at = '2020-01-01T00:00:00.000Z' WHERE namespace = ? AND key = 'status'",
     ).run("projects/status-expiry-commitment");
 
@@ -944,7 +950,6 @@ describe("memory_update_status valid_until (#217)", () => {
     // second sync after the expiry touch materially changes confidence.
     await callTool("memory_commitments", {
       namespace: "projects/status-expiry-commitment",
-      include_resolved: true,
     });
     const before = listCommitments(db, {
       namespace: "projects/status-expiry-commitment",
@@ -958,6 +963,13 @@ describe("memory_update_status valid_until (#217)", () => {
       valid_until: "2027-08-01T00:00:00Z",
     });
 
+    // The read tool performs its own shared sync pass. An expiry-only fast-path
+    // is insufficient if that later reconciliation derives confidence from the
+    // source row's metadata-only updated_at touch.
+    await callTool("memory_commitments", {
+      namespace: "projects/status-expiry-commitment",
+    });
+
     const after = listCommitments(db, {
       namespace: "projects/status-expiry-commitment",
       includeResolved: true,
@@ -968,6 +980,24 @@ describe("memory_update_status valid_until (#217)", () => {
       confidence: before!.confidence,
       status: before!.status,
     });
+
+    await callTool("memory_update_status", {
+      namespace: "projects/status-expiry-commitment",
+      next_steps: ["Send the revised release report by 2027-07-15"],
+    });
+    await callTool("memory_commitments", {
+      namespace: "projects/status-expiry-commitment",
+      include_resolved: true,
+    });
+
+    const refreshed = listCommitments(db, {
+      namespace: "projects/status-expiry-commitment",
+      includeResolved: true,
+      limit: 10,
+    }).find((row) => row.text === "Send the revised release report by 2027-07-15");
+    expect(refreshed).toBeDefined();
+    expect(refreshed!.status).toBe("open");
+    expect(refreshed!.confidence).toBeGreaterThan(before!.confidence);
   });
 
   it("updates only valid_until on a legacy free-form status without migrating it", async () => {

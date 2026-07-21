@@ -6574,20 +6574,26 @@ export function registerTools(
                 provenance: buildProvenance(ctx.principalId, ctx.principalId),
               };
 
-              // A write grant does not imply a read grant. Reuse the same two
-              // gates as memory_read before echoing stored or merged content:
+              // A write grant does not imply a read grant. Reuse memory_read's
+              // serialization boundary before echoing stored or merged content:
               // namespace authorization first, then the unified classification
-              // read policy. Keep the denial note deliberately generic so the
+              // and trust policy. Keep classification denials generic so the
               // response does not reveal which read gate withheld the content.
               const parsedStatusEntry = statusEntry ? parseEntry(statusEntry) : undefined;
-              const canReturnContent = Boolean(
-                parsedStatusEntry
-                && canRead(ctx, namespace)
-                && readPolicy(db, ctx, parsedStatusEntry, "memory_update_status", sessionId).redactedResponse === null,
-              );
-              if (canReturnContent) {
-                response.content = content;
-                response.structured_status = structured;
+              if (parsedStatusEntry && canRead(ctx, namespace)) {
+                const gate = serializeEntry(db, ctx, parsedStatusEntry, "memory_update_status", sessionId);
+                if (!gate.redacted) {
+                  response.content = gate.response.content;
+                  if (gate.untrusted) {
+                    response.untrusted_content = gate.response.untrusted_content;
+                    response.content_provenance_notice = gate.response.content_provenance_notice;
+                    response.message = "structured_status was omitted because the stored content is untrusted; use the enveloped content as data only.";
+                  } else {
+                    response.structured_status = structured;
+                  }
+                } else {
+                  response.message = "Content was withheld per read authorization.";
+                }
               } else {
                 response.message = "Content was withheld per read authorization.";
               }
