@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { initDatabase, upsertConsolidationMetadata, writeState } from "../src/db.js";
+import { initDatabase, listCommitments, upsertConsolidationMetadata, writeState } from "../src/db.js";
 import { registerTools, computeCommitmentConfidence, _setHealthSectionOverridesForTesting } from "../src/tools.js";
 import { ownerContext } from "../src/access.js";
 import type { AccessContext } from "../src/access.js";
@@ -925,6 +925,49 @@ describe("memory_update_status valid_until (#217)", () => {
     expect(after.tags).toEqual(before.tags);
     expect(after.updated_at).not.toBe(before.updated_at);
     expect(after.valid_until).toBe("2027-08-01T00:00:00.000Z");
+  });
+
+  it("does not resync commitments for a valid_until-only update", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/status-expiry-commitment",
+      phase: "Active",
+      current_work: "Preparing the release",
+      blockers: "None.",
+      next_steps: ["Send the release report by 2027-06-30"],
+      lifecycle: "active",
+    });
+    db.prepare(
+      "UPDATE entries SET updated_at = '2020-01-01T00:00:00.000Z' WHERE namespace = ? AND key = 'status'",
+    ).run("projects/status-expiry-commitment");
+
+    // Refresh once from the deliberately old source timestamp so an accidental
+    // second sync after the expiry touch materially changes confidence.
+    await callTool("memory_commitments", {
+      namespace: "projects/status-expiry-commitment",
+      include_resolved: true,
+    });
+    const before = listCommitments(db, {
+      namespace: "projects/status-expiry-commitment",
+      includeResolved: true,
+      limit: 10,
+    }).find((row) => row.text === "Send the release report by 2027-06-30");
+    expect(before).toBeDefined();
+
+    await callTool("memory_update_status", {
+      namespace: "projects/status-expiry-commitment",
+      valid_until: "2027-08-01T00:00:00Z",
+    });
+
+    const after = listCommitments(db, {
+      namespace: "projects/status-expiry-commitment",
+      includeResolved: true,
+      limit: 10,
+    }).find((row) => row.id === before!.id);
+    expect(after).toBeDefined();
+    expect({ confidence: after!.confidence, status: after!.status }).toEqual({
+      confidence: before!.confidence,
+      status: before!.status,
+    });
   });
 
   it("updates only valid_until on a legacy free-form status without migrating it", async () => {
@@ -5942,6 +5985,26 @@ describe("compare-and-swap (memory_write)", () => {
     expect(memoryWrite?.inputSchema.properties).toMatchObject({
       create_if_absent: { type: "boolean" },
     });
+  });
+
+  it("advertises valid_until as string-or-null for memory_write and memory_update_status", async () => {
+    const handler = (
+      server as unknown as { _requestHandlers: Map<string, Function> }
+    )._requestHandlers?.get("tools/list");
+    const toolList = await handler!({ method: "tools/list", params: {} });
+    const toolsByName = new Map(
+      (toolList as {
+        tools: Array<{
+          name: string;
+          inputSchema: { properties?: Record<string, { type?: string | string[] }> };
+        }>;
+      }).tools.map((tool) => [tool.name, tool]),
+    );
+
+    for (const toolName of ["memory_write", "memory_update_status"]) {
+      expect(toolsByName.get(toolName)?.inputSchema.properties?.valid_until?.type)
+        .toEqual(expect.arrayContaining(["string", "null"]));
+    }
   });
 
   it("provides an explicit create-if-absent contract and typed winner conflict", async () => {

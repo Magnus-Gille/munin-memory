@@ -3812,9 +3812,9 @@ const TOOL_DEFINITIONS = [
             "Optional owner-only escape hatch for writes below the namespace floor.",
         },
         valid_until: {
-          type: "string",
+          type: ["string", "null"],
           description:
-            "Optional. ISO 8601 timestamp after which this state entry is treated as expired in broad retrieval, while remaining available to direct read/get.",
+            "Optional. ISO 8601 timestamp after which this state entry is treated as expired in broad retrieval, while remaining available to direct read/get. Explicit null clears an existing expiry.",
         },
         expected_updated_at: {
           type: "string",
@@ -3878,7 +3878,7 @@ const TOOL_DEFINITIONS = [
           description: "Optional. Sets the tracked lifecycle tag while preserving non-lifecycle tags.",
         },
         valid_until: {
-          type: "string",
+          type: ["string", "null"],
           description:
             "Optional. ISO 8601 timestamp sets a soft-expiry review horizon; explicit null clears it and omission preserves the existing value. Expired statuses remain available to direct read/get, are surfaced by memory_attention when include_expiring is enabled, and are hidden from broad search by default.",
         },
@@ -6558,11 +6558,11 @@ export function registerTools(
               }
 
               const statusEntry = result.id ? getById(db, result.id) : undefined;
-              if (statusEntry) {
+              if (statusEntry && !isValidUntilOnlyUpdate) {
                 syncCommitmentsForEntry(db, statusEntry.id, extractCommitmentsFromEntry(statusEntry, getResolvedNamespaces(db), resolveTrackedPatterns(db, ctx)));
               }
 
-              return okResult("update_status", {
+              const response: Record<string, unknown> = {
                 status: result.status,
                 id: result.id,
                 namespace,
@@ -6570,11 +6570,29 @@ export function registerTools(
                 updated_at: result.updated_at,
                 valid_until: statusEntry?.valid_until ?? null,
                 classification: result.classification,
-                content,
-                structured_status: structured,
                 warnings: warnings.length > 0 ? warnings : undefined,
                 provenance: buildProvenance(ctx.principalId, ctx.principalId),
-              });
+              };
+
+              // A write grant does not imply a read grant. Reuse the same two
+              // gates as memory_read before echoing stored or merged content:
+              // namespace authorization first, then the unified classification
+              // read policy. Keep the denial note deliberately generic so the
+              // response does not reveal which read gate withheld the content.
+              const parsedStatusEntry = statusEntry ? parseEntry(statusEntry) : undefined;
+              const canReturnContent = Boolean(
+                parsedStatusEntry
+                && canRead(ctx, namespace)
+                && readPolicy(db, ctx, parsedStatusEntry, "memory_update_status", sessionId).redactedResponse === null,
+              );
+              if (canReturnContent) {
+                response.content = content;
+                response.structured_status = structured;
+              } else {
+                response.message = "Content was withheld per read authorization.";
+              }
+
+              return okResult("update_status", response);
             };
             return handleMemoryUpdateStatus();
           }
