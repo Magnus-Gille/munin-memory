@@ -50,6 +50,7 @@ import {
   syncCommitmentsForEntry,
   type DerivedCommitmentInput,
   type CommitmentRow,
+  computeCommitmentConfidence,
   getOtherKeysInNamespace,
   getCompletedTaskNamespaces,
   getResolvedNamespaces,
@@ -2795,58 +2796,6 @@ function isForwardLookingDatedCommitment(segment: string): boolean {
   if (!COMMITMENT_ACTION_VERB.test(segment)) return false;
   if (looksLikeRetrospectiveCompletion(segment)) return false;
   return COMMITMENT_FORWARD_CUE.test(segment) || COMMITMENT_IMPERATIVE_PREFIX.test(segment);
-}
-
-export function computeCommitmentConfidence(
-  sourceType: string,
-  entryUpdatedAt: string,
-  hasDueDate: boolean,
-  text?: string,
-): number {
-  // Base score by source type
-  // tracked_next_step: from status next-steps sections (most reliable)
-  // explicit_commitment: explicit commitment phrases in logs
-  // explicit_dated_commitment / forward_looking_dated / unknown: implicit mentions
-  const baseByType: Record<string, number> = {
-    tracked_next_step: 0.90,
-    explicit_commitment: 0.80,
-    explicit_dated_commitment: 0.70,
-    forward_looking_dated: 0.70,
-  };
-  const baseScore = baseByType[sourceType] ?? 0.70;
-
-  // Staleness decay multiplier (discrete bands)
-  const daysSinceUpdate =
-    (Date.now() - new Date(entryUpdatedAt).getTime()) / (1000 * 60 * 60 * 24);
-  let decayMultiplier: number;
-  if (daysSinceUpdate >= 60) {
-    decayMultiplier = 0.5;
-  } else if (daysSinceUpdate >= 30) {
-    decayMultiplier = 0.7;
-  } else {
-    decayMultiplier = 1.0;
-  }
-
-  // Specificity modifier (additive)
-  let specificityModifier = 0;
-  if (hasDueDate) {
-    specificityModifier += 0.05;
-  }
-  if (text) {
-    // Specific names: detect capitalized proper nouns (not at sentence start)
-    const hasSpecificNames = /(?<!\.\s{0,5}|\n)\b[A-Z][a-z]{2,}\b/.test(text);
-    if (hasSpecificNames) {
-      specificityModifier += 0.03;
-    }
-    // Vague terms reduce confidence
-    const hasVagueTerms = /\b(?:eventually|someday|maybe|perhaps|sometime|at some point|when possible)\b/i.test(text);
-    if (hasVagueTerms) {
-      specificityModifier -= 0.05;
-    }
-  }
-
-  const raw = baseScore * decayMultiplier + specificityModifier;
-  return Math.min(1.0, Math.max(0.0, raw));
 }
 
 const TERMINAL_LIFECYCLE_TAGS = new Set(["completed", "archived", "stopped", "failed"]);

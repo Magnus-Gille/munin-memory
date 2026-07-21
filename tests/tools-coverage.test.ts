@@ -81,6 +81,7 @@ function isoDatePlusDays(days: number): string {
 function backdateEntry(entryId: string, daysAgo: number) {
   const ts = new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000).toISOString();
   db.prepare("UPDATE entries SET created_at = ?, updated_at = ? WHERE id = ?").run(ts, ts, entryId);
+  return ts;
 }
 
 function familyCtx(rules: AccessContext["accessibleNamespaces"] = []): AccessContext {
@@ -1439,15 +1440,15 @@ describe("memory_commitments edges", () => {
       namespace: "projects/commit-blocked",
       content: "We agreed to: update the Docs site soon.",
     });
-    // Low confidence: stale source entry decays confidence below 0.60.
+    // Low confidence: an eagerly derived commitment decays from its stored
+    // semantic-revision timestamp once the source becomes stale.
     const lowConf = parseToolResponse(await callTool("memory_log", {
       namespace: "projects/commit-lowconf",
       content: "Will draft the Summary notes by 2099-06-01.",
     }));
-    // memory_log eagerly derives commitments. Remove that fresh derivative so
-    // the classification pass below first derives it from the aged source.
-    db.prepare("DELETE FROM commitments WHERE source_entry_id = ?").run(lowConf.id);
-    backdateEntry(lowConf.id, 70);
+    const lowConfSemanticRevision = backdateEntry(lowConf.id, 70);
+    db.prepare("UPDATE commitments SET updated_at = ? WHERE source_entry_id = ?")
+      .run(lowConfSemanticRevision, lowConf.id);
     // Completed recently: tracked next step that later disappears resolves as done.
     await callTool("memory_update_status", {
       namespace: "projects/commit-done",

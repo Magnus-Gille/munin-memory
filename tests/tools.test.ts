@@ -2,8 +2,14 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { initDatabase, listCommitments, upsertConsolidationMetadata, writeState } from "../src/db.js";
-import { registerTools, computeCommitmentConfidence, _setHealthSectionOverridesForTesting } from "../src/tools.js";
+import {
+  computeCommitmentConfidence,
+  initDatabase,
+  listCommitments,
+  upsertConsolidationMetadata,
+  writeState,
+} from "../src/db.js";
+import { registerTools, _setHealthSectionOverridesForTesting } from "../src/tools.js";
 import { ownerContext } from "../src/access.js";
 import type { AccessContext } from "../src/access.js";
 import { _setApiKey, _consolidationConfig, resetConsolidationCircuitBreaker, getConsolidationHealth, _resetHealthState } from "../src/consolidation.js";
@@ -927,7 +933,28 @@ describe("memory_update_status valid_until (#217)", () => {
     expect(after.valid_until).toBe("2027-08-01T00:00:00.000Z");
   });
 
-  it("preserves commitment confidence through post-expiry sync and refreshes it on a real text change", async () => {
+  it("recomputes an eager derivative into at_risk after its semantic revision becomes stale", async () => {
+    const written = parseToolResponse(await callTool("memory_log", {
+      namespace: "projects/eager-stale-commitment",
+      content: "Will draft the Summary notes by 2099-06-01.",
+    })) as { id: string };
+    const semanticRevision = new Date(Date.now() - 70 * 24 * 60 * 60 * 1000).toISOString();
+    db.prepare("UPDATE entries SET created_at = ?, updated_at = ? WHERE id = ?")
+      .run(semanticRevision, semanticRevision, written.id);
+    db.prepare("UPDATE commitments SET updated_at = ? WHERE source_entry_id = ?")
+      .run(semanticRevision, written.id);
+
+    const result = parseToolResponse(await callTool("memory_commitments", {
+      namespace: "projects/eager-stale-commitment",
+    })) as { at_risk: Array<{ confidence: number; reason: string; text: string }> };
+    const stale = result.at_risk.find((item) => item.text.includes("Summary notes"));
+
+    expect(stale).toBeDefined();
+    expect(stale!.confidence).toBeLessThan(0.60);
+    expect(stale!.reason).toContain("Low confidence");
+  });
+
+  it("does not increase confidence or bump the semantic revision after a valid_until-only touch", async () => {
     await callTool("memory_update_status", {
       namespace: "projects/status-expiry-commitment",
       phase: "Active",
@@ -936,21 +963,17 @@ describe("memory_update_status valid_until (#217)", () => {
       next_steps: ["Send the release report by 2027-06-30"],
       lifecycle: "active",
     });
+    const semanticRevision = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000).toISOString();
     db.prepare(
-      `DELETE FROM commitments
+      "UPDATE entries SET updated_at = ? WHERE namespace = ? AND key = 'status'",
+    ).run(semanticRevision, "projects/status-expiry-commitment");
+    db.prepare(
+      `UPDATE commitments SET updated_at = ?
        WHERE source_entry_id = (
          SELECT id FROM entries WHERE namespace = ? AND key = 'status'
        )`,
-    ).run("projects/status-expiry-commitment");
-    db.prepare(
-      "UPDATE entries SET updated_at = '2020-01-01T00:00:00.000Z' WHERE namespace = ? AND key = 'status'",
-    ).run("projects/status-expiry-commitment");
+    ).run(semanticRevision, "projects/status-expiry-commitment");
 
-    // Refresh once from the deliberately old source timestamp so an accidental
-    // second sync after the expiry touch materially changes confidence.
-    await callTool("memory_commitments", {
-      namespace: "projects/status-expiry-commitment",
-    });
     const before = listCommitments(db, {
       namespace: "projects/status-expiry-commitment",
       includeResolved: true,
@@ -976,28 +999,57 @@ describe("memory_update_status valid_until (#217)", () => {
       limit: 10,
     }).find((row) => row.id === before!.id);
     expect(after).toBeDefined();
-    expect({ confidence: after!.confidence, status: after!.status }).toEqual({
-      confidence: before!.confidence,
-      status: before!.status,
+    expect(after!.confidence).toBeLessThan(before!.confidence);
+    expect(after!.updated_at).toBe(semanticRevision);
+    expect(after!.status).toBe(before!.status);
+  });
+
+  it("refreshes commitment confidence upward after a real text change", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/status-semantic-refresh",
+      phase: "Active",
+      current_work: "Preparing the release",
+      blockers: "None.",
+      next_steps: ["Send the release report by 2027-06-30"],
+      lifecycle: "active",
     });
+    const semanticRevision = new Date(Date.now() - 70 * 24 * 60 * 60 * 1000).toISOString();
+    db.prepare(
+      "UPDATE entries SET updated_at = ? WHERE namespace = ? AND key = 'status'",
+    ).run(semanticRevision, "projects/status-semantic-refresh");
+    db.prepare(
+      `UPDATE commitments SET updated_at = ?
+       WHERE source_entry_id = (
+         SELECT id FROM entries WHERE namespace = ? AND key = 'status'
+       )`,
+    ).run(semanticRevision, "projects/status-semantic-refresh");
+    await callTool("memory_commitments", {
+      namespace: "projects/status-semantic-refresh",
+    });
+    const stale = listCommitments(db, {
+      namespace: "projects/status-semantic-refresh",
+      includeResolved: true,
+      limit: 10,
+    }).find((row) => row.text === "Send the release report by 2027-06-30");
+    expect(stale).toBeDefined();
 
     await callTool("memory_update_status", {
-      namespace: "projects/status-expiry-commitment",
+      namespace: "projects/status-semantic-refresh",
       next_steps: ["Send the revised release report by 2027-07-15"],
     });
     await callTool("memory_commitments", {
-      namespace: "projects/status-expiry-commitment",
+      namespace: "projects/status-semantic-refresh",
       include_resolved: true,
     });
 
     const refreshed = listCommitments(db, {
-      namespace: "projects/status-expiry-commitment",
+      namespace: "projects/status-semantic-refresh",
       includeResolved: true,
       limit: 10,
     }).find((row) => row.text === "Send the revised release report by 2027-07-15");
     expect(refreshed).toBeDefined();
     expect(refreshed!.status).toBe("open");
-    expect(refreshed!.confidence).toBeGreaterThan(before!.confidence);
+    expect(refreshed!.confidence).toBeGreaterThan(stale!.confidence);
   });
 
   it("updates only valid_until on a legacy free-form status without migrating it", async () => {

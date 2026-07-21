@@ -1126,6 +1126,58 @@ export interface DerivedCommitmentInput {
   confidence: number;
 }
 
+export function computeCommitmentConfidence(
+  sourceType: string,
+  semanticRevisionAt: string,
+  hasDueDate: boolean,
+  text?: string,
+): number {
+  // Base score by source type
+  // tracked_next_step: from status next-steps sections (most reliable)
+  // explicit_commitment: explicit commitment phrases in logs
+  // explicit_dated_commitment / forward_looking_dated / unknown: implicit mentions
+  const baseByType: Record<string, number> = {
+    tracked_next_step: 0.90,
+    explicit_commitment: 0.80,
+    explicit_dated_commitment: 0.70,
+    forward_looking_dated: 0.70,
+  };
+  const baseScore = baseByType[sourceType] ?? 0.70;
+
+  // Staleness decay multiplier (discrete bands)
+  const daysSinceUpdate =
+    (Date.now() - new Date(semanticRevisionAt).getTime()) / (1000 * 60 * 60 * 24);
+  let decayMultiplier: number;
+  if (daysSinceUpdate >= 60) {
+    decayMultiplier = 0.5;
+  } else if (daysSinceUpdate >= 30) {
+    decayMultiplier = 0.7;
+  } else {
+    decayMultiplier = 1.0;
+  }
+
+  // Specificity modifier (additive)
+  let specificityModifier = 0;
+  if (hasDueDate) {
+    specificityModifier += 0.05;
+  }
+  if (text) {
+    // Specific names: detect capitalized proper nouns (not at sentence start)
+    const hasSpecificNames = /(?<!\.\s{0,5}|\n)\b[A-Z][a-z]{2,}\b/.test(text);
+    if (hasSpecificNames) {
+      specificityModifier += 0.03;
+    }
+    // Vague terms reduce confidence
+    const hasVagueTerms = /\b(?:eventually|someday|maybe|perhaps|sometime|at some point|when possible)\b/i.test(text);
+    if (hasVagueTerms) {
+      specificityModifier -= 0.05;
+    }
+  }
+
+  const raw = baseScore * decayMultiplier + specificityModifier;
+  return Math.min(1.0, Math.max(0.0, raw));
+}
+
 export interface CommitmentRow {
   id: string;
   namespace: string;
@@ -1171,7 +1223,7 @@ export function syncCommitmentsForEntry(
 
   const existingRows = db
     .prepare(
-      `SELECT id, source_type, source_fingerprint, text, due_at, status
+      `SELECT id, source_type, source_fingerprint, text, due_at, status, updated_at
        FROM commitments
        WHERE source_entry_id = ?`,
     )
@@ -1182,6 +1234,7 @@ export function syncCommitmentsForEntry(
       text: string;
       due_at: string | null;
       status: CommitmentStatus;
+      updated_at: string;
     }>;
 
   const existingByFingerprint = new Map(existingRows.map((row) => [row.source_fingerprint, row]));
@@ -1200,7 +1253,7 @@ export function syncCommitmentsForEntry(
   );
   const preserveCommitmentDerivation = db.prepare(
     `UPDATE commitments
-     SET namespace = ?, source_classification = ?
+     SET namespace = ?, confidence = ?, source_classification = ?
      WHERE id = ?`,
   );
   const resolveCommitment = db.prepare(
@@ -1223,14 +1276,20 @@ export function syncCommitmentsForEntry(
           || existing.text !== commitment.text
           || existing.due_at !== dueAt;
 
-        // Reconciliation runs on every memory_commitments read. Preserve the
-        // original recency-derived confidence and updated_at while the actual
-        // commitment identity is unchanged; metadata-only touches to the source
-        // entry (such as valid_until) are not semantic revisions. A resolved row
-        // reappearing is a real reactivation and still follows the refresh path.
+        // Reconciliation runs on every memory_commitments read. Recompute decay
+        // from the commitment's stored semantic-revision timestamp without
+        // bumping it; metadata-only source touches (such as valid_until) cannot
+        // rejuvenate confidence. A resolved row reappearing is a real
+        // reactivation and still follows the refresh path.
         if (!semanticRevision && existing.status === "open") {
           preserveCommitmentDerivation.run(
             source.namespace,
+            computeCommitmentConfidence(
+              existing.source_type,
+              existing.updated_at,
+              existing.due_at !== null,
+              existing.text,
+            ),
             sourceClassification,
             existing.id,
           );
