@@ -21,6 +21,13 @@ function activeLines(unit: string): string[] {
     .filter((line) => line !== "" && !line.startsWith("#"));
 }
 
+/** Every value assigned to a directive, in file order. */
+function directiveValues(unit: string, key: string): string[] {
+  return activeLines(unit)
+    .filter((line) => line.startsWith(`${key}=`))
+    .map((line) => line.slice(key.length + 1).trim());
+}
+
 describe("systemd deployment-unit contract", () => {
   it("keeps the public service file as a renderable template", () => {
     expect(publicTemplate).toContain("User=<user>");
@@ -85,6 +92,41 @@ describe("systemd deployment-unit contract", () => {
     // widening the sandbox fails instead of passing a substring check.
     expect(activeLines(publicTemplate).filter((l) => l.startsWith("ReadWritePaths="))).toHaveLength(1);
     expect(activeLines(fleetUnit).filter((l) => l.startsWith("ReadWritePaths="))).toHaveLength(1);
+  });
+
+  it("pins the effective value of every singleton hardening directive", () => {
+    // A presence check is not enough: systemd takes the LAST assignment of a
+    // scalar directive, so appending `NoNewPrivileges=false` leaves the required
+    // `=true` line intact, adds no fleet/template set difference, and silently
+    // disables the sandbox. Assert exactly one assignment with exactly the
+    // expected value, which catches both deletion and override.
+    const fleetUnit = readFileSync(fleetUnitPath, "utf8");
+    const pinned: Record<string, string> = {
+      Type: "simple",
+      Restart: "always",
+      RestartSec: "5",
+      ExecStart: "/usr/bin/node dist/index.js",
+      ProtectSystem: "strict",
+      NoNewPrivileges: "true",
+      PrivateTmp: "true",
+    };
+
+    for (const unit of [publicTemplate, fleetUnit]) {
+      for (const [key, value] of Object.entries(pinned)) {
+        expect(directiveValues(unit, key)).toEqual([value]);
+      }
+      // ProtectHome differs intentionally between the two, but must be enabled
+      // exactly once in a hardening form.
+      const protectHome = directiveValues(unit, "ProtectHome");
+      expect(protectHome).toHaveLength(1);
+      expect(["true", "read-only"]).toContain(protectHome[0]);
+
+      // Environment is legitimately repeated, but a duplicated KEY would let a
+      // later assignment silently override an earlier one.
+      const envKeys = directiveValues(unit, "Environment").map((v) => v.split("=")[0]);
+      expect(new Set(envKeys).size).toBe(envKeys.length);
+      expect(directiveValues(unit, "Environment")).toContain("MUNIN_HTTP_HOST=127.0.0.1");
+    }
   });
 
   it("allows only the declared fleet/template divergences", () => {

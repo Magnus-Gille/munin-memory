@@ -98,19 +98,45 @@ assert_mount_active() {
     fi
 }
 
-# Filesystem identity of a path, on both GNU and BSD stat.
+# Filesystem identity of a path. The stat flavour is detected ONCE and never
+# mixed: GNU spells the format `-c`, while GNU's `-f` means --file-system, so a
+# BSD-style `stat -f '%d' path` on GNU treats '%d' as a filename and reports
+# filesystem status instead of a device ID. Falling back across flavours would
+# therefore compare the wrong value rather than fail honestly.
+if stat -c '%d' . >/dev/null 2>&1; then
+    STAT_FLAVOR="gnu"
+elif stat -f '%d' . >/dev/null 2>&1; then
+    STAT_FLAVOR="bsd"
+else
+    echo "ERROR: no usable stat(1) flavour for backup device verification." >&2
+    exit 69
+fi
+
 device_id() {
-    stat -c '%d' "$1" 2>/dev/null || stat -f '%d' "$1" 2>/dev/null
+    if [ "$STAT_FLAVOR" = "gnu" ]; then
+        stat -c '%d' "$1" 2>/dev/null
+    else
+        stat -f '%d' "$1" 2>/dev/null
+    fi
 }
 
 # Bind the destination to the mounted filesystem's identity, not just to a path
 # string, so a nested mount or a race that leaves the path resolving elsewhere is
 # caught before the database is written.
+# Guarded assignments: a bare `dev=$(device_id ...)` would abort at the
+# assignment under `set -e`, skipping the actionable message below and making a
+# transient stat failure look like a silent service exit.
 assert_dest_on_mounted_fs() {
     local mount_dev dest_dev
-    mount_dev=$(device_id "$BACKUP_MOUNT")
-    dest_dev=$(device_id "$BACKUP_DIR")
-    if [ -z "$mount_dev" ] || [ -z "$dest_dev" ] || [ "$mount_dev" != "$dest_dev" ]; then
+    if ! mount_dev=$(device_id "$BACKUP_MOUNT") || [ -z "$mount_dev" ]; then
+        echo "ERROR: cannot determine the device of MUNIN_BACKUP_MOUNT: $BACKUP_MOUNT" >&2
+        exit 69
+    fi
+    if ! dest_dev=$(device_id "$BACKUP_DIR") || [ -z "$dest_dev" ]; then
+        echo "ERROR: cannot determine the device of MUNIN_BACKUP_DIR: $BACKUP_DIR" >&2
+        exit 69
+    fi
+    if [ "$mount_dev" != "$dest_dev" ]; then
         echo "ERROR: backup destination is not on the mounted backup filesystem: $BACKUP_DIR" >&2
         exit 69
     fi
@@ -152,6 +178,22 @@ assert_mount_active "no longer an active mountpoint"
 assert_no_symlink_components
 assert_dest_on_mounted_fs
 install -m 600 "$LOCAL_TMP" "$BACKUP_DIR/$FILENAME"
+
+# Post-write verification. Path-based check-then-use cannot be made atomic in
+# shell, so a narrow race remains between the last check and `install`. Verify
+# where the file ACTUALLY landed and remove it if it is not on the mounted
+# filesystem: a wrong-location write then becomes a loud failure instead of a
+# silently "successful" backup sitting on the root filesystem.
+written_dev=""
+mount_dev_now=""
+written_dev=$(device_id "$BACKUP_DIR/$FILENAME") || true
+mount_dev_now=$(device_id "$BACKUP_MOUNT") || true
+if [ -z "$written_dev" ] || [ "$written_dev" != "$mount_dev_now" ] \
+   || ! "$MOUNTPOINT_BIN" -q -- "$BACKUP_MOUNT"; then
+    rm -f "$BACKUP_DIR/$FILENAME"
+    echo "ERROR: backup did not land on the mounted filesystem; removed $BACKUP_DIR/$FILENAME" >&2
+    exit 69
+fi
 
 # 4. Cleanup local temp
 rm -f "$LOCAL_TMP"

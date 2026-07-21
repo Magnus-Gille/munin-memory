@@ -185,6 +185,51 @@ exit 1
     expect(existsSync(dest)).toBe(false);
   });
 
+  it("removes the snapshot when it did not land on the mounted filesystem", () => {
+    // The final path-based check cannot be made atomic in shell, so a narrow race
+    // survives between the last check and `install`. Post-write verification must
+    // turn a wrong-location write into a loud failure rather than a silently
+    // successful backup left on the root filesystem.
+    const scratch = makeScratch();
+    const mount = join(scratch, "mount");
+    const dest = join(mount, "munin-memory");
+    const binDir = join(scratch, "bin");
+    mkdirSync(dest, { recursive: true });
+    mkdirSync(binDir, { recursive: true });
+    stubSqlite3(binDir);
+
+    // Passes every pre-write check, fails only the post-write revalidation.
+    const stateFile = join(scratch, "mount-calls");
+    const mountpointBin = writeExecutable(
+      join(binDir, "mountpoint-late-fail"),
+      `#!/bin/bash
+n=\$(cat "${stateFile}" 2>/dev/null || echo 0)
+n=\$((n + 1))
+echo "\$n" > "${stateFile}"
+[ "\$n" -le 3 ] && exit 0
+exit 1
+`,
+    );
+
+    const result = spawnSync("bash", [backupScript], {
+      env: {
+        ...process.env,
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HOME: scratch,
+        MUNIN_BACKUP_DB: join(scratch, "memory.db"),
+        MUNIN_BACKUP_DIR: dest,
+        MUNIN_BACKUP_MOUNT: mount,
+        MUNIN_MOUNTPOINT_BIN: mountpointBin,
+      },
+      encoding: "utf8",
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("did not land on the mounted filesystem");
+    // The stray snapshot must not be left behind.
+    expect(spawnSync("ls", [dest], { encoding: "utf8" }).stdout.trim()).toBe("");
+  });
+
   it("rejects a destination reached through a symlinked path component", () => {
     // Regression: containment was purely lexical, so a symlink inside the mount
     // resolved outside it and both mkdir and install followed it — writing the
