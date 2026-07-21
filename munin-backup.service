@@ -1,5 +1,5 @@
 [Unit]
-Description=Munin Memory off-host or mounted-volume backup
+Description=Munin Memory backup (remote host or mounted volume)
 After=network-online.target
 Wants=network-online.target
 
@@ -9,15 +9,42 @@ User=<user>
 # Runs from ~/munin-ops (a dedicated ops dir, NOT a git checkout) so cron never
 # executes code out of a mutable/dev checkout. Populate it with scripts/install-ops.sh.
 ExecStart=<ops-dir>/scripts/backup-to-nas.sh
-# Required: MUNIN_BACKUP_MOUNT must be an active mountpoint and
-# MUNIN_BACKUP_DIR must be a strict child. The script rejects / as the mount
-# root and fails closed for an absent mount.
+# The destination is configured, never hardcoded. Set MUNIN_BACKUP_MODE=remote
+# with MUNIN_BACKUP_HOST + MUNIN_BACKUP_REMOTE_DIR, or MUNIN_BACKUP_MODE=local
+# with MUNIN_BACKUP_MOUNT (an active mountpoint) + MUNIN_BACKUP_DIR (a strict
+# child). With neither configured the script refuses to start rather than
+# writing nowhere. See docs/offsite-backup.md and .env.example.
 EnvironmentFile=-<ops-dir>/.env
 StandardOutput=journal
 StandardError=journal
 
-# Timeouts
-TimeoutStartSec=120
+# Staging deliberately stays on the default /tmp (a tmpfs under PrivateTmp=yes).
+#
+# Disk staging was tried and measured worse on the reference host: its root
+# filesystem is the SD/eMMC boot card at 12.5 MB/s sustained, which turned a
+# 32 s snapshot into a >20 min one and would have written ~675 GB/year to the
+# card the OS boots from. Trading a transient ~2 GB of RAM for that is a bad
+# deal, so tmpfs wins there.
+#
+# The residual risk is that the snapshot must fit the tmpfs (~50% of RAM); at
+# the reference host's size and ~17 MB/day of growth that is roughly four months
+# away. backup-to-nas.sh preflights free space and fails loudly with an
+# actionable message rather than dying half-written on ENOSPC. If a fast disk
+# ever backs this host, point MUNIN_BACKUP_STAGING at it.
+
+# Timeouts.
+#
+# This was 120 s, and the job had quietly grown into it: measured on a 1.85 GB
+# database, a run costs ~32 s (sqlite3 .backup) + ~52 s (PRAGMA
+# integrity_check) + ~19 s (rsync) ~= 105 s. It crossed 120 s and then failed
+# silently every night from 2026-07-17 until it was found four days later.
+#
+# Runtime scales with database size at roughly 31 s per GB, and the database
+# grows steadily, so any snug ceiling merely reschedules that outage. 1800 s is
+# deliberately far beyond need: this is a nightly oneshot, so a wide timeout
+# costs nothing, while a tight one costs a silent backup gap. The timer's own
+# scheduling — not this value — is what bounds the job.
+TimeoutStartSec=1800
 
 # Hardening (lighter than the main service — just needs network + sqlite3)
 NoNewPrivileges=yes

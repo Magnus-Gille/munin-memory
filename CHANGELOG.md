@@ -20,6 +20,25 @@ changelog is the canonical record of what moved.
 
 ### Changed
 
+- **`backup-to-nas.sh` now supports both destination models in one script.**
+  It previously existed in two incompatible forms — push to a remote host over
+  ssh/rsync, or write to a local mounted volume — which had diverged between the
+  repository and the deployed fleet host, so an `install-ops.sh` run would have
+  replaced a working backup with one that could not run there. The destination is
+  now chosen by `MUNIN_BACKUP_MODE` (`remote` or `local`, inferred when unset),
+  and every installation-specific value moved out of the script into the ops
+  `.env`: `MUNIN_BACKUP_HOST`/`MUNIN_BACKUP_REMOTE_DIR` for remote,
+  `MUNIN_BACKUP_MOUNT`/`MUNIN_BACKUP_DIR` for local. With neither configured the
+  job refuses to start rather than writing nowhere. Both modes share the
+  free-space preflight, snapshot, integrity check, GFS retention and post-write
+  verification; the remote mode gained verification it never had, comparing the
+  destination's byte count against the snapshot rather than trusting `rsync`'s
+  exit status, and skipping retention entirely when that check fails.
+- **`munin-backup.service` timeout raised 120s → 1800s.** The job had grown into
+  its ceiling: ~105s measured on a 1.85 GB database, so it began failing silently
+  every night from 2026-07-17. Runtime scales at roughly 31s/GB and the database
+  grows steadily, so any snug ceiling merely reschedules the outage.
+
 - Deployment, backup, offsite, service-descriptor, and model-evaluation examples now
   use generic, configurable hosts, identities, paths, remotes, and URLs.
 - **`scripts/install-ops.sh` refuses to swap a host's backup destination model.**
