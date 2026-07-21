@@ -796,6 +796,256 @@ describe("memory_update_status", () => {
   });
 });
 
+describe("memory_update_status valid_until (#217)", () => {
+  it("sets valid_until with a content update and returns the stored value", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/status-expiry-content",
+      phase: "Active",
+      current_work: "Initial work",
+      lifecycle: "active",
+    });
+
+    const raw = await callTool("memory_update_status", {
+      namespace: "projects/status-expiry-content",
+      current_work: "Expiry-aware work",
+      valid_until: "2027-06-15T12:00:00+02:00",
+    });
+    const result = parseToolResponse(raw) as { status: string; valid_until?: string };
+    expect(result.status).toBe("updated");
+    expect(result.valid_until).toBe("2027-06-15T10:00:00.000Z");
+
+    const readRaw = await callTool("memory_read", {
+      namespace: "projects/status-expiry-content",
+      key: "status",
+    });
+    const entry = parseToolResponse(readRaw) as { content: string; valid_until?: string };
+    expect(entry.content).toContain("Expiry-aware work");
+    expect(entry.valid_until).toBe("2027-06-15T10:00:00.000Z");
+  });
+
+  it("preserves valid_until when it is omitted from a content update", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/status-expiry-preserve",
+      key: "status",
+      content: "## Phase\nActive\n\n## Current Work\nInitial work",
+      tags: ["active"],
+      valid_until: "2027-07-01T00:00:00Z",
+    });
+
+    const raw = await callTool("memory_update_status", {
+      namespace: "projects/status-expiry-preserve",
+      current_work: "Updated work",
+    });
+    const result = parseToolResponse(raw) as { valid_until?: string };
+    expect(result.valid_until).toBe("2027-07-01T00:00:00.000Z");
+
+    const readRaw = await callTool("memory_read", {
+      namespace: "projects/status-expiry-preserve",
+      key: "status",
+    });
+    const entry = parseToolResponse(readRaw) as { valid_until?: string };
+    expect(entry.valid_until).toBe("2027-07-01T00:00:00.000Z");
+  });
+
+  it("clears valid_until when explicit null is supplied", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/status-expiry-clear",
+      key: "status",
+      content: "## Phase\nActive\n\n## Current Work\nInitial work",
+      tags: ["active"],
+      valid_until: "2027-07-01T00:00:00Z",
+    });
+
+    const raw = await callTool("memory_update_status", {
+      namespace: "projects/status-expiry-clear",
+      current_work: "Still active",
+      valid_until: null,
+    });
+    const result = parseToolResponse(raw) as { status: string; valid_until?: string | null };
+    expect(result.status).toBe("updated");
+    expect(result.valid_until).toBeNull();
+
+    const readRaw = await callTool("memory_read", {
+      namespace: "projects/status-expiry-clear",
+      key: "status",
+    });
+    const entry = parseToolResponse(readRaw) as { valid_until?: string | null };
+    expect(entry.valid_until ?? null).toBeNull();
+  });
+
+  it("rejects an invalid valid_until timestamp", async () => {
+    const raw = await callTool("memory_update_status", {
+      namespace: "projects/status-expiry-invalid",
+      phase: "Active",
+      valid_until: "next tuesday",
+    });
+    const result = parseToolResponse(raw) as { error?: string; message?: string };
+    expect(result.error).toBe("validation_error");
+    expect(result.message).toContain('Invalid "valid_until" value');
+  });
+
+  it("updates only valid_until on a structured status without rewriting content or tags", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/status-expiry-only",
+      phase: "Active",
+      current_work: "Known-good work",
+      blockers: "None.",
+      next_steps: ["Review later"],
+      lifecycle: "active",
+    });
+    db.prepare(
+      "UPDATE entries SET updated_at = '2020-01-01T00:00:00.000Z' WHERE namespace = ? AND key = 'status'",
+    ).run("projects/status-expiry-only");
+
+    const beforeRaw = await callTool("memory_read", {
+      namespace: "projects/status-expiry-only",
+      key: "status",
+    });
+    const before = parseToolResponse(beforeRaw) as { content: string; tags: string[]; updated_at: string };
+
+    const raw = await callTool("memory_update_status", {
+      namespace: "projects/status-expiry-only",
+      valid_until: "2027-08-01T00:00:00Z",
+    });
+    const result = parseToolResponse(raw) as { status?: string; valid_until?: string };
+    expect(result.status).toBe("updated");
+    expect(result.valid_until).toBe("2027-08-01T00:00:00.000Z");
+
+    const afterRaw = await callTool("memory_read", {
+      namespace: "projects/status-expiry-only",
+      key: "status",
+    });
+    const after = parseToolResponse(afterRaw) as {
+      content: string;
+      tags: string[];
+      updated_at: string;
+      valid_until?: string;
+    };
+    expect(after.content).toBe(before.content);
+    expect(after.tags).toEqual(before.tags);
+    expect(after.updated_at).not.toBe(before.updated_at);
+    expect(after.valid_until).toBe("2027-08-01T00:00:00.000Z");
+  });
+
+  it("updates only valid_until on a legacy free-form status without migrating it", async () => {
+    const legacyContent = "Legacy free-form status.\nKeep spacing and punctuation exactly.  ";
+    await callTool("memory_write", {
+      namespace: "projects/status-expiry-legacy",
+      key: "status",
+      content: legacyContent,
+      tags: ["active", "topic:legacy"],
+    });
+
+    const raw = await callTool("memory_update_status", {
+      namespace: "projects/status-expiry-legacy",
+      valid_until: "2027-09-01T00:00:00Z",
+    });
+    const result = parseToolResponse(raw) as { status?: string; error?: string; valid_until?: string };
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe("updated");
+    expect(result.valid_until).toBe("2027-09-01T00:00:00.000Z");
+
+    const readRaw = await callTool("memory_read", {
+      namespace: "projects/status-expiry-legacy",
+      key: "status",
+    });
+    const entry = parseToolResponse(readRaw) as { content: string; valid_until?: string };
+    expect(entry.content).toBe(legacyContent);
+    expect(entry.valid_until).toBe("2027-09-01T00:00:00.000Z");
+  });
+
+  it("rejects valid_until-only creation with a clear validation error", async () => {
+    const raw = await callTool("memory_update_status", {
+      namespace: "projects/status-expiry-missing",
+      valid_until: "2027-10-01T00:00:00Z",
+    });
+    const result = parseToolResponse(raw) as { error?: string; message?: string };
+    expect(result.error).toBe("validation_error");
+    expect(result.message).toMatch(/valid_until.*cannot create|cannot create.*valid_until/i);
+  });
+
+  it("honors CAS for a valid_until-only update without writing on conflict", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/status-expiry-cas",
+      key: "status",
+      content: "## Phase\nActive\n\n## Current Work\nProtected work",
+      tags: ["active"],
+      valid_until: "2027-11-01T00:00:00Z",
+    });
+    const beforeRaw = await callTool("memory_read", {
+      namespace: "projects/status-expiry-cas",
+      key: "status",
+    });
+    const before = parseToolResponse(beforeRaw) as {
+      content: string;
+      updated_at: string;
+      valid_until?: string;
+    };
+
+    const raw = await callTool("memory_update_status", {
+      namespace: "projects/status-expiry-cas",
+      valid_until: "2027-12-01T00:00:00Z",
+      expected_updated_at: "2020-01-01T00:00:00.000Z",
+    });
+    const result = parseToolResponse(raw) as { error?: string; conflict_reason?: string };
+    expect(result.error).toBe("conflict");
+    expect(result.conflict_reason).toBe("version_mismatch");
+
+    const afterRaw = await callTool("memory_read", {
+      namespace: "projects/status-expiry-cas",
+      key: "status",
+    });
+    const after = parseToolResponse(afterRaw) as {
+      content: string;
+      updated_at: string;
+      valid_until?: string;
+    };
+    expect(after).toEqual(before);
+  });
+
+  it("surfaces a status expiring soon when expiry was set through memory_update_status", async () => {
+    const soon = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString();
+    await callTool("memory_update_status", {
+      namespace: "projects/status-expiry-attention",
+      phase: "Active",
+      current_work: "Known good until review",
+      lifecycle: "active",
+      valid_until: soon,
+    });
+
+    const raw = await callTool("memory_attention", { include_expiring: true });
+    const result = parseToolResponse(raw) as {
+      items: Array<{ namespace: string; category: string; severity: string }>;
+    };
+    expect(result.items).toContainEqual(expect.objectContaining({
+      namespace: "projects/status-expiry-attention",
+      category: "expiring_soon",
+      severity: "medium",
+    }));
+  });
+
+  it("creates a new tracked status with valid_until", async () => {
+    const raw = await callTool("memory_update_status", {
+      namespace: "projects/status-expiry-create",
+      phase: "Active",
+      current_work: "Starting with a review horizon",
+      lifecycle: "active",
+      valid_until: "2028-01-15T00:00:00Z",
+    });
+    const result = parseToolResponse(raw) as { status: string; valid_until?: string };
+    expect(result.status).toBe("created");
+    expect(result.valid_until).toBe("2028-01-15T00:00:00.000Z");
+
+    const readRaw = await callTool("memory_read", {
+      namespace: "projects/status-expiry-create",
+      key: "status",
+    });
+    const entry = parseToolResponse(readRaw) as { content: string; valid_until?: string };
+    expect(entry.content).toContain("Starting with a review horizon");
+    expect(entry.valid_until).toBe("2028-01-15T00:00:00.000Z");
+  });
+});
+
 describe("memory_read", () => {
   it("reads an existing entry", async () => {
     await callTool("memory_write", {

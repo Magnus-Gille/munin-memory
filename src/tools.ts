@@ -3843,7 +3843,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_update_status",
     description:
-      "Update a tracked status entry in `projects/*` or `clients/*` namespaces only. Uses a server-enforced structure with canonical sections: Phase, Current Work, Blockers, Next Steps, and optional Notes. Prefer this over `memory_write` for status updates — it supports reliable partial updates without read-modify-write on markdown blobs.\n\nCall this only when the project's phase, current work, blockers, next steps, or lifecycle actually changes — NOT after every `memory_log`. Logging a decision and updating the status are independent: log the decision (history), and separately update the status only if the change moves the project's current state. Every field is optional; supply just the sections that changed. Compare-and-swap (`expected_updated_at`) is optional — omit it for an unconditional update. Status changes are not auto-logged; call `memory_log` separately when recording a decision or milestone.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
+      "Update a tracked status entry in `projects/*` or `clients/*` namespaces only. Uses a server-enforced structure with canonical sections: Phase, Current Work, Blockers, Next Steps, and optional Notes. Prefer this over `memory_write` for status updates — it supports reliable partial updates without read-modify-write on markdown blobs. Optional `valid_until` sets or clears a soft-expiry review horizon; expired statuses remain available to direct reads, are surfaced by `memory_attention` with `include_expiring`, and are hidden from broad search by default.\n\nCall this only when the project's phase, current work, blockers, next steps, lifecycle, or review horizon actually changes — NOT after every `memory_log`. Logging a decision and updating the status are independent: log the decision (history), and separately update the status only if the change moves the project's current state. Every field is optional; supply just the sections that changed. Compare-and-swap (`expected_updated_at`) is optional — omit it for an unconditional update. Status changes are not auto-logged; call `memory_log` separately when recording a decision or milestone.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -3876,6 +3876,11 @@ const TOOL_DEFINITIONS = [
           type: "string",
           enum: ["active", "blocked", "completed", "stopped", "maintenance", "archived"],
           description: "Optional. Sets the tracked lifecycle tag while preserving non-lifecycle tags.",
+        },
+        valid_until: {
+          type: "string",
+          description:
+            "Optional. ISO 8601 timestamp sets a soft-expiry review horizon; explicit null clears it and omission preserves the existing value. Expired statuses remain available to direct read/get, are surfaced by memory_attention when include_expiring is enabled, and are hidden from broad search by default.",
         },
         classification: {
           type: "string",
@@ -6330,6 +6335,7 @@ export function registerTools(
                 next_steps,
                 notes,
                 lifecycle,
+                valid_until,
                 expected_updated_at,
                 classification,
                 classification_override,
@@ -6351,6 +6357,16 @@ export function registerTools(
               }
               if (classification_override === true && ctx.principalType !== "owner") {
                 return accessDeniedErrorResponse(db, ctx, "update_status", "classification_override is only available to the owner principal.");
+              }
+              let normalizedValidUntil: string | null | undefined;
+              if (valid_until === null) {
+                normalizedValidUntil = null;
+              } else if (valid_until !== undefined) {
+                const timestampCheck = normalizeIsoTimestamp(valid_until, "valid_until");
+                if (!timestampCheck.ok) {
+                  return errResult("update_status", "validation_error", timestampCheck.error);
+                }
+                normalizedValidUntil = timestampCheck.value;
               }
               if (next_steps !== undefined && (!Array.isArray(next_steps) || next_steps.some((item) => typeof item !== "string"))) {
                 return errResult("update_status", "validation_error", "next_steps must be an array of strings.");
@@ -6399,7 +6415,7 @@ export function registerTools(
                 ? STATUS_SECTION_ORDER.some((k) => existingStructured[k] !== undefined)
                 : false;
 
-              const hasRequestedUpdate = [
+              const hasRequestedStatusUpdate = [
                 phase,
                 current_work,
                 blockers,
@@ -6407,11 +6423,18 @@ export function registerTools(
                 lifecycle,
                 next_steps,
               ].some((value) => value !== undefined);
+              const hasRequestedValidUntilUpdate = valid_until !== undefined;
+              const isValidUntilOnlyUpdate = Boolean(
+                existing && hasRequestedValidUntilUpdate && !hasRequestedStatusUpdate,
+              );
 
-              if (!existing && !hasRequestedUpdate) {
+              if (!existing && !hasRequestedStatusUpdate) {
+                if (hasRequestedValidUntilUpdate) {
+                  return errResult("update_status", "validation_error", "valid_until alone cannot create a tracked status. Provide at least one status field or lifecycle.");
+                }
                 return errResult("update_status", "validation_error", "Provide at least one status field or lifecycle when creating a new tracked status.");
               }
-              if (existing && !hasRequestedUpdate) {
+              if (existing && !hasRequestedStatusUpdate && !hasRequestedValidUntilUpdate) {
                 return errResult("update_status", "validation_error", "No status fields were provided to update.");
               }
 
@@ -6421,7 +6444,7 @@ export function registerTools(
               // a partial structured update. Refuse unless the caller fully
               // specifies every canonical section (a deliberate, non-silent
               // replacement).
-              if (existing && !hasExistingStructure) {
+              if (existing && !hasExistingStructure && !isValidUntilOnlyUpdate) {
                 // Use the same effective semantics as buildStructuredStatus:
                 // a blank string (or an empty next_steps list) normalizes away
                 // to a default, so it counts as NOT supplied — otherwise a
@@ -6442,20 +6465,27 @@ export function registerTools(
                 }
               }
 
-              const structured = buildStructuredStatus(
-                {
-                  phase,
-                  current_work,
-                  blockers,
-                  next_steps,
-                  notes,
-                },
-                existingStructured,
-              );
-              const content = formatStructuredStatus(structured);
+              let structured = existingStructured;
+              let content: string;
+              if (isValidUntilOnlyUpdate) {
+                content = existingParsed!.content;
+              } else {
+                const builtStructured = buildStructuredStatus(
+                  {
+                    phase,
+                    current_work,
+                    blockers,
+                    next_steps,
+                    notes,
+                  },
+                  existingStructured,
+                );
+                structured = builtStructured;
+                content = formatStructuredStatus(builtStructured);
+              }
 
               const warnings: string[] = [];
-              if (existing && !hasExistingStructure) {
+              if (existing && !hasExistingStructure && !isValidUntilOnlyUpdate) {
                 warnings.push("Existing status was in a legacy free-form format; it has been replaced with the canonical structured format from the fields you supplied.");
               }
 
@@ -6465,11 +6495,15 @@ export function registerTools(
               }
 
               const existingTags = existingParsed?.tags ?? [];
-              const retainedTags = stripClassificationTags(
-                existingTags.filter((tag) => !LIFECYCLE_TAGS.has(tag)),
-              );
               const lifecycleTag = lifecycle ?? getLifecycleTags(existingTags)[0];
-              const effectiveTags = lifecycleTag ? [...retainedTags, lifecycleTag] : retainedTags;
+              const effectiveTags = isValidUntilOnlyUpdate
+                ? existingTags
+                : (() => {
+                    const retainedTags = stripClassificationTags(
+                      existingTags.filter((tag) => !LIFECYCLE_TAGS.has(tag)),
+                    );
+                    return lifecycleTag ? [...retainedTags, lifecycleTag] : retainedTags;
+                  })();
 
               if (!lifecycleTag) {
                 warnings.push(`No lifecycle tag set. Consider one of: ${[...LIFECYCLE_TAGS].join(", ")}.`);
@@ -6497,7 +6531,7 @@ export function registerTools(
                   effectiveTags,
                   ctx.principalId,
                   expected_updated_at ?? existingParsed?.updated_at,
-                  undefined,
+                  normalizedValidUntil,
                   {
                     classification,
                     classificationOverride: classification_override,
@@ -6523,11 +6557,9 @@ export function registerTools(
                 });
               }
 
-              if (result.id) {
-                const statusEntry = getById(db, result.id);
-                if (statusEntry) {
-                  syncCommitmentsForEntry(db, statusEntry.id, extractCommitmentsFromEntry(statusEntry, getResolvedNamespaces(db), resolveTrackedPatterns(db, ctx)));
-                }
+              const statusEntry = result.id ? getById(db, result.id) : undefined;
+              if (statusEntry) {
+                syncCommitmentsForEntry(db, statusEntry.id, extractCommitmentsFromEntry(statusEntry, getResolvedNamespaces(db), resolveTrackedPatterns(db, ctx)));
               }
 
               return okResult("update_status", {
@@ -6536,6 +6568,7 @@ export function registerTools(
                 namespace,
                 key: "status",
                 updated_at: result.updated_at,
+                valid_until: statusEntry?.valid_until ?? null,
                 classification: result.classification,
                 content,
                 structured_status: structured,
