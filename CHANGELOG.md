@@ -22,6 +22,15 @@ changelog is the canonical record of what moved.
 
 - Deployment, backup, offsite, service-descriptor, and model-evaluation examples now
   use generic, configurable hosts, identities, paths, remotes, and URLs.
+- **`scripts/install-ops.sh` refuses to swap a host's backup destination model.**
+  `backup-to-nas.sh` exists in two incompatible forms — push to a remote host over
+  ssh/rsync, or write to a local mounted volume — and a host is provisioned for
+  exactly one in its ops `.env`. Installing the other did not fail at install
+  time; it failed on the next timer fire, silently, surfacing days later as a
+  missing off-host copy. The installer now compares the deployed and incoming
+  models, aborts before touching anything (including `sudo`), and names what each
+  model requires. Override with `MUNIN_OPS_ALLOW_MODEL_CHANGE=true` after the
+  host's `.env` has been updated to match.
 - **`scripts/deploy-rpi.sh` now fails before rsync when the deploy target contains
   `.git`.** Earlier releases stripped `.git` from the artifact directory after
   syncing. The deploy target must now already be a pure, git-free artifact
