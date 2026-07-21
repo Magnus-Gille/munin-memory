@@ -30,6 +30,7 @@ describe("resolveProfile — tier defaults from the RAM-fit sweep", () => {
     // (anon ~74-87MB, fit at 128m for both query and write). So the cheapest
     // primary tier keeps semantic ON with quantised weights and lean memory.
     expect(p.knobs.MUNIN_EMBEDDINGS_ENABLED).toBe("true");
+    expect(p.knobs.MUNIN_EMBEDDINGS_MODEL).toBe("Xenova/all-MiniLM-L6-v2");
     expect(p.knobs.MUNIN_EMBEDDINGS_DTYPE).toBe("q8");
     expect(p.knobs.MUNIN_EMBEDDINGS_BATCH_SIZE).toBe("1");
     expect(p.knobs.MUNIN_SQLITE_CACHE_KIB).toBe("1024");
@@ -40,6 +41,7 @@ describe("resolveProfile — tier defaults from the RAM-fit sweep", () => {
   it("zero-plus: semantic ON, slightly more headroom (Pi 5 2GB class)", () => {
     const p = resolveProfile("zero-plus");
     expect(p.knobs.MUNIN_EMBEDDINGS_ENABLED).toBe("true");
+    expect(p.knobs.MUNIN_EMBEDDINGS_MODEL).toBe("Xenova/all-MiniLM-L6-v2");
     expect(p.knobs.MUNIN_EMBEDDINGS_DTYPE).toBe("q8");
     expect(p.knobs.MUNIN_EMBEDDINGS_BATCH_SIZE).toBe("4");
     expect(p.knobs.MUNIN_SQLITE_CACHE_KIB).toBe("4096");
@@ -80,6 +82,13 @@ describe("resolveKnob — precedence: env var > profile default > hard default",
     expect(
       resolveKnob("MUNIN_EMBEDDINGS_DTYPE", undefined, env),
     ).toBe("q8");
+  });
+
+  it("pins the model that was validated for constrained profiles", () => {
+    const env = { MUNIN_PROFILE: "zero-appliance" };
+    expect(
+      resolveKnob("MUNIN_EMBEDDINGS_MODEL", "Xenova/bge-small-en-v1.5", env),
+    ).toBe("Xenova/all-MiniLM-L6-v2");
   });
 
   it("hard default wins when neither env var nor profile sets the knob", () => {

@@ -21,15 +21,15 @@
   "version": 1,
   "references": [
     {
-      "namespace": "people/magnus",
+      "namespace": "people/owner",
       "key": "profile",
-      "title": "Magnus profile",
+      "title": "Owner profile",
       "when_to_load": "Use for collaboration style, background, and user-specific guidance"
     },
     {
       "namespace": "meta",
-      "key": "mgc-soul",
-      "title": "MGC soul",
+      "key": "org-principles",
+      "title": "Organization principles",
       "when_to_load": "Use for proposals, opportunity evaluation, offers, values, and positioning"
     }
   ]

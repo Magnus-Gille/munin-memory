@@ -1,4 +1,5 @@
 import type { SecurityResult } from "./types.js";
+import { resolveOwnerAliases } from "./owner-config.js";
 
 const SECRET_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /sk-or-v1-[a-zA-Z0-9_-]{20,}/, label: "OpenRouter API key" },
@@ -38,7 +39,7 @@ const INJECTION_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
     //  - "{keep|hide|conceal|withhold} … from {the user}";
     //  - "without {telling|informing|…}" the target.
     // (Input is whitespace-collapsed before scanning, so newline-split phrases match.)
-    pattern: /(?:\bdo\s+not\s+|\bdon['’]t\s+|\bnever\s+)(?:tell|inform|alert|notify|reveal|mention|disclose|report)\b[^.\n]{0,30}?\b(?:user|owner|human|magnus|principal)\b|\b(?:keep|hide|conceal|withhold)\b[^.\n]{0,25}?\bfrom\b[^.\n]{0,20}?\b(?:user|owner|human|magnus|principal)\b|\bwithout\s+(?:telling|informing|alerting|notifying|letting)\b[^.\n]{0,20}?\b(?:user|owner|human|magnus|principal)\b/i,
+    pattern: /(?:\bdo\s+not\s+|\bdon['’]t\s+|\bnever\s+)(?:tell|inform|alert|notify|reveal|mention|disclose|report)\b[^.\n]{0,30}?\b(?:user|owner|human|principal)\b|\b(?:keep|hide|conceal|withhold)\b[^.\n]{0,25}?\bfrom\b[^.\n]{0,20}?\b(?:user|owner|human|principal)\b|\bwithout\s+(?:telling|informing|alerting|notifying|letting)\b[^.\n]{0,20}?\b(?:user|owner|human|principal)\b/i,
     label: "concealment instruction",
   },
   {
@@ -92,6 +93,26 @@ const INJECTION_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
     label: "system-override marker",
   },
 ];
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function ownerAliasPattern(alias: string): string {
+  return alias.split(/\s+/).map(escapeRegex).join("\\s+");
+}
+
+function buildOwnerAliasConcealmentPattern(): RegExp | null {
+  const aliases = resolveOwnerAliases().map(ownerAliasPattern).filter(Boolean);
+  if (aliases.length === 0) return null;
+  const target = `(?:${aliases.join("|")})`;
+  return new RegExp(
+    `(?:\\bdo\\s+not\\s+|\\bdon['’]t\\s+|\\bnever\\s+)(?:tell|inform|alert|notify|reveal|mention|disclose|report)\\b[^.\\n]{0,30}?\\b${target}\\b|` +
+      `\\b(?:keep|hide|conceal|withhold)\\b[^.\\n]{0,25}?\\bfrom\\b[^.\\n]{0,20}?\\b${target}\\b|` +
+      `\\bwithout\\s+(?:telling|informing|alerting|notifying|letting)\\b[^.\\n]{0,20}?\\b${target}\\b`,
+    "i",
+  );
+}
 
 const NAMESPACE_RE = /^[a-zA-Z0-9][a-zA-Z0-9/_-]*$/;
 const KEY_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
@@ -157,6 +178,10 @@ export function scanForInjection(content: string): string[] {
     if (pattern.test(normalized)) {
       matched.push(label);
     }
+  }
+  const ownerAliasConcealmentPattern = buildOwnerAliasConcealmentPattern();
+  if (ownerAliasConcealmentPattern?.test(normalized)) {
+    matched.push("concealment instruction");
   }
   return [...new Set(matched)];
 }

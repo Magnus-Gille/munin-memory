@@ -21,7 +21,9 @@ set -euo pipefail
 #  docs/offsite-backup.md.)
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OPS_DIR="/home/magnus/munin-ops"   # units hardcode this path — keep them in sync
+OPS_USER="${MUNIN_OPS_USER:-$(id -un)}"
+OPS_HOME="${MUNIN_OPS_HOME:-$HOME}"
+OPS_DIR="${MUNIN_OPS_DIR:-${OPS_HOME}/munin-ops}"
 SCRIPTS=(backup-to-nas.sh offsite-backup.sh offsite-snapshot.sh)
 UNITS=(munin-backup.service munin-backup.timer munin-offsite.service munin-offsite.timer)
 
@@ -34,7 +36,16 @@ done
 
 echo "==> Installing systemd units into /etc/systemd/system (sudo)"
 for u in "${UNITS[@]}"; do
-  sudo install -m 644 "${REPO_DIR}/${u}" "/etc/systemd/system/${u}"
+  rendered=$(mktemp)
+  trap 'rm -f "$rendered"' EXIT
+  sed \
+    -e "s|<user>|${OPS_USER}|g" \
+    -e "s|<home-dir>|${OPS_HOME}|g" \
+    -e "s|<ops-dir>|${OPS_DIR}|g" \
+    "${REPO_DIR}/${u}" > "$rendered"
+  sudo install -m 644 "$rendered" "/etc/systemd/system/${u}"
+  rm -f "$rendered"
+  trap - EXIT
   echo "    ${u}"
 done
 sudo systemctl daemon-reload

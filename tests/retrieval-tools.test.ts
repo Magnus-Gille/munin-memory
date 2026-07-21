@@ -890,16 +890,16 @@ describe("fix #1 — non-owner home prefixes excluded from owner untracked propo
   it("owner is NOT nagged about a non-owner principal's home namespace (non-users/* prefix)", async () => {
     const call = makeCallTool(db, ownerCtx());
 
-    // Register a principal whose home is inbox/p/sara (not under users/*)
+    // Register a principal whose home is inbox/p/alice (not under users/*)
     db.prepare(
       `INSERT INTO principals (id, principal_id, principal_type, namespace_rules, created_at)
        VALUES (?, ?, 'family', ?, ?)`,
-    ).run("pid-sara", "sara", JSON.stringify([{ pattern: "inbox/p/sara/*", permissions: "rw" }]), new Date().toISOString());
+    ).run("pid-alice", "alice", JSON.stringify([{ pattern: "inbox/p/alice/*", permissions: "rw" }]), new Date().toISOString());
 
     // Seed 3+ entries under that home prefix
-    writeState(db, "inbox/p/sara/a", "k1", "x", []);
-    writeState(db, "inbox/p/sara/b", "k2", "x", []);
-    writeState(db, "inbox/p/sara/c", "k3", "x", []);
+    writeState(db, "inbox/p/alice/a", "k1", "x", []);
+    writeState(db, "inbox/p/alice/b", "k2", "x", []);
+    writeState(db, "inbox/p/alice/c", "k3", "x", []);
 
     const raw = await call("memory_patterns", {});
     const result = parseToolResponse(raw) as { patterns: Array<{ kind: string; summary: string }> };
@@ -911,7 +911,7 @@ describe("fix #1 — non-owner home prefixes excluded from owner untracked propo
   it("orient does NOT fire untracked_namespace_cluster for a non-owner home prefix", async () => {
     const call = makeCallTool(db, ownerCtx());
 
-    for (const pid of ["sara", "bob", "cat"]) {
+    for (const pid of ["alice", "bob", "cat"]) {
       db.prepare(
         `INSERT INTO principals (id, principal_id, principal_type, namespace_rules, created_at)
          VALUES (?, ?, 'family', ?, ?)`,

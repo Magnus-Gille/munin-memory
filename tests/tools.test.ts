@@ -507,7 +507,7 @@ describe("memory_update_status", () => {
         "- v2: alerts",
         "",
         "## Milestones",
-        "Q3 demo to Magnus.",
+        "Q3 demo to Owner.",
       ].join("\n"),
       tags: ["active"],
     });
@@ -529,7 +529,7 @@ describe("memory_update_status", () => {
     expect(entry.content).toContain("## Roadmap");
     expect(entry.content).toContain("- v1: dashboard");
     expect(entry.content).toContain("## Milestones");
-    expect(entry.content).toContain("Q3 demo to Magnus.");
+    expect(entry.content).toContain("Q3 demo to Owner.");
 
     // Patch a canonical section — extras must still survive a second time.
     await callTool("memory_update_status", {
@@ -859,7 +859,7 @@ describe("Librarian direct-entry enforcement", () => {
 
   it("redacts owner reads on downgraded consumer transport and logs the redaction", async () => {
     await callTool("memory_write", {
-      namespace: "clients/lofalk",
+      namespace: "clients/acme",
       key: "status",
       content: "Active retainer and billing note",
       tags: ["active"],
@@ -876,14 +876,14 @@ describe("Librarian direct-entry enforcement", () => {
     );
 
     const raw = await consumerOwnerCall("memory_read", {
-      namespace: "clients/lofalk",
+      namespace: "clients/acme",
       key: "status",
     });
     const result = parseToolResponse(raw) as Record<string, unknown>;
 
     expect(result.found).toBe(true);
     expect(result.redacted).toBe(true);
-    expect(result.namespace).toBe("clients/lofalk");
+    expect(result.namespace).toBe("clients/acme");
     expect(result.key).toBe("status");
     expect(result.classification).toBe("client-confidential");
     expect(result.content).toBeUndefined();
@@ -893,7 +893,7 @@ describe("Librarian direct-entry enforcement", () => {
       `SELECT principal_id, transport_type, entry_namespace, entry_classification, connection_max_classification, tool_name
        FROM redaction_log
        WHERE entry_namespace = ?`,
-    ).get("clients/lofalk") as {
+    ).get("clients/acme") as {
       principal_id: string;
       transport_type: string;
       entry_namespace: string;
@@ -905,7 +905,7 @@ describe("Librarian direct-entry enforcement", () => {
     expect(logRow).toMatchObject({
       principal_id: "owner",
       transport_type: "consumer",
-      entry_namespace: "clients/lofalk",
+      entry_namespace: "clients/acme",
       entry_classification: "client-confidential",
       connection_max_classification: "internal",
       tool_name: "memory_read",
@@ -923,7 +923,7 @@ describe("Librarian direct-entry enforcement", () => {
 
     const familyCall = makeContextCallTool(
       {
-        principalId: "sara",
+        principalId: "alice",
         principalType: "family",
         accessibleNamespaces: [{ pattern: "shared/family/*", permissions: "rw" }],
         transportType: "consumer",
@@ -961,7 +961,7 @@ describe("Librarian direct-entry enforcement", () => {
     });
 
     const familyCall = makeContextCallTool({
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
       accessibleNamespaces: [{ pattern: "shared/family/*", permissions: "rw" }],
       transportType: "consumer",
@@ -1001,7 +1001,7 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
 
   it("redacts classified query results for owner consumer transport and suppresses explain metadata", async () => {
     await callTool("memory_write", {
-      namespace: "clients/lofalk",
+      namespace: "clients/acme",
       key: "status",
       content: "Unique billing review marker for classified query result",
       classification: "client-confidential",
@@ -1027,7 +1027,7 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
     expect(result.total).toBeGreaterThanOrEqual(1);
     expect(result.redacted_count).toBeGreaterThanOrEqual(1);
     expect(result.results[0].redacted).toBe(true);
-    expect(result.results[0].namespace).toBe("clients/lofalk");
+    expect(result.results[0].namespace).toBe("clients/acme");
     expect(result.results[0].classification).toBe("client-confidential");
     expect(result.results[0].content_preview).toBeUndefined();
     expect(result.results[0].match).toBeUndefined();
@@ -1035,7 +1035,7 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
 
   it("rejects consumer writes to classified namespaces (orphan prevention)", async () => {
     await callTool("memory_write", {
-      namespace: "clients/lofalk",
+      namespace: "clients/acme",
       key: "secret-key",
       content: "Hidden confidential note",
       classification: "client-confidential",
@@ -1048,7 +1048,7 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
     });
 
     const raw = await consumerOwnerCall("memory_write", {
-      namespace: "clients/lofalk",
+      namespace: "clients/acme",
       key: "public-note",
       content: "Visible internal note",
     });
@@ -1062,7 +1062,7 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
 
   it("filters classified key names out of memory_read miss hints on downgraded transports", async () => {
     await callTool("memory_write", {
-      namespace: "clients/lofalk",
+      namespace: "clients/acme",
       key: "secret-key",
       content: "Hidden confidential note",
       classification: "client-confidential",
@@ -1075,14 +1075,14 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
     });
 
     const raw = await consumerOwnerCall("memory_read", {
-      namespace: "clients/lofalk",
+      namespace: "clients/acme",
       key: "missing-key",
     });
     const result = parseToolResponse(raw) as { found: boolean; hint: string };
 
     expect(result.found).toBe(false);
     expect(result.hint).not.toContain("secret-key");
-    expect(result.hint).toBe('No visible entries found in namespace "clients/lofalk".');
+    expect(result.hint).toBe('No visible entries found in namespace "clients/acme".');
   });
 
   it("uses minimal metadata for non-owner redacted query results", async () => {
@@ -1094,7 +1094,7 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
     });
 
     const familyCall = makeContextCallTool({
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
       accessibleNamespaces: [{ pattern: "shared/family/*", permissions: "rw" }],
       transportType: "consumer",
@@ -1120,13 +1120,13 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
 
   it("redacts previews in memory_list for classified state and log entries", async () => {
     await callTool("memory_write", {
-      namespace: "clients/lofalk",
+      namespace: "clients/acme",
       key: "status",
       content: "List preview should not leak",
       classification: "client-confidential",
     });
     await callTool("memory_log", {
-      namespace: "clients/lofalk",
+      namespace: "clients/acme",
       content: "List log preview should not leak",
       classification: "client-confidential",
     });
@@ -1137,7 +1137,7 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
       maxClassification: "internal",
     });
 
-    const raw = await consumerOwnerCall("memory_list", { namespace: "clients/lofalk" });
+    const raw = await consumerOwnerCall("memory_list", { namespace: "clients/acme" });
     const result = parseToolResponse(raw) as {
       state_entries: Array<Record<string, unknown>>;
       log_summary: { recent: Array<Record<string, unknown>> };
@@ -1159,7 +1159,7 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
       content: "Visible internal status",
     });
     await callTool("memory_write", {
-      namespace: "clients/lofalk",
+      namespace: "clients/acme",
       key: "status",
       content: "Classified namespace should disappear from top-level list",
       classification: "client-confidential",
@@ -1194,7 +1194,7 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
 
     expect(listedNamespaces).toContain("projects/internal");
     expect(listedNamespaces).toContain("shared/family/mixed");
-    expect(listedNamespaces).not.toContain("clients/lofalk");
+    expect(listedNamespaces).not.toContain("clients/acme");
     expect(topLevelResult.total).toBe(2);
     expect(topLevelResult.namespaces.find((entry) => entry.namespace === "shared/family/mixed")?.log_count).toBe(1);
 
@@ -1211,13 +1211,13 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
   it("filters classified keys and counts out of memory_delete preview on downgraded transports", async () => {
     process.env.MUNIN_ALLOW_NAMESPACE_DELETE = "true";
     await callTool("memory_write", {
-      namespace: "clients/lofalk",
+      namespace: "clients/acme",
       key: "secret-key",
       content: "Hidden confidential note",
       classification: "client-confidential",
     });
     await callTool("memory_log", {
-      namespace: "clients/lofalk",
+      namespace: "clients/acme",
       content: "Hidden confidential log",
       classification: "client-confidential",
     });
@@ -1228,7 +1228,7 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
       maxClassification: "internal",
     });
 
-    const raw = await consumerOwnerCall("memory_delete", { namespace: "clients/lofalk" });
+    const raw = await consumerOwnerCall("memory_delete", { namespace: "clients/acme" });
     const result = parseToolResponse(raw) as {
       phase: string;
       will_delete: { state_count: number; log_count: number; keys?: string[] };
@@ -1314,13 +1314,13 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
 
   it("redacts audit detail in memory_history for classified entries", async () => {
     await callTool("memory_write", {
-      namespace: "clients/lofalk",
+      namespace: "clients/acme",
       key: "status",
       content: "History billing note should not leak",
       classification: "client-confidential",
     });
     await callTool("memory_log", {
-      namespace: "clients/lofalk",
+      namespace: "clients/acme",
       content: "History log note should not leak",
       classification: "client-confidential",
     });
@@ -1331,12 +1331,12 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
       maxClassification: "internal",
     });
 
-    const raw = await consumerOwnerCall("memory_history", { namespace: "clients/lofalk" });
+    const raw = await consumerOwnerCall("memory_history", { namespace: "clients/acme" });
     const result = parseToolResponse(raw) as { entries: Array<Record<string, unknown>> };
 
     expect(result.entries.length).toBeGreaterThanOrEqual(2);
     for (const entry of result.entries) {
-      expect(entry.namespace).toBe("clients/lofalk");
+      expect(entry.namespace).toBe("clients/acme");
       expect(entry.redacted).toBe(true);
       expect(entry.detail).toBeNull();
       expect(entry.classification).toBe("client-confidential");
@@ -1346,14 +1346,14 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
 
   it("fails closed for deleted-entry audit history and logs the redaction", async () => {
     await callTool("memory_write", {
-      namespace: "clients/lofalk",
+      namespace: "clients/acme",
       key: "status",
       content: "Deleted audit detail should not leak after source removal",
       classification: "client-confidential",
     });
     db.prepare(
       "DELETE FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'",
-    ).run("clients/lofalk", "status");
+    ).run("clients/acme", "status");
 
     const consumerOwnerCall = makeContextCallTool(
       {
@@ -1364,7 +1364,7 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
       "history-deleted-source-session",
     );
 
-    const raw = await consumerOwnerCall("memory_history", { namespace: "clients/lofalk" });
+    const raw = await consumerOwnerCall("memory_history", { namespace: "clients/acme" });
     const result = parseToolResponse(raw) as { entries: Array<Record<string, unknown>> };
 
     expect(result.entries.length).toBeGreaterThan(0);
@@ -1374,7 +1374,7 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
 
     const redactionCount = db.prepare(
       "SELECT COUNT(*) AS count FROM redaction_log WHERE tool_name = 'memory_history' AND entry_namespace = ?",
-    ).get("clients/lofalk") as { count: number };
+    ).get("clients/acme") as { count: number };
     expect(redactionCount.count).toBeGreaterThan(0);
   });
 });
@@ -1398,7 +1398,7 @@ describe("Librarian Pattern B enforcement for derived tools", () => {
       tags: ["active"],
     });
     await callTool("memory_write", {
-      namespace: "clients/lofalk",
+      namespace: "clients/acme",
       key: "status",
       content: "Client-confidential tracked status",
       tags: ["active"],
@@ -1426,7 +1426,7 @@ describe("Librarian Pattern B enforcement for derived tools", () => {
 
     const dashboardNamespaces = Object.values(result.dashboard).flat().map((entry) => entry.namespace);
     expect(dashboardNamespaces).toContain("projects/internal");
-    expect(dashboardNamespaces).not.toContain("clients/lofalk");
+    expect(dashboardNamespaces).not.toContain("clients/acme");
     expect(result.librarian_summary).toMatchObject({
       enabled: true,
       transport_type: "consumer",
@@ -1436,7 +1436,7 @@ describe("Librarian Pattern B enforcement for derived tools", () => {
     expect(result.redacted_sources).toMatchObject({
       count: 1,
     });
-    expect(result.redacted_sources?.namespaces).toContain("clients/lofalk");
+    expect(result.redacted_sources?.namespaces).toContain("clients/acme");
   });
 
   it("omits a synthesis that exceeds the visible status entry's transport ceiling", async () => {
@@ -1649,7 +1649,7 @@ describe("Librarian Pattern B enforcement for derived tools", () => {
 
   it("does not infer hidden namespaces in memory_resume from filtered tracked statuses", async () => {
     await callTool("memory_update_status", {
-      namespace: "clients/lofalk",
+      namespace: "clients/acme",
       phase: "Active",
       current_work: "Hidden client rollout",
       blockers: "None.",
@@ -1664,22 +1664,22 @@ describe("Librarian Pattern B enforcement for derived tools", () => {
       maxClassification: "internal",
     });
 
-    const raw = await consumerOwnerCall("memory_resume", { project: "lofalk" });
+    const raw = await consumerOwnerCall("memory_resume", { project: "acme" });
     const result = parseToolResponse(raw) as {
       target_namespace?: string;
       items: Array<{ namespace: string }>;
       redacted_sources?: { count: number; namespaces?: string[] };
     };
 
-    expect(result.target_namespace).toBe("projects/lofalk");
+    expect(result.target_namespace).toBe("projects/acme");
     expect(result.items).toHaveLength(0);
     expect(result.redacted_sources?.count).toBeGreaterThan(0);
-    expect(result.redacted_sources?.namespaces).toContain("clients/lofalk");
+    expect(result.redacted_sources?.namespaces).toContain("clients/acme");
   });
 
   it("filters hidden scope inference and related entries in memory_extract", async () => {
     await callTool("memory_update_status", {
-      namespace: "clients/lofalk",
+      namespace: "clients/acme",
       phase: "Active",
       current_work: "Hidden extract target",
       blockers: "None.",
@@ -1696,7 +1696,7 @@ describe("Librarian Pattern B enforcement for derived tools", () => {
 
     const raw = await consumerOwnerCall("memory_extract", {
       conversation_text: "We decided to keep the billing notes private for now.",
-      project_hint: "lofalk",
+      project_hint: "acme",
     });
     const result = parseToolResponse(raw) as {
       suggestions: Array<{ namespace: string }>;
@@ -1705,11 +1705,11 @@ describe("Librarian Pattern B enforcement for derived tools", () => {
       redacted_sources?: { count: number; namespaces?: string[] };
     };
 
-    expect(result.candidate_namespaces).not.toContain("clients/lofalk");
+    expect(result.candidate_namespaces).not.toContain("clients/acme");
     expect(result.related_entries).toHaveLength(0);
-    expect(result.suggestions.every((suggestion) => suggestion.namespace !== "clients/lofalk")).toBe(true);
+    expect(result.suggestions.every((suggestion) => suggestion.namespace !== "clients/acme")).toBe(true);
     expect(result.redacted_sources?.count).toBeGreaterThan(0);
-    expect(result.redacted_sources?.namespaces).toContain("clients/lofalk");
+    expect(result.redacted_sources?.namespaces).toContain("clients/acme");
   });
 
   it("does not derive commitments from filtered source entries on downgraded transports", async () => {
@@ -1772,9 +1772,9 @@ describe("Librarian Pattern B enforcement for derived tools", () => {
 
   it("does not mine classified decision logs in memory_patterns", async () => {
     for (const content of [
-      "Decision: lofalk pricing review stays private until Monday.",
-      "Decided again that lofalk pricing review remains private until Monday.",
-      "Decision review: lofalk pricing review remains the recurring concern.",
+      "Decision: acme pricing review stays private until Monday.",
+      "Decided again that acme pricing review remains private until Monday.",
+      "Decision review: acme pricing review remains the recurring concern.",
     ]) {
       await callTool("memory_log", {
         namespace: "projects/private-patterns",
@@ -2358,7 +2358,7 @@ describe("memory_query", () => {
       tags: ["demo"],
     });
     await callTool("memory_write", {
-      namespace: "people/magnus",
+      namespace: "people/owner",
       key: "profile",
       content: "Orientation notes for the real profile",
       tags: ["profile"],
@@ -2368,7 +2368,7 @@ describe("memory_query", () => {
     const result = parseToolResponse(raw) as { results: Array<{ namespace: string }> };
     const namespaces = result.results.map((r) => r.namespace);
 
-    expect(namespaces).toContain("people/magnus");
+    expect(namespaces).toContain("people/owner");
     expect(namespaces).not.toContain("demo/test-person");
   });
 
@@ -2396,20 +2396,20 @@ describe("memory_query", () => {
 
   it("boosts profile entries above secondary person records", async () => {
     await callTool("memory_write", {
-      namespace: "people/magnus",
+      namespace: "people/owner",
       key: "employment",
-      content: "Magnus employment and collaboration details",
+      content: "Owner employment and collaboration details",
       tags: ["employment"],
     });
     await callTool("memory_write", {
-      namespace: "people/magnus",
+      namespace: "people/owner",
       key: "profile",
-      content: "Magnus profile with collaboration style and working preferences",
+      content: "Owner profile with collaboration style and working preferences",
       tags: ["profile"],
     });
 
     const raw = await callTool("memory_query", {
-      query: "Magnus collaboration style",
+      query: "Owner collaboration style",
       namespace: "people/",
     });
     const result = parseToolResponse(raw) as { results: Array<{ key: string | null }> };
@@ -2419,10 +2419,10 @@ describe("memory_query", () => {
 
   it("prioritizes live project status and profile context for broad orientation queries", async () => {
     await callTool("memory_write", {
-      namespace: "people/magnus",
+      namespace: "people/owner",
       key: "profile",
-      content: "Magnus profile with personal context, collaboration style, decision-making, and practical working preferences",
-      tags: ["profile", "person:magnus"],
+      content: "Owner profile with personal context, collaboration style, decision-making, and practical working preferences",
+      tags: ["profile", "person:owner"],
     });
     await callTool("memory_write", {
       namespace: "projects/grimnir",
@@ -2462,7 +2462,7 @@ describe("memory_query", () => {
       key: "status",
     }));
     expect(result.results.slice(0, 2)).toContainEqual(expect.objectContaining({
-      namespace: "people/magnus",
+      namespace: "people/owner",
       key: "profile",
     }));
     expect(result.results).not.toContainEqual(expect.objectContaining({
@@ -2477,30 +2477,30 @@ describe("memory_query", () => {
     await callTool("memory_write", {
       namespace: "meta",
       key: "reference-index",
-      content: "Session-start reference index for Magnus profile and conventions",
+      content: "Session-start reference index for Owner profile and conventions",
       tags: ["convention"],
     });
     await callTool("memory_write", {
-      namespace: "people/magnus",
+      namespace: "people/owner",
       key: "profile",
-      content: "Magnus profile with collaboration context and working style",
-      tags: ["profile", "person:magnus"],
+      content: "Owner profile with collaboration context and working style",
+      tags: ["profile", "person:owner"],
     });
     await callTool("memory_write", {
-      namespace: "clients/daniel-norin",
+      namespace: "clients/example-consulting",
       key: "status",
-      content: "Magnus is working on a proposal and hackathon follow-up for Photowall",
+      content: "Owner is working on a proposal and hackathon follow-up for an example campaign",
       tags: ["active", "client"],
     });
     await callTool("memory_write", {
-      namespace: "projects/gille-ai",
+      namespace: "projects/example-ai",
       key: "status",
       content: "Current work includes website updates and new case studies",
       tags: ["active"],
     });
 
     const raw = await callTool("memory_query", {
-      query: "orient me to what Magnus is working on and what I should know",
+      query: "orient me to what Owner is working on and what I should know",
       search_mode: "hybrid",
       limit: 5,
     });
@@ -2513,7 +2513,7 @@ describe("memory_query", () => {
       key: "reference-index",
     }));
     expect(result.results.slice(0, 2)).toContainEqual(expect.objectContaining({
-      namespace: "people/magnus",
+      namespace: "people/owner",
       key: "profile",
     }));
   });
@@ -2537,7 +2537,7 @@ describe("memory_query", () => {
       "UPDATE entries SET updated_at = ? WHERE namespace = ? AND key = 'status' AND entry_type = 'state'",
     ).run(new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString(), "projects/hackathon-web");
     await callTool("memory_write", {
-      namespace: "projects/gille-ai",
+      namespace: "projects/example-ai",
       key: "status",
       content: "## Current Work\nStable website work with no blockers.\n\n## Next Steps\nPublish another blog post.",
       tags: ["active"],
@@ -2581,7 +2581,7 @@ describe("memory_query", () => {
       "UPDATE entries SET updated_at = ? WHERE namespace = ? AND key = 'status' AND entry_type = 'state'",
     ).run(new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString(), "projects/hackathon-web");
     await callTool("memory_write", {
-      namespace: "projects/gille-ai",
+      namespace: "projects/example-ai",
       key: "status",
       content: "Attention is on routine content updates, but nothing is at risk.",
       tags: ["active"],
@@ -2726,7 +2726,7 @@ describe("memory_log", () => {
 describe("memory_list", () => {
   it("lists all namespaces", async () => {
     await callTool("memory_write", { namespace: "projects/a", key: "s", content: "c" });
-    await callTool("memory_write", { namespace: "people/magnus", key: "prefs", content: "c" });
+    await callTool("memory_write", { namespace: "people/owner", key: "prefs", content: "c" });
 
     const raw = await callTool("memory_list", {});
     const result = parseToolResponse(raw) as { namespaces: Array<{ namespace: string }> };
@@ -3045,7 +3045,7 @@ describe("memory_orient", () => {
       await seedBacklog("projects/busy", 3);
 
       const familyCall = makeContextCallTool({
-        principalId: "sara",
+        principalId: "alice",
         principalType: "family",
         accessibleNamespaces: [{ pattern: "projects/*", permissions: "rw" }],
         transportType: "consumer",
@@ -3808,6 +3808,37 @@ describe("memory_resume", () => {
 });
 
 describe("memory_extract", () => {
+  it("strips legacy owner speaker prefixes from extracted values", async () => {
+    // Regression: the speaker-prefix matcher was narrowed to the generic `owner`
+    // role, so a legacy owner name survived into proposed status content even
+    // though resolveOwnerAliases() exists to preserve exactly those names.
+    const raw = await callTool("memory_extract", {
+      conversation_text: "Magnus: Current work: audit publication.",
+      project_hint: "munin-memory",
+    });
+    const serialized = JSON.stringify(parseToolResponse(raw));
+
+    expect(serialized).not.toContain("Magnus:");
+    expect(serialized).not.toContain("magnus:");
+  });
+
+  it("strips configured owner aliases from extracted values", async () => {
+    const previous = process.env.MUNIN_OWNER_ALIASES;
+    process.env.MUNIN_OWNER_ALIASES = "Ada Lovelace";
+    try {
+      const raw = await callTool("memory_extract", {
+        conversation_text: "Ada Lovelace: Current work: audit publication.",
+        project_hint: "munin-memory",
+      });
+      const serialized = JSON.stringify(parseToolResponse(raw));
+
+      expect(serialized).not.toContain("Ada Lovelace:");
+    } finally {
+      if (previous === undefined) delete process.env.MUNIN_OWNER_ALIASES;
+      else process.env.MUNIN_OWNER_ALIASES = previous;
+    }
+  });
+
   it("turns explicit decisions into proposed log entries", async () => {
     await callTool("memory_write", {
       namespace: "projects/grimnir",
@@ -3875,9 +3906,9 @@ describe("memory_extract", () => {
 
   it("uses namespace hints to constrain suggestions and related entries", async () => {
     await callTool("memory_write", {
-      namespace: "users/sara/notes",
+      namespace: "users/alice/notes",
       key: "profile",
-      content: "Sara family notes profile.",
+      content: "Alice family notes profile.",
     });
     await callTool("memory_write", {
       namespace: "projects/foo",
@@ -3887,8 +3918,8 @@ describe("memory_extract", () => {
     });
 
     const raw = await callTool("memory_extract", {
-      conversation_text: "Decided to keep this in Sara's family notes.",
-      namespace_hint: "users/sara/notes",
+      conversation_text: "Decided to keep this in Alice's family notes.",
+      namespace_hint: "users/alice/notes",
     });
     const result = parseToolResponse(raw) as {
       suggestions: Array<{ namespace: string }>;
@@ -3896,9 +3927,9 @@ describe("memory_extract", () => {
       related_entries: Array<{ namespace: string }>;
     };
 
-    expect(result.candidate_namespaces).toEqual(["users/sara/notes"]);
-    expect(result.suggestions.every((suggestion) => suggestion.namespace === "users/sara/notes")).toBe(true);
-    expect(result.related_entries.every((entry) => entry.namespace === "users/sara/notes")).toBe(true);
+    expect(result.candidate_namespaces).toEqual(["users/alice/notes"]);
+    expect(result.suggestions.every((suggestion) => suggestion.namespace === "users/alice/notes")).toBe(true);
+    expect(result.related_entries.every((entry) => entry.namespace === "users/alice/notes")).toBe(true);
   });
 
   it("does not write anything while generating suggestions", async () => {
@@ -3961,7 +3992,7 @@ describe("memory_extract", () => {
     const raw = await callTool("memory_extract", {
       conversation_text: [
         "The sprint demo looked good and the release batch is already deployed.",
-        "Next step: exercise the new tools in normal usage and tune heuristics if they prove too Magnus-specific.",
+        "Next step: exercise the new tools in normal usage and tune heuristics if they prove too Owner-specific.",
         "Action item: refresh the docs after the live pass.",
       ].join(" "),
       namespace_hint: "projects/grimnir",
@@ -3977,7 +4008,7 @@ describe("memory_extract", () => {
 
     const statusSuggestion = result.suggestions.find((suggestion) => suggestion.action === "memory_update_status");
     expect(statusSuggestion?.status_patch?.next_steps).toEqual(expect.arrayContaining([
-      "Exercise the new tools in normal usage and tune heuristics if they prove too Magnus-specific",
+      "Exercise the new tools in normal usage and tune heuristics if they prove too Owner-specific",
       "Refresh the docs after the live pass",
     ]));
     expect(statusSuggestion?.status_patch?.next_steps?.some((step) => /^[:;,\-]/.test(step))).toBe(false);
@@ -6409,8 +6440,8 @@ describe("reference index (memory_orient)", () => {
     const refIndex = JSON.stringify({
       version: 1,
       references: [
-        { namespace: "people/magnus", key: "profile", title: "Magnus profile", when_to_load: "collaboration style" },
-        { namespace: "meta", key: "mgc-soul", title: "MGC soul", when_to_load: "proposals and positioning" },
+        { namespace: "people/owner", key: "profile", title: "Owner profile", when_to_load: "collaboration style" },
+        { namespace: "meta", key: "org-principles", title: "Organization principles", when_to_load: "proposals and positioning" },
       ],
     });
     await callTool("memory_write", { namespace: "meta", key: "reference-index", content: refIndex });
@@ -6422,7 +6453,7 @@ describe("reference index (memory_orient)", () => {
 
     expect(result.references).toBeDefined();
     expect(result.references.entries).toHaveLength(2);
-    expect(result.references.entries[0].title).toBe("Magnus profile");
+    expect(result.references.entries[0].title).toBe("Owner profile");
     expect(result.references.updated_at).toBeTruthy();
   });
 
@@ -6444,7 +6475,7 @@ describe("reference index (memory_orient)", () => {
     const refIndex = JSON.stringify({
       version: 1,
       references: [
-        { namespace: "people/magnus", key: "profile", title: "Magnus profile", when_to_load: "always" },
+        { namespace: "people/owner", key: "profile", title: "Owner profile", when_to_load: "always" },
         { namespace: "bad", title: "Missing key field" },
         { key: "bad", title: "Missing namespace" },
       ],
@@ -6457,7 +6488,7 @@ describe("reference index (memory_orient)", () => {
     };
 
     expect(result.references.entries).toHaveLength(1);
-    expect(result.references.entries[0].namespace).toBe("people/magnus");
+    expect(result.references.entries[0].namespace).toBe("people/owner");
   });
 
   it("omits references when references array is empty after filtering", async () => {
@@ -7640,7 +7671,7 @@ describe("memory_health", () => {
     // overriding principalType to a non-owner with no rules denies everything.
     const familyCall = makeContextCallTool({
       ...ownerContext(),
-      principalId: "principal:sara",
+      principalId: "principal:alice",
       principalType: "family",
     });
     await familyCall("memory_read", { namespace: "projects/secret", key: "status" });
@@ -7666,7 +7697,7 @@ describe("memory_health", () => {
     // Drive a classification_override denial for memory_write (non-owner using override)
     const familyCall = makeContextCallTool({
       ...ownerContext(),
-      principalId: "principal:sara2",
+      principalId: "principal:alice2",
       principalType: "family",
     });
     await familyCall("memory_write", {
@@ -7703,7 +7734,7 @@ describe("memory_health", () => {
 
   it("family (non-owner) principal gets invisible denial (found: false, zero metadata)", async () => {
     const familyCtx: AccessContext = {
-      principalId: "principal:sara",
+      principalId: "principal:alice",
       principalType: "family",
       namespaceRules: [{ pattern: "shared/*", permissions: "rw" }],
     };

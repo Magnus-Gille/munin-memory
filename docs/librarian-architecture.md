@@ -51,7 +51,7 @@ When Munin returns content to an AI platform, that content enters the platform's
 
 | Non-threat | Rationale |
 |---|---|
-| **User copy-paste** | Magnus can always type or paste client data into any Claude session manually. The Librarian prevents *systematic* data flow, not intentional user action. |
+| **User copy-paste** | Owner can always type or paste client data into any Claude session manually. The Librarian prevents *systematic* data flow, not intentional user action. |
 | **Model memorization** | If data was previously sent through a DPA-covered session, residual knowledge in model weights is governed by the provider's terms, not Munin's gating. |
 | **Munin server compromise** | The Librarian is an application-layer control. Server compromise is addressed by the existing 5-layer security model. |
 | **Anthropic terms change** | If Anthropic changes API terms to remove DPA, the transport classification configuration must be updated. The Librarian doesn't monitor terms. |
@@ -102,7 +102,7 @@ Four levels, strictly ordered:
 | Level | Rank | Tag | Description |
 |---|---|---|---|
 | `public` | 0 | `classification:public` | Publicly available information. No restrictions. |
-| `internal` | 1 | `classification:internal` | Magnus's own work. No client PII. Safe for any interactive AI session. |
+| `internal` | 1 | `classification:internal` | Owner's own work. No client PII. Safe for any interactive AI session. |
 | `client-confidential` | 2 | `classification:client-confidential` | Contains client PII or business context. Requires DPA-covered AI platform. |
 | `client-restricted` | 3 | `classification:client-restricted` | Contractually restricted. No cloud AI under any terms. Local processing only. |
 
@@ -185,7 +185,7 @@ When `memory_write` or `memory_log` stores an entry:
 4. **Store:** Set the `classification` column. Add/update the `classification:*` tag in the tags array.
 5. **Audit:** If `classification_override` was used, log to `audit_log`.
 
-**Rationale for rejecting below-minimum:** An entry in `clients/lofalk` should never be classified as `public`. The namespace exists because the data is client-related. Allowing lower-than-namespace classification creates a trivial bypass.
+**Rationale for rejecting below-minimum:** An entry in `clients/acme` should never be classified as `public`. The namespace exists because the data is client-related. Allowing lower-than-namespace classification creates a trivial bypass.
 
 ---
 
@@ -345,20 +345,20 @@ Raw DB results
 - Layer 2 (classification): Denied entries are **redacted**. The caller sees metadata + a notice explaining why and how to access the full content.
 
 This distinction is deliberate:
-- **Namespace isolation** is a security boundary (Sara shouldn't know `projects/foo` exists).
-- **Classification gating** is a legal/compliance boundary (Magnus knows his own data exists — he just can't surface it through this AI platform).
+- **Namespace isolation** is a security boundary (Alice shouldn't know `projects/foo` exists).
+- **Classification gating** is a legal/compliance boundary (Owner knows his own data exists — he just can't surface it through this AI platform).
 
 ### 6.2 Redacted entry format — tiered metadata policy
 
 Redaction metadata differs by principal type. This prevents non-owner principals from learning protected relationships (e.g., that a specific company is an active client) through redacted entry metadata.
 
-**Owner on downgraded transport** (e.g., Magnus via Claude.ai):
+**Owner on downgraded transport** (e.g., Owner via Claude.ai):
 
 Full metadata — the owner already knows their own data exists. The redaction notice guides them to the right environment.
 
 ```json
 {
-  "namespace": "clients/lofalk",
+  "namespace": "clients/acme",
   "key": "status",
   "entry_type": "state",
   "classification": "client-confidential",
@@ -504,7 +504,7 @@ function filterSourcesByClassification<T extends { namespace: string; id: string
 **Every Pattern B tool calls `filterSourcesByClassification` before processing.** The synthesis operates only on `allowed` sources. The response includes a `redacted_sources` summary so the caller knows content was excluded.
 
 **`redacted_sources` metadata policy** (same tiering as §6.2):
-- **Owner:** `{ count: N, namespaces: ["clients/lofalk", "people/contact"], reason: "..." }`
+- **Owner:** `{ count: N, namespaces: ["clients/acme", "people/contact"], reason: "..." }`
 - **Non-owner:** `{ count: N, reason: "Some sources exceeded your classification level." }` — no namespace or entry details.
 
 **Partial-failure rule for derived tools:** If any source entry has NULL or unparseable classification, that source is excluded (treated as `client-restricted`). The tool returns partial output from classifiable sources plus the `redacted_sources` summary. The tool does NOT fail entirely — partial output is more useful than no output. The redacted_sources field makes the omission visible.
@@ -690,9 +690,9 @@ ALTER TABLE commitments ADD COLUMN source_classification TEXT DEFAULT 'internal'
 
 | Scenario | Layer 1 (Access) | Layer 2 (Classification) | User sees |
 |---|---|---|---|
-| Sara reads `clients/lofalk/status` | Denied (no namespace rule) | N/A (Layer 1 stops it) | `{ found: false }` — INVISIBLE |
-| Magnus via Claude.ai reads `clients/lofalk/status` | Allowed (owner) | Denied (client-confidential > internal) | Redacted metadata + reason |
-| Magnus via Claude Code reads `clients/lofalk/status` | Allowed (owner) | Allowed (client-confidential <= client-confidential) | Full content |
+| Alice reads `clients/acme/status` | Denied (no namespace rule) | N/A (Layer 1 stops it) | `{ found: false }` — INVISIBLE |
+| Owner via Claude.ai reads `clients/acme/status` | Allowed (owner) | Denied (client-confidential > internal) | Redacted metadata + reason |
+| Owner via Claude Code reads `clients/acme/status` | Allowed (owner) | Allowed (client-confidential <= client-confidential) | Full content |
 | Agent:hugin reads `projects/foo/status` | Check namespace rules | Check agent max_classification | Depends on config |
 
 ---
@@ -829,8 +829,8 @@ CREATE INDEX IF NOT EXISTS idx_entries_ns_classification
 ### 10.2 Principal configuration (via munin-admin)
 
 ```bash
-# Set Sara's max classification (defense-in-depth alongside namespace rules)
-npx munin-admin principals update sara --max-classification internal
+# Set Alice's max classification (defense-in-depth alongside namespace rules)
+npx munin-admin principals update alice --max-classification internal
 
 # Set a local agent's max classification higher
 npx munin-admin principals update agent:skuld --max-classification client-confidential --transport-type local

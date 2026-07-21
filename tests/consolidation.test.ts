@@ -797,7 +797,7 @@ describe("cross-zone exfil guard", () => {
     writeState(db, "projects/beta", "status", "beta", ["active"]);
     writeState(db, "decisions/architecture", "status", "arch", []);
     writeState(db, "clients/acme", "status", "acme", ["active"]); // client-confidential
-    writeState(db, "people/sara", "status", "sara", []); // client-confidential
+    writeState(db, "people/alice", "status", "alice", []); // client-confidential
 
     const targets = loadTargetVocabulary(db, "projects/alpha") // internal floor
       .map((t) => t.namespace)
@@ -805,7 +805,7 @@ describe("cross-zone exfil guard", () => {
 
     expect(targets).toEqual(["decisions/architecture", "projects/beta"]);
     expect(targets).not.toContain("clients/acme");
-    expect(targets).not.toContain("people/sara");
+    expect(targets).not.toContain("people/alice");
   });
 
   it("loadTargetVocabulary keeps equal/lower-floor targets when the source is more sensitive", () => {
@@ -1295,7 +1295,7 @@ describe("scanMentions", () => {
   const targets = [
     { namespace: "projects/hugin", bareName: "hugin" },
     { namespace: "projects/heimdall", bareName: "heimdall" },
-    { namespace: "people/sara", bareName: "sara" },
+    { namespace: "people/alice", bareName: "alice" },
   ];
 
   it("counts full-path and bare-name mentions, case-insensitive", () => {
@@ -1320,11 +1320,11 @@ describe("scanMentions", () => {
 
   it("does not match substrings inside words", () => {
     const logs: Entry[] = [
-      makeEntry({ content: "resara and saracen and saragossa — no standalone tokens." }),
+      makeEntry({ content: "malice and alicante and calico — no standalone tokens." }),
     ];
     const hits = scanMentions(logs, targets);
-    const sara = hits.find((h) => h.targetNamespace === "people/sara");
-    expect(sara).toBeUndefined();
+    const alice = hits.find((h) => h.targetNamespace === "people/alice");
+    expect(alice).toBeUndefined();
   });
 
   it("returns empty for empty inputs", () => {
@@ -1374,7 +1374,7 @@ describe("mergeCrossReferences", () => {
     confidence: 0.5,
   };
   const scannerRefNewTarget = {
-    target_namespace: "people/sara",
+    target_namespace: "people/alice",
     reference_type: "related_to" as const,
     context: "Scanner-detected: 3 mentions",
     confidence: 0.5,
@@ -2375,7 +2375,7 @@ describe("#123 — consolidated fetch shape regression", () => {
     expect(headers["Authorization"]).toBe("Bearer sk-regression-key");
 
     // Fixed headers
-    expect(headers["HTTP-Referer"]).toBe("https://munin-memory.gille.ai");
+    expect(headers["HTTP-Referer"]).toBe("https://github.com/Magnus-Gille/munin-memory");
     expect(headers["X-Title"]).toBe("Munin Memory Consolidation");
     expect(headers["Content-Type"]).toBe("application/json");
 
@@ -2438,7 +2438,7 @@ describe("#123 — consolidated fetch shape regression", () => {
     expect(Object.prototype.hasOwnProperty.call(headers, "Authorization")).toBe(false);
 
     // Fixed headers still present
-    expect(headers["HTTP-Referer"]).toBe("https://munin-memory.gille.ai");
+    expect(headers["HTTP-Referer"]).toBe("https://github.com/Magnus-Gille/munin-memory");
     expect(headers["X-Title"]).toBe("Munin Memory Consolidation");
   });
 });

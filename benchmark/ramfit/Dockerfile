@@ -1,5 +1,5 @@
 # RAM-fit measurement image for munin-memory
-# Targets linux/arm64 (magnus-desktop host).
+# Targets linux/arm64 (owner-desktop host).
 # Build context: repo root (so COPY works from .)
 
 FROM node:20-bookworm

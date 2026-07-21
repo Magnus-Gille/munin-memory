@@ -536,7 +536,7 @@ describe("migration v10 — owner_principal_id", () => {
 
     db.prepare(
       `INSERT INTO entries (id, namespace, key, entry_type, content, tags, agent_id, created_at, updated_at, embedding_status, embedding_model, valid_until)
-       VALUES ('owned-entry', 'shared/family/board', 'note', 'state', 'hello', '[]', 'sara', '2026-04-01T00:00:00.000Z', '2026-04-01T00:00:00.000Z', 'pending', NULL, NULL)`,
+       VALUES ('owned-entry', 'shared/family/board', 'note', 'state', 'hello', '[]', 'alice', '2026-04-01T00:00:00.000Z', '2026-04-01T00:00:00.000Z', 'pending', NULL, NULL)`,
     ).run();
 
     runMigrations(db);
@@ -544,7 +544,7 @@ describe("migration v10 — owner_principal_id", () => {
     const row = db
       .prepare("SELECT owner_principal_id FROM entries WHERE id = 'owned-entry'")
       .get() as { owner_principal_id: string | null };
-    expect(row.owner_principal_id).toBe("sara");
+    expect(row.owner_principal_id).toBe("alice");
     db.close();
   });
 });

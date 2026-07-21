@@ -47,7 +47,7 @@
   {
     "id": "tunnel-C06",
     "source": "codex-round-1",
-    "text": "munin-memory.service lacks systemd hardening directives (runs as magnus with full access)",
+    "text": "munin-memory.service lacks systemd hardening directives (runs as owner with full access)",
     "classification": "valid",
     "impact": "changed",
     "severity": "major",

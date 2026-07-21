@@ -91,15 +91,15 @@ None of substance. Convergence was clean.
 | **PR/Artifact 4** | Decision | Recency-weight decision | `decisions/retrieval-recency-blend.md` compares current tiebreaker / normalized blend / docs+API correction on retrieval v1; aggregate + per-stratum metrics; p95 duration; changed top-20 examples; ranking change merges only if no authority/staleness regressions, otherwise docs+API correction or no-change |
 | **Checkpoint** | Gate | Stop or continue deliberately | Status records: merged ranking change, merged docs+API correction, or documented no-change. If "no useful signal" → project pauses; PRs 7–9 do not start without owner decision |
 | **PR 5 (cond.)** | Schema | Report-only scorecard schema enforcement | Separate retrieval and consolidation primary fields, no aggregate scalar, lint test fails on blended fields; retrieval comparison runs report-only until thresholds approved |
-| **Artifact 6 (cond.)** | Audit | Minimal consolidation audit protocol | `eval/consolidation/v0/`: 12 cases (4 ordinary, 3 planted contradictions, 2 #51-style, 2 sparse, 1 multilingual), 60–80 audited claims (claim-level rubric), Magnus-owned gold labels, `judge-audit.md` with precision/recall |
+| **Artifact 6 (cond.)** | Audit | Minimal consolidation audit protocol | `eval/consolidation/v0/`: 12 cases (4 ordinary, 3 planted contradictions, 2 #51-style, 2 sparse, 1 multilingual), 60–80 audited claims (claim-level rubric), maintainer-owned gold labels, `judge-audit.md` with precision/recall |
 | **PR 7 (cond.)** | Scorer | Consolidation scorer | Only after Artifact 6 meets recall ≥ 0.90 + precision ≥ 0.80 for unsupported/contradicted detection; deterministic coverage/compression/stability/recency on v0 cases; faithfulness judge pinned by model+prompt checksum; #51 outage as explicit fixture |
 
 ## Action items
 
 | # | Action | Owner | Status |
 |---|---|---|---|
-| 1 | File PR 0 (telemetry labeling fix) | Magnus | proposed |
-| 2 | File PR 1 + PR 2 issues on Magnus-Gille/munin-memory | Magnus/Claude | proposed |
+| 1 | File PR 0 (telemetry labeling fix) | Maintainer | proposed |
+| 2 | File PR 1 + PR 2 issues on the Munin repository | Maintainer | proposed |
 | 3 | Update `projects/munin-memory/synthesis` to reflect v3c-closed state | Claude | recommended next session |
 | 4 | Add quality-metrics plan reference to status Next Steps | Claude | recommended |
 

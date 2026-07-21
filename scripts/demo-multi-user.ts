@@ -65,26 +65,26 @@ async function show(label: string, call: Call): Promise<void> {
 async function main(): Promise<void> {
   const db = initDatabase(":memory:");
 
-  // --- Owner (Magnus): global conventions + tracked consultant work ---
+  // --- Owner (Owner): global conventions + tracked consultant work ---
   writeState(
     db,
     "meta/conventions",
     "conventions",
-    "# Magnus — Munin Conventions\nConsultant taxonomy: projects/* and clients/*.",
+    "# Owner — Munin Conventions\nConsultant taxonomy: projects/* and clients/*.",
     ["governance"],
   );
   writeState(db, "projects/munin", "status", "Building multi-user memory", ["active"]);
   writeState(db, "clients/acme", "status", "Engagement active", ["active"]);
 
-  // --- Sara (family): onboarded with the household profile ---
+  // --- Alice (family): onboarded with the household profile ---
   addPrincipal(db, {
-    principalId: "sara",
+    principalId: "alice",
     principalType: "family",
-    rules: [{ pattern: "users/sara/*", permissions: "rw" }],
+    rules: [{ pattern: "users/alice/*", permissions: "rw" }],
     profile: "household",
   });
-  writeState(db, "users/sara/home/garden", "status", "Replant the back beds", ["active"], "sara");
-  writeState(db, "users/sara/health/checkup", "status", "Book annual checkup", ["active"], "sara");
+  writeState(db, "users/alice/home/garden", "status", "Replant the back beds", ["active"], "alice");
+  writeState(db, "users/alice/health/checkup", "status", "Book annual checkup", ["active"], "alice");
 
   // --- Guest (external): onboarded with the personal-knowledge profile ---
   addPrincipal(db, {
@@ -96,8 +96,8 @@ async function main(): Promise<void> {
   writeState(db, "users/guest/projects/novel", "status", "Draft chapter 3", ["active"], "guest");
 
   console.log("\n=== Munin multi-user demo — three principals, three worlds ===");
-  await show("OWNER (Magnus)", makeCall(db, ownerContext()));
-  await show("FAMILY (Sara — household profile)", makeCall(db, scopedCtx("sara", "family", "users/sara")));
+  await show("OWNER (Owner)", makeCall(db, ownerContext()));
+  await show("FAMILY (Alice — household profile)", makeCall(db, scopedCtx("alice", "family", "users/alice")));
   await show("EXTERNAL (Guest — personal-knowledge profile)", makeCall(db, scopedCtx("guest", "external", "users/guest")));
 
   console.log(

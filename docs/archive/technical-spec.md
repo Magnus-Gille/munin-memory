@@ -142,7 +142,7 @@ Each tool is defined with a JSON Schema for parameters and a handler function. B
     "properties": {
       "namespace": {
         "type": "string",
-        "description": "Hierarchical namespace using / separator. E.g. 'projects/hugin-munin', 'people/magnus', 'decisions/tech-stack'"
+        "description": "Hierarchical namespace using / separator. E.g. 'projects/hugin-munin', 'people/owner', 'decisions/tech-stack'"
       },
       "key": {
         "type": "string",

@@ -653,7 +653,7 @@ describe("listNamespaces", () => {
     writeState(db, "projects/a", "status", "active", []);
     writeState(db, "projects/a", "arch", "monolith", []);
     appendLog(db, "projects/a", "started", []);
-    writeState(db, "people/magnus", "prefs", "vim", []);
+    writeState(db, "people/owner", "prefs", "vim", []);
 
     const ns = listNamespaces(db);
     expect(ns).toHaveLength(2);
@@ -662,7 +662,7 @@ describe("listNamespaces", () => {
     expect(projA!.state_count).toBe(2);
     expect(projA!.log_count).toBe(1);
 
-    const people = ns.find((n) => n.namespace === "people/magnus");
+    const people = ns.find((n) => n.namespace === "people/owner");
     expect(people!.state_count).toBe(1);
     expect(people!.log_count).toBe(0);
   });
@@ -1829,7 +1829,7 @@ describe("recordAccessDenied + getAccessDeniedCount7d", () => {
 
   it("records a secret-free access_denied audit row and counts it within 7d", () => {
     recordAccessDenied(db, "agent:skuld", "memory_read");
-    recordAccessDenied(db, "family:sara", "memory_write");
+    recordAccessDenied(db, "family:alice", "memory_write");
 
     const rows = db
       .prepare("SELECT agent_id, action, namespace, key, detail FROM audit_log WHERE action = 'access_denied' ORDER BY id")

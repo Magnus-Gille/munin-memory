@@ -30,10 +30,10 @@ describe("taxonomy profiles", () => {
   });
 
   it("materializeProfile substitutes {home} with a scoped principal's prefix", () => {
-    const m = materializeProfile(getTaxonomyProfile("household")!, "users/sara");
-    expect(m.trackedPatterns).toContain("users/sara/home/*");
+    const m = materializeProfile(getTaxonomyProfile("household")!, "users/alice");
+    expect(m.trackedPatterns).toContain("users/alice/home/*");
     expect(m.trackedPatterns.every((p) => !p.includes("{home}"))).toBe(true);
-    expect(m.conventions).toContain("users/sara/home");
+    expect(m.conventions).toContain("users/alice/home");
     expect(m.conventions).not.toContain("{home}");
   });
 

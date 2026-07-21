@@ -5,16 +5,15 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=magnus
+User=<user>
 # Runs from ~/munin-ops (a dedicated ops dir, NOT a git checkout) so cron never
 # executes code out of a mutable/dev checkout. Populate it with scripts/install-ops.sh.
-WorkingDirectory=/home/magnus/munin-ops
-ExecStart=/home/magnus/munin-ops/scripts/offsite-snapshot.sh
+WorkingDirectory=<ops-dir>
+ExecStart=<ops-dir>/scripts/offsite-snapshot.sh
 # Optional — reuses HEIMDALL_HUB_URL + HEIMDALL_FLEET_TOKEN (shared) for the status
-# panel, plus any MIMIR_OFFSITE_* / MUNIN_OFFSITE_* overrides. The munin-crypt remote
-# + OneDrive OAuth token live in the rclone config (~/.config/rclone/rclone.conf,
-# chmod 600) — NOT in this .env and NOT in the repo.
-EnvironmentFile=-/home/magnus/munin-ops/.env
+# panel, plus any MIMIR_OFFSITE_* / MUNIN_OFFSITE_* overrides. Remote credentials
+# and the crypt key live in rclone's chmod-600 config, not this env file or repo.
+EnvironmentFile=-<ops-dir>/.env
 Nice=10
 IOSchedulingClass=idle
 
@@ -26,10 +25,10 @@ TimeoutStartSec=7200
 
 # Sandboxing
 ProtectSystem=strict
-# rclone rewrites rclone.conf when it refreshes the OneDrive OAuth token, so its
+# rclone may rewrite rclone.conf when it refreshes a provider OAuth token, so its
 # config dir must be writable. The live DB, VACUUM INTO snapshot staging, log + stamp
 # all live under ~/.munin-memory (the snapshot reads the DB; sqlite may touch WAL/shm).
-ReadWritePaths=/home/magnus/.munin-memory /home/magnus/.config/rclone
+ReadWritePaths=<home-dir>/.munin-memory <home-dir>/.config/rclone
 NoNewPrivileges=true
 PrivateTmp=true
 

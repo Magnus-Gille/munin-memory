@@ -1,14 +1,18 @@
 [Unit]
-Description=Munin Memory backup to NAS
+Description=Munin Memory off-host or mounted-volume backup
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=magnus
+User=<user>
 # Runs from ~/munin-ops (a dedicated ops dir, NOT a git checkout) so cron never
 # executes code out of a mutable/dev checkout. Populate it with scripts/install-ops.sh.
-ExecStart=/home/magnus/munin-ops/scripts/backup-to-nas.sh
+ExecStart=<ops-dir>/scripts/backup-to-nas.sh
+# Required: MUNIN_BACKUP_MOUNT must be an active mountpoint and
+# MUNIN_BACKUP_DIR must be a strict child. The script rejects / as the mount
+# root and fails closed for an absent mount.
+EnvironmentFile=-<ops-dir>/.env
 StandardOutput=journal
 StandardError=journal
 
@@ -17,6 +21,6 @@ TimeoutStartSec=120
 
 # Hardening (lighter than the main service — just needs network + sqlite3)
 NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=read-only
+ProtectSystem=full
+ProtectHome=false
 PrivateTmp=yes

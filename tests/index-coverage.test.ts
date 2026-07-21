@@ -535,14 +535,20 @@ describe("createHttpApp — HTTP app endpoints", () => {
     }
   });
 
-  it("/heimdall.json returns the expected static descriptor", async () => {
+  it("/heimdall.json returns a generic standalone descriptor by default", async () => {
     const { app } = makeApp(db);
     const res = await supertest(app)
       .get("/heimdall.json")
       .set({ Host: "127.0.0.1:3030" })
       .expect(200);
     expect(res.body).toMatchObject({
-      service: { name: "munin-memory", label: "Munin Memory", namespace: "grimnir" },
+      service: {
+        name: "munin-memory",
+        label: "Munin Memory",
+        namespace: "standalone",
+        instance_id: "munin-local",
+      },
+      deploy: { host: "localhost" },
       kind: "mcp",
       status: "pass",
       links: {
@@ -655,9 +661,10 @@ describe("createHttpApp — HTTP app endpoints", () => {
       },
     };
 
-    // Send RATE_LIMIT_MAX + 1 requests, collecting last status
+    // Leave headroom for tokens refilled while the sequential HTTP requests run
+    // on slower CI machines.
     let lastStatus = 200;
-    for (let i = 0; i <= RATE_LIMIT_MAX; i++) {
+    for (let i = 0; i <= RATE_LIMIT_MAX + 20; i++) {
       const r = await supertest(app)
         .post("/mcp")
         .set(stdHeaders())

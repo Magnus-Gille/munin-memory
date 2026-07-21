@@ -69,7 +69,7 @@ function seedCorpus(db: Database.Database): void {
 
   // Canonical entries
   writeState(db, "meta", "reference-index", "Catalog of important Munin namespaces and conventions.", ["canonical"]);
-  writeState(db, "people/magnus", "profile", "Owner of the Munin Memory project. Prefers terse outputs.", ["canonical"]);
+  writeState(db, "people/owner", "profile", "Owner of the Munin Memory project. Prefers terse outputs.", ["canonical"]);
 
   // Plain notes
   writeState(db, "decisions/ranker", "v1", "Decided to apply heuristic rerank + freshness over raw FTS5 scores.", ["decision"]);

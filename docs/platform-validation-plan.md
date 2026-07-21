@@ -28,7 +28,7 @@ At the end of this plan:
 
 ## Current Touchpoints
 
-- [docs/appliance-profiles.md](docs/appliance-profiles.md)
+- [appliance-profiles.md](appliance-profiles.md)
 - current runtime flags for semantic/hybrid search
 - deploy/service scripts already used for Pi-class hardware
 

@@ -165,7 +165,11 @@ Deployment uses one owner per directory role; do not blur them:
 - `~/munin-memory`: git-free deploy artifact executed by systemd; populated by `scripts/deploy-rpi.sh`.
 - `~/munin-ops`: checkout-independent backup/offsite runtime installed by `scripts/install-ops.sh`.
 
-The root `munin-memory.service` is the portable template rendered by `deploy-rpi.sh`. `systemd/munin-memory.service` is the pre-rendered canonical Magnus/Grimnir fleet unit; contract tests keep the two paths aligned.
+The root `munin-memory.service` is the portable template rendered by
+`deploy-rpi.sh`. `systemd/munin-memory.service` is the install-ready,
+placeholder-free unit for the public Grimnir registry example; private fleets
+that use different paths keep their rendered overrides in private deployment
+configuration.
 
 ```bash
 ./scripts/deploy-rpi.sh <host>

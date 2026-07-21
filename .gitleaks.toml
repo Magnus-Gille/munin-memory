@@ -1,0 +1,39 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Exact synthetic credentials used by secret-redaction tests"
+regexTarget = "match"
+regexes = [
+  '''AKIAIOSFODNN7EXAMPLE''',
+  '''gh[op]_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij''',
+  '''ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa''',
+  '''sk-abcdEFGH1234567890wxyz''',
+  '''sk-abc123def456ghi789jkl012mno345''',
+  '''sk-abcdefghijklmnopqrstuvwx''',
+  '''sk-abcdefghijklmnopqrstuvwxyz''',
+  '''sk-or-v1-(?:abcdefghijklmnopqrstuv|supersecretkey12345678)''',
+  '''sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij''',
+  '''eyJhbGciOiJIUzI1NiJ9\.eyJ0ZXN0IjoidmFsdWUifQ''',
+]
+
+[[allowlists]]
+description = "Exact synthetic OpenRouter secrets used by streaming-redaction tests"
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^tests/openrouter\.test\.ts$''']
+regexes = [
+  '''sk-or-secret-abc123''',
+  '''sk-or-secret-xyz789''',
+]
+
+[[allowlists]]
+description = "Exact synthetic API keys used by OAuth compatibility tests"
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^tests/oauth\.test\.ts$''']
+regexes = [
+  '''test-legacy-api-key-12345''',
+  '''test-dpa-api-key-67890''',
+  '''test-consumer-api-key-54321''',
+]

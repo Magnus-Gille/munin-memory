@@ -3,6 +3,7 @@
 Persistent memory for AI assistants, self-hosted and provider-portable.
 
 Named after Munin, one of Odin's two ravens — the one responsible for memory.
+Munin Memory is unrelated to the established Munin network-monitoring project.
 
 ## Why
 
@@ -10,7 +11,7 @@ AI assistants forget everything between conversations. The context you build up 
 
 Some providers offer built-in memory features, but that context lives on their servers, in their format, under their control. If you switch providers, or they change their terms, or they shut down — your accumulated context goes with them.
 
-Munin Memory is a different approach: a lightweight [MCP](https://modelcontextprotocol.io/) server that stores your AI's memory in a SQLite database **you own and control**. It runs on a Raspberry Pi, a VPS, or your laptop. Any MCP-compatible AI client can connect — today that's Claude across all platforms, tomorrow it could be any provider that supports the protocol.
+Munin Memory is a different approach: a lightweight [MCP](https://modelcontextprotocol.io/) server that stores your AI's memory in a SQLite database **you own and control**. It runs on a Raspberry Pi, a VPS, or your laptop, and any MCP-compatible client can use the same memory contract.
 
 The underlying principle: **your AI's memory is your data, and it should live on your infrastructure.**
 
@@ -25,7 +26,7 @@ Munin is more than a key-value store for AI. The features are designed around ho
 - **Retrospective synthesis tools** — `memory_narrative`, `memory_commitments`, `memory_patterns`, and `memory_handoff` derive reviewable, source-backed signals from logs and audit history: blocker age, decision churn, open commitments, anti-patterns, and handoff packs between environments or agents. Every surfaced signal is tied to an explicit source entry — no hidden policy, no hallucinated summaries.
 - **Two memory types** — state entries (mutable, current truth) and log entries (append-only, chronological history). A clean conceptual model that maps to how projects actually evolve.
 - **Atomic state-write preconditions** — `memory_update_status` and `memory_write` support compare-and-swap (`expected_updated_at`) so concurrent environments do not blindly overwrite each other. `memory_write` also supports `create_if_absent: true` for ledgers and other first-writer-wins state: exactly one competing writer creates the key, while losers receive a typed conflict and the winner's `current_updated_at`.
-- **Hierarchical namespaces** — `projects/website`, `people/alice`, `decisions/tech-stack`, `clients/acme`, and so on. Prefixed tags (`client:lofalk`, `person:sara`, `topic:ai-education`) cross-reference entries without rigid schemas.
+- **Hierarchical namespaces** — `projects/website`, `people/alice`, `decisions/tech-stack`, `clients/acme`, and so on. Prefixed tags (`client:acme`, `person:alice`, `topic:ai-education`) cross-reference entries without rigid schemas.
 - **Three search modes** — keyword (FTS5), semantic (vector embeddings), and hybrid (fused via Reciprocal Rank Fusion). Semantic modes are optional and profile-dependent.
 - **Multi-principal access control** — server-enforced namespace isolation. The owner gets full access; family members, agents, and external principals get scoped permissions. OAuth clients auto-map to principals via a trusted proxy email header. A `munin-admin` CLI manages principals, devices, and service tokens.
 - **Outcome-aware retrieval** — Munin observes what the assistant does after each retrieval (opened a result? wrote in the namespace? reformulated the query?) and accumulates per-entry signals over time. Inspectable via `memory_insights`; explicit feedback via `memory_retrieval_feedback`.
@@ -42,8 +43,8 @@ These features exist to solve specific friction points that appear once you actu
 
 - **"What's next?" gives a real answer.** Open any project and ask. `memory_orient` returns the computed dashboard grouped by lifecycle; for a specific project, the synthesis entry provides the consolidated arc — decisions, blockers, and open threads — without you having to paste a summary. The consolidation worker quietly rolls logs into a readable synthesis while you're away.
 - **Decisions survive the conversation that made them.** When you decide something, log it once. Six weeks later, `memory_narrative` or `memory_commitments` surfaces it with rationale and timestamp. No searching through chat history.
-- **Cross-environment continuity.** Claude Code on your laptop, Claude Desktop, Claude Web, and Claude Mobile all talk to the same Munin instance. A status update made on mobile shows up in your laptop session. The two-layer model (local detail files + Munin summary state) keeps each environment fast without losing coherence.
-- **Cross-namespace awareness.** The consolidator extracts references between namespaces — "this project depends on `people/sara` finishing X". Later, when you update Sara's status, you can see what's blocked on her.
+- **Cross-environment continuity.** Different coding agents, desktop clients, and web or mobile MCP clients can share one Munin instance. A status update from one environment is available to the next. The two-layer model (local detail files + Munin summary state) keeps each environment fast without losing coherence.
+- **Cross-namespace awareness.** The consolidator extracts references between namespaces — "this project depends on `people/alice` finishing X". Later, when you update Alice's status, you can see what's blocked on her.
 - **Honest retrospection.** `memory_patterns` only surfaces patterns that are backed by actual source entries. `memory_commitments` tracks open, overdue, at-risk, and completed follow-through. Nothing is invented — every signal points back to a source.
 - **Shared memory with scoped access.** A family member or a research agent can use the same Munin server without seeing your work namespaces. Principals have namespace rules and the server enforces them on every tool call, with denial semantics that make disallowed namespaces invisible rather than merely refused.
 - **Handoff between agents.** When one agent (or one environment) hands work to another, `memory_handoff` assembles a source-backed pack: current state, recent decisions, open loops, recent actors, and recommended next actions. Tuned for multi-agent setups where context transfer matters.
@@ -52,8 +53,8 @@ These features exist to solve specific friction points that appear once you actu
 
 ```
  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
- │  Claude Code │  │Claude Desktop│  │  Claude Web  │
- │  (Bearer)    │  │  (Bearer)    │  │  (OAuth)     │
+ │ Coding agent │  │Desktop client│  │  Web client  │
+ │  (stdio)     │  │  (Bearer)    │  │  (OAuth)     │
  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘
         │                 │                 │
         └─────────────────┼─────────────────┘
@@ -71,8 +72,7 @@ These features exist to solve specific friction points that appear once you actu
 │  SQLite + FTS5 (keyword search)                     │
 │  Optional: sqlite-vec + embedding backend           │
 └─────────────────────────────────────────────────────┘
-Also supports stdio transport for local use (Claude Code
-or Claude Desktop running on the same machine as the server).
+Also supports stdio transport for any local MCP client.
 ```
 
 Key technology choices:
@@ -106,19 +106,20 @@ No full rewrite is recommended as the first move: keep the MCP and SQLite contra
 ```bash
 git clone https://github.com/Magnus-Gille/munin-memory.git
 cd munin-memory
-npm install
+npm ci
 npm run build
 ```
 
 ### Local mode (stdio)
 
-The simplest way to run — Claude Code connects directly via stdin/stdout:
+The simplest way to run is to configure your MCP client to launch:
 
 ```bash
-# Register with Claude Code
-claude mcp add-json munin-memory \
-  '{"command":"node","args":["'$(pwd)'/dist/index.js"]}'
+node /absolute/path/to/munin-memory/dist/index.js
 ```
+
+An optional Claude Code registration example is
+`claude mcp add-json munin-memory '{"command":"node","args":["/absolute/path/to/munin-memory/dist/index.js"]}'`.
 
 ### Network mode (HTTP)
 
@@ -131,10 +132,8 @@ export MUNIN_API_KEY=$(openssl rand -hex 32)
 # Start the server
 MUNIN_TRANSPORT=http MUNIN_API_KEY=$MUNIN_API_KEY node dist/index.js
 
-# Register with Claude Code
-claude mcp add --transport http \
-  -H "Authorization: Bearer $MUNIN_API_KEY" \
-  -s user munin-memory http://localhost:3030/mcp
+# Verify the unauthenticated health endpoint
+curl http://127.0.0.1:3030/health
 ```
 
 The HTTP bearer token configured as `MUNIN_API_KEY` is a shared owner
@@ -156,7 +155,7 @@ The command prints the raw token once. Configure the client with that token as
 the exact rule; if it only writes state keys directly in one namespace, omit the
 `/*` rule.
 
-### Connect from Claude Web / Mobile (OAuth)
+### Connect from an OAuth-capable client
 
 When running in HTTP mode, the server exposes OAuth 2.1 endpoints. Configure your MCP client with the server URL and the OAuth flow handles authentication automatically. For public deployments, OAuth consent is now fail-closed: you must configure a trusted proxy-authenticated header/value pair for `/authorize` and `/authorize/approve`, or the server will refuse to serve public consent. See the configuration below and the route/provider contracts in `src/index.ts` and `src/oauth.ts` for details.
 
@@ -171,7 +170,9 @@ All configuration is via environment variables. Copy `.env.example` for a starti
 | `MUNIN_HTTP_HOST` | `127.0.0.1` | HTTP bind address |
 | `MUNIN_API_KEY` | — | Bearer token (required for HTTP mode) |
 | `MUNIN_MEMORY_DB_PATH` | `~/.munin-memory/memory.db` | Database file location |
+| `MUNIN_PROFILE` | — | Optional hardware preset: `zero-appliance`, `zero-plus`, or `full-node` |
 | `MUNIN_EMBEDDINGS_ENABLED` | `true` | Enable semantic search |
+| `MUNIN_EMBEDDINGS_MODEL` | profile-dependent; otherwise `Xenova/bge-small-en-v1.5` | Local embedding model |
 | `MUNIN_SEMANTIC_ENABLED` | `true` | Allow semantic search requests |
 | `MUNIN_HYBRID_ENABLED` | `true` | Enable hybrid search (FTS5 + vector) |
 | `MUNIN_OAUTH_ISSUER_URL` | `http://localhost:3030` | OAuth issuer (set to your public URL) |
@@ -179,6 +180,8 @@ All configuration is via environment variables. Copy `.env.example` for a starti
 | `MUNIN_OAUTH_TRUSTED_USER_HEADER` | — | Trusted header name required for public OAuth consent |
 | `MUNIN_OAUTH_TRUSTED_USER_VALUE` | — | Exact trusted header value required for public OAuth consent |
 | `MUNIN_OAUTH_ALLOW_LOCALHOST_CONSENT` | `true` | Allow consent on loopback-only local development |
+| `MUNIN_OWNER_ALIASES` | legacy compatibility alias | Optional comma-separated owner names recognized by orientation and injection checks |
+| `MUNIN_OWNER_PROFILE_NAMESPACE` | `people/owner` | Canonical owner-profile namespace; lookup falls back to existing `people/magnus` data |
 
 See `.env.example` for the full list.
 
@@ -212,19 +215,41 @@ The bridge refuses to read a credentials file that is group- or world-accessible
 
 All three fields are optional; omit `cf_client_id` / `cf_client_secret` if you don't use Cloudflare Access. Rotate the Bearer token at a cadence that fits your threat model — once a quarter is a reasonable default for a personal deployment.
 
-## Deploying to a Raspberry Pi
+## Grimnir ecosystem
 
-This is how I run it today — a `full-node` deployment on a Pi 5 on my desk, accessible from anywhere via a Cloudflare Tunnel. The general pattern:
+Munin is the persistent-memory component in the broader Grimnir ecosystem. Hugin
+dispatches work, gille-inference provides an OpenAI-compatible inference gateway,
+Mimir serves artifacts, Heimdall observes service health, and the Grimnir repository
+documents the system contract. Munin does not require any of them: its supported
+boundary is MCP plus SQLite, so it remains useful as a standalone server.
+
+Compared with mem0, Zep/Graphiti, Letta, LangMem, basic-memory, and the MCP reference
+memory server, Munin emphasizes an inspectable state-plus-log model, a single-file
+self-hosted database, server-enforced namespace isolation, and first-class MCP over
+both stdio and HTTP. It does not yet offer a managed cloud, automatic relationship
+graphs, or turnkey conversation ingestion. See
+[docs/competitive-analysis.md](docs/competitive-analysis.md) for the dated survey.
+
+## Deploying to Linux or Raspberry Pi
+
+The included deployment path is a generic systemd-oriented starting point:
 
 1. **Deploy the code** — `./scripts/deploy-rpi.sh <your-pi-hostname>`
 2. **Install the systemd service** — see `munin-memory.service` as a template
 3. **Set up a reverse proxy** — Cloudflare Tunnel, Tailscale, WireGuard, nginx, or whatever fits your setup
 4. **Configure OAuth** — set `MUNIN_OAUTH_ISSUER_URL` to your public domain and configure `MUNIN_OAUTH_TRUSTED_USER_HEADER` + `MUNIN_OAUTH_TRUSTED_USER_VALUE` so browser consent is only available to your authenticated user
 
-The deploy script and service file are tailored to my setup. You will likely need to adjust paths, usernames, and network configuration for yours.
-The separate `systemd/munin-memory.service` is the already-rendered unit used
-by the Grimnir fleet controller; self-hosted installations should continue to
-use the root template through `scripts/deploy-rpi.sh`.
+The script renders the placeholders in `munin-memory.service`, refuses to deploy
+over an existing Git checkout, and does not copy `.env` or database files. Review
+the service user, paths, reverse-proxy trust boundary, and backup location for your
+host before enabling it.
+
+The optional `munin-backup.timer` intentionally has no local-disk destination
+default. Before enabling it, set `MUNIN_BACKUP_MOUNT` to the mounted filesystem
+root and `MUNIN_BACKUP_DIR` to an absolute child directory in
+`~/munin-ops/.env`. The job verifies the mount before snapshotting or creating
+directories, so a missing mount cannot silently redirect backups to the system
+disk.
 
 For the broader appliance direction, the project now distinguishes between `full-node` and `zero-appliance` deployments. A Pi Zero 2 W is being treated as a constrained profile that needs explicit hardware validation rather than assumed feature parity. See [docs/appliance-profiles.md](docs/appliance-profiles.md).
 
@@ -248,7 +273,7 @@ See [AGENTS.md](AGENTS.md#sources-of-truth) for the concise source-of-truth map;
 
 Munin works best with an explicit operating model — one where you define what goes into state entries versus log entries, which namespaces track project health, and when each environment writes versus just reads. Without that model, memory tends to drift: redundant state, lost history, stale dashboards.
 
-The conventions that govern live Claude sessions are stored in Munin itself (in `meta/conventions`, surfaced by `memory_orient`). That is the canonical runtime contract — it wins in any conflict.
+Session conventions can be stored in Munin itself (in `meta/conventions`, surfaced by `memory_orient`). That entry is the instance's runtime contract and can be adapted for any MCP client.
 
 For the underlying concepts — why the two entry types exist, what tracked statuses are for, and how to think about the two data layers — see [docs/usage-model.md](docs/usage-model.md).
 
@@ -261,11 +286,18 @@ npm run test:watch    # Watch mode
 
 ## Status
 
-Early-stage open source, but in daily use. It runs my own setup — Claude across four platforms (CLI, Desktop, Web, Mobile) sharing persistent memory through a Raspberry Pi 5 on my desk, publicly reachable via a Cloudflare Tunnel.
+Early-stage open source and intended for technically comfortable self-hosters.
 
-What's live today: the full MCP tool surface (23 tools), background consolidation via OpenRouter, the computed lifecycle dashboard, retrospective synthesis tools, multi-principal access control with OAuth auto-mapping and the `munin-admin` CLI, outcome-aware retrieval signals (Phase 1, observation only), and the five-layer security stack (Cloudflare Tunnel, Cloudflare Access, Bearer/OAuth, app hardening, Pi hardening).
+Available today: 23 MCP tools, background consolidation through OpenRouter or a
+compatible local endpoint, lifecycle and retrospective views, multi-principal
+authorization, OAuth and service tokens, retrieval signals, and encrypted backup
+helpers. The constrained profile has been validated under cgroup memory limits on
+ARM64; appliance provisioning and user-experience testing on each named board remain
+ongoing.
 
-What it is not: a polished mass-market product. It is optimized for a technically comfortable self-hoster. The deployment scripts assume Linux/systemd familiarity, you will need to adapt paths and network setup to your own environment, and the Pi Zero 2 W appliance direction is documented but not yet validated on hardware. Multi-principal access is implemented and tested, but in practice the server is still primarily used by a single human owner plus a handful of agent principals.
+It is not a polished mass-market product or a managed service. Operators remain
+responsible for TLS/reverse-proxy configuration, trusted OAuth headers, key custody,
+backup restoration tests, upgrades, and review of any model-generated synthesis.
 
 Built by Claude (Opus 4.6) and Magnus Gille, adversarially reviewed by Codex (GPT-5.4).
 
@@ -276,6 +308,8 @@ Built by Claude (Opus 4.6) and Magnus Gille, adversarially reviewed by Codex (GP
 - [docs/roadmap.md](docs/roadmap.md)
 - [docs/appliance-profiles.md](docs/appliance-profiles.md)
 - [docs/usage-model.md](docs/usage-model.md)
+- [docs/competitive-analysis.md](docs/competitive-analysis.md)
+- [PUBLICATION.md](PUBLICATION.md) — publication and history-audit boundary
 - [CONTRIBUTING.md](CONTRIBUTING.md)
 - [SECURITY.md](SECURITY.md)
 

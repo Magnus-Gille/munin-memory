@@ -299,7 +299,7 @@ describe("runBenchmark (end-to-end report shape)", () => {
     { namespace: "projects/alpha", key: "status", content: "alpha project active phase", tags: ["status", "active"] },
     { namespace: "projects/alpha", key: "decision", content: "alpha team chose sqlite over postgres", tags: ["decision"] },
     { namespace: "projects/beta", key: "status", content: "beta project blocked waiting on infra", tags: ["status", "blocked"] },
-    { namespace: "people/sara", key: "context", content: "sara prefers terse status updates", tags: ["preference"] },
+    { namespace: "people/alice", key: "context", content: "alice prefers terse status updates", tags: ["preference"] },
     { namespace: "meta/notes", key: "x", content: "unrelated note about cabbages", tags: [] },
   ];
 
@@ -347,12 +347,12 @@ describe("runBenchmark (end-to-end report shape)", () => {
         expected_ids: [idMap.get("projects/beta::status")!],
       },
       {
-        id: "sara-context",
-        query: "sara terse updates",
+        id: "alice-context",
+        query: "alice terse updates",
         category: "person-context",
         search_mode: "lexical",
         source: "manual",
-        expected_ids: [idMap.get("people/sara::context")!],
+        expected_ids: [idMap.get("people/alice::context")!],
       },
       {
         id: "no-hit",

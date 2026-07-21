@@ -12,9 +12,9 @@
  *
  * Templates use the token "{home}", replaced at seed time with the principal's
  * home prefix: "" for the owner (root namespaces) or "<home>/" for a scoped
- * principal (e.g. "users/sara/"). So a template pattern "{home}projects/*"
- * materializes to "projects/*" for the owner and "users/sara/projects/*" for a
- * principal whose home is "users/sara".
+ * principal (e.g. "users/alice/"). So a template pattern "{home}projects/*"
+ * materializes to "projects/*" for the owner and "users/alice/projects/*" for a
+ * principal whose home is "users/alice".
  */
 
 export interface TaxonomyProfile {
@@ -123,7 +123,7 @@ export function listProfileNames(): string[] {
 /**
  * Materialize a profile for a given home prefix: substitute the {home} token in
  * the conventions text and every tracked pattern. `home` is "" for the owner
- * (root namespaces) or a prefix like "users/sara" for a scoped principal.
+ * (root namespaces) or a prefix like "users/alice" for a scoped principal.
  */
 export function materializeProfile(
   profile: TaxonomyProfile,

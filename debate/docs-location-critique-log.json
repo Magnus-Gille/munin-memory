@@ -20,7 +20,7 @@
   {
     "id": "docs-location-C03",
     "source": "codex-round-1",
-    "text": "Personal vs generic is not a clean two-way split. There are at least four categories: stable server semantics, Claude-specific guidance, Magnus-specific workflow, transferable deployment examples.",
+    "text": "Personal vs generic is not a clean two-way split. There are at least four categories: stable server semantics, Claude-specific guidance, operator-specific workflow, transferable deployment examples.",
     "classification": "valid",
     "impact": "acknowledged",
     "severity": "major",

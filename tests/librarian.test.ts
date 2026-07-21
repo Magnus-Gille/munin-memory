@@ -68,7 +68,7 @@ describe("resolveNamespaceClassificationFloorFromRows", () => {
     // case-variation must resolve to the SAME restrictive floor, not the default
     expect(resolveNamespaceClassificationFloorFromRows("Clients/acme", sensitive)).toBe("client-confidential");
     expect(resolveNamespaceClassificationFloorFromRows("CLIENTS/acme", sensitive)).toBe("client-confidential");
-    expect(resolveNamespaceClassificationFloorFromRows("People/Sara", sensitive)).toBe("client-confidential");
+    expect(resolveNamespaceClassificationFloorFromRows("People/Alice", sensitive)).toBe("client-confidential");
   });
 });
 

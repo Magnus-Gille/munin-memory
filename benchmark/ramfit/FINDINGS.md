@@ -3,7 +3,7 @@
 Validated on real hardware: an **aarch64, 6-core, 8 GB** Linux board (kernel
 5.15, cgroup v2 with the `memory` controller delegated to the user slice). Every
 configuration ran under a `systemd-run --user --scope` with `MemoryMax=<cap>` and
-`MemorySwapMax=0`, against the **pristine 1.34 GB production DB snapshot**
+`MemorySwapMax=0`, against the **pristine 1.34 GB reference corpus snapshot**
 (opened read-only for query mode; a writable `/tmp` copy for write/concurrent
 mode). Quality (recall) was measured separately by re-embedding the 2 975-entry
 fixture under each model+dtype and running the IR goldset (31 queries:

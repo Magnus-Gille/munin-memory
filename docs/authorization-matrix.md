@@ -8,14 +8,14 @@
 
 | Principal | Type | Namespaces owned | Notes |
 |-----------|------|-----------------|-------|
-| **Magnus** | Owner | `*` (all) | Full access. Existing behavior. |
-| **Sara** | Family | `users/sara/*` | Non-technical. System must be invisible/fool-proof. |
+| **Owner** | Owner | `*` (all) | Full access. Existing behavior. |
+| **Alice** | Family | `users/alice/*` | Non-technical. System must be invisible/fool-proof. |
 | **Agents** | Service | Per-token scope | Skuld, Hugin, etc. Scoped to specific namespaces. |
 | **Third-party** | External | `orgs/<name>/*` only | Must not know other users/namespaces exist. |
 
 ## Namespace access rules
 
-| Namespace pattern | Owner | Family (Sara) | Third-party | Notes |
+| Namespace pattern | Owner | Family (Alice) | Third-party | Notes |
 |-------------------|-------|---------------|-------------|-------|
 | `projects/*` | RW | — | — | Owner-only |
 | `clients/*` | RW | — | — | Owner-only |
@@ -39,7 +39,7 @@
 
 | Caller type | Unauthorized read | Unauthorized write | Unauthorized delete |
 |-------------|-------------------|-------------------|-------------------|
-| **Human** (Sara, third-party) | `"not found"` — identical to non-existent entry | `"not found"` — identical to non-existent namespace | `"not found"` |
+| **Human** (Alice, third-party) | `"not found"` — identical to non-existent entry | `"not found"` — identical to non-existent namespace | `"not found"` |
 | **Agent** (service token) | Machine-readable denial: `{"error": "access_denied", "namespace": "<redacted>"}` | Same | Same |
 | **Owner** | N/A (full access) | N/A | N/A |
 
@@ -170,8 +170,8 @@ These services bypass the MCP layer and read Munin's SQLite database directly.
 
 | Service | Access pattern | Authorization rule |
 |---------|---------------|-------------------|
-| **Skuld** | Read-only: `projects/*`, `clients/*`, `rituals/*`, `briefings/*`, `business/*` | Owner-only (runs on Pi as magnus). No change needed — already scoped by queries. |
-| **Heimdall** | Read-only: `briefings/latest`, system metrics | Owner-only (runs on Pi as magnus). No change needed. |
+| **Skuld** | Read-only: `projects/*`, `clients/*`, `rituals/*`, `briefings/*`, `business/*` | Owner-only (runs on Pi as owner). No change needed — already scoped by queries. |
+| **Heimdall** | Read-only: `briefings/latest`, system metrics | Owner-only (runs on Pi as owner). No change needed. |
 
 **Rule:** Direct SQLite readers are classified as owner-only. If a non-owner service needs Munin data, it must go through the MCP API with a scoped token.
 
@@ -179,13 +179,13 @@ These services bypass the MCP layer and read Munin's SQLite database directly.
 
 ```typescript
 interface AccessContext {
-  principalId: string;        // e.g. "magnus", "sara", "org:acme"
+  principalId: string;        // e.g. "owner", "alice", "org:acme"
   principalType: "owner" | "family" | "agent" | "external";
   accessibleNamespaces: NamespaceRule[];
 }
 
 interface NamespaceRule {
-  pattern: string;            // glob-like: "users/sara/*", "shared/family/*"
+  pattern: string;            // glob-like: "users/alice/*", "shared/family/*"
   permissions: "read" | "write" | "rw";
 }
 ```
@@ -199,7 +199,7 @@ interface NamespaceRule {
 
 | Auth method | Principal resolution |
 |-------------|---------------------|
-| Legacy bearer (MUNIN_API_KEY) | → owner (Magnus). Single shared key = owner access. |
+| Legacy bearer (MUNIN_API_KEY) | → owner (Owner). Single shared key = owner access. |
 | OAuth token | → lookup `client_id` in token table → map to principal via `principals` table. |
 | Agent service token | → lookup hashed token in `principals` table → scoped AccessContext. |
 
@@ -240,10 +240,10 @@ access.
 ```sql
 CREATE TABLE principals (
   id            TEXT PRIMARY KEY,
-  principal_id  TEXT NOT NULL UNIQUE,  -- "magnus", "sara", "agent:skuld"
+  principal_id  TEXT NOT NULL UNIQUE,  -- "owner", "alice", "agent:skuld"
   principal_type TEXT NOT NULL,        -- "owner", "family", "agent", "external"
   token_hash    TEXT,                  -- SHA-256 of bearer token (nullable for OAuth-mapped)
-  namespace_rules TEXT NOT NULL,       -- JSON: [{"pattern": "users/sara/*", "permissions": "rw"}, ...]
+  namespace_rules TEXT NOT NULL,       -- JSON: [{"pattern": "users/alice/*", "permissions": "rw"}, ...]
   created_at    TEXT NOT NULL,
   revoked_at    TEXT,                  -- non-null = revoked
   expires_at    TEXT                   -- optional expiry
@@ -262,7 +262,7 @@ CREATE TABLE principals (
 8. **Add `munin-admin` CLI** — `principals list/add/revoke/preview`
 9. **Migrate existing services** — assign tokens to Skuld, Hugin, Heimdall
 10. **Remove legacy unauth path** — all access requires a valid token
-11. **Onboard Sara** — create principal, assign token, test inbox flow
+11. **Onboard Alice** — create principal, assign token, test inbox flow
 
 ## Test matrix (fail-closed)
 

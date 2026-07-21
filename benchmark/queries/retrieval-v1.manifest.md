@@ -213,8 +213,8 @@ file in the same commit as the JSON change.
 
 ## 12. Maintenance
 
-**Owner:** the same person maintaining `benchmark/queries/*.jsonl` and
-the munin-zero retrieval pilots (currently Magnus). Three triggers
+**Owner:** the maintainer of `benchmark/queries/*.jsonl` and the munin-zero
+retrieval pilots. Three triggers
 require touching this manifest:
 
 1. A native JSONL changes (records added, removed, or reordered).

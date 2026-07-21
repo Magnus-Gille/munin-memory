@@ -115,7 +115,7 @@ describe("getAuditHistory — namespace filter", () => {
   beforeEach(() => {
     writeState(db, "projects/alpha", "status", "alpha status", []);
     writeState(db, "projects/beta", "status", "beta status", []);
-    appendLog(db, "people/magnus", "a log entry", []);
+    appendLog(db, "people/owner", "a log entry", []);
   });
 
   it("exact namespace match returns only that namespace", () => {
@@ -143,9 +143,9 @@ describe("getAuditHistory — namespace filter", () => {
   });
 
   it("namespace filter excludes other namespaces", () => {
-    const result = getAuditHistory(db, { namespace: "people/magnus" });
+    const result = getAuditHistory(db, { namespace: "people/owner" });
     expect(result.length).toBe(1);
-    expect(result[0].namespace).toBe("people/magnus");
+    expect(result[0].namespace).toBe("people/owner");
   });
 });
 

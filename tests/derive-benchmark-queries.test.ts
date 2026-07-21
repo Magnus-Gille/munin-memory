@@ -92,7 +92,7 @@ describe("inferCategory", () => {
   it("maps namespace prefixes to benchmark categories", () => {
     expect(inferCategory("projects/munin-memory")).toBe("project-status");
     expect(inferCategory("decisions/auth")).toBe("decision-lookup");
-    expect(inferCategory("people/sara")).toBe("person-context");
+    expect(inferCategory("people/alice")).toBe("person-context");
     expect(inferCategory("meta/whatever")).toBe("broad-orientation");
   });
 });
@@ -169,13 +169,13 @@ describe("deriveQueries — feedback signals", () => {
       id: "f1",
       eventId: null,
       type: "good_results",
-      query: "sara onboarding email",
-      expectedEntryId: "entry-sara",
+      query: "alice onboarding email",
+      expectedEntryId: "entry-alice",
     });
 
     const { candidates } = deriveQueries(db);
     expect(candidates).toHaveLength(1);
-    expect(candidates[0].expected_ids).toContain("entry-sara");
+    expect(candidates[0].expected_ids).toContain("entry-alice");
   });
 });
 

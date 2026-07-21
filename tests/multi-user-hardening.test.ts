@@ -66,24 +66,24 @@ describe("addPrincipal --profile — shared-home hardening (#164 part 2)", () =>
       ],
     });
 
-    // Sara is (mis)configured with the SHARED rule first, so her home would
+    // Alice is (mis)configured with the SHARED rule first, so her home would
     // derive to shared/family — readable by Bob.
-    const saraRules: NamespaceRule[] = [
+    const aliceRules: NamespaceRule[] = [
       { pattern: "shared/family/*", permissions: "rw" },
-      { pattern: "users/sara/*", permissions: "rw" },
+      { pattern: "users/alice/*", permissions: "rw" },
     ];
 
     expect(() =>
       addPrincipal(db, {
-        principalId: "sara",
+        principalId: "alice",
         principalType: "family",
-        rules: saraRules,
+        rules: aliceRules,
         profile: "household",
       }),
     ).toThrow(/shared/i);
 
     // Rejected up front — no principal row, no seeded entries.
-    expect(db.prepare("SELECT 1 FROM principals WHERE principal_id='sara'").get()).toBeUndefined();
+    expect(db.prepare("SELECT 1 FROM principals WHERE principal_id='alice'").get()).toBeUndefined();
     expect(
       db.prepare("SELECT 1 FROM entries WHERE namespace='shared/family/meta'").get(),
     ).toBeUndefined();
@@ -121,15 +121,15 @@ describe("addPrincipal --profile — shared-home hardening (#164 part 2)", () =>
 describe("addPrincipal / updatePrincipal — seeded-home access guard (Codex Finding 2)", () => {
   it("adding a principal with rules that read an existing seeded home is rejected", () => {
     const db = makeDb();
-    // Sara is the only principal with shared/family/* → her home seeds fine.
+    // Alice is the only principal with shared/family/* → her home seeds fine.
     addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
       rules: [{ pattern: "shared/family/*", permissions: "rw" }],
       profile: "household",
     });
 
-    // Now Bob is added with shared/family/* — that would let him read Sara's
+    // Now Bob is added with shared/family/* — that would let him read Alice's
     // seeded conventions/config in shared/family/meta. Must be rejected.
     expect(() =>
       addPrincipal(db, {
@@ -142,11 +142,11 @@ describe("addPrincipal / updatePrincipal — seeded-home access guard (Codex Fin
 
   it("updating a principal's rules to read an existing seeded private home is rejected", () => {
     const db = makeDb();
-    // Sara's home is private users/sara/meta — no other principal can read it.
+    // Alice's home is private users/alice/meta — no other principal can read it.
     addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
-      rules: [{ pattern: "users/sara/*", permissions: "rw" }],
+      rules: [{ pattern: "users/alice/*", permissions: "rw" }],
       profile: "household",
     });
     // Bob starts with non-overlapping rules.
@@ -156,24 +156,24 @@ describe("addPrincipal / updatePrincipal — seeded-home access guard (Codex Fin
       rules: [{ pattern: "users/bob/*", permissions: "rw" }],
     });
 
-    // Attempting to update Bob's rules to include users/sara/* should fail because
-    // users/sara/meta is Sara's seeded home.
+    // Attempting to update Bob's rules to include users/alice/* should fail because
+    // users/alice/meta is Alice's seeded home.
     expect(() =>
       updatePrincipal(db, "bob", {
         rules: [
           { pattern: "users/bob/*", permissions: "rw" },
-          { pattern: "users/sara/*", permissions: "rw" },
+          { pattern: "users/alice/*", permissions: "rw" },
         ],
       }),
-    ).toThrow(/users\/sara\/meta|seeded/i);
+    ).toThrow(/users\/alice\/meta|seeded/i);
   });
 
   it("updating a principal's rules to non-overlapping namespaces succeeds", () => {
     const db = makeDb();
     addPrincipal(db, {
-      principalId: "sara",
+      principalId: "alice",
       principalType: "family",
-      rules: [{ pattern: "users/sara/*", permissions: "rw" }],
+      rules: [{ pattern: "users/alice/*", permissions: "rw" }],
       profile: "household",
     });
     addPrincipal(db, {
@@ -182,7 +182,7 @@ describe("addPrincipal / updatePrincipal — seeded-home access guard (Codex Fin
       rules: [{ pattern: "users/bob/*", permissions: "rw" }],
     });
 
-    // Bob adds access to shared/family/* — does not overlap users/sara/meta.
+    // Bob adds access to shared/family/* — does not overlap users/alice/meta.
     expect(() =>
       updatePrincipal(db, "bob", {
         rules: [
