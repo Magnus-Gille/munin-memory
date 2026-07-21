@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
 import {
@@ -133,6 +133,34 @@ describe("getNamespacesNeedingConsolidation", () => {
     }
 
     expect(getNamespacesNeedingConsolidation(db, 3)).toEqual([]);
+  });
+
+  it("warns only once per malformed namespace across consecutive calls", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const insertLegacyLog = db.prepare(
+      `INSERT INTO entries
+         (id, namespace, key, entry_type, content, tags, agent_id, owner_principal_id, created_at, updated_at, classification)
+       VALUES (?, ?, NULL, 'log', ?, '[]', 'owner', 'owner', ?, ?, 'internal')`,
+    );
+    for (let i = 0; i < 3; i++) {
+      const timestamp = `2026-07-21T13:00:0${i}.000Z`;
+      insertLegacyLog.run(
+        `repeated-malformed-log-${i}`,
+        "projects/repeated-malformed/",
+        `Malformed log ${i}`,
+        timestamp,
+        timestamp,
+      );
+    }
+
+    getNamespacesNeedingConsolidation(db, 3);
+    getNamespacesNeedingConsolidation(db, 3);
+
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledWith(
+      'consolidation: skipped malformed write-target namespace(s): "projects/repeated-malformed/"',
+    );
+    warnSpy.mockRestore();
   });
 });
 

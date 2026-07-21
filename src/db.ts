@@ -3025,6 +3025,11 @@ export function getNamespaceTagVocabulary(
 
 // --- Consolidation operations ---
 
+// Backlog discovery is polled by health checks and consolidation entry points.
+// Remember malformed legacy namespaces for the process lifetime so persistent
+// phantom rows remain visible without producing an unbounded stream of warnings.
+const warnedMalformedConsolidationNamespaces = new Set<string>();
+
 /**
  * Return namespaces (projects/*, clients/*) that have at least minLogs unincorporated
  * log entries — i.e., logs created after the last consolidation checkpoint.
@@ -3064,17 +3069,18 @@ export function getNamespacesNeedingConsolidation(
   `;
   const candidates = db.prepare(sql).all(...trackedParams, minLogs) as ConsolidationCandidate[];
   const validCandidates: ConsolidationCandidate[] = [];
-  const skippedNamespaces: string[] = [];
+  const newlySkippedNamespaces: string[] = [];
   for (const candidate of candidates) {
     if (validateWriteNamespace(candidate.namespace).valid) {
       validCandidates.push(candidate);
-    } else {
-      skippedNamespaces.push(candidate.namespace);
+    } else if (!warnedMalformedConsolidationNamespaces.has(candidate.namespace)) {
+      warnedMalformedConsolidationNamespaces.add(candidate.namespace);
+      newlySkippedNamespaces.push(candidate.namespace);
     }
   }
-  if (skippedNamespaces.length > 0) {
+  if (newlySkippedNamespaces.length > 0) {
     console.warn(
-      `consolidation: skipped malformed write-target namespace(s): ${skippedNamespaces
+      `consolidation: skipped malformed write-target namespace(s): ${newlySkippedNamespaces
         .map((namespace) => JSON.stringify(namespace))
         .join(", ")}`,
     );

@@ -209,6 +209,23 @@ describe("addPrincipal", () => {
     expect(seeded.count).toBe(0);
   });
 
+  it("rejects a profiled principal when its valid rule derives an invalid seed namespace", () => {
+    expect(() =>
+      addPrincipal(db, {
+        principalId: "alice-invalid-seed",
+        principalType: "family",
+        rules: [{ pattern: "users/alice!/*", permissions: "rw" }],
+        profile: "freelancer",
+      }),
+    ).toThrow(/--profile cannot seed/);
+
+    expect(showPrincipal(db, "alice-invalid-seed")).toBeNull();
+    const seeded = db.prepare(
+      "SELECT COUNT(*) AS count FROM entries WHERE owner_principal_id = ?",
+    ).get("alice-invalid-seed") as { count: number };
+    expect(seeded.count).toBe(0);
+  });
+
   it("rejects duplicate principal-id", () => {
     addPrincipal(db, {
       principalId: "alice",
