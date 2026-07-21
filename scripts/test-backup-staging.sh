@@ -59,7 +59,11 @@ cat >"${BIN}/sqlite3" <<'STUB'
 #!/usr/bin/env bash
 case "${2:-}" in
   .backup*)
+    # Mirror sqlite3's own dot-command handling: strip the surrounding quotes
+    # the caller adds so a staging path containing spaces survives tokenizing.
     target="${2#.backup }"
+    target="${target#\'}"
+    target="${target%\'}"
     printf 'fake-sqlite-snapshot' >"$target"
     printf 'fake-journal' >"${target}-journal"
     printf '%s\n' "$target" >>"${STUB_LOG_DIR}/snapshot-path"
@@ -87,9 +91,14 @@ exit 0
 STUB
 
 # df: reports a caller-chosen free-space figure when FORCE_DF_AVAIL is set,
-# otherwise delegates to the real df so the happy path stays honest.
+# emits header-only (unparseable) output when FORCE_DF_BROKEN=1, and otherwise
+# delegates to the real df so the happy path stays honest.
 cat >"${BIN}/df" <<'STUB'
 #!/usr/bin/env bash
+if [ "${FORCE_DF_BROKEN:-0}" = "1" ]; then
+  echo "Filesystem 1024-blocks Used Available Capacity Mounted-on"
+  exit 0
+fi
 if [ -n "${FORCE_DF_AVAIL:-}" ]; then
   echo "Filesystem 1024-blocks Used Available Capacity Mounted-on"
   echo "stubfs 1000000 0 ${FORCE_DF_AVAIL} 1% /"
@@ -161,15 +170,35 @@ case "$snap3" in
 esac
 rm -f "$snap3" "${snap3}-journal" 2>/dev/null || true
 
-# --- 6. preflight refuses a run that cannot fit -----------------------------
+# --- 5b. staging path containing a space ------------------------------------
+# sqlite3 tokenizes dot-command arguments on whitespace itself, independently of
+# shell quoting, so an unquoted `.backup $LOCAL_TMP` writes to the wrong place
+# (or fails) the moment MUNIN_BACKUP_STAGING contains a space. Now that the
+# staging dir is operator-configurable this is reachable, so pin it.
+STAGE_SP="${SANDBOX}/stage with space"; mkdir -p "$STAGE_SP"
+L7="${SANDBOX}/run7"
+run_backup "$L7" MUNIN_BACKUP_STAGING="$STAGE_SP"
+
+check "handles a staging path containing spaces" "$(cat "${L7}/exit")" "0"
+snap7="$(head -1 "${L7}/snapshot-path" 2>/dev/null || echo '')"
+case "$snap7" in
+  "${STAGE_SP}/"*) ok "snapshot lands in the spaced path, not a split fragment" ;;
+  *)               bad "snapshot lands in the spaced path (got '${snap7:-<none>}')" ;;
+esac
+
+# --- 6. preflight threshold, pinned at the exact boundary -------------------
+# The fake DB is 1 MiB, so DB_KB=1024 and NEED_KB=1024*12/10=1228 (the 20%
+# headroom, integer-truncated). Probing 1227/1228 pins that arithmetic exactly:
+# a generous margin like "offer 100 KB" would still pass if the headroom factor
+# were deleted, which is precisely the vacuous-assertion trap this suite already
+# fell into once.
 STAGE3="${SANDBOX}/stage-full"; mkdir -p "$STAGE3"
 L4="${SANDBOX}/run4"
-# 1 MiB DB needs ~1229 KB with headroom; offer 100 KB.
-run_backup "$L4" MUNIN_BACKUP_STAGING="$STAGE3" FORCE_DF_AVAIL=100
+run_backup "$L4" MUNIN_BACKUP_STAGING="$STAGE3" FORCE_DF_AVAIL=1227
 
 rc4="$(cat "${L4}/exit")"
-if [ "$rc4" != "0" ]; then ok "preflight refuses a run that cannot fit (exit $rc4)"
-else bad "preflight refuses a run that cannot fit (exited 0)"; fi
+if [ "$rc4" != "0" ]; then ok "preflight refuses 1 KB below the threshold (exit $rc4)"
+else bad "preflight refuses 1 KB below the threshold (exited 0 — is the 20% headroom gone?)"; fi
 
 if grep -q "staging dir" "${L4}/stderr" 2>/dev/null; then
   ok "preflight failure names the staging dir and the shortfall"
@@ -179,6 +208,26 @@ fi
 
 check "preflight aborts BEFORE writing a snapshot" \
       "$(find "$STAGE3" -type f 2>/dev/null | wc -l | tr -d ' ')" "0"
+
+STAGE4="${SANDBOX}/stage-just-enough"; mkdir -p "$STAGE4"
+L5="${SANDBOX}/run5"
+run_backup "$L5" MUNIN_BACKUP_STAGING="$STAGE4" FORCE_DF_AVAIL=1228
+check "preflight allows exactly the threshold" "$(cat "${L5}/exit")" "0"
+
+# --- 7. preflight fails CLOSED on unreadable free space ---------------------
+# Regression for the fail-open hole: an empty AVAIL_KB makes `[ "" -lt N ]`
+# return 2, which `set -e` does not catch inside an `if`, so the guard would
+# silently pass. Header-only df output reproduces that exactly.
+STAGE5="${SANDBOX}/stage-broken-df"; mkdir -p "$STAGE5"
+L6="${SANDBOX}/run6"
+run_backup "$L6" MUNIN_BACKUP_STAGING="$STAGE5" FORCE_DF_BROKEN=1
+
+rc6="$(cat "${L6}/exit")"
+if [ "$rc6" != "0" ]; then ok "unparseable df output fails CLOSED (exit $rc6)"
+else bad "unparseable df output fails CLOSED (exited 0 — guard silently skipped)"; fi
+
+check "no snapshot written when free space is unreadable" \
+      "$(find "$STAGE5" -type f 2>/dev/null | wc -l | tr -d ' ')" "0"
 
 echo
 echo "  ${pass} passed, ${fail} failed"

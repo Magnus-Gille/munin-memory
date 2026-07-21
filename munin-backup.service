@@ -21,10 +21,17 @@ StandardError=journal
 # deal, so tmpfs wins here.
 #
 # The residual risk is that the snapshot must fit the tmpfs (~50% of RAM,
-# ~3.9 GB); at the current 1.85 GB and ~17 MB/day of growth that is roughly
-# four months away. backup-to-nas.sh now preflights free space and fails loudly
-# with an actionable message rather than dying half-written on ENOSPC. If a
-# fast disk ever backs this host, point MUNIN_BACKUP_STAGING at it.
+# ~3.9 GiB). The preflight demands the DB plus 20% headroom, so it starts
+# refusing once the DB passes ~3.25 GiB; from today's ~1.85 GiB at ~17 MB/day
+# that is ~88 days out — under three months, not the "four months" an earlier
+# revision of this comment claimed. backup-to-nas.sh preflights free space and
+# fails loudly with an actionable message rather than dying half-written.
+#
+# MUNIN_BACKUP_STAGING can repoint staging at fast disk if this host ever gets
+# some, but NOTE: ProtectSystem=strict below makes the whole hierarchy
+# read-only, so the override alone is not enough — the new location also needs
+# a matching ReadWritePaths= (or StateDirectory=) entry here, or the snapshot
+# will fail on a read-only filesystem.
 
 # Timeouts.
 #
@@ -33,8 +40,10 @@ StandardError=journal
 # (PRAGMA integrity_check) + ~19 s (rsync) ~= 105 s. It crossed 120 s and has
 # failed silently every night since 2026-07-17.
 #
-# Runtime scales with database size at roughly 31 s per GB, and the DB grows
-# ~17 MB/day, so any snug ceiling just reschedules this outage. 1800 s is
+# Runtime scales with database size at roughly 61 s per GiB (113 s over
+# 1.85 GiB — an earlier revision of this comment said 31 s/GB, which was simply
+# wrong), and the DB grows ~17 MB/day, so any snug ceiling just reschedules
+# this outage. 1800 s is
 # deliberately far beyond need: this is a nightly oneshot, so a wide timeout
 # costs nothing, while a tight one costs a silent backup gap. The timer's own
 # scheduling — not this value — is what bounds the job.

@@ -31,9 +31,31 @@ echo "$(date -Iseconds) Starting Munin backup..."
 # GNU stat (Linux/the Pi) and BSD stat (macOS, where the test suite also runs)
 # spell "size in bytes" differently. Both forms are O(1); `wc -c` would be the
 # other portable option but invites reading a 1.85 GB file on some platforms.
-DB_BYTES=$(stat -c %s "$DB" 2>/dev/null || stat -f %z "$DB")
+# -P forces POSIX single-line df output, so a long device name cannot wrap the
+# figure we want onto a third line.
+DB_BYTES=$(stat -c %s "$DB" 2>/dev/null || stat -f %z "$DB" 2>/dev/null || true)
+AVAIL_KB=$(df -Pk "$STAGING_DIR" 2>/dev/null | awk 'NR==2 {print $4}')
+
+# Fail CLOSED when either figure is unreadable. This is not defensive padding:
+# an empty value sails straight through both of the checks below. `$(( "" / 1024 ))`
+# evaluates to 0, and `[ "" -lt 1229 ]` returns 2 with "integer expression
+# expected" — a status `set -e` does NOT catch inside an `if` condition. So an
+# unparseable stat or df would make this guard silently pass, in precisely the
+# situation it exists to catch. Verified by hand; a regression test covers it.
+for _probe in "database size:${DB_BYTES}" "free space in ${STAGING_DIR}:${AVAIL_KB}"; do
+    _label=${_probe%%:*}
+    _value=${_probe##*:}
+    case "$_value" in
+        ''|*[!0-9]*)
+            echo "ERROR: could not determine ${_label} (got '${_value}')." >&2
+            echo "       Refusing to start a backup whose staging space cannot" >&2
+            echo "       be verified." >&2
+            exit 1
+            ;;
+    esac
+done
+
 DB_KB=$(( DB_BYTES / 1024 ))
-AVAIL_KB=$(df -Pk "$STAGING_DIR" | awk 'NR==2 {print $4}')
 NEED_KB=$(( DB_KB * 12 / 10 ))   # snapshot + 20% headroom
 if [ "$AVAIL_KB" -lt "$NEED_KB" ]; then
     echo "ERROR: staging dir ${STAGING_DIR} has ${AVAIL_KB} KB free but the" >&2
@@ -44,7 +66,12 @@ if [ "$AVAIL_KB" -lt "$NEED_KB" ]; then
 fi
 
 # 1. Create a consistent snapshot using sqlite3 .backup
-sqlite3 "$DB" ".backup $LOCAL_TMP"
+# The path is quoted INSIDE the dot-command: sqlite3 tokenizes dot-command
+# arguments on whitespace itself, independently of shell quoting, so an
+# unquoted MUNIN_BACKUP_STAGING containing a space would be split and the
+# backup written somewhere unintended. Verified: unquoted fails on such a
+# path, quoted succeeds.
+sqlite3 "$DB" ".backup '$LOCAL_TMP'"
 
 # 2. Verify integrity of the backup
 INTEGRITY=$(sqlite3 "$LOCAL_TMP" "PRAGMA integrity_check;" 2>&1)
