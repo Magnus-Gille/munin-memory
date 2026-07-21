@@ -51,14 +51,17 @@ changelog is the canonical record of what moved.
   model requires. Override with `MUNIN_OPS_ALLOW_MODEL_CHANGE=true` after the
   host's `.env` has been updated to match.
 - **Write targets now reject a trailing or doubled slash in the namespace.**
-  `memory_write` and `memory_log` previously accepted `"maintenance/"` and stored
+  `memory_write`, `memory_log`, targeted consolidation, admin profile seeding,
+  and the state persistence backstop now reject `"maintenance/"` instead of storing
   it as a namespace distinct from `"maintenance"`, silently forking history in
   two. Two production writers hardcoded the trailing form and accumulated 61 log
   entries in phantom namespaces before it was noticed. The error names the
   intended namespace (`Did you mean "maintenance"?`). Namespace *prefix filters*
   are unaffected — `memory_query` still accepts `projects/` to mean the whole
   subtree, which is why the rule lives in a separate `validateWriteNamespace`
-  rather than in `validateNamespace`.
+  rather than in `validateNamespace`. Consolidation candidate discovery skips
+  legacy malformed namespaces without recording worker failures, and namespace
+  access rules reject empty path segments before a home can be derived from them.
 - **`scripts/deploy-rpi.sh` now fails before rsync when the deploy target contains
   `.git`.** Earlier releases stripped `.git` from the artifact directory after
   syncing. The deploy target must now already be a pure, git-free artifact

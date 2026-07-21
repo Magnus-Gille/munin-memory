@@ -149,6 +149,12 @@ describe("validateNamespaceRules", () => {
     ).toThrow();
   });
 
+  it("rejects empty segments inside a namespace rule prefix", () => {
+    expect(() =>
+      validateNamespaceRules([{ pattern: "users/alice//*", permissions: "rw" }])
+    ).toThrow(/users\/alice\/\/\*/);
+  });
+
   it("rejects invalid permissions", () => {
     expect(() =>
       validateNamespaceRules([

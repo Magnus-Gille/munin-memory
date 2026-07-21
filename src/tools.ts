@@ -106,6 +106,7 @@ import {
   validateWriteInput,
   validateLogInput,
   validateNamespace,
+  validateWriteNamespace,
   validateKey,
   validateTags,
   injectionWarning,
@@ -3781,7 +3782,7 @@ const TOOL_DEFINITIONS = [
         namespace: {
           type: "string",
           description:
-            "Hierarchical namespace using / separator. E.g. 'projects/hugin-munin', 'people/owner', 'decisions/tech-stack'. Grammar: must start with a letter or digit, then only letters, digits, '_', '-', and '/'. Dots and spaces are INVALID (use hyphens instead, e.g. 'testing/foo-bar' not 'testing/foo.bar').",
+            "Hierarchical namespace using / separator. E.g. 'projects/hugin-munin', 'people/owner', 'decisions/tech-stack'. Grammar: must start with a letter or digit, then only letters, digits, '_', '-', and '/'. Dots and spaces are INVALID (use hyphens instead, e.g. 'testing/foo-bar' not 'testing/foo.bar'). Write targets reject trailing slashes and empty segments: use 'maintenance', not 'maintenance/'. Prefix-filter tools such as memory_query deliberately accept forms like 'projects/'.",
         },
         key: {
           type: "string",
@@ -4084,7 +4085,7 @@ const TOOL_DEFINITIONS = [
         namespace: {
           type: "string",
           description:
-            "The namespace to log to (hierarchical, '/' separator). Grammar: must start with a letter or digit, then only letters, digits, '_', '-', and '/'. Dots and spaces are INVALID (use hyphens, e.g. 'testing/foo-bar' not 'testing/foo.bar').",
+            "The namespace to log to (hierarchical, '/' separator). Grammar: must start with a letter or digit, then only letters, digits, '_', '-', and '/'. Dots and spaces are INVALID (use hyphens, e.g. 'testing/foo-bar' not 'testing/foo.bar'). Write targets reject trailing slashes and empty segments: use 'maintenance', not 'maintenance/'. Prefix-filter tools such as memory_query deliberately accept forms like 'projects/'.",
         },
         content: {
           type: "string",
@@ -6018,7 +6019,7 @@ export function registerTools(
                 args as unknown as WriteParams & { patch?: PatchParams };
 
               // Validate namespace and key (always required)
-              const nsCheck = validateNamespace(namespace);
+              const nsCheck = validateWriteNamespace(namespace);
               if (!nsCheck.valid) {
                 return errResult("write", "validation_error", nsCheck.error!);
               }
@@ -7671,7 +7672,7 @@ export function registerTools(
               const { namespace: consolidateNs } = (args ?? {}) as { namespace?: string };
 
               if (consolidateNs) {
-                const nsCheck = validateNamespace(consolidateNs);
+                const nsCheck = validateWriteNamespace(consolidateNs);
                 if (!nsCheck.valid) {
                   return errResult("consolidate", "validation_error", nsCheck.error!);
                 }

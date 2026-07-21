@@ -192,6 +192,23 @@ describe("addPrincipal", () => {
     ).toThrow("Ambiguous patterns");
   });
 
+  it("rejects a doubled-slash home rule before creating or seeding a profiled principal", () => {
+    expect(() =>
+      addPrincipal(db, {
+        principalId: "alice-double-slash",
+        principalType: "family",
+        rules: [{ pattern: "users/alice//*", permissions: "rw" }],
+        profile: "freelancer",
+      }),
+    ).toThrow(/users\/alice\/\/\*/);
+
+    expect(showPrincipal(db, "alice-double-slash")).toBeNull();
+    const seeded = db.prepare(
+      "SELECT COUNT(*) AS count FROM entries WHERE owner_principal_id = ?",
+    ).get("alice-double-slash") as { count: number };
+    expect(seeded.count).toBe(0);
+  });
+
   it("rejects duplicate principal-id", () => {
     addPrincipal(db, {
       principalId: "alice",

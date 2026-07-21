@@ -161,6 +161,17 @@ describe("memory_write", () => {
     expect(result.error).toBe("validation_error");
   });
 
+  it("rejects a trailing slash on the full-write path with an actionable hint", async () => {
+    const raw = await callTool("memory_write", {
+      namespace: "maintenance/",
+      key: "status",
+      content: "must not be stored",
+    });
+    const result = parseToolResponse(raw) as { error: string; message: string };
+    expect(result.error).toBe("validation_error");
+    expect(result.message).toContain('Did you mean "maintenance"?');
+  });
+
   it("rejects content with secrets", async () => {
     const raw = await callTool("memory_write", {
       namespace: "projects/test",
@@ -397,9 +408,53 @@ describe("memory_write patch", () => {
     const result = parseToolResponse(raw) as { error: string };
     expect(result.error).toBe("validation_error");
   });
+
+  it("rejects a patch targeting a legacy row in a trailing-slash namespace without changing it", async () => {
+    const timestamp = "2026-07-21T12:00:00.000Z";
+    db.prepare(
+      `INSERT INTO entries
+         (id, namespace, key, entry_type, content, tags, agent_id, owner_principal_id, created_at, updated_at, classification)
+       VALUES (?, ?, ?, 'state', ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      "legacy-trailing-slash-state",
+      "projects/legacy/",
+      "notes",
+      "legacy content",
+      "[]",
+      "owner",
+      "owner",
+      timestamp,
+      timestamp,
+      "internal",
+    );
+
+    const raw = await callTool("memory_write", {
+      namespace: "projects/legacy/",
+      key: "notes",
+      patch: { content_append: "must not be appended" },
+    });
+    const result = parseToolResponse(raw) as { error: string; message: string };
+    expect(result.error).toBe("validation_error");
+    expect(result.message).toMatch(/write target/i);
+
+    const row = db.prepare(
+      "SELECT content, updated_at FROM entries WHERE id = ?",
+    ).get("legacy-trailing-slash-state") as { content: string; updated_at: string };
+    expect(row).toEqual({ content: "legacy content", updated_at: timestamp });
+  });
 });
 
 describe("memory_update_status", () => {
+  it("rejects a trailing slash namespace at the handler boundary", async () => {
+    const raw = await callTool("memory_update_status", {
+      namespace: "projects/status-tool/",
+      phase: "Active",
+      lifecycle: "active",
+    });
+    const result = parseToolResponse(raw) as { error: string };
+    expect(result.error).toBe("validation_error");
+  });
+
   it("creates a canonical tracked status from structured fields", async () => {
     const raw = await callTool("memory_update_status", {
       namespace: "projects/status-tool",
@@ -2717,6 +2772,15 @@ describe("memory_log", () => {
     const raw = await callTool("memory_log", {
       namespace: "",
       content: "test",
+    });
+    const result = parseToolResponse(raw) as { error: string };
+    expect(result.error).toBe("validation_error");
+  });
+
+  it("rejects a trailing slash namespace at the handler boundary", async () => {
+    const raw = await callTool("memory_log", {
+      namespace: "maintenance/",
+      content: "must not be logged",
     });
     const result = parseToolResponse(raw) as { error: string };
     expect(result.error).toBe("validation_error");
@@ -5588,6 +5652,29 @@ describe("staleness flag", () => {
 });
 
 describe("compare-and-swap (memory_write)", () => {
+  it("documents strict write-target namespace grammar for memory_write and memory_log", async () => {
+    const handler = (
+      server as unknown as { _requestHandlers: Map<string, Function> }
+    )._requestHandlers?.get("tools/list");
+    const toolList = await handler!({ method: "tools/list", params: {} });
+    const tools = (toolList as {
+      tools: Array<{
+        name: string;
+        inputSchema: {
+          properties?: Record<string, { description?: string }>;
+        };
+      }>;
+    }).tools;
+
+    for (const name of ["memory_write", "memory_log"]) {
+      const description = tools.find((tool) => tool.name === name)
+        ?.inputSchema.properties?.namespace?.description;
+      expect(description).toContain("trailing slashes");
+      expect(description).toContain("empty segments");
+      expect(description).toContain("maintenance/");
+    }
+  });
+
   it("advertises create_if_absent in the MCP input schema", async () => {
     const handler = (
       server as unknown as { _requestHandlers: Map<string, Function> }

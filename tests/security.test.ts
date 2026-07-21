@@ -334,6 +334,7 @@ describe("validateNamespace", () => {
     // on this; tightening must not strand them.
     expect(validateWriteNamespace("tasks/_heartbeat").valid).toBe(true);
     expect(validateWriteNamespace("tasks/_auth_alarm").valid).toBe(true);
+    expect(validateWriteNamespace("tasks/-heartbeat").valid).toBe(true);
     expect(validateNamespace("experiments/hugin/champions/m5-code-edit-28e17").valid).toBe(true);
   });
 

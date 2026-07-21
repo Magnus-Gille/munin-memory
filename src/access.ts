@@ -216,6 +216,16 @@ export function validateNamespaceRules(rules: NamespaceRule[]): void {
       }
     }
 
+    const namespacePortion = pattern.endsWith("/*")
+      ? pattern.slice(0, -2)
+      : pattern;
+    if (namespacePortion.split("/").some((segment) => segment.length === 0)) {
+      throw new Error(
+        `Invalid namespace pattern "${pattern}". Namespace segments cannot be empty; ` +
+          `use a single "/" between segments (the final "/*" suffix is allowed).`,
+      );
+    }
+
     // Exact patterns: no further validation needed beyond the * checks above
   }
 }

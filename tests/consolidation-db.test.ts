@@ -114,6 +114,26 @@ describe("getNamespacesNeedingConsolidation", () => {
     expect(candidates[0].namespace).toBe("projects/busy");
     expect(candidates[1].namespace).toBe("clients/quiet");
   });
+
+  it("excludes legacy logs in a malformed trailing-slash namespace", () => {
+    const insertLegacyLog = db.prepare(
+      `INSERT INTO entries
+         (id, namespace, key, entry_type, content, tags, agent_id, owner_principal_id, created_at, updated_at, classification)
+       VALUES (?, ?, NULL, 'log', ?, '[]', 'owner', 'owner', ?, ?, 'internal')`,
+    );
+    for (let i = 0; i < 4; i++) {
+      const timestamp = `2026-07-21T12:00:0${i}.000Z`;
+      insertLegacyLog.run(
+        `legacy-malformed-log-${i}`,
+        "projects/legacy/",
+        `Legacy log ${i}`,
+        timestamp,
+        timestamp,
+      );
+    }
+
+    expect(getNamespacesNeedingConsolidation(db, 3)).toEqual([]);
+  });
 });
 
 describe("getNamespacesNeedingConsolidation — with prior consolidation checkpoint", () => {
