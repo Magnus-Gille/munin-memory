@@ -12,8 +12,33 @@ ExecStart=/home/magnus/munin-ops/scripts/backup-to-nas.sh
 StandardOutput=journal
 StandardError=journal
 
-# Timeouts
-TimeoutStartSec=120
+# Staging deliberately stays on the default /tmp (a tmpfs under PrivateTmp=yes).
+#
+# Disk staging was tried and measured worse on this host: huginmunin's root
+# filesystem is the SD/eMMC boot card at 12.5 MB/s sustained, which turned a
+# 32 s snapshot into a >20 min one and would have written ~675 GB/year to the
+# card the OS boots from. Trading a transient 1.85 GB of RAM for that is a bad
+# deal, so tmpfs wins here.
+#
+# The residual risk is that the snapshot must fit the tmpfs (~50% of RAM,
+# ~3.9 GB); at the current 1.85 GB and ~17 MB/day of growth that is roughly
+# four months away. backup-to-nas.sh now preflights free space and fails loudly
+# with an actionable message rather than dying half-written on ENOSPC. If a
+# fast disk ever backs this host, point MUNIN_BACKUP_STAGING at it.
+
+# Timeouts.
+#
+# This was 120 s, and the job had quietly grown into it: measured on the
+# 1.85 GB database, a run costs ~32 s (sqlite3 .backup) + ~52 s
+# (PRAGMA integrity_check) + ~19 s (rsync) ~= 105 s. It crossed 120 s and has
+# failed silently every night since 2026-07-17.
+#
+# Runtime scales with database size at roughly 31 s per GB, and the DB grows
+# ~17 MB/day, so any snug ceiling just reschedules this outage. 1800 s is
+# deliberately far beyond need: this is a nightly oneshot, so a wide timeout
+# costs nothing, while a tight one costs a silent backup gap. The timer's own
+# scheduling — not this value — is what bounds the job.
+TimeoutStartSec=1800
 
 # Hardening (lighter than the main service — just needs network + sqlite3)
 NoNewPrivileges=yes

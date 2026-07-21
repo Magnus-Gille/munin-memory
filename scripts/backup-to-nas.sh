@@ -5,14 +5,43 @@ set -euo pipefail
 # Uses sqlite3 .backup for a consistent snapshot (no file locking issues)
 # Filename format: memory-YYYY-MM-DD-HHMM.db (Heimdall parses this for freshness)
 
-DB="/home/magnus/.munin-memory/memory.db"
+DB="${MUNIN_DB:-/home/magnus/.munin-memory/memory.db}"
 NAS_HOST="100.99.119.52"
 NAS_DIR="/mnt/timemachine/backups/munin-memory"
 TIMESTAMP=$(date -u +%Y-%m-%d-%H%M)
 FILENAME="memory-${TIMESTAMP}.db"
-LOCAL_TMP="/tmp/${FILENAME}"
+# Staging defaults to /tmp, which under the unit's PrivateTmp=yes is a tmpfs.
+# That is intentional on huginmunin — see the rationale in munin-backup.service.
+# Override with MUNIN_BACKUP_STAGING when a host has fast disk to spare.
+STAGING_DIR="${MUNIN_BACKUP_STAGING:-/tmp}"
+LOCAL_TMP="${STAGING_DIR}/${FILENAME}"
+
+# Remove the staging snapshot on EVERY exit path, not just the successful one,
+# and take sqlite's sidecars with it: `.backup` leaves a <file>-journal (and can
+# leave -wal/-shm) next to the snapshot, so removing only $LOCAL_TMP strands
+# them. Observed for real — an interrupted run left an orphaned -journal behind.
+trap 'rm -f "$LOCAL_TMP" "${LOCAL_TMP}-journal" "${LOCAL_TMP}-wal" "${LOCAL_TMP}-shm"' EXIT
 
 echo "$(date -Iseconds) Starting Munin backup..."
+
+# 0. Preflight: the snapshot is a full copy of the DB, so staging needs room for
+# it. Fail loudly and immediately rather than writing most of a snapshot and
+# dying on ENOSPC — a half-run that reports failure is far cheaper to diagnose
+# than one that fails 90% of the way through a 30-minute job.
+# GNU stat (Linux/the Pi) and BSD stat (macOS, where the test suite also runs)
+# spell "size in bytes" differently. Both forms are O(1); `wc -c` would be the
+# other portable option but invites reading a 1.85 GB file on some platforms.
+DB_BYTES=$(stat -c %s "$DB" 2>/dev/null || stat -f %z "$DB")
+DB_KB=$(( DB_BYTES / 1024 ))
+AVAIL_KB=$(df -Pk "$STAGING_DIR" | awk 'NR==2 {print $4}')
+NEED_KB=$(( DB_KB * 12 / 10 ))   # snapshot + 20% headroom
+if [ "$AVAIL_KB" -lt "$NEED_KB" ]; then
+    echo "ERROR: staging dir ${STAGING_DIR} has ${AVAIL_KB} KB free but the" >&2
+    echo "       snapshot needs ~${NEED_KB} KB (database is ${DB_KB} KB)." >&2
+    echo "       Point MUNIN_BACKUP_STAGING at a location with more room, or" >&2
+    echo "       shrink the database. Refusing to start a doomed snapshot." >&2
+    exit 1
+fi
 
 # 1. Create a consistent snapshot using sqlite3 .backup
 sqlite3 "$DB" ".backup $LOCAL_TMP"
@@ -21,16 +50,21 @@ sqlite3 "$DB" ".backup $LOCAL_TMP"
 INTEGRITY=$(sqlite3 "$LOCAL_TMP" "PRAGMA integrity_check;" 2>&1)
 if [ "$INTEGRITY" != "ok" ]; then
     echo "ERROR: Integrity check failed: $INTEGRITY" >&2
-    rm -f "$LOCAL_TMP"
-    exit 1
+    exit 1  # staging snapshot is removed by the EXIT trap
 fi
 
 # 3. Ensure target dir exists, then rsync to NAS
 ssh "magnus@${NAS_HOST}" "mkdir -p '${NAS_DIR}'"
-rsync -az "$LOCAL_TMP" "magnus@${NAS_HOST}:${NAS_DIR}/${FILENAME}"
+# No -z: this is a fast LAN and the Pi's CPU, not the link, is the bottleneck.
+# Measured on the 1.85 GB snapshot, huginmunin -> NAS:
+#   rsync -az  29 s  (~65 MB/s, gzip-bound)
+#   rsync -a   19 s  (~100 MB/s, near line rate)
+# Compression would be the right call over a slow WAN link; over this one it is
+# a pessimisation. scripts/test-backup-staging.sh pins this so it is not
+# "tidied" back to -az.
+rsync -a "$LOCAL_TMP" "magnus@${NAS_HOST}:${NAS_DIR}/${FILENAME}"
 
-# 4. Cleanup local temp
-rm -f "$LOCAL_TMP"
+# 4. Cleanup local temp — handled by the EXIT trap set above.
 
 # 5. Prune old backups on NAS — GFS retention:
 #    - keep the 14 most recent daily snapshots
