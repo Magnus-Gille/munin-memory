@@ -10,6 +10,7 @@ import {
   initDatabase,
   parsePragmaInt,
   writeState,
+  patchState,
   readState,
   getById,
   appendLog,
@@ -95,6 +96,37 @@ describe("initDatabase", () => {
   it("sets WAL journal mode", () => {
     const mode = db.pragma("journal_mode", { simple: true });
     expect(mode).toBe("wal");
+  });
+});
+
+describe("state write-target namespace backstop", () => {
+  it("writeState rejects a malformed namespace", () => {
+    expect(() =>
+      writeState(db, "maintenance/", "status", "must not be stored", []),
+    ).toThrow(/write target/i);
+  });
+
+  it("patchState rejects a malformed namespace before reading a legacy row", () => {
+    const timestamp = "2026-07-21T12:00:00.000Z";
+    db.prepare(
+      `INSERT INTO entries
+         (id, namespace, key, entry_type, content, tags, agent_id, owner_principal_id, created_at, updated_at, classification)
+       VALUES (?, ?, ?, 'state', ?, '[]', 'owner', 'owner', ?, ?, 'internal')`,
+    ).run(
+      "db-legacy-trailing-slash-state",
+      "security/",
+      "status",
+      "legacy content",
+      timestamp,
+      timestamp,
+    );
+
+    expect(() =>
+      patchState(db, "security/", "status", { content_append: "must not be appended" }),
+    ).toThrow(/write target/i);
+    const row = db.prepare("SELECT content FROM entries WHERE id = ?")
+      .get("db-legacy-trailing-slash-state") as { content: string };
+    expect(row.content).toBe("legacy content");
   });
 });
 

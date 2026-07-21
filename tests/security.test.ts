@@ -5,6 +5,7 @@ import {
   scanForInjection,
   injectionWarning,
   validateNamespace,
+  validateWriteNamespace,
   validateKey,
   validateContent,
   validateTags,
@@ -307,6 +308,34 @@ describe("validateNamespace", () => {
 
   it("rejects namespace with leading slash", () => {
     expect(validateNamespace("/projects").valid).toBe(false);
+  });
+
+  it("rejects a trailing slash that would fork a namespace in two", () => {
+    // Regression: "maintenance/" and "maintenance" are semantically the same
+    // namespace but were stored separately, silently splitting history. Two
+    // production writers hardcoded the trailing form and accumulated 61 log
+    // entries in phantom namespaces before anyone noticed.
+    for (const namespace of ["maintenance/", "security/", "projects/munin-memory/"]) {
+      const result = validateWriteNamespace(namespace);
+      expect(result.valid).toBe(false);
+      expect(result.error).toMatch(/slash/i);
+    }
+  });
+
+  it("rejects empty path segments", () => {
+    expect(validateWriteNamespace("maintenance//os").valid).toBe(false);
+    expect(validateWriteNamespace("a//b//c").valid).toBe(false);
+    // ...but a prefix FILTER may legitimately end in "/" (memory_query subtree).
+    expect(validateNamespace("projects/").valid).toBe(true);
+  });
+
+  it("still accepts segments that start with underscore or hyphen", () => {
+    // Production namespaces such as tasks/_heartbeat and tasks/_auth_alarm rely
+    // on this; tightening must not strand them.
+    expect(validateWriteNamespace("tasks/_heartbeat").valid).toBe(true);
+    expect(validateWriteNamespace("tasks/_auth_alarm").valid).toBe(true);
+    expect(validateWriteNamespace("tasks/-heartbeat").valid).toBe(true);
+    expect(validateNamespace("experiments/hugin/champions/m5-code-edit-28e17").valid).toBe(true);
   });
 
   it("rejects namespace with special characters", () => {

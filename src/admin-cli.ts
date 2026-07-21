@@ -58,6 +58,7 @@ import {
   validateClassificationPattern,
 } from "./librarian.js";
 import type { ClassificationLevel } from "./types.js";
+import { validateWriteNamespace } from "./security.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -472,6 +473,7 @@ export function addPrincipal(
 
   // Validate --profile up front so we never create a principal we cannot seed.
   let profileHome: string | null = null;
+  let profileMetaNamespace: string | null = null;
   if (opts.profile) {
     if (!getTaxonomyProfile(opts.profile)) {
       throw new Error(
@@ -486,6 +488,21 @@ export function addPrincipal(
       );
     }
 
+    profileMetaNamespace = `${profileHome}/meta`;
+    const metaNamespaceCheck = validateWriteNamespace(profileMetaNamespace);
+    if (!metaNamespaceCheck.valid) {
+      const homeRule = opts.rules.find(
+        (rule) =>
+          rule.permissions === "rw" &&
+          rule.pattern.endsWith("/*") &&
+          rule.pattern.slice(0, -2) === profileHome,
+      );
+      throw new Error(
+        `--profile cannot seed: rule "${homeRule?.pattern ?? "(unknown)"}" derives invalid ` +
+          `meta namespace "${profileMetaNamespace}". ${metaNamespaceCheck.error}`,
+      );
+    }
+
     // Shared-home guard (#164 part 2): the profile seeds personal conventions +
     // config under "<home>/meta". If that namespace is also readable by another
     // active non-owner principal (e.g. the home derived to a SHARED prefix
@@ -493,7 +510,7 @@ export function addPrincipal(
     // "users/<id>/*" rule), seeding would leak the principal's personal taxonomy.
     const sharedWith = findPrincipalSharingNamespace(
       db,
-      `${profileHome}/meta`,
+      profileMetaNamespace,
       opts.principalId,
     );
     if (sharedWith !== null) {
@@ -552,7 +569,7 @@ export function addPrincipal(
   let seeded: AddPrincipalResult["seeded"];
   if (opts.profile && profileHome !== null) {
     const profile = getTaxonomyProfile(opts.profile)!;
-    const metaNs = `${profileHome}/meta`;
+    const metaNs = profileMetaNamespace!;
     const { conventions, trackedPatterns } = materializeProfile(profile, profileHome);
     // Classification floor vs principal max (#164 part 3): with the Librarian
     // enabled, the home's namespace floor (default "internal") can exceed a

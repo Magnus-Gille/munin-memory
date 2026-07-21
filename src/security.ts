@@ -238,6 +238,39 @@ export function validateNamespace(namespace: string): SecurityResult {
 }
 
 /**
+ * Validate a namespace used as a WRITE TARGET.
+ *
+ * Stricter than `validateNamespace`, which also guards namespace *prefix
+ * filters* where a trailing slash is meaningful (`memory_query` uses
+ * `projects/` to mean "everything beneath projects"). As a write target a
+ * trailing or doubled slash is always a caller bug: it stores a namespace that
+ * reads as identical to its trimmed form but lives separately, silently forking
+ * history in two. Two production writers hardcoded `"maintenance/"` and
+ * `"security/"` and accumulated 61 log entries in phantom namespaces before it
+ * was noticed.
+ *
+ * Segments are otherwise unconstrained beyond the character rule — namespaces
+ * such as `tasks/_heartbeat` intentionally begin a segment with an underscore.
+ */
+export function validateWriteNamespace(namespace: string): SecurityResult {
+  const base = validateNamespace(namespace);
+  if (!base.valid) return base;
+
+  if (namespace.split("/").some((segment) => segment.length === 0)) {
+    const trimmed = namespace.replace(/\/+$/, "");
+    const hint = trimmed.length > 0 && !trimmed.includes("//") ? ` Did you mean "${trimmed}"?` : "";
+    return {
+      valid: false,
+      error:
+        `Invalid namespace "${namespace}". Namespace segments cannot be empty, so a ` +
+        `trailing or doubled slash is not allowed as a write target — it would create a ` +
+        `second namespace separate from the one you meant.${hint}`,
+    };
+  }
+  return { valid: true };
+}
+
+/**
  * Return the first character (and its index) that is not in the allowed set.
  * Used to give actionable validation errors that name the offending character.
  */
@@ -305,7 +338,7 @@ export function validateWriteInput(
   maxContentSize: number,
 ): SecurityResult {
   const checks = [
-    validateNamespace(namespace),
+    validateWriteNamespace(namespace),
     validateKey(key),
     validateContent(content, maxContentSize),
     validateTags(tags),
@@ -324,7 +357,7 @@ export function validateLogInput(
   maxContentSize: number,
 ): SecurityResult {
   const checks = [
-    validateNamespace(namespace),
+    validateWriteNamespace(namespace),
     validateContent(content, maxContentSize),
     validateTags(tags),
     scanForSecrets(content),

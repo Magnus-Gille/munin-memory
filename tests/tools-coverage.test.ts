@@ -1970,6 +1970,13 @@ describe("memory_consolidate", () => {
     expect(res.error).toBe("validation_error");
   });
 
+  it("rejects a targeted consolidation write to a trailing-slash namespace", async () => {
+    const res = parseToolResponse(await callTool("memory_consolidate", { namespace: "maintenance/" }));
+    expect(res.ok).toBe(false);
+    expect(res.error).toBe("validation_error");
+    expect(res.message).toContain('Did you mean "maintenance"?');
+  });
+
   it("completes immediately for a namespace with no unincorporated logs", async () => {
     const res = parseToolResponse(await callTool("memory_consolidate", { namespace: "projects/empty-ns" }));
     expect(res.ok).toBe(true);

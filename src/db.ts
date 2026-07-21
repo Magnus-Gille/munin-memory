@@ -22,7 +22,7 @@ import {
 } from "./internal/retrieval-shared.js";
 import { runMigrations } from "./migrations.js";
 import { resolveKnob } from "./profiles.js";
-import { scanForSecrets } from "./security.js";
+import { scanForSecrets, validateWriteNamespace } from "./security.js";
 import {
   CLASSIFICATION_LEVELS,
   compareClassificationLevels,
@@ -368,6 +368,11 @@ export function writeState(
   validUntil?: string | null,
   writeOptions?: WriteStateOptions,
 ): WriteStateResult {
+  const namespaceCheck = validateWriteNamespace(namespace);
+  if (!namespaceCheck.valid) {
+    throw new Error(namespaceCheck.error);
+  }
+
   if (writeOptions?.createIfAbsent === true && expectedUpdatedAt !== undefined) {
     throw new Error("createIfAbsent and expectedUpdatedAt are mutually exclusive write preconditions");
   }
@@ -507,6 +512,11 @@ export function patchState(
   expectedUpdatedAt?: string,
   classificationOptions?: ClassificationWriteOptions,
 ): PatchStateResult {
+  const namespaceCheck = validateWriteNamespace(namespace);
+  if (!namespaceCheck.valid) {
+    throw new Error(namespaceCheck.error);
+  }
+
   const existing = db.prepare(
     "SELECT id, content, tags, updated_at, classification FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'",
   ).get(namespace, key) as {
@@ -3015,6 +3025,11 @@ export function getNamespaceTagVocabulary(
 
 // --- Consolidation operations ---
 
+// Backlog discovery is polled by health checks and consolidation entry points.
+// Remember malformed legacy namespaces for the process lifetime so persistent
+// phantom rows remain visible without producing an unbounded stream of warnings.
+const warnedMalformedConsolidationNamespaces = new Set<string>();
+
 /**
  * Return namespaces (projects/*, clients/*) that have at least minLogs unincorporated
  * log entries — i.e., logs created after the last consolidation checkpoint.
@@ -3052,7 +3067,25 @@ export function getNamespacesNeedingConsolidation(
         OR (COALESCE(cm.drain_in_progress, 0) = 1 AND COUNT(*) >= 1)
     ORDER BY unincorporated_log_count DESC
   `;
-  return db.prepare(sql).all(...trackedParams, minLogs) as ConsolidationCandidate[];
+  const candidates = db.prepare(sql).all(...trackedParams, minLogs) as ConsolidationCandidate[];
+  const validCandidates: ConsolidationCandidate[] = [];
+  const newlySkippedNamespaces: string[] = [];
+  for (const candidate of candidates) {
+    if (validateWriteNamespace(candidate.namespace).valid) {
+      validCandidates.push(candidate);
+    } else if (!warnedMalformedConsolidationNamespaces.has(candidate.namespace)) {
+      warnedMalformedConsolidationNamespaces.add(candidate.namespace);
+      newlySkippedNamespaces.push(candidate.namespace);
+    }
+  }
+  if (newlySkippedNamespaces.length > 0) {
+    console.warn(
+      `consolidation: skipped malformed write-target namespace(s): ${newlySkippedNamespaces
+        .map((namespace) => JSON.stringify(namespace))
+        .join(", ")}`,
+    );
+  }
+  return validCandidates;
 }
 
 /**
