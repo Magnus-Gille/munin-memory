@@ -1,8 +1,8 @@
 # Librarian Engineering Plan
 
-Status: concrete and repo-adjusted. This document turns the approved Librarian
-architecture into an implementation plan for the current `munin-memory`
-codebase.
+Status: implemented and deployed; retained as the rollout design record. The
+active product sequence is [`roadmap.md`](roadmap.md), and the production audit
+evidence is recorded on #4.
 
 Source architecture:
 

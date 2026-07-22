@@ -1,6 +1,8 @@
 # Munin Memory Phase 3 Engineering Plan
 
-Status: provisional. This phase depends on what Phase 1 and 2 reveal in real use.
+Status: implemented; retained as a historical design record. Narrative,
+commitment, pattern, and attention surfaces are shipped. The active sequence is
+[`roadmap.md`](roadmap.md).
 
 This document turns Roadmap Phase 3 into an engineering plan.
 

@@ -1,5 +1,9 @@
 # Munin Memory Phase 1 Engineering Plan
 
+Status: implemented; retained as a historical design record. The active sequence
+is [`roadmap.md`](roadmap.md). Later work extended this phase with tracked-status
+expiry metadata and explicit correction/as-of semantics.
+
 This document turns Phase 1 of the roadmap into a concrete implementation plan.
 
 Phase 1 covers:

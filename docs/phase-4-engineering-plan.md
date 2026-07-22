@@ -1,7 +1,9 @@
 # Munin Memory Phase 4 Engineering Plan
 
-Status: provisional. This phase depends on real small-trust multi-user use and on the
-current access-control model proving stable in practice.
+Status: substantially implemented; retained as a historical design record.
+Ownership, principal profiles, configurable tracked namespaces, and
+`memory_handoff` are shipped. Real household validation remains tracked in #5,
+and the active sequence is [`roadmap.md`](roadmap.md).
 
 This document turns Roadmap Phase 4 into an engineering plan.
 
