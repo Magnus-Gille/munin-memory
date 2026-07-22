@@ -44,6 +44,7 @@ import {
   RATE_LIMIT_WINDOW_MS,
   HEIMDALL_DESCRIPTOR,
   type ConsentAuthConfig,
+  type RateLimitConfig,
   type RequestLogEntry,
 } from "../src/index.js";
 import type { ExtendedAuthInfo } from "../src/oauth.js";
@@ -74,7 +75,11 @@ function mockRequest(
 const LEGACY_API_KEY = "index-coverage-test-api-key";
 const ISSUER_URL = "https://test.example.com";
 
-function makeApp(db: Database.Database, logs?: RequestLogEntry[]) {
+function makeApp(
+  db: Database.Database,
+  logs?: RequestLogEntry[],
+  rateLimitConfig?: RateLimitConfig,
+) {
   // Ensure trusted header env vars are set so createHttpApp doesn't throw
   process.env.MUNIN_OAUTH_TRUSTED_USER_HEADER = "x-auth-user";
   process.env.MUNIN_OAUTH_TRUSTED_USER_VALUE = "owner@example.com";
@@ -85,6 +90,7 @@ function makeApp(db: Database.Database, logs?: RequestLogEntry[]) {
     httpHost: "127.0.0.1",
     httpPort: 3030,
     requestLogger: logs ? (e) => logs.push(e) : undefined,
+    rateLimitConfig,
   });
 }
 
@@ -673,6 +679,130 @@ describe("createHttpApp — HTTP app endpoints", () => {
       if (lastStatus === 429) break;
     }
     expect(lastStatus).toBe(429);
+  });
+
+  it("does not let one authenticated caller starve another caller's control plane", async () => {
+    const rateLimitConfig = {
+      perCallerMax: 2,
+      globalMax: 10,
+      windowMs: 60_000,
+      maxCallers: 10,
+    };
+    const { app } = makeApp(db, logs, rateLimitConfig);
+    const initPayload = {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-03-26",
+        capabilities: {},
+        clientInfo: { name: "test", version: "1.0.0" },
+      },
+    };
+
+    let exhausted = false;
+    for (let i = 0; i <= rateLimitConfig.perCallerMax; i++) {
+      const response = await supertest(app)
+        .post("/mcp")
+        .set({ ...stdHeaders(), "X-Munin-Client-Id": "noisy-agent" })
+        .send(initPayload);
+      if (response.status === 429) {
+        exhausted = true;
+        break;
+      }
+    }
+    expect(exhausted).toBe(true);
+
+    await supertest(app)
+      .post("/mcp")
+      .set({ ...stdHeaders(), "X-Munin-Client-Id": "new-agent" })
+      .send(initPayload)
+      .expect(200);
+
+    await supertest(app)
+      .post("/mcp")
+      .set({ ...stdHeaders(), "X-Munin-Client-Id": "new-agent" })
+      .send({ jsonrpc: "2.0", id: 2, method: "tools/list" })
+      .expect(200);
+  });
+
+  it("returns an accurate Retry-After and structured non-secret throttle counters", async () => {
+    const { app } = makeApp(db, logs, {
+      perCallerMax: 1,
+      globalMax: 10,
+      windowMs: 10_000,
+      maxCallers: 10,
+    });
+    const payload = { jsonrpc: "2.0", id: 1, method: "tools/list" };
+    const headers = { ...stdHeaders(), "X-Munin-Client-Id": "diagnostic-agent" };
+
+    await supertest(app).post("/mcp").set(headers).send(payload).expect(200);
+    const throttled = await supertest(app)
+      .post("/mcp")
+      .set(headers)
+      .send(payload)
+      .expect(429);
+
+    expect(throttled.headers["retry-after"]).toBe("10");
+    expect(throttled.body).toMatchObject({
+      error: "Too many requests",
+      retry_after_seconds: 10,
+      limiter_scope: "caller",
+    });
+    expect(throttled.body.limiter_key).toMatch(/^[0-9a-f]{16}$/);
+    const entry = logs.at(-1)!;
+    expect(entry.rateLimit).toMatchObject({
+      keyHash: throttled.body.limiter_key,
+      keySource: "client",
+      scope: "caller",
+      admittedCount: 1,
+      throttleCount: 1,
+      totalThrottleCount: 1,
+    });
+    expect(JSON.stringify(entry)).not.toContain(LEGACY_API_KEY);
+  });
+
+  it("authenticates before admission and invalid credentials cannot spend tokens", async () => {
+    const { app } = makeApp(db, logs, {
+      perCallerMax: 1,
+      globalMax: 1,
+      windowMs: 60_000,
+      maxCallers: 10,
+    });
+    const payload = { jsonrpc: "2.0", id: 1, method: "tools/list" };
+
+    for (let i = 0; i < 3; i++) {
+      await supertest(app)
+        .post("/mcp")
+        .set(stdHeaders("invalid-token"))
+        .send(payload)
+        .expect(401);
+    }
+    await supertest(app).post("/mcp").set(stdHeaders()).send(payload).expect(200);
+    await supertest(app).post("/mcp").set(stdHeaders()).send(payload).expect(429);
+  });
+
+  it("charges malformed caller hints to the credential fallback bucket", async () => {
+    const { app } = makeApp(db, logs, {
+      perCallerMax: 1,
+      globalMax: 10,
+      windowMs: 60_000,
+      maxCallers: 10,
+    });
+    const payload = { jsonrpc: "2.0", id: 1, method: "tools/list" };
+
+    await supertest(app)
+      .post("/mcp")
+      .set({ ...stdHeaders(), "X-Munin-Client-Id": "bad id one" })
+      .send(payload)
+      .expect(200);
+    await supertest(app)
+      .post("/mcp")
+      .set({ ...stdHeaders(), "X-Munin-Client-Id": "bad id two" })
+      .send(payload)
+      .expect(429);
+
+    expect(logs.at(-1)?.rateLimit?.keySource).toBe("credential");
   });
 
   it("returns 400 for invalid JSON body to /mcp", async () => {

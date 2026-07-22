@@ -169,6 +169,10 @@ All configuration is via environment variables. Copy `.env.example` for a starti
 | `MUNIN_HTTP_PORT` | `3030` | HTTP server port |
 | `MUNIN_HTTP_HOST` | `127.0.0.1` | HTTP bind address |
 | `MUNIN_API_KEY` | — | Bearer token (required for HTTP mode) |
+| `MUNIN_RATE_LIMIT_PER_CALLER_MAX` | `60` | Authenticated MCP requests admitted per caller per window |
+| `MUNIN_RATE_LIMIT_GLOBAL_MAX` | `300` | Process-wide MCP admission backstop per window |
+| `MUNIN_RATE_LIMIT_WINDOW_MS` | `60000` | Continuous-refill admission window in milliseconds |
+| `MUNIN_RATE_LIMIT_MAX_CALLERS` | `1000` | Maximum independently tracked caller buckets; overflow remains capped |
 | `MUNIN_MEMORY_DB_PATH` | `~/.munin-memory/memory.db` | Database file location |
 | `MUNIN_PROFILE` | — | Optional hardware preset: `zero-appliance`, `zero-plus`, or `full-node` |
 | `MUNIN_EMBEDDINGS_ENABLED` | `true` | Enable semantic search |
@@ -214,6 +218,16 @@ MUNIN_CREDENTIALS_FILE = "/Users/you/.config/munin/credentials.json"
 The bridge refuses to read a credentials file that is group- or world-accessible — fix perms with `chmod 600`. If both the file and inline env vars are set, the file wins and a stderr warning lists the env vars that were ignored.
 
 All three fields are optional; omit `cf_client_id` / `cf_client_secret` if you don't use Cloudflare Access. Rotate the Bearer token at a cadence that fits your threat model — once a quarter is a reasonable default for a personal deployment.
+
+Each bridge process also sends a generated, non-secret `X-Munin-Client-Id` so
+several agents sharing one legacy bearer credential receive independent admission
+buckets. Set `MUNIN_BRIDGE_CLIENT_ID` to a stable opaque label when correlation
+across bridge restarts is useful. HTTP 429 responses are retried only according to
+the server's `Retry-After`, with positive jitter and bounded defaults: two retries,
+a 10-second total wait budget, and 250 ms maximum jitter. Override these with
+`MUNIN_BRIDGE_RATE_LIMIT_RETRIES`, `MUNIN_BRIDGE_RATE_LIMIT_MAX_WAIT_MS`, and
+`MUNIN_BRIDGE_RATE_LIMIT_JITTER_MS`. Authentication failures (401/403) and other
+HTTP failures are never retried by this path.
 
 ## Grimnir ecosystem
 

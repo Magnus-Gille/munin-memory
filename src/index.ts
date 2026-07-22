@@ -8,7 +8,7 @@ import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import express from "express";
 import type { Request, Response, NextFunction } from "express";
 import { createServer, IncomingMessage } from "node:http";
-import { timingSafeEqual, randomUUID, createHash } from "node:crypto";
+import { timingSafeEqual, randomUUID, createHash, createHmac, randomBytes } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { initDatabase, nowUTC, pruneRedactionLog, pruneRetrievalAnalytics } from "./db.js";
 import { registerTools } from "./tools.js";
@@ -18,7 +18,27 @@ import { getConfiguredLegacyBearerTransportType, resolveAccessContext } from "./
 import type { AccessContext } from "./access.js";
 import { getLibrarianConfigWarnings, type LibrarianRuntimeConfig } from "./librarian.js";
 import { MuninOAuthProvider, type ExtendedAuthInfo } from "./oauth.js";
+import {
+  McpRateLimiter,
+  RATE_LIMIT_MAX,
+  RATE_LIMIT_WINDOW_MS,
+  createRateLimiter,
+  checkRateLimit,
+  getRateLimitConfig,
+  type RateLimitConfig,
+  type RateLimiterState,
+  type RateLimitScope,
+} from "./rate-limit.js";
 import { SERVER_VERSION } from "./version.js";
+
+export {
+  RATE_LIMIT_MAX,
+  RATE_LIMIT_WINDOW_MS,
+  createRateLimiter,
+  checkRateLimit,
+  getRateLimitConfig,
+};
+export type { RateLimitConfig, RateLimiterState };
 
 // Analytics retention (default 90 days)
 function getAnalyticsRetentionDays(): number {
@@ -59,9 +79,6 @@ const issuerUrl = process.env.MUNIN_OAUTH_ISSUER_URL ?? "http://localhost:3030";
 export const MAX_BODY_SIZE = 1 * 1024 * 1024; // 1MB
 const BODY_PARSE_TIMEOUT_MS = 10_000;
 const OAUTH_CLEANUP_INTERVAL_MS = 60 * 1000;
-
-export const RATE_LIMIT_MAX = 60;
-export const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 
 // --- Heimdall self-descriptor ---
 // Served at GET /heimdall.json for Tier-1 discovery by the Heimdall dashboard.
@@ -104,11 +121,6 @@ export type BodyParseResult =
   | { ok: true; body: unknown }
   | { ok: false; reason: "too_large" | "timeout" | "invalid_json" | "error" };
 
-export interface RateLimiterState {
-  tokens: number;
-  lastRefill: number;
-}
-
 export interface RequestLogEntry {
   timestamp: string;
   method: string;
@@ -120,6 +132,15 @@ export interface RequestLogEntry {
   sessionId?: string;
   status: number;
   durationMs: number;
+  rateLimit?: {
+    keyHash: string;
+    keySource: "client" | "session" | "credential";
+    scope: RateLimitScope;
+    retryAfterMs: number;
+    admittedCount: number;
+    throttleCount: number;
+    totalThrottleCount: number;
+  };
   diagnostics?: {
     headers: Record<string, string | string[]>;
     bodySnippet?: string;
@@ -135,6 +156,7 @@ export interface HttpAppOptions {
   httpHost: string;
   httpPort: number;
   requestLogger?: (entry: RequestLogEntry) => void;
+  rateLimitConfig?: RateLimitConfig;
 }
 
 export interface ConsentAuthConfig {
@@ -375,21 +397,6 @@ export function resolveConsentIdentity(
   return null;
 }
 
-export function createRateLimiter(): RateLimiterState {
-  return { tokens: RATE_LIMIT_MAX, lastRefill: Date.now() };
-}
-
-export function checkRateLimit(state: RateLimiterState, now = Date.now()): boolean {
-  const elapsed = now - state.lastRefill;
-  const refill = (elapsed / RATE_LIMIT_WINDOW_MS) * RATE_LIMIT_MAX;
-  state.tokens = Math.min(RATE_LIMIT_MAX, state.tokens + refill);
-  state.lastRefill = now;
-
-  if (state.tokens < 1) return false;
-  state.tokens -= 1;
-  return true;
-}
-
 export function extractMethod(body: unknown): string | undefined {
   if (Array.isArray(body) && body.length > 0) {
     const first = body[0];
@@ -464,6 +471,40 @@ function getSessionHeader(req: Request): string | undefined {
   return header;
 }
 
+function getClientRateLimitHeader(req: Request): string | undefined {
+  const header = req.headers["x-munin-client-id"];
+  const value = Array.isArray(header) ? header[0] : header;
+  if (!value) return undefined;
+  const normalized = value.trim();
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(normalized)
+    ? normalized
+    : undefined;
+}
+
+function getRateLimitIdentity(
+  req: Request,
+  secret: Buffer,
+): {
+  key: string;
+  keyHash: string;
+  keySource: "client" | "session" | "credential";
+} {
+  const auth = req.auth as ExtendedAuthInfo | undefined;
+  const explicitClient = getClientRateLimitHeader(req);
+  const session = getSessionHeader(req);
+  const keySource = explicitClient
+    ? "client"
+    : session
+      ? "session"
+      : "credential";
+  const caller = explicitClient ?? session ?? "shared";
+  const authScope = `${auth?.principalId ?? ""}:${auth?.clientId ?? "unknown"}`;
+  const key = createHmac("sha256", secret)
+    .update(`${authScope}\0${caller}`)
+    .digest("hex");
+  return { key, keyHash: key.slice(0, 16), keySource };
+}
+
 /**
  * Derive a stable session ID from the caller's identity and a time bucket.
  * When the client doesn't send mcp-session-id, this ensures all requests from
@@ -512,13 +553,17 @@ function attachRequestLogger(
   req: Request,
   res: Response,
   requestLogger: (entry: RequestLogEntry) => void,
-): { setBody: (body: unknown) => void } {
+): {
+  setBody: (body: unknown) => void;
+  setRateLimit: (rateLimit: NonNullable<RequestLogEntry["rateLimit"]>) => void;
+} {
   const startTime = Date.now();
   const sessionId = getSessionHeader(req);
   const authContext = getRequestAuthLogContext(req.auth);
   let rpcMethod: string | undefined;
   let toolName: string | undefined;
   let body: unknown;
+  let rateLimit: RequestLogEntry["rateLimit"];
 
   res.on("finish", () => {
     const entry: RequestLogEntry = {
@@ -531,6 +576,7 @@ function attachRequestLogger(
       sessionId,
       status: res.statusCode,
       durationMs: Date.now() - startTime,
+      rateLimit,
     };
     if (res.statusCode >= 400 && req.path === "/mcp") {
       entry.diagnostics = {
@@ -546,6 +592,9 @@ function attachRequestLogger(
       body = nextBody;
       rpcMethod = extractMethod(nextBody);
       toolName = extractToolName(nextBody);
+    },
+    setRateLimit(nextRateLimit) {
+      rateLimit = nextRateLimit;
     },
   };
 }
@@ -593,10 +642,12 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
     httpHost,
     httpPort,
     requestLogger = logRequest,
+    rateLimitConfig = getRateLimitConfig(),
   } = options;
   const allowedHosts = buildAllowedHosts(httpHost, httpPort);
   const runtimeConfig = buildLibrarianRuntimeConfig("http", { apiKey, apiKeyDpa, apiKeyConsumer });
-  const rateLimiter = createRateLimiter();
+  const rateLimiter = new McpRateLimiter(rateLimitConfig);
+  const rateLimitSecret = randomBytes(32);
   const consentAuth = getConsentAuthConfig();
   const issuer = new URL(issuerUrl);
   const consentConfigError = validateConsentAuthConfig(consentAuth, issuer);
@@ -754,10 +805,29 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
   app.post("/mcp", bearerAuth, async (req: Request, res: Response) => {
     const requestLog = attachRequestLogger(req, res, requestLogger);
 
-    // Rate limiting (after auth)
-    if (!checkRateLimit(rateLimiter)) {
-      res.setHeader("Retry-After", "60");
-      res.status(429).json({ error: "Too many requests" });
+    // Rate limiting (after auth). Every authenticated MCP POST costs one token,
+    // including initialize, notifications, tools/list, and malformed bodies.
+    const rateLimitIdentity = getRateLimitIdentity(req, rateLimitSecret);
+    const admission = rateLimiter.admit(rateLimitIdentity.key);
+    if (!admission.allowed) {
+      const retryAfterSeconds = Math.max(1, Math.ceil(admission.retryAfterMs / 1000));
+      requestLog.setRateLimit({
+        keyHash: rateLimitIdentity.keyHash,
+        keySource: rateLimitIdentity.keySource,
+        scope: admission.scope!,
+        retryAfterMs: admission.retryAfterMs,
+        admittedCount: admission.admittedCount,
+        throttleCount: admission.throttleCount,
+        totalThrottleCount: admission.totalThrottleCount,
+      });
+      res.setHeader("Retry-After", String(retryAfterSeconds));
+      res.setHeader("X-Munin-RateLimit-Key", rateLimitIdentity.keyHash);
+      res.status(429).json({
+        error: "Too many requests",
+        retry_after_seconds: retryAfterSeconds,
+        limiter_scope: admission.scope,
+        limiter_key: rateLimitIdentity.keyHash,
+      });
       return;
     }
 

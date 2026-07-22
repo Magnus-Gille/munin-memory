@@ -30,6 +30,17 @@ changelog is the canonical record of what moved.
 
 ### Changed
 
+- **Authenticated MCP admission is isolated per caller instead of using one
+  starvation-prone process bucket.** Each bridge process now supplies a bounded,
+  non-secret caller ID; legacy clients without it retain a credential/session
+  fallback. A larger global token bucket remains as an abuse backstop, caller-local
+  rejections do not consume global tokens, the caller map is bounded, and every
+  authenticated POST—including initialize and tool discovery—still costs one
+  token. HTTP 429 responses now report the actual continuous-refill
+  `Retry-After` plus structured, non-secret limiter attribution and counters. The
+  stdio bridge retries only 429 with server-directed delay, positive jitter, and
+  strict attempt/time budgets; 401/403 remain non-retryable (#231).
+
 - **`backup-to-nas.sh` now supports both destination models in one script.**
   It previously existed in two incompatible forms — push to a remote host over
   ssh/rsync, or write to a local mounted volume — which had diverged between the

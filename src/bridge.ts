@@ -19,11 +19,17 @@
  *                                 file instead of env vars, keeping secrets
  *                                 out of MCP client config files.
  *   MUNIN_REQUEST_TIMEOUT_MS   — Per-request timeout in ms (default: 60000).
+ *   MUNIN_BRIDGE_CLIENT_ID     — Optional non-secret caller label used for
+ *                                 per-client server admission isolation.
+ *   MUNIN_BRIDGE_RATE_LIMIT_RETRIES — 429 retries (default: 2).
+ *   MUNIN_BRIDGE_RATE_LIMIT_MAX_WAIT_MS — Total 429 wait budget (default: 10000).
+ *   MUNIN_BRIDGE_RATE_LIMIT_JITTER_MS — Additive jitter ceiling (default: 250).
  */
 
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { randomUUID } from "node:crypto";
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -201,34 +207,204 @@ export function isRequest(
   return "id" in msg && "method" in msg && msg.id !== undefined;
 }
 
-export function createFetchWithTimeout(timeoutMs: number): typeof fetch {
+export const DEFAULT_BRIDGE_RATE_LIMIT_RETRIES = 2;
+export const DEFAULT_BRIDGE_RATE_LIMIT_MAX_WAIT_MS = 10_000;
+export const DEFAULT_BRIDGE_RATE_LIMIT_JITTER_MS = 250;
+const DEFAULT_BRIDGE_RATE_LIMIT_FALLBACK_MS = 1_000;
+
+export interface BridgeRateLimitRetryConfig {
+  maxRetries: number;
+  maxWaitMs: number;
+  jitterMs: number;
+}
+
+export interface FetchWithTimeoutOptions {
+  fetchFn?: typeof fetch;
+  sleep?: (delayMs: number, signal: AbortSignal) => Promise<void>;
+  random?: () => number;
+  now?: () => number;
+  log?: (message: string) => void;
+  retry?: BridgeRateLimitRetryConfig;
+}
+
+function nonNegativeInteger(
+  value: string | undefined,
+  fallback: number,
+  maximum: number,
+): number {
+  if (value === undefined || !/^\d+$/.test(value.trim())) return fallback;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed <= maximum ? parsed : fallback;
+}
+
+function positiveInteger(
+  value: string | undefined,
+  fallback: number,
+  maximum: number,
+): number {
+  const parsed = nonNegativeInteger(value, fallback, maximum);
+  return parsed > 0 ? parsed : fallback;
+}
+
+export function getBridgeRateLimitRetryConfig(
+  env: NodeJS.ProcessEnv = process.env,
+): BridgeRateLimitRetryConfig {
+  return {
+    maxRetries: nonNegativeInteger(
+      env.MUNIN_BRIDGE_RATE_LIMIT_RETRIES,
+      DEFAULT_BRIDGE_RATE_LIMIT_RETRIES,
+      10,
+    ),
+    maxWaitMs: positiveInteger(
+      env.MUNIN_BRIDGE_RATE_LIMIT_MAX_WAIT_MS,
+      DEFAULT_BRIDGE_RATE_LIMIT_MAX_WAIT_MS,
+      60_000,
+    ),
+    jitterMs: nonNegativeInteger(
+      env.MUNIN_BRIDGE_RATE_LIMIT_JITTER_MS,
+      DEFAULT_BRIDGE_RATE_LIMIT_JITTER_MS,
+      5000,
+    ),
+  };
+}
+
+export function resolveBridgeClientId(
+  env: NodeJS.ProcessEnv = process.env,
+  uuid: () => string = randomUUID,
+): string {
+  const configured = env.MUNIN_BRIDGE_CLIENT_ID?.trim();
+  if (configured !== undefined && configured.length > 0) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(configured)) {
+      throw new Error(
+        "MUNIN_BRIDGE_CLIENT_ID must be 1-128 characters using only letters, digits, '.', '_', ':', or '-'.",
+      );
+    }
+    return configured;
+  }
+  return `bridge-${uuid()}`;
+}
+
+export function parseRetryAfterMs(
+  value: string | null,
+  now = Date.now(),
+): number | undefined {
+  if (value === null) return undefined;
+  const normalized = value.trim();
+  if (/^\d+$/.test(normalized)) {
+    const seconds = Number(normalized);
+    return Number.isSafeInteger(seconds) ? seconds * 1000 : undefined;
+  }
+  const timestamp = Date.parse(normalized);
+  if (!Number.isFinite(timestamp)) return undefined;
+  return Math.max(0, timestamp - now);
+}
+
+export class BridgeRateLimitRetryExhaustedError extends Error {
+  constructor(
+    attempts: number,
+    waitedMs: number,
+    maxWaitMs: number,
+    nextDelayMs: number,
+  ) {
+    super(
+      `Bridge rate-limit retry exhausted after ${attempts} attempt(s); ` +
+        `waited ${waitedMs}ms of ${maxWaitMs}ms budget and next admission ` +
+        `requires ${nextDelayMs}ms.`,
+    );
+    this.name = "BridgeRateLimitRetryExhaustedError";
+  }
+}
+
+function defaultSleep(delayMs: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+export function createFetchWithTimeout(
+  timeoutMs: number,
+  options: FetchWithTimeoutOptions = {},
+): typeof fetch {
+  const fetchFn = options.fetchFn ?? globalThis.fetch;
+  const sleep = options.sleep ?? defaultSleep;
+  const random = options.random ?? Math.random;
+  const now = options.now ?? Date.now;
+  const retry = options.retry ?? getBridgeRateLimitRetryConfig();
+  const retryLog = options.log ?? (() => {});
+
   return async (input, init) => {
     const controller = new AbortController();
     const timeoutId = setTimeout(
-      () =>
-        controller.abort(
-          new Error(`Request timeout after ${timeoutMs}ms`),
-        ),
+      () => controller.abort(new Error(`Request timeout after ${timeoutMs}ms`)),
       timeoutMs,
     );
 
-    // Propagate the SDK's abort signal to our controller
+    let removeOuterAbort: (() => void) | undefined;
     if (init?.signal) {
       if (init.signal.aborted) {
         controller.abort(init.signal.reason);
       } else {
-        init.signal.addEventListener(
-          "abort",
-          () => controller.abort(init.signal!.reason),
-          { once: true },
-        );
+        const onOuterAbort = () => controller.abort(init.signal!.reason);
+        init.signal.addEventListener("abort", onOuterAbort, { once: true });
+        removeOuterAbort = () =>
+          init.signal?.removeEventListener("abort", onOuterAbort);
       }
     }
 
     try {
-      return await fetch(input, { ...init, signal: controller.signal });
+      const startedAt = now();
+      let retriesUsed = 0;
+      let waitedMs = 0;
+
+      while (true) {
+        const response = await fetchFn(input, {
+          ...init,
+          signal: controller.signal,
+        });
+        if (response.status !== 429) return response;
+
+        const retryAfterMs =
+          parseRetryAfterMs(response.headers.get("Retry-After"), now()) ??
+          DEFAULT_BRIDGE_RATE_LIMIT_FALLBACK_MS;
+        const jitterMs = Math.floor(Math.max(0, random()) * retry.jitterMs);
+        const delayMs = retryAfterMs + jitterMs;
+        await response.body?.cancel().catch(() => {});
+
+        const elapsedMs = Math.max(waitedMs, now() - startedAt);
+        if (
+          retriesUsed >= retry.maxRetries ||
+          elapsedMs + delayMs > retry.maxWaitMs
+        ) {
+          throw new BridgeRateLimitRetryExhaustedError(
+            retriesUsed + 1,
+            elapsedMs,
+            retry.maxWaitMs,
+            delayMs,
+          );
+        }
+
+        retriesUsed += 1;
+        retryLog(
+          `HTTP 429; retry ${retriesUsed}/${retry.maxRetries} in ${delayMs}ms`,
+        );
+        await sleep(delayMs, controller.signal);
+        waitedMs += delayMs;
+      }
     } finally {
       clearTimeout(timeoutId);
+      removeOuterAbort?.();
     }
   };
 }
@@ -520,8 +696,9 @@ async function main(): Promise<void> {
   if (creds.cfClientSecret) {
     authHeaders["CF-Access-Client-Secret"] = creds.cfClientSecret;
   }
+  authHeaders["X-Munin-Client-Id"] = resolveBridgeClientId();
 
-  const fetchWithTimeout = createFetchWithTimeout(requestTimeoutMs);
+  const fetchWithTimeout = createFetchWithTimeout(requestTimeoutMs, { log });
 
   const bridge = createBridge({
     stdio: new StdioServerTransport() as TransportLike,
