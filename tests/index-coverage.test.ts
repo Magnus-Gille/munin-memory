@@ -683,7 +683,7 @@ describe("createHttpApp — HTTP app endpoints", () => {
 
   it("does not let one authenticated caller starve another caller's control plane", async () => {
     const rateLimitConfig = {
-      perCallerMax: 2,
+      perCallerMax: 3,
       globalMax: 10,
       windowMs: 60_000,
       maxCallers: 10,
@@ -718,6 +718,12 @@ describe("createHttpApp — HTTP app endpoints", () => {
       .set({ ...stdHeaders(), "X-Munin-Client-Id": "new-agent" })
       .send(initPayload)
       .expect(200);
+
+    await supertest(app)
+      .post("/mcp")
+      .set({ ...stdHeaders(), "X-Munin-Client-Id": "new-agent" })
+      .send({ jsonrpc: "2.0", method: "notifications/initialized" })
+      .expect(202);
 
     await supertest(app)
       .post("/mcp")
