@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +8,8 @@ import type { SearchMode } from "../../../src/types.js";
 import type { BenchmarkQuery } from "../../types.js";
 
 export type LongMemEvalGranularity = "session" | "round";
+
+export const LONGMEMEVAL_ARTIFACT_SCHEMA_VERSION = 1;
 
 export interface LongMemEvalMessage {
   role: string;
@@ -18,7 +21,7 @@ export interface LongMemEvalItem {
   question_id: string;
   question_type: string;
   question: string;
-  answer: string;
+  answer: string | number;
   question_date: string;
   answer_session_ids: string[];
   haystack_dates: string[];
@@ -63,11 +66,13 @@ export interface BuildOptions {
 
 export interface BuildMetadata {
   adapter: "longmemeval";
+  artifact_schema_version: typeof LONGMEMEVAL_ARTIFACT_SCHEMA_VERSION;
   split: string;
   granularity: LongMemEvalGranularity;
   search_mode: SearchMode;
   generated_at: string;
   input_path: string;
+  input_sha256: string;
   db_path: string;
   query_path: string;
   id_scheme: string;
@@ -161,11 +166,7 @@ export function flattenSession(
   lines.push("Conversation:");
   for (const message of messages) {
     const role = message.role || "unknown";
-    const hasAnswerSuffix =
-      typeof message.has_answer === "boolean"
-        ? ` [has_answer=${message.has_answer ? "true" : "false"}]`
-        : "";
-    lines.push(`${role}${hasAnswerSuffix}: ${message.content.trim()}`);
+    lines.push(`${role}: ${message.content.trim()}`);
   }
   return lines.join("\n");
 }
@@ -222,11 +223,7 @@ function flattenRound(
   lines.push("Round:");
   for (const message of messages) {
     const role = message.role || "unknown";
-    const hasAnswerSuffix =
-      typeof message.has_answer === "boolean"
-        ? ` [has_answer=${message.has_answer ? "true" : "false"}]`
-        : "";
-    lines.push(`${role}${hasAnswerSuffix}: ${message.content.trim()}`);
+    lines.push(`${role}: ${message.content.trim()}`);
   }
   return lines.join("\n");
 }
@@ -361,7 +358,9 @@ export function convertLongMemEvalDataset(
       search_mode: searchMode,
       expected_ids: expectedIds,
       scope_namespace: namespace,
-      notes: `LongMemEval ${split} question ${item.question_id}; answer=${item.answer}`,
+      notes: `LongMemEval ${split} question ${item.question_id}`,
+      reference_answer: String(item.answer),
+      question_date: item.question_date,
     });
   }
 
@@ -427,7 +426,8 @@ export function buildLongMemEvalArtifacts(options: BuildOptions): ConvertResult 
   const granularity: LongMemEvalGranularity = options.granularity ?? "session";
   const searchMode: SearchMode = options.searchMode ?? "lexical";
 
-  const items = JSON.parse(readFileSync(options.inputPath, "utf-8")) as LongMemEvalItem[];
+  const inputBytes = readFileSync(options.inputPath);
+  const items = JSON.parse(inputBytes.toString("utf-8")) as LongMemEvalItem[];
   const converted = convertLongMemEvalDataset(
     items,
     options.split,
@@ -449,11 +449,13 @@ export function buildLongMemEvalArtifacts(options: BuildOptions): ConvertResult 
 
   const metadata: BuildMetadata = {
     adapter: "longmemeval",
+    artifact_schema_version: LONGMEMEVAL_ARTIFACT_SCHEMA_VERSION,
     split: options.split,
     granularity,
     search_mode: searchMode,
     generated_at: new Date().toISOString(),
     input_path: options.inputPath,
+    input_sha256: createHash("sha256").update(inputBytes).digest("hex"),
     db_path: options.dbPath,
     query_path: options.queryPath,
     id_scheme: granularity === "session"

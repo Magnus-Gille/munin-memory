@@ -61,6 +61,14 @@ export interface AnswerQualityOptions {
   answerModel: string;
   /** Model for judging. Should differ from answerModel to reduce self-preference. */
   judgeModel: string;
+  /** Reader sampling temperature. Omitted means provider/model default. */
+  answerTemperature?: number;
+  /** Reader output-token ceiling. Defaults to the shared client ceiling (4096). */
+  answerMaxTokens?: number;
+  /** Judge sampling temperature. Defaults to 0. */
+  judgeTemperature?: number;
+  /** Judge output-token ceiling. Defaults to the shared client ceiling (4096). */
+  judgeMaxTokens?: number;
   /** Injected LLM call function. Defaults to shared callOpenRouter. */
   chat?: ChatFn;
   /** OpenRouter API key. Defaults to getOpenRouterApiKey(). */
@@ -168,13 +176,17 @@ export async function runAnswerQuality(
   const searchMode: SearchMode = opts.searchMode ?? "hybrid";
   const topK = opts.topK ?? 10;
   const searchRecencyWeight = opts.searchRecencyWeight ?? null;
+  const answerTemperature = opts.answerTemperature ?? null;
+  const answerMaxTokens = opts.answerMaxTokens ?? 4096;
+  const judgeTemperature = opts.judgeTemperature ?? 0;
+  const judgeMaxTokens = opts.judgeMaxTokens ?? 4096;
 
   // Graceful skip when no API key is available
   const skipReason = shouldSkipForMissingKey(opts.apiKey, opts.chat);
   if (skipReason) {
     return {
       report_kind: "answer_quality",
-      report_schema_version: 1,
+      report_schema_version: 2,
       run_at: runAt,
       snapshot_path: opts.snapshotPath,
       snapshot_schema_version: 0,
@@ -185,7 +197,11 @@ export async function runAnswerQuality(
       search_recency_weight: searchRecencyWeight,
       top_k: topK,
       answer_model: opts.answerModel,
+      answer_temperature: answerTemperature,
+      answer_max_output_tokens: answerMaxTokens,
       judge_model: opts.judgeModel,
+      judge_temperature: judgeTemperature,
+      judge_max_output_tokens: judgeMaxTokens,
       query_set_sources: opts.querySetSources ?? [],
       query_set_checksum: computeQuerySetChecksum(opts.querySetSources ?? []),
       query_count: 0,
@@ -255,6 +271,10 @@ export async function runAnswerQualityInner(
   embeddingSummary: CorpusEmbeddingSummary | null = null,
 ): Promise<AnswerQualityReport> {
   const warnings: string[] = [];
+  const answerTemperature = opts.answerTemperature ?? null;
+  const answerMaxTokens = opts.answerMaxTokens ?? 4096;
+  const judgeTemperature = opts.judgeTemperature ?? 0;
+  const judgeMaxTokens = opts.judgeMaxTokens ?? 4096;
 
   // Partition queries: those with a reference_answer field participate; others are skipped.
   // Note: empty-string reference_answer is allowed (e.g. adversarial/unanswerable questions
@@ -372,9 +392,12 @@ export async function runAnswerQualityInner(
       const generated = await generateAnswer(
         {
           question: query.query,
+          questionDate: query.question_date,
           context: contextText,
           model: opts.answerModel,
           apiKey,
+          temperature: opts.answerTemperature,
+          maxTokens: answerMaxTokens,
         },
         chat,
       );
@@ -397,6 +420,8 @@ export async function runAnswerQualityInner(
           category: query.category,
           model: opts.judgeModel,
           apiKey,
+          temperature: judgeTemperature,
+          maxTokens: judgeMaxTokens,
         },
         chat,
       );
@@ -419,6 +444,7 @@ export async function runAnswerQualityInner(
       query_id: query.id,
       category: query.category,
       question: query.query,
+      question_date: query.question_date,
       reference_answer: referenceAnswer,
       candidate_answer: candidateAnswer,
       retrieved_ids: retrievedIds,
@@ -474,7 +500,7 @@ export async function runAnswerQualityInner(
 
   return {
     report_kind: "answer_quality",
-    report_schema_version: 1,
+    report_schema_version: 2,
     run_at: runAt,
     snapshot_path: opts.snapshotPath,
     snapshot_schema_version: snapshotSchemaVersion,
@@ -485,7 +511,11 @@ export async function runAnswerQualityInner(
     search_recency_weight: searchRecencyWeight,
     top_k: topK,
     answer_model: opts.answerModel,
+    answer_temperature: answerTemperature,
+    answer_max_output_tokens: answerMaxTokens,
     judge_model: opts.judgeModel,
+    judge_temperature: judgeTemperature,
+    judge_max_output_tokens: judgeMaxTokens,
     query_set_sources: querySetSources,
     query_set_checksum: querySetChecksum,
     query_count: eligible.length,

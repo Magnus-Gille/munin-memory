@@ -62,7 +62,9 @@
     "answer-quality": "tsx benchmark/answer-quality/run.ts",
     "answer-quality:locomo": "tsx benchmark/answer-quality/run.ts --queries benchmark/generated/locomo.jsonl --snapshot benchmark/generated/locomo.db --runner-mode production_ranker",
     "answer-quality:ab": "tsx benchmark/answer-quality/run.ts --ab --queries benchmark/generated/locomo.jsonl --snapshot benchmark/generated/locomo.db",
-    "answer-quality:ab:locomo": "tsx benchmark/adapters/locomo/build.ts --include-adversarial && tsx benchmark/answer-quality/run.ts --ab --queries benchmark/generated/locomo.jsonl --snapshot benchmark/generated/locomo.db"
+    "answer-quality:ab:locomo": "tsx benchmark/adapters/locomo/build.ts --include-adversarial && tsx benchmark/answer-quality/run.ts --ab --queries benchmark/generated/locomo.jsonl --snapshot benchmark/generated/locomo.db",
+    "scorecard:smoke": "tsx benchmark/scorecard/run.ts --profile smoke",
+    "scorecard:longmemeval:s": "./scripts/fetch-benchmark-data.sh longmemeval-s && tsx benchmark/scorecard/run.ts --profile full"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
