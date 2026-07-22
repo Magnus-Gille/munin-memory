@@ -4,7 +4,7 @@ export type EntryType = "state" | "log";
 export type EmbeddingStatus = "pending" | "processing" | "generated" | "failed";
 export type SearchMode = "lexical" | "semantic" | "hybrid";
 export type OrientDetail = "compact" | "standard" | "full";
-export type AuditAction = "write" | "update" | "patch" | "delete" | "namespace_delete" | "log_append" | "cross_zone_block" | "access_denied";
+export type AuditAction = "write" | "update" | "patch" | "supersede" | "delete" | "namespace_delete" | "log_append" | "cross_zone_block" | "access_denied";
 export type CommitmentStatus = "open" | "done" | "cancelled";
 export type ClassificationLevel =
   | "public"
@@ -30,7 +30,9 @@ export interface Entry {
   owner_principal_id: string | null;
   created_at: string;
   updated_at: string;
+  valid_from: string;
   valid_until: string | null;
+  is_current: number;
   classification: ClassificationLevel;
   embedding_status: EmbeddingStatus;
   embedding_model: string | null;
@@ -53,6 +55,8 @@ export interface WriteParams {
   create_if_absent?: boolean;
   classification?: ClassificationLevel;
   classification_override?: boolean;
+  supersedes?: string;
+  valid_from?: string;
 }
 
 export interface StatusUpdateParams {
@@ -72,6 +76,7 @@ export interface StatusUpdateParams {
 export interface ReadParams {
   namespace: string;
   key: string;
+  as_of?: string;
 }
 
 export interface ReadBatchParams {
@@ -168,6 +173,9 @@ export interface LogParams {
   tags?: string[];
   classification?: ClassificationLevel;
   classification_override?: boolean;
+  supersedes?: string;
+  expected_updated_at?: string;
+  valid_from?: string;
 }
 
 export interface ListParams {
@@ -208,13 +216,16 @@ export interface AuditSyncParams {
 // Tool response types
 
 export interface WriteResponse {
-  status: "created" | "updated" | "conflict";
+  status: "created" | "updated" | "superseded" | "conflict";
   id?: string;
   namespace: string;
   key: string;
   hint?: string;
   message?: string;
   current_updated_at?: string;
+  updated_at?: string;
+  valid_from?: string;
+  supersedes?: string;
   warnings?: string[];
 }
 
@@ -297,6 +308,7 @@ export interface ReadResponse {
   tags?: string[];
   created_at?: string;
   updated_at?: string;
+  valid_from?: string;
   valid_until?: string | null;
   classification?: ClassificationLevel;
   expired?: boolean;
@@ -305,6 +317,9 @@ export interface ReadResponse {
   redaction_reason?: string;
   message?: string;
   hint?: string;
+  supersedes?: string;
+  superseded?: boolean;
+  superseded_by?: string;
   /** Set when stored content is instruction-shaped or tagged `untrusted`/`source:external`. (#150) */
   untrusted_content?: boolean;
   /** Human-readable provenance notice when untrusted_content is true. (#150) */
@@ -321,6 +336,7 @@ export interface GetResponse {
   tags?: string[];
   created_at?: string;
   updated_at?: string;
+  valid_from?: string;
   valid_until?: string | null;
   classification?: ClassificationLevel;
   expired?: boolean;
@@ -328,6 +344,9 @@ export interface GetResponse {
   redacted?: boolean;
   redaction_reason?: string;
   message?: string;
+  supersedes?: string;
+  superseded?: boolean;
+  superseded_by?: string;
   /** Set when stored content is instruction-shaped or tagged `untrusted`/`source:external`. (#150) */
   untrusted_content?: boolean;
   /** Human-readable provenance notice when untrusted_content is true. (#150) */
@@ -344,6 +363,7 @@ export interface QueryResult {
   created_at?: string;
   updated_at?: string;
   updated_at_local?: string;
+  valid_from?: string;
   valid_until?: string | null;
   classification?: ClassificationLevel;
   expired?: boolean;
@@ -389,10 +409,12 @@ export interface QueryResponse {
 }
 
 export interface LogResponse {
-  status: "logged";
+  status: "logged" | "superseded";
   id: string;
   namespace: string;
   timestamp: string;
+  valid_from?: string;
+  supersedes?: string;
   classification?: ClassificationLevel;
   provenance?: EntryProvenance;
 }

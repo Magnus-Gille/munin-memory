@@ -30,6 +30,20 @@ changelog is the canonical record of what moved.
 
 ### Changed
 
+- **Explicit correction/supersession and temporal validity (#192).** `memory_write`
+  and `memory_log` now accept `supersedes` with mandatory compare-and-swap, creating
+  a fresh revision while preserving the original UUID as historical evidence. State
+  and log correction chains reject stale targets, branching, future validity, source
+  ownership violations, and classification downgrades; owner-only `valid_from`
+  backdating is bounded by the predecessor. Normal search, lists, dashboards,
+  consolidation, commitments, and derived views hide superseded rows before ranking
+  and limits, while `memory_get` exposes authorized lineage and `memory_read(as_of)`
+  resolves half-open state validity intervals. Corrected log content and timestamps
+  remain immutable, predecessor vectors are removed, open derived commitments are
+  cancelled, and state-key deletion removes the complete chain transactionally.
+  Soft expiry remains orthogonal and retention/GC or legal erasure are explicitly out
+  of scope.
+
 - **Authenticated MCP admission is isolated per caller instead of using one
   starvation-prone process bucket.** Each bridge process now supplies a bounded,
   non-secret caller ID; legacy clients without it retain a credential/session

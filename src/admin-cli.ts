@@ -374,6 +374,7 @@ function findRuleAccessingSeededHome(
        FROM entries e
        JOIN principals p ON p.principal_id = e.owner_principal_id
        WHERE e.entry_type = 'state'
+         AND e.is_current = 1
          AND e.key IN ('conventions', 'config')
          AND e.namespace LIKE '%/meta'
          AND p.principal_type != 'owner'

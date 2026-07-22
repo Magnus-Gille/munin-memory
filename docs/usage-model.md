@@ -124,6 +124,32 @@ guard for an entry you have read, not an assertion that a key exists or is absen
 Soft expiry also does not make a key absent: a state row past `valid_until` remains directly
 addressable, so `create_if_absent: true` returns `already_exists` until that row is deleted.
 
+### Corrections and temporal reads
+
+An ordinary state upsert remains mutable. When the old wording must remain auditable, use an
+explicit correction instead: pass its UUID as `supersedes` and its exact `updated_at` as
+`expected_updated_at` to `memory_write`. Munin atomically marks that revision historical and
+inserts a new UUID for the successor. `memory_log` supports the same correction parameters,
+but always appends a new immutable log row; it never edits the original log content or
+timestamps.
+
+Default query, list, dashboard, consolidation, commitment, and derived-memory paths expose
+only current revisions. `include_expired` changes soft-expiry filtering only—it never brings
+superseded revisions back. Historical evidence remains available through `memory_get(id)`.
+For state, `memory_read(namespace, key, as_of)` returns the revision valid at that instant;
+validity intervals are half-open, so the successor wins exactly at its `valid_from` boundary.
+
+Corrections require read and write access, ownership of the source entry unless the caller is
+the owner principal, an exact CAS match, the same namespace and state key, and a classification
+at least as restrictive as the predecessor. One revision can have only one successor, so stale
+or branching attempts return a conflict. Explicit backdating is owner-only, cannot precede the
+target revision's `valid_from`, and cannot be in the future. Omitting `valid_from` uses the
+server's current time. Deleting a state key removes its complete correction chain atomically.
+
+`valid_until` remains independent soft expiry. An expired current successor stays current but
+is hidden from broad retrieval by default; expiry never resurrects an older revision. Retention,
+garbage collection, and legal erasure are separate policies and are not implied by correction.
+
 ---
 
 ## Namespace categories

@@ -802,6 +802,55 @@ export const migrations: Migration[] = [
       ).run();
     },
   },
+  {
+    version: 20,
+    description: "Add temporal validity and immutable correction lineage (#192)",
+    up: (db) => {
+      const entriesTableExists = db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'entries'",
+      ).get();
+      if (!entriesTableExists) return;
+      const columns = db.prepare("PRAGMA table_info(entries)").all() as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === "valid_from")) {
+        db.prepare("ALTER TABLE entries ADD COLUMN valid_from TEXT").run();
+      }
+      if (!columns.some((column) => column.name === "is_current")) {
+        db.prepare(
+          "ALTER TABLE entries ADD COLUMN is_current INTEGER NOT NULL DEFAULT 1 CHECK(is_current IN (0, 1))",
+        ).run();
+      }
+
+      // Existing mutable state only proves its current wording as of its last
+      // update. Immutable logs have been valid since creation.
+      db.prepare(
+        `UPDATE entries
+         SET valid_from = CASE WHEN entry_type = 'state' THEN updated_at ELSE created_at END
+         WHERE valid_from IS NULL`,
+      ).run();
+
+      db.exec(`
+        DROP INDEX IF EXISTS idx_entries_ns_key;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_entries_ns_key
+          ON entries(namespace, key)
+          WHERE entry_type = 'state' AND is_current = 1;
+        CREATE INDEX IF NOT EXISTS idx_entries_temporal
+          ON entries(namespace, entry_type, is_current, valid_from);
+
+        CREATE TABLE IF NOT EXISTS entry_supersessions (
+          predecessor_id TEXT PRIMARY KEY
+            REFERENCES entries(id) ON DELETE RESTRICT,
+          successor_id TEXT NOT NULL UNIQUE
+            REFERENCES entries(id) ON DELETE RESTRICT,
+          effective_at TEXT NOT NULL,
+          actor_principal_id TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          CHECK(predecessor_id <> successor_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_entry_supersessions_effective
+          ON entry_supersessions(effective_at);
+      `);
+    },
+  },
 ];
 
 /**

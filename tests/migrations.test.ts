@@ -1046,3 +1046,66 @@ describe("migration v11 — backfill edge cases", () => {
     db.close();
   });
 });
+
+describe("migration v20 — correction lineage", () => {
+  it("adds temporal metadata, immutable supersession links, and a current-state uniqueness guard", () => {
+    const db = openRawDb();
+    registerMuninUDFs(db);
+    const before = "2026-07-20T10:00:00.000Z";
+    const after = "2026-07-21T10:00:00.000Z";
+
+    for (const migration of migrations.filter((candidate) => candidate.version < 20)) {
+      if (migration.version === 1) {
+        db.exec(`CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)`);
+      }
+      migration.up(db);
+      db.prepare("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)")
+        .run(migration.version, after);
+    }
+
+    db.prepare(
+      `INSERT INTO entries
+         (id, namespace, key, entry_type, content, tags, agent_id, owner_principal_id,
+          created_at, updated_at, valid_until, classification, embedding_status)
+       VALUES ('state-old', 'projects/history', 'status', 'state', 'current wording', '[]',
+               'owner', 'owner', ?, ?, NULL, 'internal', 'pending')`,
+    ).run(before, after);
+    db.prepare(
+      `INSERT INTO entries
+         (id, namespace, key, entry_type, content, tags, agent_id, owner_principal_id,
+          created_at, updated_at, valid_until, classification, embedding_status)
+       VALUES ('log-old', 'projects/history', NULL, 'log', 'historical event', '[]',
+               'owner', 'owner', ?, ?, NULL, 'internal', 'pending')`,
+    ).run(before, after);
+
+    runMigrations(db);
+
+    const columns = db.prepare("PRAGMA table_info(entries)").all() as Array<{ name: string }>;
+    expect(columns.map((column) => column.name)).toEqual(
+      expect.arrayContaining(["valid_from", "is_current"]),
+    );
+    expect(
+      db.prepare("SELECT valid_from, is_current FROM entries WHERE id = 'state-old'").get(),
+    ).toEqual({ valid_from: after, is_current: 1 });
+    expect(
+      db.prepare("SELECT valid_from, is_current FROM entries WHERE id = 'log-old'").get(),
+    ).toEqual({ valid_from: before, is_current: 1 });
+
+    const relationTable = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'entry_supersessions'",
+    ).get();
+    expect(relationTable).toBeTruthy();
+
+    expect(() => {
+      db.prepare(
+        `INSERT INTO entries
+           (id, namespace, key, entry_type, content, tags, agent_id, owner_principal_id,
+            created_at, updated_at, valid_until, classification, embedding_status, valid_from, is_current)
+         VALUES ('state-duplicate', 'projects/history', 'status', 'state', 'duplicate', '[]',
+                 'owner', 'owner', ?, ?, NULL, 'internal', 'pending', ?, 1)`,
+      ).run(after, after, after);
+    }).toThrow(/UNIQUE constraint failed/);
+
+    db.close();
+  });
+});

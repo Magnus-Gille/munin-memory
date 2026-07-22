@@ -66,6 +66,7 @@ Invisible denial is critical: non-owner principals must not be able to distingui
 | **Unauthorized** | Invisible denial (same response as writing to a read-only or non-existent namespace would produce) |
 | **compare-and-swap** | `expected_updated_at` works normally within accessible namespaces |
 | **create-if-absent** | `create_if_absent: true` atomically creates only while the accessible namespace+key is absent; an existing entry returns a typed conflict with `current_updated_at` |
+| **correction** | `supersedes` requires read + write access, exact CAS, and source ownership for non-owner principals. Classification cannot be lowered. Explicit `valid_from` backdating is owner-only. |
 
 ### memory_read
 
@@ -74,6 +75,7 @@ Invisible denial is critical: non-owner principals must not be able to distingui
 | **Who can call** | All principals |
 | **Namespace check** | Caller must have read access to the target namespace |
 | **Unauthorized** | `{"found": false}` — identical to non-existent entry |
+| **as-of read** | `as_of` applies the same namespace, classification, and untrusted-content gates to the historical revision selected for that instant |
 
 ### memory_read_batch
 
@@ -115,6 +117,7 @@ Invisible denial is critical: non-owner principals must not be able to distingui
 | **Who can call** | All principals |
 | **Namespace check** | Caller must have write access to the target namespace |
 | **Unauthorized** | Invisible denial |
+| **correction** | `supersedes` appends a new log revision only when the caller can read and write the namespace and owns the source (owner principal excepted); the historical UUID remains directly readable under normal gates |
 
 ### memory_list
 
