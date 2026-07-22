@@ -877,7 +877,10 @@ describe("createFetchWithTimeout", () => {
   it("retries a transient 429 before returning the cold-start response", async () => {
     const throttled = new Response("too many requests", {
       status: 429,
-      headers: { "Retry-After": "0" },
+      headers: {
+        "Retry-After": "0",
+        "X-Munin-Rate-Limit": "admission-v1",
+      },
     });
     const recovered = new Response("ok", { status: 200 });
     const mockFetch = vi
@@ -907,7 +910,10 @@ describe("createFetchWithTimeout", () => {
       .mockResolvedValueOnce(
         new Response("limited", {
           status: 429,
-          headers: { "Retry-After": "2" },
+          headers: {
+            "Retry-After": "2",
+            "X-Munin-Rate-Limit": "admission-v1",
+          },
         }),
       )
       .mockResolvedValueOnce(new Response("ok", { status: 200 }));
@@ -933,7 +939,10 @@ describe("createFetchWithTimeout", () => {
     const mockFetch = vi.fn().mockResolvedValue(
       new Response("limited", {
         status: 429,
-        headers: { "Retry-After": "30" },
+        headers: {
+          "Retry-After": "30",
+          "X-Munin-Rate-Limit": "admission-v1",
+        },
       }),
     );
     const sleep = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
@@ -955,7 +964,10 @@ describe("createFetchWithTimeout", () => {
     const mockFetch = vi.fn().mockImplementation(async () =>
       new Response("limited", {
         status: 429,
-        headers: { "Retry-After": "1" },
+        headers: {
+          "Retry-After": "1",
+          "X-Munin-Rate-Limit": "admission-v1",
+        },
       }),
     );
     const sleep = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
@@ -971,6 +983,37 @@ describe("createFetchWithTimeout", () => {
     );
     expect(mockFetch).toHaveBeenCalledTimes(3);
     expect(sleep).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not replay an unmarked upstream 429 for a mutating POST", async () => {
+    const upstreamThrottle = new Response("proxy limited", {
+      status: 429,
+      headers: { "Retry-After": "1" },
+    });
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValueOnce(upstreamThrottle)
+      .mockResolvedValueOnce(new Response("unexpected retry", { status: 200 }));
+    const sleep = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
+    const fetchFn = createFetchWithTimeout(5000, {
+      fetchFn: mockFetch,
+      sleep,
+      random: () => 0,
+    });
+
+    const response = await fetchFn("https://example.com/mcp", {
+      method: "POST",
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "memory_log", arguments: { content: "once" } },
+      }),
+    });
+
+    expect(response).toBe(upstreamThrottle);
+    expect(mockFetch).toHaveBeenCalledOnce();
+    expect(sleep).not.toHaveBeenCalled();
   });
 
   it.each([401, 403])("does not retry authentication response %s", async (status) => {

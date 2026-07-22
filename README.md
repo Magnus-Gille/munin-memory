@@ -170,6 +170,7 @@ All configuration is via environment variables. Copy `.env.example` for a starti
 | `MUNIN_HTTP_HOST` | `127.0.0.1` | HTTP bind address |
 | `MUNIN_API_KEY` | — | Bearer token (required for HTTP mode) |
 | `MUNIN_RATE_LIMIT_PER_CALLER_MAX` | `60` | Authenticated MCP requests admitted per caller per window |
+| `MUNIN_RATE_LIMIT_PER_CREDENTIAL_MAX` | `180` | Aggregate requests admitted per authenticated principal/client credential per window |
 | `MUNIN_RATE_LIMIT_GLOBAL_MAX` | `300` | Process-wide MCP admission backstop per window |
 | `MUNIN_RATE_LIMIT_WINDOW_MS` | `60000` | Continuous-refill admission window in milliseconds |
 | `MUNIN_RATE_LIMIT_MAX_CALLERS` | `1000` | Maximum independently tracked caller buckets; overflow remains capped |
@@ -222,9 +223,17 @@ All three fields are optional; omit `cf_client_id` / `cf_client_secret` if you d
 Each bridge process also sends a generated, non-secret `X-Munin-Client-Id` so
 several agents sharing one legacy bearer credential receive independent admission
 buckets. Set `MUNIN_BRIDGE_CLIENT_ID` to a stable opaque label when correlation
-across bridge restarts is useful. HTTP 429 responses are retried only according to
-the server's `Retry-After`, with positive jitter and bounded defaults: two retries,
-a 10-second total wait budget, and 250 ms maximum jitter. Override these with
+across bridge restarts is useful. The caller ID is a cooperative partition, not an
+authentication boundary: the authenticated principal/client credential retains an
+aggregate bucket, and the process retains a global backstop. Separate OAuth clients
+or agent service tokens provide the strongest isolation.
+
+The bridge retries only a Munin admission 429 marked
+`X-Munin-Rate-Limit: admission-v1`, which is emitted before the request body is
+processed and is therefore safe to replay. Unmarked proxy or upstream 429 responses
+are returned without replay. Marked responses follow the server's `Retry-After`,
+with positive jitter and bounded defaults: two retries, a 10-second total wait
+budget, and 250 ms maximum jitter. Override these with
 `MUNIN_BRIDGE_RATE_LIMIT_RETRIES`, `MUNIN_BRIDGE_RATE_LIMIT_MAX_WAIT_MS`, and
 `MUNIN_BRIDGE_RATE_LIMIT_JITTER_MS`. Authentication failures (401/403) and other
 HTTP failures are never retried by this path.

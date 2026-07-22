@@ -373,7 +373,12 @@ export function createFetchWithTimeout(
           ...init,
           signal: controller.signal,
         });
-        if (response.status !== 429) return response;
+        if (
+          response.status !== 429 ||
+          response.headers.get("X-Munin-Rate-Limit") !== "admission-v1"
+        ) {
+          return response;
+        }
 
         const retryAfterMs =
           parseRetryAfterMs(response.headers.get("Retry-After"), now()) ??

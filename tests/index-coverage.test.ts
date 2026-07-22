@@ -732,9 +732,69 @@ describe("createHttpApp — HTTP app endpoints", () => {
       .expect(200);
   });
 
+  it("keeps a new caller's handshake live during a concurrent caller flood", async () => {
+    const { app } = makeApp(db, logs, {
+      perCallerMax: 3,
+      perCredentialMax: 20,
+      globalMax: 20,
+      windowMs: 60_000,
+      maxCallers: 10,
+    });
+    const noisyHeaders = {
+      ...stdHeaders(),
+      "X-Munin-Client-Id": "concurrent-noisy-agent",
+    };
+    const newHeaders = {
+      ...stdHeaders(),
+      "X-Munin-Client-Id": "concurrent-new-agent",
+    };
+
+    const noisyFlood = Promise.all(
+      Array.from({ length: 10 }, (_, id) =>
+        supertest(app)
+          .post("/mcp")
+          .set(noisyHeaders)
+          .send({ jsonrpc: "2.0", id, method: "tools/list" }),
+      ),
+    );
+    const handshake = (async () => {
+      const initialize = await supertest(app)
+        .post("/mcp")
+        .set(newHeaders)
+        .send({
+          jsonrpc: "2.0",
+          id: 100,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-03-26",
+            capabilities: {},
+            clientInfo: { name: "new-agent", version: "1.0.0" },
+          },
+        });
+      const initialized = await supertest(app)
+        .post("/mcp")
+        .set(newHeaders)
+        .send({ jsonrpc: "2.0", method: "notifications/initialized" });
+      const tools = await supertest(app)
+        .post("/mcp")
+        .set(newHeaders)
+        .send({ jsonrpc: "2.0", id: 101, method: "tools/list" });
+      return [initialize.status, initialized.status, tools.status];
+    })();
+
+    const [noisyResponses, handshakeStatuses] = await Promise.all([
+      noisyFlood,
+      handshake,
+    ]);
+    expect(handshakeStatuses).toEqual([200, 202, 200]);
+    expect(noisyResponses.filter((response) => response.status === 200)).toHaveLength(3);
+    expect(noisyResponses.filter((response) => response.status === 429)).toHaveLength(7);
+  });
+
   it("returns an accurate Retry-After and structured non-secret throttle counters", async () => {
     const { app } = makeApp(db, logs, {
       perCallerMax: 1,
+      perCredentialMax: 10,
       globalMax: 10,
       windowMs: 10_000,
       maxCallers: 10,
@@ -750,6 +810,7 @@ describe("createHttpApp — HTTP app endpoints", () => {
       .expect(429);
 
     expect(throttled.headers["retry-after"]).toBe("10");
+    expect(throttled.headers["x-munin-rate-limit"]).toBe("admission-v1");
     expect(throttled.body).toMatchObject({
       error: "Too many requests",
       retry_after_seconds: 10,
@@ -768,9 +829,40 @@ describe("createHttpApp — HTTP app endpoints", () => {
     expect(JSON.stringify(entry)).not.toContain(LEGACY_API_KEY);
   });
 
+  it("attributes a pooled caller-map rejection to the overflow bucket", async () => {
+    const { app } = makeApp(db, logs, {
+      perCallerMax: 1,
+      perCredentialMax: 10,
+      globalMax: 10,
+      windowMs: 60_000,
+      maxCallers: 1,
+    });
+    const payload = { jsonrpc: "2.0", id: 1, method: "tools/list" };
+
+    for (const callerId of ["stored", "overflow-a"]) {
+      await supertest(app)
+        .post("/mcp")
+        .set({ ...stdHeaders(), "X-Munin-Client-Id": callerId })
+        .send(payload)
+        .expect(200);
+    }
+    const rejected = await supertest(app)
+      .post("/mcp")
+      .set({ ...stdHeaders(), "X-Munin-Client-Id": "overflow-b" })
+      .send(payload)
+      .expect(429);
+
+    expect(rejected.body).toMatchObject({
+      limiter_scope: "caller",
+      limiter_key: "overflow",
+    });
+    expect(logs.at(-1)?.rateLimit?.keyHash).toBe("overflow");
+  });
+
   it("authenticates before admission and invalid credentials cannot spend tokens", async () => {
     const { app } = makeApp(db, logs, {
       perCallerMax: 1,
+      perCredentialMax: 10,
       globalMax: 1,
       windowMs: 60_000,
       maxCallers: 10,
@@ -791,6 +883,7 @@ describe("createHttpApp — HTTP app endpoints", () => {
   it("charges malformed caller hints to the credential fallback bucket", async () => {
     const { app } = makeApp(db, logs, {
       perCallerMax: 1,
+      perCredentialMax: 10,
       globalMax: 10,
       windowMs: 60_000,
       maxCallers: 10,
@@ -809,6 +902,33 @@ describe("createHttpApp — HTTP app endpoints", () => {
       .expect(429);
 
     expect(logs.at(-1)?.rateLimit?.keySource).toBe("credential");
+  });
+
+  it("caps caller-id rotation at the authenticated credential boundary", async () => {
+    const rateLimitConfig = {
+      perCallerMax: 1,
+      perCredentialMax: 2,
+      globalMax: 10,
+      windowMs: 60_000,
+      maxCallers: 10,
+    };
+    const { app } = makeApp(db, logs, rateLimitConfig);
+    const payload = { jsonrpc: "2.0", id: 1, method: "tools/list" };
+
+    for (const callerId of ["rotating-a", "rotating-b"]) {
+      await supertest(app)
+        .post("/mcp")
+        .set({ ...stdHeaders(), "X-Munin-Client-Id": callerId })
+        .send(payload)
+        .expect(200);
+    }
+    const rejected = await supertest(app)
+      .post("/mcp")
+      .set({ ...stdHeaders(), "X-Munin-Client-Id": "rotating-c" })
+      .send(payload)
+      .expect(429);
+
+    expect(rejected.body.limiter_scope).toBe("credential");
   });
 
   it("returns 400 for invalid JSON body to /mcp", async () => {

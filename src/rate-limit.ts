@@ -1,4 +1,5 @@
 export const RATE_LIMIT_MAX = 60;
+export const RATE_LIMIT_CREDENTIAL_MAX = 180;
 export const RATE_LIMIT_WINDOW_MS = 60 * 1000;
 export const RATE_LIMIT_GLOBAL_MAX = 300;
 export const RATE_LIMIT_MAX_CALLERS = 1000;
@@ -10,16 +11,19 @@ export interface RateLimiterState {
 
 export interface RateLimitConfig {
   perCallerMax: number;
+  perCredentialMax: number;
   globalMax: number;
   windowMs: number;
   maxCallers: number;
 }
 
-export type RateLimitScope = "caller" | "global";
+export type RateLimitScope = "caller" | "credential" | "global";
+export type RateLimitBucketKind = "caller" | "credential" | "overflow" | "global";
 
 export interface RateLimitDecision {
   allowed: boolean;
   scope?: RateLimitScope;
+  bucketKind?: RateLimitBucketKind;
   retryAfterMs: number;
   remaining: number;
   admittedCount: number;
@@ -59,6 +63,12 @@ export function getRateLimitConfig(
       RATE_LIMIT_MAX,
       1,
       10_000,
+    ),
+    perCredentialMax: positiveInteger(
+      env.MUNIN_RATE_LIMIT_PER_CREDENTIAL_MAX,
+      RATE_LIMIT_CREDENTIAL_MAX,
+      1,
+      100_000,
     ),
     globalMax: positiveInteger(
       env.MUNIN_RATE_LIMIT_GLOBAL_MAX,
@@ -123,13 +133,16 @@ function createBucket(max: number, now: number): BucketWithCounters {
 }
 
 /**
- * Hierarchical MCP admission control. Each authenticated caller has its own
- * bucket, while a larger process-wide bucket remains as a hard abuse backstop.
- * A caller-local rejection never consumes a global token.
+ * Hierarchical MCP admission control. Each cooperative caller identity has its
+ * own bucket, each authenticated credential has an aggregate bucket, and a
+ * larger process-wide bucket remains as a hard abuse backstop. Rejections at a
+ * narrower scope never consume tokens from wider scopes.
  */
 export class McpRateLimiter {
   private readonly callers = new Map<string, CallerBucket>();
-  private readonly overflow: CallerBucket;
+  private readonly credentials = new Map<string, CallerBucket>();
+  private readonly callerOverflow: CallerBucket;
+  private readonly credentialOverflow: CallerBucket;
   private readonly global: BucketWithCounters;
   private totalThrottled = 0;
 
@@ -143,44 +156,75 @@ export class McpRateLimiter {
       }
     }
     this.global = createBucket(config.globalMax, now);
-    this.overflow = {
+    this.callerOverflow = {
       ...createBucket(config.perCallerMax, now),
       lastSeen: now,
     };
+    this.credentialOverflow = {
+      ...createBucket(config.perCredentialMax, now),
+      lastSeen: now,
+    };
   }
 
-  private getCaller(key: string, now: number): CallerBucket {
-    const existing = this.callers.get(key);
+  private getBoundedBucket(
+    buckets: Map<string, CallerBucket>,
+    overflow: CallerBucket,
+    max: number,
+    key: string,
+    now: number,
+  ): { bucket: CallerBucket; overflow: boolean } {
+    const existing = buckets.get(key);
     if (existing) {
       existing.lastSeen = now;
-      return existing;
+      return { bucket: existing, overflow: false };
     }
 
     const expiryMs = this.config.windowMs * 2;
-    for (const [candidateKey, candidate] of this.callers) {
+    for (const [candidateKey, candidate] of buckets) {
       if (now - candidate.lastSeen >= expiryMs) {
-        this.callers.delete(candidateKey);
+        buckets.delete(candidateKey);
       }
     }
 
-    if (this.callers.size >= this.config.maxCallers) {
-      this.overflow.lastSeen = now;
-      return this.overflow;
+    if (buckets.size >= this.config.maxCallers) {
+      overflow.lastSeen = now;
+      return { bucket: overflow, overflow: true };
     }
 
     const created: CallerBucket = {
-      ...createBucket(this.config.perCallerMax, now),
+      ...createBucket(max, now),
       lastSeen: now,
     };
-    this.callers.set(key, created);
-    return created;
+    buckets.set(key, created);
+    return { bucket: created, overflow: false };
   }
 
-  admit(key: string, now = Date.now()): RateLimitDecision {
-    const caller = this.getCaller(key, now);
+  admit(callerKey: string, credentialKey: string, now = Date.now()): RateLimitDecision {
+    const callerResult = this.getBoundedBucket(
+      this.callers,
+      this.callerOverflow,
+      this.config.perCallerMax,
+      callerKey,
+      now,
+    );
+    const credentialResult = this.getBoundedBucket(
+      this.credentials,
+      this.credentialOverflow,
+      this.config.perCredentialMax,
+      credentialKey,
+      now,
+    );
+    const caller = callerResult.bucket;
+    const credential = credentialResult.bucket;
     refillRateLimit(
       caller.state,
       this.config.perCallerMax,
+      this.config.windowMs,
+      now,
+    );
+    refillRateLimit(
+      credential.state,
+      this.config.perCredentialMax,
       this.config.windowMs,
       now,
     );
@@ -202,10 +246,31 @@ export class McpRateLimiter {
       return {
         allowed: false,
         scope: "caller",
+        bucketKind: callerResult.overflow ? "overflow" : "caller",
         retryAfterMs: callerWait,
         remaining: Math.floor(caller.state.tokens),
         admittedCount: caller.admitted,
         throttleCount: caller.throttled,
+        totalThrottleCount: this.totalThrottled,
+      };
+    }
+
+    const credentialWait = getRateLimitRetryAfterMs(
+      credential.state,
+      this.config.perCredentialMax,
+      this.config.windowMs,
+    );
+    if (credentialWait > 0) {
+      credential.throttled += 1;
+      this.totalThrottled += 1;
+      return {
+        allowed: false,
+        scope: "credential",
+        bucketKind: credentialResult.overflow ? "overflow" : "credential",
+        retryAfterMs: credentialWait,
+        remaining: Math.floor(credential.state.tokens),
+        admittedCount: credential.admitted,
+        throttleCount: credential.throttled,
         totalThrottleCount: this.totalThrottled,
       };
     }
@@ -221,6 +286,7 @@ export class McpRateLimiter {
       return {
         allowed: false,
         scope: "global",
+        bucketKind: "global",
         retryAfterMs: globalWait,
         remaining: Math.floor(this.global.state.tokens),
         admittedCount: caller.admitted,
@@ -231,6 +297,8 @@ export class McpRateLimiter {
 
     caller.state.tokens -= 1;
     caller.admitted += 1;
+    credential.state.tokens -= 1;
+    credential.admitted += 1;
     this.global.state.tokens -= 1;
     this.global.admitted += 1;
     return {

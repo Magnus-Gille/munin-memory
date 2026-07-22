@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   McpRateLimiter,
+  RATE_LIMIT_CREDENTIAL_MAX,
   RATE_LIMIT_GLOBAL_MAX,
   RATE_LIMIT_MAX,
   RATE_LIMIT_MAX_CALLERS,
@@ -10,6 +11,7 @@ import {
 
 const testConfig = {
   perCallerMax: 2,
+  perCredentialMax: 10,
   globalMax: 10,
   windowMs: 10_000,
   maxCallers: 10,
@@ -25,23 +27,23 @@ describe("McpRateLimiter", () => {
   it("isolates callers and reports the exact continuous-refill wait", () => {
     const limiter = new McpRateLimiter(testConfig, 0);
 
-    expect(limiter.admit("caller-a", 0).allowed).toBe(true);
-    expect(limiter.admit("caller-a", 0).allowed).toBe(true);
-    expect(limiter.admit("caller-a", 0)).toMatchObject({
+    expect(limiter.admit("caller-a", "credential", 0).allowed).toBe(true);
+    expect(limiter.admit("caller-a", "credential", 0).allowed).toBe(true);
+    expect(limiter.admit("caller-a", "credential", 0)).toMatchObject({
       allowed: false,
       scope: "caller",
       retryAfterMs: 5000,
       admittedCount: 2,
       throttleCount: 1,
     });
-    expect(limiter.admit("caller-b", 0).allowed).toBe(true);
+    expect(limiter.admit("caller-b", "credential", 0).allowed).toBe(true);
 
-    expect(limiter.admit("caller-a", 4999)).toMatchObject({
+    expect(limiter.admit("caller-a", "credential", 4999)).toMatchObject({
       allowed: false,
       retryAfterMs: 1,
       throttleCount: 2,
     });
-    expect(limiter.admit("caller-a", 5000).allowed).toBe(true);
+    expect(limiter.admit("caller-a", "credential", 5000).allowed).toBe(true);
   });
 
   it("does not charge the global backstop for caller-local rejections", () => {
@@ -50,12 +52,33 @@ describe("McpRateLimiter", () => {
       0,
     );
 
-    expect(limiter.admit("caller-a", 0).allowed).toBe(true);
+    expect(limiter.admit("caller-a", "credential", 0).allowed).toBe(true);
     for (let i = 0; i < 20; i++) {
-      expect(limiter.admit("caller-a", 0).scope).toBe("caller");
+      expect(limiter.admit("caller-a", "credential", 0).scope).toBe("caller");
     }
-    expect(limiter.admit("caller-b", 0).allowed).toBe(true);
-    expect(limiter.admit("caller-c", 0)).toMatchObject({
+    expect(limiter.admit("caller-b", "credential", 0).allowed).toBe(true);
+    expect(limiter.admit("caller-c", "credential", 0)).toMatchObject({
+      allowed: false,
+      scope: "global",
+    });
+  });
+
+  it("caps rotating caller IDs without charging the global backstop on rejection", () => {
+    const limiter = new McpRateLimiter(
+      { ...testConfig, perCallerMax: 2, perCredentialMax: 2, globalMax: 3 },
+      0,
+    );
+
+    expect(limiter.admit("caller-a", "credential-a", 0).allowed).toBe(true);
+    expect(limiter.admit("caller-b", "credential-a", 0).allowed).toBe(true);
+    expect(limiter.admit("caller-c", "credential-a", 0)).toMatchObject({
+      allowed: false,
+      scope: "credential",
+      bucketKind: "credential",
+      admittedCount: 2,
+    });
+    expect(limiter.admit("caller-d", "credential-b", 0).allowed).toBe(true);
+    expect(limiter.admit("caller-e", "credential-b", 0)).toMatchObject({
       allowed: false,
       scope: "global",
     });
@@ -67,11 +90,12 @@ describe("McpRateLimiter", () => {
       0,
     );
 
-    expect(limiter.admit("stored", 0).allowed).toBe(true);
-    expect(limiter.admit("overflow-a", 0).allowed).toBe(true);
-    expect(limiter.admit("overflow-b", 0)).toMatchObject({
+    expect(limiter.admit("stored", "credential", 0).allowed).toBe(true);
+    expect(limiter.admit("overflow-a", "credential", 0).allowed).toBe(true);
+    expect(limiter.admit("overflow-b", "credential", 0)).toMatchObject({
       allowed: false,
       scope: "caller",
+      bucketKind: "overflow",
     });
     expect(limiter.callerCount).toBe(1);
   });
@@ -82,8 +106,8 @@ describe("McpRateLimiter", () => {
       0,
     );
 
-    expect(limiter.admit("old", 0).allowed).toBe(true);
-    expect(limiter.admit("new", 20_000).allowed).toBe(true);
+    expect(limiter.admit("old", "credential", 0).allowed).toBe(true);
+    expect(limiter.admit("new", "credential", 20_000).allowed).toBe(true);
     expect(limiter.callerCount).toBe(1);
   });
 
@@ -93,8 +117,8 @@ describe("McpRateLimiter", () => {
       1000,
     );
 
-    expect(limiter.admit("caller", 1000).allowed).toBe(true);
-    expect(limiter.admit("caller", 500)).toMatchObject({
+    expect(limiter.admit("caller", "credential", 1000).allowed).toBe(true);
+    expect(limiter.admit("caller", "credential", 500)).toMatchObject({
       allowed: false,
       retryAfterMs: 10_000,
     });
@@ -105,6 +129,7 @@ describe("getRateLimitConfig", () => {
   it("uses documented defaults", () => {
     expect(getRateLimitConfig({})).toEqual({
       perCallerMax: RATE_LIMIT_MAX,
+      perCredentialMax: RATE_LIMIT_CREDENTIAL_MAX,
       globalMax: RATE_LIMIT_GLOBAL_MAX,
       windowMs: RATE_LIMIT_WINDOW_MS,
       maxCallers: RATE_LIMIT_MAX_CALLERS,
@@ -115,12 +140,14 @@ describe("getRateLimitConfig", () => {
     expect(
       getRateLimitConfig({
         MUNIN_RATE_LIMIT_PER_CALLER_MAX: "12",
+        MUNIN_RATE_LIMIT_PER_CREDENTIAL_MAX: "36",
         MUNIN_RATE_LIMIT_GLOBAL_MAX: "120",
         MUNIN_RATE_LIMIT_WINDOW_MS: "30000",
         MUNIN_RATE_LIMIT_MAX_CALLERS: "50",
       }),
     ).toEqual({
       perCallerMax: 12,
+      perCredentialMax: 36,
       globalMax: 120,
       windowMs: 30_000,
       maxCallers: 50,
@@ -129,6 +156,7 @@ describe("getRateLimitConfig", () => {
     expect(
       getRateLimitConfig({
         MUNIN_RATE_LIMIT_PER_CALLER_MAX: "0",
+        MUNIN_RATE_LIMIT_PER_CREDENTIAL_MAX: "-1",
         MUNIN_RATE_LIMIT_GLOBAL_MAX: "not-a-number",
         MUNIN_RATE_LIMIT_WINDOW_MS: "500",
         MUNIN_RATE_LIMIT_MAX_CALLERS: "1.5",

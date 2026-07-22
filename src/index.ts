@@ -485,8 +485,10 @@ function getRateLimitIdentity(
   req: Request,
   secret: Buffer,
 ): {
-  key: string;
-  keyHash: string;
+  callerKey: string;
+  callerKeyHash: string;
+  credentialKey: string;
+  credentialKeyHash: string;
   keySource: "client" | "session" | "credential";
 } {
   const auth = req.auth as ExtendedAuthInfo | undefined;
@@ -499,10 +501,19 @@ function getRateLimitIdentity(
       : "credential";
   const caller = explicitClient ?? session ?? "shared";
   const authScope = `${auth?.principalId ?? ""}:${auth?.clientId ?? "unknown"}`;
-  const key = createHmac("sha256", secret)
+  const credentialKey = createHmac("sha256", secret)
+    .update(authScope)
+    .digest("hex");
+  const callerKey = createHmac("sha256", secret)
     .update(`${authScope}\0${caller}`)
     .digest("hex");
-  return { key, keyHash: key.slice(0, 16), keySource };
+  return {
+    callerKey,
+    callerKeyHash: callerKey.slice(0, 16),
+    credentialKey,
+    credentialKeyHash: credentialKey.slice(0, 16),
+    keySource,
+  };
 }
 
 /**
@@ -808,11 +819,22 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
     // Rate limiting (after auth). Every authenticated MCP POST costs one token,
     // including initialize, notifications, tools/list, and malformed bodies.
     const rateLimitIdentity = getRateLimitIdentity(req, rateLimitSecret);
-    const admission = rateLimiter.admit(rateLimitIdentity.key);
+    const admission = rateLimiter.admit(
+      rateLimitIdentity.callerKey,
+      rateLimitIdentity.credentialKey,
+    );
     if (!admission.allowed) {
       const retryAfterSeconds = Math.max(1, Math.ceil(admission.retryAfterMs / 1000));
+      const limiterKey =
+        admission.bucketKind === "overflow"
+          ? "overflow"
+          : admission.scope === "credential"
+            ? rateLimitIdentity.credentialKeyHash
+            : admission.scope === "global"
+              ? "global"
+              : rateLimitIdentity.callerKeyHash;
       requestLog.setRateLimit({
-        keyHash: rateLimitIdentity.keyHash,
+        keyHash: limiterKey,
         keySource: rateLimitIdentity.keySource,
         scope: admission.scope!,
         retryAfterMs: admission.retryAfterMs,
@@ -821,12 +843,13 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
         totalThrottleCount: admission.totalThrottleCount,
       });
       res.setHeader("Retry-After", String(retryAfterSeconds));
-      res.setHeader("X-Munin-RateLimit-Key", rateLimitIdentity.keyHash);
+      res.setHeader("X-Munin-Rate-Limit", "admission-v1");
+      res.setHeader("X-Munin-RateLimit-Key", limiterKey);
       res.status(429).json({
         error: "Too many requests",
         retry_after_seconds: retryAfterSeconds,
         limiter_scope: admission.scope,
-        limiter_key: rateLimitIdentity.keyHash,
+        limiter_key: limiterKey,
       });
       return;
     }
