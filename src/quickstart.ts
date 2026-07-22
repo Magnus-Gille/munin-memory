@@ -14,7 +14,7 @@ import {
   writeFileSync,
   constants as fsConstants,
 } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { PROFILE_NAMES } from "./profiles.js";
 
 export type QuickstartTransport = "stdio" | "http";
@@ -119,7 +119,7 @@ function shellSingleQuote(value: string): string {
 function localMcpDefinition(projectRoot: string, dataDir: string) {
   return {
     type: "stdio",
-    command: "node",
+    command: process.execPath,
     args: [join(resolve(projectRoot), "dist/index.js")],
     env: {
       MUNIN_MEMORY_DB_PATH: join(resolve(dataDir), "memory.db"),
@@ -185,7 +185,12 @@ export function validateGeneratedClientConfigurations(configs: ClientConfigurati
       mcpServers?: Record<string, { command?: unknown; args?: unknown; env?: unknown }>;
     };
     const server = parsed.mcpServers?.["munin-memory"];
-    if (server?.command !== "node" || !Array.isArray(server.args) || typeof server.env !== "object") {
+    if (
+      typeof server?.command !== "string" ||
+      !isAbsolute(server.command) ||
+      !Array.isArray(server.args) ||
+      typeof server.env !== "object"
+    ) {
       errors.push("Claude Desktop configuration has an invalid stdio server shape.");
     }
   } catch {
@@ -429,7 +434,12 @@ export async function runFirstSuccess(options: { dbPath: string; serverPath?: st
     const orient = await call("memory_orient", { detail: "compact", include_namespaces: false });
     record("orient", orient, "Session handshake returned conventions and dashboard context.");
     const status = await call("memory_status");
-    record("status", status, "Server capability status is available.");
+    const health = await call("memory_health");
+    steps.push({
+      id: "status",
+      ok: toolSucceeded(status) && toolSucceeded(health),
+      message: "Server capability status and owner health snapshot are available.",
+    });
     const write = await call("memory_write", {
       namespace,
       key,
@@ -470,9 +480,12 @@ export async function runFirstSuccess(options: { dbPath: string; serverPath?: st
 }
 
 export function redactSensitiveText(text: string, sensitiveValues: string[] = []): string {
-  let redacted = text.replace(/Bearer\s+[A-Za-z0-9._~+\/-]{12,}/gi, "Bearer [REDACTED]");
+  let redacted = text.replace(
+    /Bearer\s+(<MUNIN_API_KEY>|[^\s"',}\]]+)/gi,
+    (match, credential: string) => credential === "<MUNIN_API_KEY>" ? match : "Bearer [REDACTED]",
+  );
   for (const value of sensitiveValues) {
-    if (value.length >= 8) redacted = redacted.replaceAll(value, "[REDACTED]");
+    if (value.length > 0) redacted = redacted.replaceAll(value, "[REDACTED]");
   }
   return redacted;
 }

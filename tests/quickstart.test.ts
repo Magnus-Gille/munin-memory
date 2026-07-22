@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   generateClientConfigurations,
+  redactSensitiveText,
   runFirstSuccess,
   runPreflight,
   runQuickstart,
@@ -52,7 +53,7 @@ describe("quickstart client configuration", () => {
     const desktop = JSON.parse(configs.claudeDesktopJson) as {
       mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
     };
-    expect(desktop.mcpServers["munin-memory"].command).toBe("node");
+    expect(isAbsolute(desktop.mcpServers["munin-memory"].command)).toBe(true);
     expect(desktop.mcpServers["munin-memory"].env.MUNIN_EMBEDDINGS_ENABLED).toBe("false");
 
     const http = JSON.parse(configs.streamableHttpJson) as {
@@ -65,6 +66,16 @@ describe("quickstart client configuration", () => {
     const combined = Object.values(configs).join("\n");
     expect(combined).not.toContain("real-sensitive-token");
     expect(combined).not.toMatch(/Bearer (?!<MUNIN_API_KEY>)[A-Za-z0-9._-]{16,}/);
+  });
+});
+
+describe("quickstart secret redaction", () => {
+  it("redacts bearer material regardless of length while retaining the documented placeholder", () => {
+    expect(redactSensitiveText("Authorization: Bearer short")).toBe("Authorization: Bearer [REDACTED]");
+    expect(redactSensitiveText("Authorization: Bearer <MUNIN_API_KEY>")).toBe(
+      "Authorization: Bearer <MUNIN_API_KEY>",
+    );
+    expect(redactSensitiveText("failed with tiny", ["tiny"])).toBe("failed with [REDACTED]");
   });
 });
 
@@ -158,6 +169,7 @@ describe("quickstart first success", () => {
       "inspect",
     ]);
     expect(result.steps.every((step) => step.ok)).toBe(true);
+    expect(result.steps.find((step) => step.id === "status")?.message).toContain("health");
     expect(result.namespace).toBe("onboarding/quickstart");
     expect(result.entryId).toMatch(/^[0-9a-f-]{36}$/);
   });

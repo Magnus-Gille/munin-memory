@@ -31,7 +31,7 @@ stdio. It therefore covers process startup, initialization, transport, tool
 schemas, persistence, shutdown, and read-back. It:
 
 1. performs the required `memory_orient` handshake;
-2. reads `memory_status`;
+2. reads `memory_status` and the owner-only `memory_health` snapshot;
 3. creates an isolated state entry under `onboarding/quickstart`;
 4. appends a milestone log;
 5. retrieves the context with `memory_resume`; and
