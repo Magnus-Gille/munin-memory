@@ -39,8 +39,10 @@ still be available.
 
 Full untrusted values retain the existing prefix and suffix. Before insertion,
 Munin replaces every attacker-controlled `⚠` with `▲` and prefixes every logical
-body line, including blank lines, with `| `. Preview fields retain the existing
-`⚠ UNTRUSTED: ` marker and apply the same line quoting to their returned text.
+body line, including blank lines and lines introduced by LF, CRLF, bare CR, NEL,
+Unicode line separator, or Unicode paragraph separator, with `| `. Preview
+fields retain the existing `⚠ UNTRUSTED: ` marker and apply the same line quoting
+to their returned text.
 
 For example:
 

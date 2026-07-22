@@ -316,17 +316,21 @@ function neutralizeEnvelopeSigil(body: string): string {
 /**
  * Serialize attacker-controlled text so every logical line is structurally
  * distinct from server-owned response framing. Exact envelope sigils are
- * neutralized first, then each line (including blank lines and CRLF-preserving
- * lines) receives a fixed data prefix. A stored string therefore cannot begin a
- * Markdown heading, separator, or sigil-free/lookalike "end of data" marker at
- * the response's structural margin. This is a provenance signal, not a claim
- * that an LLM is incapable of following quoted prose. (#198)
+ * neutralized first, then the body and every recognized line terminator
+ * (LF, CRLF, bare CR, NEL, LS, or PS) receive a fixed data prefix. A stored
+ * string therefore cannot begin a Markdown heading, separator, or
+ * sigil-free/lookalike "end of data" marker at the response's structural
+ * margin. This is a provenance signal, not a claim that an LLM is incapable
+ * of following quoted prose. (#198)
  */
 function quoteUntrustedBody(body: string): string {
-  return neutralizeEnvelopeSigil(body)
-    .split("\n")
-    .map((line) => `${UNTRUSTED_LINE_PREFIX}${line}`)
-    .join("\n");
+  return (
+    UNTRUSTED_LINE_PREFIX +
+    neutralizeEnvelopeSigil(body).replace(
+      /(\r\n|[\n\r\u0085\u2028\u2029])/gu,
+      `$1${UNTRUSTED_LINE_PREFIX}`,
+    )
+  );
 }
 
 /**
