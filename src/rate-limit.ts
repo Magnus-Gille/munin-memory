@@ -40,11 +40,14 @@ interface CallerBucket extends BucketWithCounters {
 function positiveInteger(
   value: string | undefined,
   fallback: number,
+  minimum: number,
   maximum: number,
 ): number {
   if (value === undefined || !/^[1-9]\d*$/.test(value.trim())) return fallback;
   const parsed = Number(value);
-  return Number.isSafeInteger(parsed) && parsed <= maximum ? parsed : fallback;
+  return Number.isSafeInteger(parsed) && parsed >= minimum && parsed <= maximum
+    ? parsed
+    : fallback;
 }
 
 export function getRateLimitConfig(
@@ -54,21 +57,25 @@ export function getRateLimitConfig(
     perCallerMax: positiveInteger(
       env.MUNIN_RATE_LIMIT_PER_CALLER_MAX,
       RATE_LIMIT_MAX,
+      1,
       10_000,
     ),
     globalMax: positiveInteger(
       env.MUNIN_RATE_LIMIT_GLOBAL_MAX,
       RATE_LIMIT_GLOBAL_MAX,
+      1,
       100_000,
     ),
     windowMs: positiveInteger(
       env.MUNIN_RATE_LIMIT_WINDOW_MS,
       RATE_LIMIT_WINDOW_MS,
+      1000,
       3_600_000,
     ),
     maxCallers: positiveInteger(
       env.MUNIN_RATE_LIMIT_MAX_CALLERS,
       RATE_LIMIT_MAX_CALLERS,
+      1,
       10_000,
     ),
   };
@@ -130,6 +137,11 @@ export class McpRateLimiter {
     readonly config: RateLimitConfig,
     now = Date.now(),
   ) {
+    for (const [name, value] of Object.entries(config)) {
+      if (!Number.isSafeInteger(value) || value <= 0) {
+        throw new Error(`Invalid rate-limit config: ${name} must be a positive integer.`);
+      }
+    }
     this.global = createBucket(config.globalMax, now);
     this.overflow = {
       ...createBucket(config.perCallerMax, now),

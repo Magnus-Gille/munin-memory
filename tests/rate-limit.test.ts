@@ -16,6 +16,12 @@ const testConfig = {
 };
 
 describe("McpRateLimiter", () => {
+  it("rejects unsafe programmatic configuration", () => {
+    expect(
+      () => new McpRateLimiter({ ...testConfig, windowMs: 0 }),
+    ).toThrow("windowMs must be a positive integer");
+  });
+
   it("isolates callers and reports the exact continuous-refill wait", () => {
     const limiter = new McpRateLimiter(testConfig, 0);
 
@@ -124,7 +130,7 @@ describe("getRateLimitConfig", () => {
       getRateLimitConfig({
         MUNIN_RATE_LIMIT_PER_CALLER_MAX: "0",
         MUNIN_RATE_LIMIT_GLOBAL_MAX: "not-a-number",
-        MUNIN_RATE_LIMIT_WINDOW_MS: "-1",
+        MUNIN_RATE_LIMIT_WINDOW_MS: "500",
         MUNIN_RATE_LIMIT_MAX_CALLERS: "1.5",
       }),
     ).toEqual(getRateLimitConfig({}));

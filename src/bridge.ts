@@ -302,13 +302,13 @@ export function parseRetryAfterMs(
 export class BridgeRateLimitRetryExhaustedError extends Error {
   constructor(
     attempts: number,
-    waitedMs: number,
+    elapsedMs: number,
     maxWaitMs: number,
     nextDelayMs: number,
   ) {
     super(
       `Bridge rate-limit retry exhausted after ${attempts} attempt(s); ` +
-        `waited ${waitedMs}ms of ${maxWaitMs}ms budget and next admission ` +
+        `elapsed ${elapsedMs}ms of ${maxWaitMs}ms budget and next admission ` +
         `requires ${nextDelayMs}ms.`,
     );
     this.name = "BridgeRateLimitRetryExhaustedError";
