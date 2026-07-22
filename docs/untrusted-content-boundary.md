@@ -9,10 +9,14 @@ not as a sandbox.
 ## Threat model
 
 The attacker can control the text of an entry that is identified as untrusted
-because it is tagged `untrusted` or `source:external`, or because the advisory
-injection scan recognizes instruction-shaped phrasing. The attacker may know
-Munin's source code and fixed response format. A consuming model may have access
-to Munin tools or unrelated tools under the caller's authority.
+because it is tagged `untrusted` or `source:external`, because it reproduces
+an exact or near-exact server-owned untrusted-boundary phrase, or because the
+advisory injection scan recognizes instruction-shaped phrasing. Boundary-phrase
+detection normalizes compatibility characters, Unicode default-ignorable and
+control code points, case, and Unicode whitespace before comparison. The
+attacker may know Munin's source code and fixed response format. A consuming
+model may have access to Munin tools or unrelated tools under the caller's
+authority.
 
 The boundary must preserve these properties:
 
@@ -39,10 +43,11 @@ still be available.
 
 Full untrusted values retain the existing prefix and suffix. Before insertion,
 Munin replaces every attacker-controlled `⚠` with `▲` and prefixes every logical
-body line, including blank lines and lines introduced by LF, CRLF, bare CR, NEL,
-Unicode line separator, or Unicode paragraph separator, with `| `. Preview
-fields retain the existing `⚠ UNTRUSTED: ` marker and apply the same line quoting
-to their returned text.
+body line, including blank lines and lines introduced by LF, CRLF, bare CR,
+vertical tab, form feed, file/group/record separators, NEL, Unicode line
+separator, or Unicode paragraph separator, with `| `. Preview fields retain
+the existing `⚠ UNTRUSTED: ` marker and apply the same line quoting to their
+returned text.
 
 For example:
 
@@ -92,7 +97,9 @@ It is a transport evolution, not a security boundary, and is not required here.
 
 ## Compatibility and migration
 
-- Benign content is returned byte-for-byte as before.
+- Ordinary benign content is returned byte-for-byte as before. Content that
+  reproduces a server-owned boundary marker is now always treated as untrusted,
+  even without provenance tags or other instruction-shaped text.
 - `untrusted_content`, `content_provenance_notice`, the full-content delimiters,
   and the preview marker are unchanged.
 - Direct reads (`memory_read`, `memory_get`, `memory_read_batch`) change only the
@@ -101,7 +108,8 @@ It is a transport evolution, not a security boundary, and is not required here.
   centralized full-text or preview serializers.
 - Existing consumers that key on the structured provenance flags or delimiters
   remain compatible. Consumers that compare the wrapped untrusted `content` string
-  byte-for-byte must accept the added `| ` body prefixes.
+  or untrusted preview strings byte-for-byte must accept the added `| ` body
+  prefixes.
 - Stored database content is never rewritten. The change applies on serialization,
   so there is no database migration or backfill.
 

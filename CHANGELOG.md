@@ -14,10 +14,12 @@ changelog is the canonical record of what moved.
   Unicode-lookalike closure text (#198). Values already identified as untrusted
   retain the existing delimiters, `untrusted_content` flag, and provenance notice,
   while every attacker-controlled body or preview line is now prefixed as quoted
-  data. Exact delimiter sigils remain neutralized, benign content is unchanged,
-  and the new threat-model document states the precise syntactic guarantee: this
-  prevents stored text from occupying the server-owned structural margin, but no
-  in-band format can guarantee that an LLM will not follow quoted prose.
+  data. Exact and invisible-Unicode-obfuscated server boundary phrases now
+  trigger untrusted handling even without tags or scanner phrasing, their sigils
+  remain neutralized, ordinary benign content is unchanged, and the new
+  threat-model document states the precise syntactic guarantee: this prevents
+  stored text from occupying the server-owned structural margin, but no in-band
+  format can guarantee that an LLM will not follow quoted prose.
 - Prepared the public source tree by removing generated model transcripts derived
   from a private benchmark snapshot, deleting fleet-specific units and live runbooks,
   anonymizing owner/client fixtures, making benchmark inputs explicit and local, and
