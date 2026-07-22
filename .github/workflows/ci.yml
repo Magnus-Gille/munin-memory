@@ -34,6 +34,9 @@ jobs:
       - run: npm run typecheck
       - run: npm run typecheck:tools
       - run: npm run build
+      # Exercises the actual canonical shell entry point in an isolated
+      # data/config root and enforces the five-minute first-success budget.
+      - run: npm run quickstart:smoke
       # Runs the full suite with V8 coverage and enforces the ratchet floors
       # in vitest.config.ts (statements/branches/functions/lines). Raise the
       # floors when coverage rises; never lower them to admit a regression.

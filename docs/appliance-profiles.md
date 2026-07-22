@@ -17,6 +17,12 @@ That means the right first move is **not** a full rewrite of the codebase. The r
 
 ## Profiles
 
+For installation, start with the lexical-first
+[five-minute quick start](quickstart.md), pass the intended profile to preflight,
+and enable its semantic defaults after the first write-to-resume check. This
+keeps model download latency out of onboarding without changing the profile's
+steady-state recommendation below.
+
 | Profile (`MUNIN_PROFILE`) | Target hardware | Default capabilities | Notes |
 |---------|-----------------|----------------------|-------|
 | `zero-appliance` | Raspberry Pi 3A+ / Pi Zero 2 W (512 MB-class) — the cheapest, primary target (both sourceable to Jan 2030) | Core memory **+ q8 semantic/hybrid search** | **Updated 2026-06-18:** the 2026-06-18 on-hardware RAM-fit sweep proved q8 MiniLM semantic fits a 128 MB cgroup cap (peak anon ≈ 74–99 MB across query/write/concurrent; ≈ 91–94 MB under sustained burst at appliance caps), so this tier ships semantic ON via q8, not lexical-only. See "Validated RAM-fit findings" below. |

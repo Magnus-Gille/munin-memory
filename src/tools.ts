@@ -212,13 +212,16 @@ function consumeDeleteToken(token: string, namespace: string, key?: string): boo
   return true;
 }
 
-// Clean expired tokens periodically
-setInterval(() => {
+// Clean expired tokens periodically. The timer must not keep one-shot consumers
+// (admin/quick-start tooling and focused test processes) alive after their work
+// is complete.
+const deleteTokenCleanupTimer = setInterval(() => {
   const now = Date.now();
   for (const [token, entry] of deleteTokens) {
     if (entry.expiresAt < now) deleteTokens.delete(token);
   }
 }, 30_000);
+deleteTokenCleanupTimer.unref();
 
 // --- Display timestamp formatting ---
 
