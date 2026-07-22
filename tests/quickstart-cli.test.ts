@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseQuickstartArgs, runQuickstartCli, type QuickstartCliIo } from "../src/quickstart-cli.js";
+import { formatFirstSuccessLines, parseQuickstartArgs, runQuickstartCli, type QuickstartCliIo } from "../src/quickstart-cli.js";
 
 const tempRoots: string[] = [];
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -47,6 +47,7 @@ describe("quickstart CLI", () => {
       ],
       {
         MUNIN_API_KEY: "sensitive-owner-key",
+        MUNIN_HTTP_HOST: "0.0.0.0",
         MUNIN_HTTP_PORT: "4040",
         MUNIN_QUICKSTART_INSTALL_MS: "900",
       },
@@ -57,8 +58,32 @@ describe("quickstart CLI", () => {
     expect(options.embeddings).toBe(false);
     expect(options.apiKeyPresent).toBe(true);
     expect(options.port).toBe(4040);
+    expect(options.host).toBe("0.0.0.0");
     expect(options.installDurationMs).toBe(900);
     expect(options.sensitiveValues).toEqual(["sensitive-owner-key"]);
+  });
+
+  it("uses the default HTTP port when the environment value is empty", () => {
+    const options = parseQuickstartArgs([], { MUNIN_HTTP_PORT: "  " });
+    expect(options.port).toBe(3030);
+    expect(options.host).toBe("127.0.0.1");
+  });
+
+  it("formats failed first-success steps for human-readable output", () => {
+    const lines = formatFirstSuccessLines({
+      ok: false,
+      transport: "stdio",
+      namespace: "onboarding/quickstart",
+      entryId: "",
+      coldStartMs: 10,
+      durationMs: 20,
+      steps: [
+        { id: "orient", ok: true, message: "orient worked" },
+        { id: "status", ok: false, message: "health failed" },
+      ],
+    });
+    expect(lines.join("\n")).toContain("First-success flow: FAIL");
+    expect(lines.join("\n")).toContain("✗ status: health failed");
   });
 
   it("prints help successfully", async () => {

@@ -20,9 +20,10 @@ first success, enable a hardware profile and embeddings if desired.
 
 The command fails before starting a service when it finds an unsupported Node
 or OS version, an unknown profile, missing build output, unavailable SQLite
-FTS5, unsafe/unwritable or symbolic-link data/config/database paths, an occupied HTTP port, an empty
-embedding model override, or HTTP mode without a configured bearer credential.
-Credential values are never displayed or written into generated examples.
+FTS5, unsafe/unwritable or symbolic-link data/config/database paths, insecure
+SQLite sidecars, an unavailable HTTP bind address, an empty embedding model
+override, or HTTP mode without a configured bearer credential. Credential
+values are never displayed or written into generated examples.
 
 ## What success proves
 
@@ -58,7 +59,7 @@ only the Munin entry, restart the client, call `memory_orient`, and then inspect
 
 ## Optional modes
 
-Run preflight without creating configs or memory:
+Run preflight without creating directories, configs, or memory:
 
 ```bash
 ./scripts/quickstart.sh --preflight-only
@@ -76,7 +77,8 @@ verification, edit the chosen client entry to set
 `MUNIN_HYBRID_ENABLED` to `true`, add `MUNIN_PROFILE`, and restart the client.
 The first semantic start may download model data.
 
-HTTP preflight checks port and auth before startup but never prints the token:
+HTTP preflight checks the configured `MUNIN_HTTP_HOST`/`MUNIN_HTTP_PORT` bind and
+auth before startup but never prints the token:
 
 ```bash
 MUNIN_API_KEY="$(openssl rand -hex 32)" \
@@ -86,6 +88,12 @@ MUNIN_API_KEY="$(openssl rand -hex 32)" \
 Store the key in a permission-restricted environment or credential file. Put it
 into a real client's secure credential surface in place of the generated
 placeholder; never commit it.
+
+`--transport http` selects HTTP preflight and the generated HTTP example; the
+first-success verifier deliberately remains local stdio so onboarding never
+opens a network service. `last-run.json` records the requested `transport` and
+the independently explicit `verifiedTransport` (`stdio`) so the report cannot
+be mistaken for an HTTP end-to-end test.
 
 ## Automated smoke test
 
@@ -103,8 +111,8 @@ through Vitest against a fresh database.
 ## Measurement record
 
 `last-run.json` records install, cold-start, and total duration plus resident
-memory, database size, and checkout/data/config disk footprint. It contains no
-credential values.
+memory, database size, checkout/data/config disk footprint, requested transport,
+and `verifiedTransport`. It contains no credential values.
 
 Measured 2026-07-22 on fresh data/config directories. The Linux run used the
 native GitHub-hosted `ubuntu-24.04-arm` image and an empty npm cache:

@@ -19,6 +19,7 @@ import {
   constants as fsConstants,
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { PROFILE_NAMES } from "./profiles.js";
 
 export type QuickstartTransport = "stdio" | "http";
@@ -39,6 +40,7 @@ export interface PreflightOptions {
   profile?: string;
   embeddingModel?: string;
   apiKeyPresent?: boolean;
+  host?: string;
   port?: number;
   nodeVersion?: string;
   platform?: NodeJS.Platform | string;
@@ -71,6 +73,7 @@ export interface FirstSuccessStep {
 
 export interface FirstSuccessResult {
   ok: boolean;
+  transport: "stdio";
   namespace: string;
   entryId: string;
   coldStartMs: number;
@@ -113,7 +116,7 @@ function json(value: unknown): string {
 }
 
 function tomlString(value: string): string {
-  return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+  return JSON.stringify(value);
 }
 
 function shellSingleQuote(value: string): string {
@@ -221,6 +224,8 @@ export function validateGeneratedClientConfigurations(configs: ClientConfigurati
 
 function ensurePrivateDirectory(path: string): void {
   if (!existsSync(path)) mkdirSync(path, { recursive: true, mode: 0o700 });
+  const check = permissionCheck("directory", path, "Directory");
+  if (check.status === "fail") throw new Error(check.message);
 }
 
 function permissionCheck(id: string, path: string, label: string): PreflightCheck {
@@ -242,40 +247,88 @@ function permissionCheck(id: string, path: string, label: string): PreflightChec
       };
     }
     return { id, status: "pass", message: `${label} is writable and owner-only.` };
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      let ancestor = dirname(resolve(path));
+      try {
+        while (!existsSync(ancestor)) {
+          const parent = dirname(ancestor);
+          if (parent === ancestor) throw new Error("No existing parent directory was found.");
+          ancestor = parent;
+        }
+        const ancestorStat = statSync(ancestor);
+        if (!ancestorStat.isDirectory()) {
+          return { id, status: "fail", message: `${label} cannot be created because ${ancestor} is not a directory.` };
+        }
+        accessSync(ancestor, fsConstants.W_OK | fsConstants.X_OK);
+        return {
+          id,
+          status: "pass",
+          message: `${label} does not exist and will be created owner-only (0700).`,
+        };
+      } catch (ancestorError) {
+        const code = (ancestorError as NodeJS.ErrnoException).code;
+        return {
+          id,
+          status: "fail",
+          message: `${label} cannot be created at ${path}${code ? ` (${code})` : ""}.`,
+        };
+      }
+    }
     return { id, status: "fail", message: `${label} is not readable and writable: ${path}.` };
   }
 }
 
 function databasePermissionCheck(dataDir: string): PreflightCheck {
-  const path = join(dataDir, "memory.db");
-  if (!existsSync(path)) {
-    return { id: "database-permissions", status: "pass", message: "New database will be created owner-only (0600)." };
-  }
-  try {
-    const stat = lstatSync(path);
-    if (stat.isSymbolicLink()) {
-      return { id: "database-permissions", status: "fail", message: `Database must not be a symbolic link: ${path}.` };
+  const paths = ["memory.db", "memory.db-wal", "memory.db-shm"].map((name) => join(dataDir, name));
+  let inspected = 0;
+  for (const path of paths) {
+    if (!existsSync(path)) continue;
+    inspected += 1;
+    try {
+      const stat = lstatSync(path);
+      if (stat.isSymbolicLink()) {
+        return { id: "database-permissions", status: "fail", message: `Database artifact must not be a symbolic link: ${path}.` };
+      }
+      if (!stat.isFile()) {
+        return { id: "database-permissions", status: "fail", message: `Database artifact must be a regular file: ${path}.` };
+      }
+      const mode = stat.mode & 0o777;
+      if ((mode & 0o077) !== 0) {
+        return {
+          id: "database-permissions",
+          status: "fail",
+          message: `Database artifact permissions are ${mode.toString(8)}; run chmod 600 ${path}.`,
+        };
+      }
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      return {
+        id: "database-permissions",
+        status: "fail",
+        message: `Database artifact cannot be inspected: ${path}${code ? ` (${code})` : ""}.`,
+      };
     }
-    if (!stat.isFile()) {
-      return { id: "database-permissions", status: "fail", message: `Database path must be a regular file: ${path}.` };
-    }
-    const mode = stat.mode & 0o777;
-    return (mode & 0o077) === 0
-      ? { id: "database-permissions", status: "pass", message: "Existing database is owner-only." }
-      : { id: "database-permissions", status: "fail", message: `Existing database permissions are ${mode.toString(8)}; run chmod 600 ${path}.` };
-  } catch {
-    return { id: "database-permissions", status: "fail", message: `Existing database cannot be inspected: ${path}.` };
   }
+  return inspected === 0
+    ? { id: "database-permissions", status: "pass", message: "New database will be created owner-only (0600)." }
+    : { id: "database-permissions", status: "pass", message: "Existing database and SQLite sidecars are owner-only." };
 }
 
-async function checkPort(port: number): Promise<boolean> {
+interface PortProbeResult {
+  available: boolean;
+  errorCode?: string;
+}
+
+async function checkPort(host: string, port: number): Promise<PortProbeResult> {
   return new Promise((resolvePort) => {
     const server = createServer();
     server.unref();
-    server.once("error", () => resolvePort(false));
-    server.listen(port, "127.0.0.1", () => {
-      server.close(() => resolvePort(true));
+    server.once("error", (error: NodeJS.ErrnoException) => {
+      resolvePort({ available: false, errorCode: error.code });
+    });
+    server.listen(port, host, () => {
+      server.close(() => resolvePort({ available: true }));
     });
   });
 }
@@ -303,8 +356,6 @@ function checkSqlite(): PreflightCheck {
 }
 
 export async function runPreflight(options: PreflightOptions): Promise<PreflightResult> {
-  ensurePrivateDirectory(options.dataDir);
-  ensurePrivateDirectory(options.configDir);
   const checks: PreflightCheck[] = [];
   const platform = options.platform ?? process.platform;
   checks.push(
@@ -365,14 +416,24 @@ export async function runPreflight(options: PreflightOptions): Promise<Preflight
         : { id: "http-auth", status: "fail", message: "HTTP mode requires MUNIN_API_KEY or a scoped bearer credential." },
     );
     const port = options.port ?? 3030;
+    const host = options.host ?? "127.0.0.1";
     if (!Number.isInteger(port) || port < 1 || port > 65_535) {
       checks.push({ id: "port", status: "fail", message: `Invalid HTTP port ${String(port)}; use an integer from 1 to 65535.` });
     } else {
-      checks.push(
-        (await checkPort(port))
-          ? { id: "port", status: "pass", message: `127.0.0.1:${port} is available.` }
-          : { id: "port", status: "fail", message: `127.0.0.1:${port} is already in use.` },
-      );
+      const probe = await checkPort(host, port);
+      if (probe.available) {
+        checks.push({ id: "port", status: "pass", message: `${host}:${port} is available.` });
+      } else if (probe.errorCode === "EADDRINUSE") {
+        checks.push({ id: "port", status: "fail", message: `${host}:${port} is already in use.` });
+      } else if (probe.errorCode === "EACCES") {
+        checks.push({ id: "port", status: "fail", message: `Permission denied while binding ${host}:${port}.` });
+      } else {
+        checks.push({
+          id: "port",
+          status: "fail",
+          message: `${host}:${port} cannot be bound (${probe.errorCode ?? "unknown error"}).`,
+        });
+      }
     }
   } else {
     checks.push({ id: "http-auth", status: "pass", message: "Local stdio mode does not require a bearer credential." });
@@ -386,10 +447,11 @@ export async function runPreflight(options: PreflightOptions): Promise<Preflight
   };
 }
 
-function parseToolResponse(raw: unknown): Record<string, unknown> {
-  const response = raw as { content?: Array<{ type?: string; text?: string }> };
+export function parseQuickstartToolResponse(raw: unknown): Record<string, unknown> {
+  const response = raw as { isError?: boolean; content?: Array<{ type?: string; text?: string }> };
   const text = response.content?.find((item) => item.type === "text")?.text;
   if (!text) throw new Error("MCP tool returned no text result.");
+  if (response.isError) throw new Error(`MCP tool failed: ${text}`);
   return JSON.parse(text) as Record<string, unknown>;
 }
 
@@ -401,7 +463,8 @@ export async function runFirstSuccess(options: { dbPath: string; serverPath?: st
   const startedAt = Date.now();
   const namespace = "onboarding/quickstart";
   const key = `first-success-${randomUUID()}`;
-  const serverPath = options.serverPath ?? join(resolve("."), "dist/index.js");
+  const serverPath = options.serverPath ?? join(resolve(dirname(fileURLToPath(import.meta.url)), ".."), "dist/index.js");
+  if (!existsSync(serverPath)) throw new Error(`Built Munin server not found at ${serverPath}; run npm run build first.`);
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [serverPath],
@@ -425,7 +488,7 @@ export async function runFirstSuccess(options: { dbPath: string; serverPath?: st
   const connectStartedAt = Date.now();
   let coldStartMs = 0;
   const call = async (name: string, args: Record<string, unknown> = {}) =>
-    parseToolResponse(await client.callTool({ name, arguments: args }));
+    parseQuickstartToolResponse(await client.callTool({ name, arguments: args }));
   const steps: FirstSuccessStep[] = [];
   let entryId = "";
   const record = (id: FirstSuccessStep["id"], result: Record<string, unknown>, message: string) => {
@@ -475,6 +538,7 @@ export async function runFirstSuccess(options: { dbPath: string; serverPath?: st
 
   return {
     ok: steps.length === 6 && steps.every((step) => step.ok) && entryId.length > 0,
+    transport: "stdio",
     namespace,
     entryId,
     coldStartMs,
@@ -557,20 +621,32 @@ export async function runQuickstart(options: QuickstartOptions): Promise<Quickst
 
   const configs = generateClientConfigurations(options);
   const configErrors = validateGeneratedClientConfigurations(configs);
+  for (const value of sensitiveValues) {
+    if (value.length > 0 && Object.values(configs).some((content) => content.includes(value))) {
+      configErrors.push("Generated client configuration contains configured credential material.");
+      break;
+    }
+  }
   if (configErrors.length > 0) throw new Error(configErrors.join(" "));
+  ensurePrivateDirectory(options.dataDir);
+  ensurePrivateDirectory(options.configDir);
+
+  const dbPath = join(options.dataDir, "memory.db");
+  const firstSuccess = await runFirstSuccess({ dbPath, serverPath: join(options.projectRoot, "dist/index.js") });
   const artifacts = [
     join(options.configDir, "codex.toml"),
     join(options.configDir, "claude-code.txt"),
     join(options.configDir, "claude-desktop.json"),
     join(options.configDir, "streamable-http.json"),
   ];
-  privateWrite(artifacts[0], configs.codexToml, sensitiveValues);
-  privateWrite(artifacts[1], configs.claudeCodeCommand, sensitiveValues);
-  privateWrite(artifacts[2], configs.claudeDesktopJson, sensitiveValues);
-  privateWrite(artifacts[3], configs.streamableHttpJson, sensitiveValues);
-
-  const dbPath = join(options.dataDir, "memory.db");
-  const firstSuccess = await runFirstSuccess({ dbPath, serverPath: join(options.projectRoot, "dist/index.js") });
+  if (firstSuccess.ok) {
+    privateWrite(artifacts[0], configs.codexToml, []);
+    privateWrite(artifacts[1], configs.claudeCodeCommand, []);
+    privateWrite(artifacts[2], configs.claudeDesktopJson, []);
+    privateWrite(artifacts[3], configs.streamableHttpJson, []);
+  } else {
+    artifacts.splice(0);
+  }
   const setupDurationMs = Date.now() - startedAt;
   const databaseBytes = statSync(dbPath).size;
   const metrics: QuickstartMetrics = {
@@ -593,6 +669,7 @@ export async function runQuickstart(options: QuickstartOptions): Promise<Quickst
       ok: firstSuccess.ok,
       mode: preflight.mode,
       transport: options.transport,
+      verifiedTransport: firstSuccess.transport,
       profile: options.profile ?? null,
       preflight,
       firstSuccess,

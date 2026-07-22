@@ -8,6 +8,7 @@ import {
   runPreflight,
   runQuickstart,
   type PreflightOptions,
+  type FirstSuccessResult,
   type QuickstartOptions,
   type QuickstartTransport,
 } from "./quickstart.js";
@@ -90,6 +91,7 @@ export function parseQuickstartArgs(args: string[], env: NodeJS.ProcessEnv = pro
     env.MUNIN_API_KEY_CONSUMER,
   ].filter((value): value is string => typeof value === "string" && value.length > 0);
   const installDurationMs = Number.parseInt(env.MUNIN_QUICKSTART_INSTALL_MS ?? "0", 10);
+  const httpPort = env.MUNIN_HTTP_PORT?.trim();
   return {
     projectRoot: resolve(projectRoot),
     dataDir: resolve(dataDir),
@@ -99,7 +101,8 @@ export function parseQuickstartArgs(args: string[], env: NodeJS.ProcessEnv = pro
     profile,
     embeddingModel: env.MUNIN_EMBEDDINGS_MODEL,
     apiKeyPresent: sensitiveValues.length > 0,
-    port: Number.parseInt(env.MUNIN_HTTP_PORT ?? "3030", 10),
+    host: env.MUNIN_HTTP_HOST?.trim() || "127.0.0.1",
+    port: httpPort ? Number.parseInt(httpPort, 10) : 3030,
     serverUrl,
     installDurationMs: Number.isFinite(installDurationMs) ? installDurationMs : 0,
     sensitiveValues,
@@ -107,6 +110,13 @@ export function parseQuickstartArgs(args: string[], env: NodeJS.ProcessEnv = pro
     preflightOnly,
     help,
   };
+}
+
+export function formatFirstSuccessLines(result: FirstSuccessResult): string[] {
+  return [
+    `First-success flow: ${result.ok ? "PASS" : "FAIL"}`,
+    ...result.steps.map((step) => `  ${step.ok ? "✓" : "✗"} ${step.id}: ${step.message}`),
+  ];
 }
 
 function printPreflight(
@@ -150,13 +160,17 @@ export async function runQuickstartCli(
       io.log(JSON.stringify(result, null, 2));
     } else {
       printPreflight(options, result.preflight, io);
+      if (result.firstSuccess) {
+        io.log("");
+        for (const line of formatFirstSuccessLines(result.firstSuccess)) io.log(line);
+      }
       if (result.ok && result.firstSuccess) {
-        io.log("\nFirst-success flow: PASS");
-        for (const step of result.firstSuccess.steps) io.log(`  ✓ ${step.id}: ${step.message}`);
         io.log(`\nGenerated placeholder-only client examples in ${options.configDir}`);
         io.log(`Database: ${join(options.dataDir, "memory.db")}`);
         io.log(`Total measured time: ${(result.metrics.totalDurationMs / 1000).toFixed(1)}s`);
         io.log("Next: copy the matching client example, restart that client, and call memory_orient.");
+      } else if (result.firstSuccess) {
+        io.log(`Inspect the failure report in ${join(options.configDir, "last-run.json")}, fix the failed step, and rerun.`);
       }
     }
     return result.ok ? 0 : 1;

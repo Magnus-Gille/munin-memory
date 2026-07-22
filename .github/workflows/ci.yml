@@ -23,7 +23,6 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-          cache: npm
       # Native ARM64 evidence for the exact user-facing path, including its own
       # locked dependency install. The smoke script enforces <5 minutes.
       - run: npm run quickstart:smoke

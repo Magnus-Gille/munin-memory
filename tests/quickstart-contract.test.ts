@@ -29,10 +29,12 @@ describe("canonical quick-start contract", () => {
   });
 
   it("runs the full canonical install on a native Linux ARM64 runner", () => {
+    const armJob = ci.split("  quickstart-arm64:")[1]?.split("\n  test:")[0] ?? "";
     expect(ci).toContain("runs-on: ubuntu-24.04-arm");
     expect(ci).toContain('MUNIN_QUICKSTART_SMOKE_FULL_INSTALL: "1"');
     expect(smoke).toContain("MUNIN_QUICKSTART_SMOKE_FULL_INSTALL");
     expect(smoke).toContain("arch=${process.arch}");
+    expect(armJob).not.toContain("cache: npm");
   });
 
   it("documents rollback boundaries and deliberate data retention", () => {
@@ -41,5 +43,6 @@ describe("canonical quick-start contract", () => {
     expect(guide).toContain("Retain `~/.munin-memory`");
     expect(guide).toContain("<MUNIN_API_KEY>");
     expect(guide).toContain("Ubuntu 24.04 ARM64");
+    expect(guide).toContain("verifiedTransport");
   });
 });

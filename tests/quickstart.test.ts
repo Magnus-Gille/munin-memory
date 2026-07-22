@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   generateClientConfigurations,
+  parseQuickstartToolResponse,
   redactSensitiveText,
   runFirstSuccess,
   runPreflight,
@@ -21,21 +22,12 @@ function makeTempRoot(): string {
   return root;
 }
 
-function makeProjectRoot(root: string): string {
-  const projectRoot = join(root, "project");
-  const distDir = join(projectRoot, "dist");
-  mkdirSync(distDir, { recursive: true, mode: 0o700 });
-  writeFileSync(join(projectRoot, "package.json"), '{"name":"munin-memory"}\n');
-  writeFileSync(join(distDir, "index.js"), "// built server\n");
-  return projectRoot;
-}
-
 afterEach(() => {
   for (const root of tempRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 describe("quickstart client configuration", () => {
-  it("generates schema-checked local and HTTP examples with placeholders only", () => {
+  it("generates format-checked local and HTTP examples with placeholders only", () => {
     const root = makeTempRoot();
     const projectRoot = repoRoot;
     const dataDir = join(root, "data");
@@ -67,6 +59,17 @@ describe("quickstart client configuration", () => {
     expect(combined).not.toContain("real-sensitive-token");
     expect(combined).not.toMatch(/Bearer (?!<MUNIN_API_KEY>)[A-Za-z0-9._-]{16,}/);
   });
+
+  it("escapes control characters in generated TOML paths", () => {
+    const root = makeTempRoot();
+    const configs = generateClientConfigurations({
+      projectRoot: repoRoot,
+      dataDir: join(root, "data\nnewline"),
+    });
+
+    expect(configs.codexToml).toContain("data\\nnewline");
+    expect(validateGeneratedClientConfigurations(configs)).toEqual([]);
+  });
 });
 
 describe("quickstart secret redaction", () => {
@@ -77,16 +80,40 @@ describe("quickstart secret redaction", () => {
     );
     expect(redactSensitiveText("failed with tiny", ["tiny"])).toBe("failed with [REDACTED]");
   });
+
+  it("rejects a generated config that contains a configured credential value", async () => {
+    const root = makeTempRoot();
+    const secret = "credential-collision";
+    await expect(runQuickstart({
+      projectRoot: repoRoot,
+      dataDir: join(root, secret),
+      configDir: join(root, "config"),
+      transport: "stdio",
+      embeddings: false,
+      sensitiveValues: [secret],
+    })).rejects.toThrow("contains configured credential material");
+  });
+});
+
+describe("quickstart MCP response parsing", () => {
+  it("preserves tool-level error text", () => {
+    expect(() => parseQuickstartToolResponse({
+      isError: true,
+      content: [{ type: "text", text: "specific tool failure" }],
+    })).toThrow("specific tool failure");
+  });
 });
 
 describe("quickstart preflight", () => {
   it("passes the supported lexical-first local path and verifies SQLite FTS5", async () => {
     const root = makeTempRoot();
     const projectRoot = repoRoot;
+    const dataDir = join(root, "data");
+    const configDir = join(root, "config");
     const result = await runPreflight({
       projectRoot,
-      dataDir: join(root, "data"),
-      configDir: join(root, "config"),
+      dataDir,
+      configDir,
       transport: "stdio",
       embeddings: false,
       nodeVersion: "v20.19.0",
@@ -96,11 +123,13 @@ describe("quickstart preflight", () => {
     expect(result.ok).toBe(true);
     expect(result.checks.find((check) => check.id === "sqlite-fts5")?.status).toBe("pass");
     expect(result.checks.find((check) => check.id === "embedding-mode")?.message).toContain("lexical");
+    expect(existsSync(dataDir)).toBe(false);
+    expect(existsSync(configDir)).toBe(false);
   });
 
   it("fails before startup for unsupported runtime, profile, insecure paths, and missing HTTP auth", async () => {
     const root = makeTempRoot();
-    const projectRoot = makeProjectRoot(root);
+    const projectRoot = repoRoot;
     const dataDir = join(root, "data");
     const configDir = join(root, "config");
     mkdirSync(dataDir, { mode: 0o755 });
@@ -132,7 +161,7 @@ describe("quickstart preflight", () => {
 
   it("rejects non-directory roots and symbolic-link data paths before startup", async () => {
     const root = makeTempRoot();
-    const projectRoot = makeProjectRoot(root);
+    const projectRoot = repoRoot;
     const realData = join(root, "real-data");
     const dataLink = join(root, "data-link");
     const configFile = join(root, "config-file");
@@ -152,6 +181,46 @@ describe("quickstart preflight", () => {
     expect(result.checks.find((check) => check.id === "data-permissions")?.message).toContain("symbolic link");
     expect(result.checks.find((check) => check.id === "config-permissions")?.message).toContain("must be a directory");
   });
+
+  it("rejects insecure SQLite sidecars", async () => {
+    const root = makeTempRoot();
+    const dataDir = join(root, "data");
+    const configDir = join(root, "config");
+    mkdirSync(dataDir, { mode: 0o700 });
+    mkdirSync(configDir, { mode: 0o700 });
+    writeFileSync(join(dataDir, "memory.db"), "db", { mode: 0o600 });
+    writeFileSync(join(dataDir, "memory.db-wal"), "live rows", { mode: 0o644 });
+
+    const result = await runPreflight({
+      projectRoot: repoRoot,
+      dataDir,
+      configDir,
+      transport: "stdio",
+      embeddings: false,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.checks.find((check) => check.id === "database-permissions")?.message).toContain("memory.db-wal");
+  });
+
+  it("distinguishes an unavailable HTTP bind host from a busy port", async () => {
+    const root = makeTempRoot();
+    const result = await runPreflight({
+      projectRoot: repoRoot,
+      dataDir: join(root, "data"),
+      configDir: join(root, "config"),
+      transport: "http",
+      embeddings: false,
+      apiKeyPresent: true,
+      host: "203.0.113.1",
+      port: 3030,
+    });
+
+    const portCheck = result.checks.find((check) => check.id === "port");
+    expect(portCheck?.status).toBe("fail");
+    expect(portCheck?.message).toContain("cannot be bound");
+    expect(portCheck?.message).not.toContain("already in use");
+  });
 });
 
 describe("quickstart first success", () => {
@@ -169,6 +238,7 @@ describe("quickstart first success", () => {
       "inspect",
     ]);
     expect(result.steps.every((step) => step.ok)).toBe(true);
+    expect(result.transport).toBe("stdio");
     expect(result.steps.find((step) => step.id === "status")?.message).toContain("health");
     expect(result.namespace).toBe("onboarding/quickstart");
     expect(result.entryId).toMatch(/^[0-9a-f-]{36}$/);
@@ -209,14 +279,20 @@ describe("quickstart first success", () => {
       expect(readFileSync(path, "utf8")).not.toContain(secret);
       expect(statSync(path).mode & 0o077).toBe(0);
     }
-    const report = JSON.parse(readFileSync(join(configDir, "last-run.json"), "utf8")) as { artifacts: string[] };
+    const report = JSON.parse(readFileSync(join(configDir, "last-run.json"), "utf8")) as {
+      artifacts: string[];
+      transport: string;
+      verifiedTransport: string;
+    };
     expect(report.artifacts).toEqual(result.artifacts);
+    expect(report.transport).toBe("stdio");
+    expect(report.verifiedTransport).toBe("stdio");
     expect(statSync(join(dataDir, "memory.db")).mode & 0o077).toBe(0);
   });
 
   it("refuses to overwrite a generated artifact through a symbolic link", async () => {
     const root = makeTempRoot();
-    const projectRoot = makeProjectRoot(root);
+    const projectRoot = repoRoot;
     const dataDir = join(root, "data");
     const configDir = join(root, "config");
     mkdirSync(configDir, { mode: 0o700 });
@@ -236,7 +312,7 @@ describe("quickstart first success", () => {
 
   it("refuses to overwrite a generated artifact through a hard link", async () => {
     const root = makeTempRoot();
-    const projectRoot = makeProjectRoot(root);
+    const projectRoot = repoRoot;
     const dataDir = join(root, "data");
     const configDir = join(root, "config");
     mkdirSync(configDir, { mode: 0o700 });
