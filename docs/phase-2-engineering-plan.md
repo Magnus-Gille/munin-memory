@@ -1,6 +1,8 @@
 # Munin Memory Phase 2 Engineering Plan
 
-Status: provisional, but concrete enough to guide implementation after Phase 1.
+Status: implemented; retained as a historical design record. `memory_resume`,
+`memory_extract`, and the shared context-selection behavior are shipped. The
+active sequence is [`roadmap.md`](roadmap.md).
 
 This document turns Roadmap Phase 2 into an engineering plan.
 

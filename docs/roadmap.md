@@ -1,273 +1,240 @@
 # Munin Memory Roadmap
 
-This document turns the product vision into an implementation plan.
-
-It is intentionally opinionated. The goal is not to list everything Munin could
-eventually do. The goal is to define what should be built next, in what order, and
-what should be refused for now.
-
-## Planning Assumptions
-
-The roadmap assumes the product thesis in [vision.md](vision.md):
-
-- Munin is a self-hosted, MCP-native memory layer
-- the target user is one person or a small trusted group
-- the main value is cross-environment continuity, not general-purpose knowledge
-  management
-- SQLite and the MCP contract remain stable
-- new capabilities should not require a permanent external API dependency
-
-## Current Baseline
-
-Munin already has a stronger baseline than a generic "early memory project" framing
-would suggest.
-
-Today the product already includes:
-
-- state and log as separate first-class memory types
-- tracked project status with computed orientation via `memory_orient`
-- lexical, semantic, and hybrid retrieval
-- retrieval analytics and per-entry insights
-- Bearer and OAuth access for local and remote clients
-- principal-based access control and an admin CLI
-- explicit hardware profile thinking for constrained and full-node deployments
-
-The roadmap should build on that shape, not reset it.
-
-## Product Goal
-
-The practical product goal is:
-
-> Starting a new session in any supported client should feel like the assistant has
-> enough of the right context to continue useful work without making the human
-> reconstruct everything.
-
-Everything below is prioritized against that standard.
-
-## Phase 1: Sharpen Retrieval and Time Awareness
-
-This is the next build phase.
-
-Detailed engineering plan: [phase-1-engineering-plan.md](phase-1-engineering-plan.md)
-
-### Goal
-
-Reduce stale retrieval and make time-bounded context behave correctly.
-
-### Deliverables
-
-- Add recency-aware ranking to `memory_query`
-- Add temporal validity to state entries
-- Surface expired and expiring context in orientation and attention tools
-- Tighten documentation so the roadmap reflects the product as it exists now
-
-### Concrete Scope
-
-1. **Recency-aware ranking**
-
-- add a configurable time-decay multiplier to retrieval scoring
-- make the effect visible in `memory_query` response metadata
-- keep the default conservative so new ranking does not destabilize obvious exact-match
-  searches
-
-2. **Temporal validity**
-
-- add `valid_until` to state entries
-- optionally add `valid_from` if it improves symmetry and query clarity
-- exclude expired entries from default retrieval
-- allow explicit inclusion of expired entries in queries and reads where needed
-
-3. **Orientation and attention**
-
-- flag entries that are about to expire
-- flag projects whose next steps or deadlines are stale
-- distinguish "old but still current" from "expired and should not surface by default"
-
-4. **Doc cleanup**
-
-- align `docs/competitive-analysis.md` with the actual product state
-- remove already-completed items from "missing features" and roadmap references
-
-### Exit Criteria
-
-- a query for a topic is less likely to return stale entries ahead of current ones
-- temporary context can expire without manual deletion
-- orientation surfaces time risk before the human has to rediscover it
-
-## Phase 2: Make Resume and Capture Feel Proactive
-
-This phase turns Munin from a passive store into a better session-start system.
-
-Detailed engineering plan: [phase-2-engineering-plan.md](phase-2-engineering-plan.md)
-
-### Goal
-
-Make the right context easier to surface and the right memories easier to capture.
-
-### Deliverables
-
-- add suggestion-based memory extraction from conversation text
-- add intent-aware resume/context loading
-- improve first-response continuity from a user's opening message
-
-### Concrete Scope
-
-1. **`memory_extract`**
-
-- accept raw conversation text or notes
-- return proposed `memory_write` and `memory_log` operations
-- keep the tool suggestion-only; do not auto-commit writes
-- avoid external API dependence in the server itself
-
-2. **Intent-aware resume**
-
-- add a dedicated `memory_resume` tool after the broad `memory_orient` handshake
-- accept an optional hint such as project, topic, or user opener
-- return the most relevant active work, recent decisions, blockers, and open loops
-
-3. **Session-start context packs**
-
-- bias toward active tracked work, recent decisions, and unresolved blockers
-- include why an item was surfaced, not only that it was surfaced
-- keep outputs compact enough for real use in clients with token pressure
-
-### Exit Criteria
-
-- session startup requires less manual "go read these three things" prompting
-- memory capture is easier in long or messy conversations
-- the system feels more like a prepared handoff than a searchable notebook
-
-## Phase 3: Add Narrative Memory
-
-This is where Munin should become better at work continuity over time, not just memory
-retrieval.
-
-Detailed engineering plan: [phase-3-engineering-plan.md](phase-3-engineering-plan.md)
-
-### Goal
-
-Represent arcs, churn, and dropped commitments instead of only snapshots.
-
-### Deliverables
-
-- derive narrative signals from logs, statuses, and timestamps
-- surface stuck work, repeated reversals, and aging blockers
-- compress recurring patterns into reusable heuristics
-
-### Concrete Scope
-
-1. **Project-arc signals**
-
-- time in current phase
-- blocker age
-- repeated status reversals
-- frequent reopen cycles
-
-2. **Commitment nudges**
-
-- detect commitments that were written down but not followed through
-- prioritize explicit user commitments and project next steps over vague prose
-- surface nudges in `memory_attention` or a dedicated commitment view
-
-3. **Compressed wisdom**
-
-- summarize recurring evaluation patterns and operating heuristics
-- prefer derived summaries over more raw storage
-- keep summaries reviewable and attributable to source entries
-
-### Exit Criteria
-
-- Munin can answer "what is drifting?" and "what keeps happening?" without the human
-  reconstructing the history manually
-- the product becomes better at continuity of judgment, not only continuity of facts
-
-## Phase 4: Strengthen Small-Trust Multi-User and Multi-Agent Use
-
-This phase deepens the existing access-control direction without changing the product's
-scope.
-
-Detailed engineering plan: [phase-4-engineering-plan.md](phase-4-engineering-plan.md)
-
-### Goal
-
-Make shared use practical for a household or small trusted set of agents.
-
-### Deliverables
-
-- finish rough edges in principal ownership and shared-namespace behavior
-- improve onboarding flows and docs for new principals
-- make cross-agent handoff and continuity more deliberate
-
-### Concrete Scope
-
-1. **Shared-namespace ownership**
-
-- finish entry-level ownership semantics where needed
-- make deletion and mutation behavior clear and predictable
-
-2. **Onboarding**
-
-- tighten principal provisioning docs around the existing admin CLI
-- document the normal path for bearer, desktop, and OAuth clients
-
-3. **Cross-agent coherence**
-
-- improve provenance and handoff conventions
-- make it easier for multiple agents to continue the same thread without silent
-  context loss
-
-### Exit Criteria
-
-- bringing in one more family member or one more agent feels supported, not incidental
-- cross-agent continuity improves without turning Munin into a broad team platform
-
-## Parallel Platform Track: Constrained Hardware Validation
-
-This track runs alongside the product phases. It should inform feature boundaries, not
-dictate the product thesis.
-
-Detailed validation plan: [platform-validation-plan.md](platform-validation-plan.md)
-
-### Goal
-
-Keep Munin strong on modest self-hosted hardware and prove the constrained appliance
-story with real measurements.
-
-### Deliverables
-
-- validate `zero-appliance` on real hardware
-- define performance budgets for core operations
-- ensure graceful degradation when semantic features are unavailable
-
-### Rules
-
-- core memory must remain useful without local semantic search
-- semantic features are enhancements, not dependencies
-- product packaging can evolve, but SQLite and the tool contract should remain stable
-
-## Explicit Non-Goals For Now
-
-The following are intentionally out of scope until the phases above are done and proven:
-
-- full temporal knowledge graph work
-- heavyweight entity-relationship traversal as a primary architecture
-- web UI as a major product track
-- broad document ingestion and research workflows
-- managed cloud or SaaS positioning
-- emotional or tonal memory as a first-class feature
-- automatic server-side memory writing through an external LLM dependency
-
-These ideas are not forbidden forever. They are off-strategy relative to the current
-thesis and should not displace the core continuity work.
-
-## Sequencing Summary
-
-If there is only enough time for a few major moves, build in this order:
-
-1. recency-aware retrieval
-2. temporal validity on state entries
-3. proactive resume and suggestion-based capture
-4. narrative and commitment-aware signals
-5. small-trust multi-user polish
-
-That order reinforces the existing wedge instead of diluting it.
+Status: current planning baseline as of 2026-07-22.
+
+This roadmap prioritizes work against Munin's product standard:
+
+> Starting a new session in any supported client should feel like the assistant
+> has enough of the right context to continue useful work without making the
+> human reconstruct it.
+
+The original four implementation phases are substantially shipped. Their
+engineering plans remain useful design records, but they are no longer the
+active sequence. Current strategy is informed by
+[`vision.md`](vision.md) and the
+[July 2026 competitive analysis](competitive-analysis-2026-07.md).
+
+## Product thesis
+
+Munin is sovereign operational memory for one person or a small trusted group:
+current truth, immutable decision history, least-privilege sharing, and reliable
+cross-client resumption from a database the user owns.
+
+The project should compound its distinctive strengths:
+
+- mutable state and append-only logs as separate first-class concepts;
+- source-backed orientation, resume, handoff, commitments, and narrative;
+- explicit correction/supersession rather than silent history rewriting;
+- MCP-first provider portability and a small SQLite/ARM deployment;
+- CAS, provenance, classification, scoped principals, and stored-content
+  injection defenses;
+- graceful lexical operation when semantic infrastructure is unavailable.
+
+## Current baseline
+
+Munin v0.5 already includes:
+
+- lexical, semantic, and hybrid retrieval with recency and expiry handling;
+- `valid_until`, correction chains, `valid_from`, lineage, and as-of reads;
+- suggestion-only extraction plus orient, resume, handoff, narrative,
+  commitment, pattern, attention, and health tools;
+- Bearer and OAuth access, multi-principal namespace authorization, transport
+  classification, and pre-synthesis source filtering;
+- retrieval analytics, benchmark harnesses, hardware profiles, encrypted
+  offsite backup, and a live ARM64 deployment.
+
+The main gap is no longer another retrieval primitive. It is proof,
+productization, and a complete human-controlled capture workflow.
+
+## Phase 0: Re-baseline and remove ambiguity
+
+Goal: start the productization cycle from a trustworthy backlog and current
+documentation.
+
+- Audit draft PR #187 against current main; salvage the decision-provenance
+  benchmark only after its security finding and M5 signal gate are resolved.
+- Retire PR #206 as an obsolete implementation branch; preserve #170 as a
+  deliberate v21+ port if multi-worker SQLite becomes a supported path.
+- Reconcile #4 against production Librarian evidence and close it when the
+  rollout record is complete.
+- Patch compatible dependency advisories and track upstream-blocked Hono/Sharp
+  remediation in #236.
+- Mark the original phase plans as historical and keep this file as the active
+  implementation sequence.
+
+Exit criteria:
+
+- no stale PR is mistaken for merge-ready work;
+- every residual dependency advisory is fixed or has a documented reachability
+  decision and tracking issue;
+- roadmap and issue state describe the deployed product accurately.
+
+## Phase 1: Make Munin easy and provable
+
+Goal: demonstrate that Munin works end to end and that a new operator can reach
+first success without learning the architecture first.
+
+1. **#225 — five-minute install and first-success flow**
+   - one canonical macOS/Linux path;
+   - preflight for runtime, SQLite, paths, permissions, ports, auth, and profile;
+   - generated secret-safe client configuration;
+   - verified health -> write/log -> orient/resume loop;
+   - automated clean-environment smoke test and safe upgrade/rollback guidance.
+
+2. **#227 — publishable end-to-end scorecard**
+   - complete the 500-question LongMemEval-S Phase A run;
+   - enforce and report a retrieved-token budget;
+   - pin model/provider/environment metadata;
+   - report answer quality, stage latency, tokens, RAM, disk, and cost;
+   - add repetition/variance and adversarial authorization/poison lanes;
+   - publish raw artifacts, limitations, and a dated summary.
+
+3. **#222 — privacy-safe dogfood and TCO case study**
+   - versioned redacted evidence export;
+   - operational scale, latency, reliability, backup/restore, and upgrade data;
+   - operator-time and realistic hosted/local cost scenarios;
+   - outcome examples without memory text, private identities, or topology.
+
+Exit criteria:
+
+- a clean supported machine reaches first write-to-resume success in five
+  minutes;
+- Munin has a reproducible end-to-end result rather than only retrieval recall;
+- product claims link to dated, privacy-reviewed evidence.
+
+## Phase 2: Complete human-controlled capture
+
+Goal: turn suggestion-only extraction into a durable, reviewable workflow
+without allowing stored content or models to mutate truth autonomously.
+
+1. **#181 — write-time intake quality gate**
+   - recover the useful LLM-free advisory core from the archived work;
+   - detect redundancy, duplicate overwrite, tag drift, namespace problems, and
+     likely consolidation candidates;
+   - keep the first implementation internal/advisory; add another MCP tool only
+     if measured use justifies it.
+
+2. **#223 — durable review inbox**
+   - persist principal-scoped proposals with bounded/redacted source references;
+   - validate secrets, classification, transport, size, and instruction-shaped
+     content before durable storage;
+   - support approve, decline, edit, expire, fail, and supersede transitions with
+     append-only audit events;
+   - apply through existing auth, CAS, and correction semantics;
+   - implement undo as a reviewed corrective operation, never history deletion.
+
+3. **#5 — real household onboarding pilot**
+   - validate the principal/profile path with a real second user;
+   - exercise personal and shared namespaces, consumer transport, review
+     ownership, and cross-client resumption.
+
+Exit criteria:
+
+- extract -> review/edit -> approve -> resume is durable and auditable;
+- no approval or undo path bypasses ordinary write controls;
+- a real second principal can use the system without owner-shaped conventions.
+
+## Phase 3: Deliver context and portability
+
+Goal: reduce agent/tool friction and make user-owned data inspectable and
+movable without creating a second source of truth.
+
+1. **#226 — measured context-pack/receipt contract**
+   - establish a wrong-tool/unnecessary-call baseline against the existing tools;
+   - add at most one composite front door unless evidence proves distinct needs;
+   - enforce explicit token budgets and return source, ranking, freshness,
+     provenance, scope, truncation, and degraded-mode receipts.
+
+2. **#228 — versioned portable interchange**
+   - preserve state, logs, audit history, classifications, provenance, validity,
+     supersession, ownership, identifiers, and references;
+   - exclude credentials, encrypted OAuth material, sensitive operational data,
+     and disallowed analytics;
+   - provide authorized scoped export plus dry-run, collision handling, and an
+     atomic or resumable idempotent import.
+
+3. **Thin clients and inspection surface, only after contracts stabilize**
+   - TypeScript/Python wrappers over MCP/HTTP rather than a parallel semantic API;
+   - a replaceable local surface for search, history, proposal review,
+     correction, sharing inspection, retrieval explanation, and export;
+   - no general chat or document-management product.
+
+Exit criteria:
+
+- agents use less context and fewer unnecessary calls without losing provenance;
+- authorized users can inspect and transfer their data safely;
+- expert tools remain available for compatibility and debugging.
+
+## Phase 4: Evidence-driven intelligence
+
+Goal: add richer behavior only when evaluation demonstrates that it improves
+decisions or continuity.
+
+- **#186 — decision-provenance/evolvability benchmark.** First validate the
+  three-arm toy signal on M5, then test the real server, read gate, and
+  consolidation behavior. Do not merge a large scaffold without the signal.
+- **#97 — binary completion criteria.** Add lightweight human-authored,
+  checkable criteria to tracked status and commitment views; do not build an
+  autonomous verification engine.
+- **#224 — per-principal retrieval preferences.** Explicit versioned preferences
+  may ship first. Learned candidates remain gated on #227/#186 evidence,
+  shadow-mode non-regression, expiry, audit, and owner approval.
+- **#98 — tiered/windowed consolidation.** Preserve raw logs and add summaries
+  only if #186 establishes which path information must remain retrievable and
+  which synthesis formats preserve decision revision.
+
+Exit criteria:
+
+- each adaptive or consolidating feature names the evidence that justified it;
+- no learned system weakens deterministic authorization, classification,
+  validity, or untrusted-content rules;
+- raw historical evidence remains available alongside derived summaries.
+
+## Parallel trust and platform track
+
+These are continuous obligations, not a separate product destination:
+
+- close #4 only from documented production audit evidence;
+- keep #170 low priority while production remains one worker per database;
+- track upstream dependency remediation in #236;
+- validate cold start, SD wear, power interruption, Wi-Fi loss, upgrade,
+  rollback, backup restoration, and recovery time on real appliance profiles;
+- complete the reachable-history and hosting-artifact review described in
+  `PUBLICATION.md` before making stronger public-release claims;
+- retain independent review for auth, schema, worker, and data-integrity changes.
+
+## Default 90-day target
+
+A realistic productization cycle delivers:
+
+1. five-minute first success (#225);
+2. a publishable Munin end-to-end scorecard (#227);
+3. a privacy-safe dogfood/TCO case study (#222);
+4. a validated durable review inbox (#181 + #223);
+5. measurement/specification—not necessarily full implementation—for #226 and
+   #228.
+
+The outcome gate is practical: can a fresh client resume real work faster, with
+fewer corrections and no trust-boundary regression? If not, more retrieval
+machinery is unlikely to fix the product.
+
+## Explicit non-goals
+
+Defer unless evidence changes the product thesis:
+
+- a full temporal knowledge graph;
+- broad document connectors or multimodal ingestion;
+- automatic server-side truth, prompt, skill, or policy mutation;
+- a full agent runtime or context-window owner;
+- managed SaaS;
+- more retrieval micro-tuning before end-to-end evidence;
+- more MCP tools without measured tool-choice failure;
+- a broad general-purpose web UI.
+
+## Planning discipline
+
+- GitHub Issues own executable backlog work; this file owns ordering and gates.
+- Local state files own branch, commit, blocker, and exact-next-step detail.
+- Munin project status owns the brief cross-environment current summary.
+- Update this roadmap when a phase outcome or dependency changes, not after every
+  merged PR.

@@ -4,7 +4,10 @@
 **Date:** 2026-04-02
 **Author:** Magnus Gille + Claude (Opus 4.6)
 **Reviewed by:** Codex (GPT-5.4) — adversarial review, 2 rounds, 15 critique points
-**Status:** Architecture approved — ready for implementation planning
+**Status:** Implemented and production-enabled; retained as the architecture and
+threat-model record. The 2026-07-22 rollout audit found no entries below their
+classification floor and no derivative rows missing source classification;
+completion is tracked in #4.
 **Engineering plan:** `docs/librarian-engineering-plan.md`
 **Depends on:** Multi-principal access control (Feature 5, implemented)
 **Debate record:** `debate/librarian-summary.md`
