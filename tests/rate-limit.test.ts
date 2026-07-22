@@ -60,6 +60,8 @@ describe("McpRateLimiter", () => {
     expect(limiter.admit("caller-c", "credential", 0)).toMatchObject({
       allowed: false,
       scope: "global",
+      admittedCount: 2,
+      throttleCount: 1,
     });
   });
 

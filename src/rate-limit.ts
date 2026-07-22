@@ -289,7 +289,7 @@ export class McpRateLimiter {
         bucketKind: "global",
         retryAfterMs: globalWait,
         remaining: Math.floor(this.global.state.tokens),
-        admittedCount: caller.admitted,
+        admittedCount: this.global.admitted,
         throttleCount: this.global.throttled,
         totalThrottleCount: this.totalThrottled,
       };
