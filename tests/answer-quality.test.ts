@@ -365,6 +365,37 @@ describe("runAnswerQuality happy path", () => {
     expect(report.results[0].answer_usage).toEqual({ prompt_tokens: 10, completion_tokens: 5 });
     expect(report.results[0].judge_usage).toEqual({ prompt_tokens: 10, completion_tokens: 5 });
   });
+
+  it("records reader and judge execution failures as structured diagnostics", async () => {
+    const { db, dbPath } = makeTempDb();
+    writeState(db, "projects/failure", "s", "failure context", []);
+    db.close();
+    const chat: ChatFn = vi.fn(async () => {
+      throw new Error("provider unavailable");
+    });
+
+    const report = await runAnswerQuality({
+      snapshotPath: dbPath,
+      queries: [{
+        id: "q-failure",
+        query: "What failed?",
+        source: "derived",
+        category: "failure",
+        search_mode: "lexical",
+        reference_answer: "provider",
+      }],
+      serialization: "linear",
+      runnerMode: "raw",
+      searchMode: "lexical",
+      answerModel: "test/model",
+      judgeModel: "test/judge",
+      chat,
+    });
+
+    expect(report.results[0].answer_error).toBe("provider unavailable");
+    expect(report.results[0].judge_error).toBe("provider unavailable");
+    expect(report.judge_parse_failures).toBe(1);
+  });
 });
 
 // ---------------------------------------------------------------------------

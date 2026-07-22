@@ -6,6 +6,8 @@ import {
   loadScorecardContract,
   preflightScorecardQueries,
   runScorecard,
+  validateScorecardAnswerQualityReport,
+  validateScorecardRetrievalReport,
   validateScorecardContract,
 } from "../benchmark/scorecard/run.js";
 
@@ -187,22 +189,37 @@ describe("deterministic scorecard smoke", () => {
     };
     expect(persisted.publication_eligible).toBe(false);
     expect(persisted.profile).toBe("deterministic_pipeline_smoke");
-  });
 
-  it("restores the caller's embedding environment setting", async () => {
-    mkdirSync(resolve("benchmark/generated"), { recursive: true });
-    mkdirSync(resolve("benchmark/reports"), { recursive: true });
-    const artifactDir = mkdtempSync(resolve("benchmark/generated/scorecard-env-test-"));
-    const reportDir = mkdtempSync(resolve("benchmark/reports/scorecard-env-test-"));
-    tempDirs.push(artifactDir, reportDir);
-    const previous = process.env.MUNIN_EMBEDDINGS_ENABLED;
-    process.env.MUNIN_EMBEDDINGS_ENABLED = "caller-owned-value";
-    try {
-      await runScorecard({ profile: "smoke", artifactDir, reportDir });
-      expect(process.env.MUNIN_EMBEDDINGS_ENABLED).toBe("caller-owned-value");
-    } finally {
-      if (previous === undefined) delete process.env.MUNIN_EMBEDDINGS_ENABLED;
-      else process.env.MUNIN_EMBEDDINGS_ENABLED = previous;
-    }
+    expect(() => validateScorecardAnswerQualityReport(
+      { ...report.answer_quality, judge_parse_failures: 1 },
+      "smoke",
+      2,
+      "lexical",
+    )).toThrow(/malformed judge responses/i);
+    expect(() => validateScorecardAnswerQualityReport(
+      {
+        ...report.answer_quality,
+        results: [
+          { ...report.answer_quality.results[0], answer_error: "provider unavailable" },
+          ...report.answer_quality.results.slice(1),
+        ],
+      },
+      "smoke",
+      2,
+      "lexical",
+    )).toThrow(/reader\/judge execution failures/i);
+    expect(() => validateScorecardRetrievalReport(
+      {
+        ...report.retrieval,
+        queries: [
+          { ...report.retrieval.queries[0], actual_mode: "lexical" },
+          ...report.retrieval.queries.slice(1),
+        ],
+      },
+      "smoke",
+      2,
+      "hybrid",
+      "raw",
+    )).toThrow(/retrieval mode degraded/i);
   });
 });

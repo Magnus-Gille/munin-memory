@@ -87,7 +87,9 @@ changelog is the canonical record of what moved.
   two-question pipeline check with deterministic fixture stubs and always emits
   `publication_eligible: false`; the documented paid command preflights exactly
   500 uniquely identified, dated, scoped questions with reference answers
-  before retrieval or model calls.
+  before retrieval or model calls. Answer-quality reports advance to schema v2
+  with question-date lineage, structured provider-failure diagnostics, and
+  explicit reader/judge sampling plus output-token settings.
   Reports keep retrieval recall separate from final-answer judging and list the
   token-budget, resource/cost, repetition, model-pinning, and adversarial lanes
   still required before any result can be published.

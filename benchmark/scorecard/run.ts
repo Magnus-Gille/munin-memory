@@ -12,8 +12,9 @@ import {
 } from "../adapters/shared.js";
 import { JUDGE_SYSTEM_SENTINEL, type ChatFn } from "../answer-quality/judge.js";
 import { runAnswerQuality } from "../answer-quality/runner.js";
+import type { AnswerQualityReport } from "../answer-quality/types.js";
 import { loadQueriesWithSource, runBenchmark } from "../runner.js";
-import type { BenchmarkQuery } from "../types.js";
+import type { BenchmarkQuery, BenchmarkReport } from "../types.js";
 import type {
   MuninAgentMemoryScorecardReport,
   ScorecardContract,
@@ -248,6 +249,84 @@ export function preflightScorecardQueries(
   }
 }
 
+export function validateScorecardAnswerQualityReport(
+  report: AnswerQualityReport,
+  profile: ScorecardProfileName,
+  expectedQuestionCount: number,
+  expectedSearchMode: ScorecardProfileContract["search_mode"],
+): void {
+  if (report.skipped) {
+    throw new Error(
+      `Scorecard ${profile} answer-quality run skipped: ${report.skip_reason ?? "unknown reason"}`,
+    );
+  }
+  if (report.skipped_no_reference !== 0) {
+    throw new Error(
+      `Scorecard ${profile} unexpectedly skipped ${report.skipped_no_reference} reference answers.`,
+    );
+  }
+  if (report.query_count !== expectedQuestionCount) {
+    throw new Error(
+      `Scorecard ${profile} answer-quality count drifted: ${report.query_count} != ${expectedQuestionCount}.`,
+    );
+  }
+  if (report.warnings?.length) {
+    throw new Error(
+      `Scorecard ${profile} answer-quality warned or degraded: ${report.warnings.join("; ")}`,
+    );
+  }
+  if (report.judge_parse_failures !== 0) {
+    throw new Error(
+      `Scorecard ${profile} had ${report.judge_parse_failures} malformed judge responses.`,
+    );
+  }
+  const executionFailures = report.results
+    .filter((result) => result.answer_error !== undefined || result.judge_error !== undefined)
+    .map((result) => result.query_id);
+  if (executionFailures.length > 0) {
+    throw new Error(
+      `Scorecard ${profile} had reader/judge execution failures on: ${executionFailures.slice(0, 10).join(", ")}.`,
+    );
+  }
+  const degradedQueries = report.results
+    .filter((result) => result.effective_search_mode !== expectedSearchMode)
+    .map((result) => result.query_id);
+  if (degradedQueries.length > 0) {
+    throw new Error(
+      `Scorecard ${profile} answer-quality search mode degraded on: ${degradedQueries.slice(0, 10).join(", ")}.`,
+    );
+  }
+}
+
+export function validateScorecardRetrievalReport(
+  report: BenchmarkReport,
+  profile: ScorecardProfileName,
+  expectedQuestionCount: number,
+  expectedSearchMode: ScorecardProfileContract["search_mode"],
+  expectedRunnerMode: ScorecardProfileContract["runner_mode"],
+): void {
+  if (report.runner_mode !== expectedRunnerMode || report.warnings?.length) {
+    throw new Error(
+      `Scorecard ${profile} retrieval degraded or warned: ${(report.warnings ?? []).join("; ") || `${report.runner_mode} != ${expectedRunnerMode}`}`,
+    );
+  }
+  if (report.query_count !== expectedQuestionCount) {
+    throw new Error(
+      `Scorecard ${profile} retrieval count drifted: ${report.query_count} != ${expectedQuestionCount}.`,
+    );
+  }
+  const degradedQueries = report.queries
+    .filter((result) =>
+      result.search_mode !== expectedSearchMode ||
+      (result.actual_mode !== undefined && result.actual_mode !== expectedSearchMode))
+    .map((result) => result.query_id);
+  if (degradedQueries.length > 0) {
+    throw new Error(
+      `Scorecard ${profile} retrieval mode degraded on: ${degradedQueries.slice(0, 10).join(", ")}.`,
+    );
+  }
+}
+
 function extractPromptPayload(content: string): Record<string, unknown> {
   const first = content.indexOf("{");
   const last = content.lastIndexOf("}");
@@ -352,9 +431,6 @@ export async function runScorecard(
   ensureSafeGeneratedPath(paths.queryPath, "Scorecard query file");
   ensureSafeGeneratedPath(paths.provenancePath, "Scorecard provenance file");
 
-  const previousEmbeddingsEnabled = process.env.MUNIN_EMBEDDINGS_ENABLED;
-  try {
-  process.env.MUNIN_EMBEDDINGS_ENABLED = profile.search_mode === "lexical" ? "false" : "true";
   buildLongMemEvalArtifacts({
     split: contract.dataset.split,
     granularity: profile.granularity,
@@ -387,11 +463,13 @@ export async function runScorecard(
     runnerMode: profile.runner_mode,
     manifestPath: null,
   });
-  if (retrieval.runner_mode !== profile.runner_mode || retrieval.warnings?.length) {
-    throw new Error(
-      `Scorecard ${options.profile} retrieval degraded or warned: ${(retrieval.warnings ?? []).join("; ") || `${retrieval.runner_mode} != ${profile.runner_mode}`}`,
-    );
-  }
+  validateScorecardRetrievalReport(
+    retrieval,
+    options.profile,
+    profile.expected_question_count,
+    profile.search_mode,
+    profile.runner_mode,
+  );
 
   const answerQuality = await runAnswerQuality({
     snapshotPath: paths.dbPath,
@@ -409,34 +487,12 @@ export async function runScorecard(
     querySetSources: [source],
     chat: options.profile === "smoke" ? deterministicSmokeChat() : options.chat,
   });
-  if (answerQuality.skipped) {
-    throw new Error(
-      `Scorecard ${options.profile} answer-quality run skipped: ${answerQuality.skip_reason ?? "unknown reason"}`,
-    );
-  }
-  if (answerQuality.skipped_no_reference !== 0) {
-    throw new Error(
-      `Scorecard ${options.profile} unexpectedly skipped ${answerQuality.skipped_no_reference} reference answers.`,
-    );
-  }
-  if (answerQuality.query_count !== profile.expected_question_count) {
-    throw new Error(
-      `Scorecard ${options.profile} answer-quality count drifted: ${answerQuality.query_count} != ${profile.expected_question_count}.`,
-    );
-  }
-  if (answerQuality.warnings?.length) {
-    throw new Error(
-      `Scorecard ${options.profile} answer-quality warned or degraded: ${answerQuality.warnings.join("; ")}`,
-    );
-  }
-  const degradedAnswerQueries = answerQuality.results
-    .filter((result) => result.effective_search_mode !== profile.search_mode)
-    .map((result) => result.query_id);
-  if (degradedAnswerQueries.length > 0) {
-    throw new Error(
-      `Scorecard ${options.profile} answer-quality search mode degraded on: ${degradedAnswerQueries.slice(0, 10).join(", ")}.`,
-    );
-  }
+  validateScorecardAnswerQualityReport(
+    answerQuality,
+    options.profile,
+    profile.expected_question_count,
+    profile.search_mode,
+  );
   const retrievalSources = retrieval.query_set_sources
     .map((item) => `${item.filename}:${item.sha256}`)
     .sort();
@@ -463,13 +519,6 @@ export async function runScorecard(
   };
   const reportPath = writeScorecardReport(report, reportDir);
   return { report, reportPath };
-  } finally {
-    if (previousEmbeddingsEnabled === undefined) {
-      delete process.env.MUNIN_EMBEDDINGS_ENABLED;
-    } else {
-      process.env.MUNIN_EMBEDDINGS_ENABLED = previousEmbeddingsEnabled;
-    }
-  }
 }
 
 function parseProfile(argv: string[]): ScorecardProfileName {

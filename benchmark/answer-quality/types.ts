@@ -51,6 +51,10 @@ export interface AnswerQualityResult {
   question_date?: string;
   reference_answer: string;
   candidate_answer: string;
+  /** Present when answer generation threw; scorecard runs treat this as fatal. */
+  answer_error?: string;
+  /** Present when judging threw; scorecard runs treat this as fatal. */
+  judge_error?: string;
   /** IDs in true linear rank order from the retrieval pipeline. Provenance. */
   retrieved_ids: string[];
   /** IDs in the display order that was fed to the answer model. */

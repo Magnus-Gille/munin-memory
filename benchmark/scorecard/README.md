@@ -41,6 +41,11 @@ namespace. It then populates corpus embeddings, runs the production-ranker
 hybrid retrieval harness, and runs the existing answer-quality reader/judge
 harness over the same query bytes. Reader and judge temperature/output-token
 settings are pinned by the contract and recorded in the answer-quality report.
+The npm command sets `MUNIN_EMBEDDINGS_ENABLED=true` before the scorecard module
+loads, because embedding configuration is resolved at process startup. Direct
+programmatic callers must likewise start the process with embeddings enabled
+for the hybrid full profile; a disabled runtime fails rather than degrading to
+lexical.
 
 This command does **not** publish a result. The foundation report stays
 `unpublished_foundation` and `publication_eligible: false`, even after a

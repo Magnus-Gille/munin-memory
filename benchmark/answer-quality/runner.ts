@@ -388,6 +388,7 @@ export async function runAnswerQualityInner(
     // Generate answer
     let candidateAnswer = "";
     let answerUsage: TokenUsage | undefined;
+    let answerError: string | undefined;
     try {
       const generated = await generateAnswer(
         {
@@ -404,13 +405,15 @@ export async function runAnswerQualityInner(
       candidateAnswer = generated.answer;
       answerUsage = generated.usage;
     } catch (err) {
-      candidateAnswer = `[answer generation failed: ${err instanceof Error ? err.message : String(err)}]`;
+      answerError = err instanceof Error ? err.message : String(err);
+      candidateAnswer = `[answer generation failed: ${answerError}]`;
     }
 
     // Judge
     const referenceAnswer = query.reference_answer!;
     let verdict;
     let judgeUsage: TokenUsage | undefined;
+    let judgeError: string | undefined;
     try {
       const judgeResult = await judgeAnswer(
         {
@@ -428,10 +431,11 @@ export async function runAnswerQualityInner(
       verdict = judgeResult;
       judgeUsage = judgeResult.usage;
     } catch (err) {
+      judgeError = err instanceof Error ? err.message : String(err);
       verdict = {
         correct: false,
         score: 0,
-        reasoning: `[judge failed: ${err instanceof Error ? err.message : String(err)}]`,
+        reasoning: `[judge failed: ${judgeError}]`,
         parse_ok: false,
         raw: undefined,
       };
@@ -447,6 +451,8 @@ export async function runAnswerQualityInner(
       question_date: query.question_date,
       reference_answer: referenceAnswer,
       candidate_answer: candidateAnswer,
+      answer_error: answerError,
+      judge_error: judgeError,
       retrieved_ids: retrievedIds,
       serialized_order_ids: serializedOrderIds,
       serialization,
