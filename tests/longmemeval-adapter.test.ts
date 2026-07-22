@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
@@ -6,10 +6,12 @@ import Database from "better-sqlite3";
 import {
   buildLongMemEvalArtifacts,
   convertLongMemEvalDataset,
+  LONGMEMEVAL_ARTIFACT_SCHEMA_VERSION,
   makeSyntheticEntryId,
   makeSyntheticRoundEntryId,
   normalizeNsSegment,
 } from "../benchmark/adapters/longmemeval/build.js";
+import { canReuseExistingArtifacts } from "../benchmark/adapters/longmemeval/run.js";
 import { queryEntriesLexicalScored } from "../src/db.js";
 import type { LongMemEvalItem } from "../benchmark/adapters/longmemeval/build.js";
 
@@ -89,6 +91,53 @@ describe("LongMemEval adapter", () => {
     expect(result.queries[0].search_mode).toBe("lexical");
   });
 
+  it("preserves every gold answer and question date as structured query metadata", () => {
+    const items = loadFixture();
+    const result = convertLongMemEvalDataset(items, "s");
+
+    expect(result.queries).toHaveLength(items.length);
+    for (const [index, query] of result.queries.entries()) {
+      expect(query.reference_answer).toBe(String(items[index].answer));
+      expect(query.question_date).toBe(items[index].question_date);
+      expect(query.notes).not.toContain("answer=");
+    }
+  });
+
+  it("normalizes numeric gold answers for the answer-quality harness", () => {
+    const item = structuredClone(loadFixture()[0]);
+    item.answer = 42;
+
+    const result = convertLongMemEvalDataset([item], "s");
+
+    expect(result.queries[0].reference_answer).toBe("42");
+  });
+
+  it("keeps has_answer ground-truth labels out of model-visible corpus content", () => {
+    const sessionResult = convertLongMemEvalDataset(loadFixture(), "s", "session");
+    const roundResult = convertLongMemEvalDataset(loadFixture(), "s", "round");
+
+    for (const entry of [...sessionResult.entries, ...roundResult.entries]) {
+      expect(entry.content).not.toContain("has_answer");
+    }
+  });
+
+  it("uses has_answer only to select evidence rounds, never as model-visible text", () => {
+    const item = structuredClone(loadFixture()[0]);
+    item.haystack_sessions[1] = [
+      { role: "user", content: "Distractor round", has_answer: false },
+      { role: "assistant", content: "No answer here", has_answer: false },
+      { role: "user", content: "The actual evidence", has_answer: true },
+      { role: "assistant", content: "Confirmed evidence", has_answer: true },
+    ];
+
+    const result = convertLongMemEvalDataset([item], "s", "round");
+
+    expect(result.queries[0].expected_ids).toEqual([
+      makeSyntheticRoundEntryId("s", item.question_id, item.answer_session_ids[0], 1),
+    ]);
+    expect(result.entries.every((entry) => !entry.content.includes("has_answer"))).toBe(true);
+  });
+
   it("converts sample data into round-granularity evidence ids", () => {
     const result = convertLongMemEvalDataset(loadFixture(), "s", "round");
 
@@ -158,6 +207,50 @@ describe("LongMemEval adapter", () => {
     expect(hits.length).toBeGreaterThan(0);
     // 3-arg id: (split, questionId, sessionId)
     expect(hits[0].entry.id).toBe(makeSyntheticEntryId("s", "q-001", "answer_280352e9"));
+  });
+
+  it("versions generated artifacts and invalidates reuse when source bytes change", () => {
+    const dir = mkdtempSync(join(tmpdir(), "munin-longmemeval-reuse-"));
+    tempDirs.push(dir);
+    const inputPath = join(dir, "input.json");
+    const dbPath = join(dir, "longmemeval-s.db");
+    const queryPath = join(dir, "longmemeval-s.jsonl");
+    const provenancePath = join(dir, "longmemeval-s.provenance.json");
+    writeFileSync(inputPath, JSON.stringify(loadFixture()), "utf-8");
+
+    buildLongMemEvalArtifacts({
+      split: "s",
+      inputPath,
+      dbPath,
+      queryPath,
+      provenancePath,
+    });
+    const metadata = JSON.parse(readFileSync(provenancePath, "utf-8"));
+    const options = {
+      split: "s",
+      granularity: "session" as const,
+      searchMode: "lexical" as const,
+      inputPath,
+      dbPath,
+      queryPath,
+      provenancePath,
+      reportDir: dir,
+      reuseExisting: true,
+      runnerMode: "raw" as const,
+    };
+
+    expect(metadata.artifact_schema_version).toBe(LONGMEMEVAL_ARTIFACT_SCHEMA_VERSION);
+    expect(metadata.input_sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(canReuseExistingArtifacts(options, metadata)).toBe(true);
+
+    const staleMetadata = {
+      ...metadata,
+      artifact_schema_version: LONGMEMEVAL_ARTIFACT_SCHEMA_VERSION + 1,
+    };
+    expect(canReuseExistingArtifacts(options, staleMetadata)).toBe(false);
+
+    writeFileSync(inputPath, `${JSON.stringify(loadFixture())}\n`, "utf-8");
+    expect(canReuseExistingArtifacts(options, metadata)).toBe(false);
   });
 
   it("builds a round-granularity benchmark db that lexical retrieval can query", () => {

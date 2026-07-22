@@ -206,6 +206,7 @@ describe("runAnswerQuality happy path", () => {
         search_mode: "lexical",
         expected_ids: [],
         reference_answer: "Paris",
+        question_date: "2026-01-15T12:00:00Z",
       },
     ];
 
@@ -226,7 +227,7 @@ describe("runAnswerQuality happy path", () => {
     });
 
     expect(report.report_kind).toBe("answer_quality");
-    expect(report.report_schema_version).toBe(1);
+    expect(report.report_schema_version).toBe(2);
     expect(report.skipped).toBeUndefined();
     expect(report.query_count).toBe(1);
     expect(report.skipped_no_reference).toBe(0);
@@ -234,6 +235,7 @@ describe("runAnswerQuality happy path", () => {
     expect(report.overall_mean_score).toBe(1);
     expect(report.results).toHaveLength(1);
     expect(report.results[0].query_id).toBe("q1");
+    expect(report.results[0].question_date).toBe("2026-01-15T12:00:00Z");
     expect(report.results[0].verdict.correct).toBe(true);
     expect(report.results[0].verdict.parse_ok).toBe(true);
     expect(report.results[0].serialization).toBe("linear");
@@ -362,6 +364,37 @@ describe("runAnswerQuality happy path", () => {
     // per-result usage is populated for both the answer and the judge call.
     expect(report.results[0].answer_usage).toEqual({ prompt_tokens: 10, completion_tokens: 5 });
     expect(report.results[0].judge_usage).toEqual({ prompt_tokens: 10, completion_tokens: 5 });
+  });
+
+  it("records reader and judge execution failures as structured diagnostics", async () => {
+    const { db, dbPath } = makeTempDb();
+    writeState(db, "projects/failure", "s", "failure context", []);
+    db.close();
+    const chat: ChatFn = vi.fn(async () => {
+      throw new Error("provider unavailable");
+    });
+
+    const report = await runAnswerQuality({
+      snapshotPath: dbPath,
+      queries: [{
+        id: "q-failure",
+        query: "What failed?",
+        source: "derived",
+        category: "failure",
+        search_mode: "lexical",
+        reference_answer: "provider",
+      }],
+      serialization: "linear",
+      runnerMode: "raw",
+      searchMode: "lexical",
+      answerModel: "test/model",
+      judgeModel: "test/judge",
+      chat,
+    });
+
+    expect(report.results[0].answer_error).toBe("provider unavailable");
+    expect(report.results[0].judge_error).toBe("provider unavailable");
+    expect(report.judge_parse_failures).toBe(1);
   });
 });
 
@@ -871,7 +904,9 @@ describe("Fix 2: production_ranker prereq guard", () => {
 describe("Fix B: prompt injection hardening — JSON payload format", () => {
   it("generateAnswer sends a JSON payload with context and question fields, plus guard text", async () => {
     let capturedMessages: OpenRouterCallOptions["messages"] | null = null;
+    let capturedOptions: OpenRouterCallOptions | null = null;
     const chat: ChatFn = async (opts) => {
+      capturedOptions = opts;
       capturedMessages = opts.messages;
       return { choices: [{ message: { content: "The answer." } }] };
     };
@@ -879,9 +914,12 @@ describe("Fix B: prompt injection hardening — JSON payload format", () => {
     await generateAnswer(
       {
         question: "What is the test question?",
+        questionDate: "2023/05/30 (Tue) 23:40",
         context: "This is the context.",
         model: "test/model",
         apiKey: "test-key",
+        temperature: 0,
+        maxTokens: 128,
       },
       chat,
     );
@@ -902,6 +940,9 @@ describe("Fix B: prompt injection hardening — JSON payload format", () => {
     // Fields must round-trip exactly
     expect(payload.context).toBe("This is the context.");
     expect(payload.question).toBe("What is the test question?");
+    expect(payload.question_date).toBe("2023/05/30 (Tue) 23:40");
+    expect(capturedOptions!.temperature).toBe(0);
+    expect(capturedOptions!.maxTokens).toBe(128);
   });
 
   it("judgeAnswer sends a JSON payload with question, reference_answer, candidate_answer fields, plus guard text", async () => {

@@ -19,6 +19,8 @@ This directory holds Munin's retrieval benchmark harness plus the scaffold for p
 - `generated/` — generated adapter outputs such as converted query JSONL files. Gitignored except for this README.
 - `fixtures/` — local snapshot databases for Munin-native runs. Gitignored.
 - `reports/` — benchmark reports. Gitignored.
+- `scorecard/` — versioned end-to-end scorecard contracts and the thin
+  retrieval + answer-quality orchestrator.
 
 ## Recommended Sequence
 
@@ -71,6 +73,21 @@ The production reranker is intentionally *not* gated here: its freshness and
 attention inputs are time-relative and would rot a committed baseline.
 Raw-vs-production parity is guarded separately by `tests/runner-parity.test.ts`.
 Extending the gate to a time-frozen `production_ranker` run is future work.
+
+## End-to-end scorecard foundation
+
+The unpublished Phase A scorecard composes the existing LongMemEval adapter,
+retrieval runner, and answer-quality harness under one versioned contract. Run
+the deterministic offline wiring check with:
+
+```bash
+npm run scorecard:smoke
+```
+
+The paid 500-question foundation command is documented in
+[`scorecard/README.md`](./scorecard/README.md). Neither profile is publication
+eligible yet. In particular, existing LongMemEval `R@K` values are retrieval
+recall, never end-to-end answer accuracy.
 
 ## Ground-Truth Query Pipeline
 

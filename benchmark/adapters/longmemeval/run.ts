@@ -1,6 +1,13 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { buildLongMemEvalArtifacts, type BuildMetadata, type BuildOptions } from "./build.js";
+import { fileURLToPath } from "node:url";
+import {
+  buildLongMemEvalArtifacts,
+  LONGMEMEVAL_ARTIFACT_SCHEMA_VERSION,
+  type BuildMetadata,
+  type BuildOptions,
+} from "./build.js";
 import { loadQueriesWithSource, runBenchmark, writeReport } from "../../runner.js";
 import { ensureSafeGeneratedPath, populateCorpusEmbeddings, type CorpusEmbeddingSummary } from "../shared.js";
 import type { SearchMode } from "../../../src/types.js";
@@ -70,14 +77,20 @@ function readBuildMetadata(path: string): BuildMetadata | null {
   }
 }
 
-function canReuseExistingArtifacts(options: RunOptions, metadata: BuildMetadata | null): boolean {
+export function canReuseExistingArtifacts(options: RunOptions, metadata: BuildMetadata | null): boolean {
   if (!options.reuseExisting) return false;
   if (!metadata) return false;
+  if (!existsSync(options.inputPath)) return false;
+  const inputSha256 = createHash("sha256")
+    .update(readFileSync(options.inputPath))
+    .digest("hex");
   return metadata.adapter === "longmemeval"
+    && metadata.artifact_schema_version === LONGMEMEVAL_ARTIFACT_SCHEMA_VERSION
     && metadata.split === options.split
     && metadata.granularity === options.granularity
     && metadata.search_mode === options.searchMode
     && metadata.input_path === options.inputPath
+    && metadata.input_sha256 === inputSha256
     && metadata.db_path === options.dbPath
     && metadata.query_path === options.queryPath
     && metadata.limit === options.limit
@@ -157,4 +170,11 @@ async function main(): Promise<void> {
   }
 }
 
-await main();
+const isMain = (() => {
+  if (!process.argv[1]) return false;
+  return resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+})();
+
+if (isMain) {
+  await main();
+}

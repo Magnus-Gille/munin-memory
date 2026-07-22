@@ -39,6 +39,11 @@ export interface BenchmarkQuery {
    */
   reference_answer?: string;
   /**
+   * Dataset-supplied timestamp at which the question is asked. Preserved for
+   * temporal answer-quality protocols; ignored by the retrieval scorer.
+   */
+  question_date?: string;
+  /**
    * When set, retrieval for this query is restricted to this exact namespace.
    * Reproduces per-question-haystack isolation (e.g. LongMemEval: each
    * question scored only against its own corpus). Unset = search the whole DB
@@ -57,7 +62,8 @@ export interface BenchmarkQuery {
  * - `production_ranker` — runner additionally runs results through
  *   `rerankQueryResults` + canonical / attention injectors + completed-task
  *   filter, matching what `memory_query` does in production. The benchmark
- *   numbers reflect end-to-end production behavior.
+ *   numbers reflect production retrieval and ranking behavior. They are not
+ *   end-to-end answer accuracy.
  *
  * Wired in PR 2b. PR 2a emits only `"raw"`; the type lives here so the
  * report shape is stable across both PRs.

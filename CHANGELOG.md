@@ -81,6 +81,18 @@ changelog is the canonical record of what moved.
 
 ### Added
 
+- **Unpublished LongMemEval-S end-to-end scorecard foundation (#227).** A
+  versioned contract and thin orchestrator now compose the shipped retrieval
+  and answer-quality harnesses. `npm run scorecard:smoke` runs a hermetic
+  two-question pipeline check with deterministic fixture stubs and always emits
+  `publication_eligible: false`; the documented paid command preflights exactly
+  500 uniquely identified, dated, scoped questions with reference answers
+  before retrieval or model calls. Answer-quality reports advance to schema v2
+  with question-date lineage, structured provider-failure diagnostics, and
+  explicit reader/judge sampling plus output-token settings.
+  Reports keep retrieval recall separate from final-answer judging and list the
+  token-budget, resource/cost, repetition, model-pinning, and adversarial lanes
+  still required before any result can be published.
 - **Tracked-status review horizons (#217).** `memory_update_status` now accepts `valid_until`: an ISO 8601 timestamp sets soft expiry, explicit `null` clears it, and omission preserves the stored value. Expiry-only updates preserve status content and tags verbatim, including legacy free-form statuses, while retaining normal CAS conflict protection and leaving derived commitments unchanged. Update responses expose `content` and `structured_status` only when the caller passes the same namespace and classification read gates as `memory_read`; write-only callers still receive mutation metadata plus a generic withholding note. The published `valid_until` input schema now accepts both string and null for `memory_update_status` and `memory_write`, matching their clear semantics.
 - **Explicit atomic create-if-absent state writes (#211).** `memory_write` now accepts `create_if_absent: true` as a first-writer-wins precondition owned by Munin, rather than requiring callers to fake absence with a magic `expected_updated_at` timestamp. The existence check and insert execute in one SQLite `IMMEDIATE` transaction. A losing writer receives the normal typed `error: "conflict"` plus `conflict_reason: "already_exists"` and the winner's `current_updated_at`; full-content `memory_write` and `memory_update_status` version-CAS conflicts now identify `conflict_reason: "version_mismatch"` (patch-mode response shape is unchanged). The new mode is mutually exclusive with `expected_updated_at` and patch writes, and soft-expired rows still count as existing. Unconditional upserts and the existing CAS behavior, including creation when an expected version is supplied for an absent entry, remain compatible.
 

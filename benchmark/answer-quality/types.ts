@@ -47,8 +47,14 @@ export interface AnswerQualityResult {
   query_id: string;
   category: string;
   question: string;
+  /** Dataset-supplied evaluation timestamp shown to the answer model, when present. */
+  question_date?: string;
   reference_answer: string;
   candidate_answer: string;
+  /** Present when answer generation threw; scorecard runs treat this as fatal. */
+  answer_error?: string;
+  /** Present when judging threw; scorecard runs treat this as fatal. */
+  judge_error?: string;
   /** IDs in true linear rank order from the retrieval pipeline. Provenance. */
   retrieved_ids: string[];
   /** IDs in the display order that was fed to the answer model. */
@@ -80,8 +86,12 @@ export interface AnswerQualityCategorySummary {
 export interface AnswerQualityReport {
   /** Discriminator — distinguishes from BenchmarkReport. */
   report_kind: "answer_quality";
-  /** Independent version line, separate from BenchmarkReport.report_schema_version. */
-  report_schema_version: 1;
+  /**
+   * Independent version line, separate from BenchmarkReport.report_schema_version.
+   * v2 adds question-date lineage plus explicit reader/judge sampling and
+   * output-token settings.
+   */
+  report_schema_version: 2;
   /** ISO 8601 run timestamp. */
   run_at: string;
   snapshot_path: string;
@@ -94,7 +104,12 @@ export interface AnswerQualityReport {
   search_recency_weight: number | null;
   top_k: number;
   answer_model: string;
+  /** Null means the provider/model default was used. */
+  answer_temperature: number | null;
+  answer_max_output_tokens: number;
   judge_model: string;
+  judge_temperature: number;
+  judge_max_output_tokens: number;
   // Lineage
   query_set_sources: QuerySetSource[];
   query_set_checksum: string;
@@ -120,7 +135,7 @@ export interface AnswerQualityReport {
 /** A/B comparison report: linear vs boundary serialization. */
 export interface AnswerQualityAbReport {
   report_kind: "answer_quality_ab";
-  report_schema_version: 1;
+  report_schema_version: 2;
   run_at: string;
   /** The A/B variable being tested. */
   variable: "serialization";

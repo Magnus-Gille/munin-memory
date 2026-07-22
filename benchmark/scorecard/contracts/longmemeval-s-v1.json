@@ -1,0 +1,89 @@
+{
+  "contract_schema_version": 1,
+  "contract_id": "munin-longmemeval-s-e2e-v1",
+  "publication_status": "unpublished_foundation",
+  "dataset": {
+    "adapter": "longmemeval",
+    "split": "s",
+    "source_url": "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json",
+    "expected_full_question_count": 500,
+    "haystack_policy": "per_question_namespace"
+  },
+  "ingestion": {
+    "entry_type": "state",
+    "classification": "public",
+    "answer_labels_stored_in_corpus": false
+  },
+  "context_budget": {
+    "unit": "entries",
+    "top_k": 10,
+    "retrieved_token_budget": null,
+    "limitation": "A retrieved-token budget is not yet enforced; this foundation limits context to the top 10 entries and is not publication eligible."
+  },
+  "grading": {
+    "rubric_version": "answer-quality-v1",
+    "correct_signal": "judge_boolean"
+  },
+  "profiles": {
+    "smoke": {
+      "profile_id": "deterministic_pipeline_smoke",
+      "input_path": "benchmark/adapters/longmemeval/fixtures/sample-longmemeval.json",
+      "expected_question_count": 2,
+      "limit": 2,
+      "granularity": "session",
+      "runner_mode": "raw",
+      "search_mode": "lexical",
+      "serialization": "linear",
+      "top_k": 10,
+      "reader": {
+        "model": "munin/deterministic-scorecard-smoke-reader-v1",
+        "temperature": 0,
+        "temperature_policy": "fixed_zero",
+        "max_output_tokens": 128
+      },
+      "judge": {
+        "model": "munin/deterministic-scorecard-smoke-judge-v1",
+        "temperature": 0,
+        "temperature_policy": "fixed_zero",
+        "max_output_tokens": 128
+      },
+      "repetitions": 1,
+      "seed_policy": "fixed_fixture_stub",
+      "publication_eligible": false
+    },
+    "full": {
+      "profile_id": "longmemeval_s_full_on_demand",
+      "input_path": "benchmark/data/raw/longmemeval/longmemeval_s_cleaned.json",
+      "expected_question_count": 500,
+      "limit": null,
+      "granularity": "session",
+      "runner_mode": "production_ranker",
+      "search_mode": "hybrid",
+      "serialization": "linear",
+      "top_k": 10,
+      "reader": {
+        "model": "anthropic/claude-haiku-4-5",
+        "temperature": 0,
+        "temperature_policy": "fixed_zero",
+        "max_output_tokens": 4096
+      },
+      "judge": {
+        "model": "anthropic/claude-sonnet-4-5",
+        "temperature": 0,
+        "temperature_policy": "fixed_zero",
+        "max_output_tokens": 4096
+      },
+      "repetitions": 1,
+      "seed_policy": "temperature_zero_provider_no_seed",
+      "publication_eligible": false
+    }
+  },
+  "required_before_publication": [
+    "Enforce and report a model-appropriate retrieved-token budget.",
+    "Pin provider model revisions and record environment metadata.",
+    "Report stage-separated latency, peak RAM, disk footprint, and monetary cost.",
+    "Run repetitions and report variance or confidence intervals.",
+    "Add authorization and instruction-shaped or poisoned-memory lanes.",
+    "Publish all 500 raw question results plus a dated limitations summary."
+  ]
+}
