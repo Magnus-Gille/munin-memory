@@ -40,5 +40,6 @@ describe("canonical quick-start contract", () => {
     expect(guide).toContain("Forward-only migrations");
     expect(guide).toContain("Retain `~/.munin-memory`");
     expect(guide).toContain("<MUNIN_API_KEY>");
+    expect(guide).toContain("Ubuntu 24.04 ARM64");
   });
 });

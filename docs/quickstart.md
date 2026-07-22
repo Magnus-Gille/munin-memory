@@ -106,16 +106,17 @@ through Vitest against a fresh database.
 memory, database size, and checkout/data/config disk footprint. It contains no
 credential values.
 
-Measured 2026-07-22 on macOS with Node 26.5.0, a warm npm package cache, and a
-fresh data/config directory:
+Measured 2026-07-22 on fresh data/config directories. The Linux run used the
+native GitHub-hosted `ubuntu-24.04-arm` image and an empty npm cache:
 
 | Mode | Install | MCP cold start and six-step check | Total | RSS | Database | Checkout + dependencies + data/config |
 |---|---:|---:|---:|---:|---:|---:|
-| lexical-first, profile unset | 4.0 s | 265 ms | 4.29 s | 80.0 MiB | 432 KiB | 502 MiB |
+| macOS ARM64, Node 26.5.0, warm npm cache | 4.0 s | 265 ms | 4.29 s | 80.0 MiB | 432 KiB | 502 MiB |
+| Ubuntu 24.04 ARM64, Node 22.23.1, empty npm cache | 12.0 s | 306 ms | 13 s wall | 89.5 MiB | 432 KiB | 520.4 MiB |
 
-These numbers are evidence for that machine, not a universal promise. CI runs
-isolated Linux x64 and native ARM64 smoke lanes. Appliance RAM evidence for `zero-appliance`,
-`zero-plus`, and `full-node` remains in
+These numbers are evidence for those runners, not a universal promise. CI runs
+isolated Linux x64 and native ARM64 smoke lanes. Appliance RAM evidence for
+`zero-appliance`, `zero-plus`, and `full-node` remains in
 [`appliance-profiles.md`](appliance-profiles.md); the quick start defaults to
 lexical mode specifically so model download time and semantic working-set size
 cannot prevent first success.
