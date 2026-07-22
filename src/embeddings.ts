@@ -414,9 +414,10 @@ async function processBatch(): Promise<void> {
         `UPDATE entries SET embedding_status = 'processing'
          WHERE id IN (
            SELECT id FROM entries
-           WHERE embedding_status IN ('pending', 'failed')
+           WHERE is_current = 1
+             AND (embedding_status IN ('pending', 'failed')
               OR (embedding_status = 'generated'
-                  AND (embedding_model IS NULL OR embedding_model != ?))
+                  AND (embedding_model IS NULL OR embedding_model != ?)))
            ORDER BY created_at ASC
            LIMIT ?
          )
@@ -443,7 +444,7 @@ async function processBatch(): Promise<void> {
       // Guarded by updated_at to prevent stale embeddings
       const txn = db.transaction(() => {
         const current = db
-          .prepare("SELECT updated_at FROM entries WHERE id = ?")
+          .prepare("SELECT updated_at FROM entries WHERE id = ? AND is_current = 1")
           .get(row.id) as { updated_at: string } | undefined;
 
         if (!current || current.updated_at !== row.updated_at) {

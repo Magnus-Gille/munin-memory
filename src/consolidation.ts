@@ -486,11 +486,11 @@ function readExistingStateEntries(
   namespace: string,
 ): { existingStatus: { content: string; tags: string } | undefined; existingSynthesis: { content: string; tags: string } | undefined } {
   const existingStatus = db
-    .prepare("SELECT content, tags FROM entries WHERE namespace = ? AND key = 'status' AND entry_type = 'state'")
+    .prepare("SELECT content, tags FROM entries WHERE namespace = ? AND key = 'status' AND entry_type = 'state' AND is_current = 1")
     .get(namespace) as { content: string; tags: string } | undefined;
 
   const existingSynthesis = db
-    .prepare("SELECT content, tags FROM entries WHERE namespace = ? AND key = 'synthesis' AND entry_type = 'state'")
+    .prepare("SELECT content, tags FROM entries WHERE namespace = ? AND key = 'synthesis' AND entry_type = 'state' AND is_current = 1")
     .get(namespace) as { content: string; tags: string } | undefined;
 
   return { existingStatus, existingSynthesis };
@@ -779,7 +779,8 @@ export function loadTargetVocabulary(
           OR namespace GLOB 'clients/*'
           OR namespace GLOB 'people/*'
           OR namespace GLOB 'decisions/*')
-         AND namespace != ?`,
+         AND namespace != ?
+         AND is_current = 1`,
     )
     .all(sourceNamespace) as Array<{ namespace: string }>;
 
@@ -835,7 +836,7 @@ export function isOrphaned(
   const rows = db
     .prepare(
       `SELECT content FROM entries
-       WHERE namespace = ? AND entry_type = 'state' AND key IN ('status', 'synthesis')`,
+       WHERE namespace = ? AND entry_type = 'state' AND is_current = 1 AND key IN ('status', 'synthesis')`,
     )
     .all(targetNamespace) as Array<{ content: string }>;
 

@@ -29,7 +29,10 @@ import {
   type AuditHistoryEntry,
   readState,
   getById,
+  getSupersessionLineage,
   appendLog,
+  supersedeState,
+  supersedeLog,
   queryEntriesLexicalScored,
   filterIdsMatchingFts,
   queryEntriesSemanticScored,
@@ -92,6 +95,7 @@ import {
   filterSourcesByClassification,
   getLibrarianConfigWarnings,
   classificationAllowed,
+  compareClassificationLevels,
   isClassificationLevel,
   isLibrarianEnabled,
   isRedactionLogEnabled,
@@ -265,6 +269,7 @@ function serializeParsedEntry(entry: ReturnType<typeof parseEntry>) {
     created_at: entry.created_at,
     updated_at: entry.updated_at,
     updated_at_local: toLocalDisplay(entry.updated_at),
+    valid_from: entry.valid_from,
     valid_until: entry.valid_until ?? undefined,
     classification: entry.classification,
     provenance: buildProvenance(entry.agent_id, entry.owner_principal_id),
@@ -538,6 +543,28 @@ function serializeEntry(
     return { response: policy.redactedResponse, redacted: true, untrusted: policy.untrusted };
   }
   const response: Record<string, unknown> = serializeParsedEntry(entry);
+  const lineage = getSupersessionLineage(db, entry.id);
+  if (lineage.supersedes) {
+    const predecessor = getById(db, lineage.supersedes);
+    if (
+      predecessor &&
+      canRead(ctx, predecessor.namespace) &&
+      classificationAllowed(predecessor.classification, getContextMaxClassification(ctx))
+    ) {
+      response.supersedes = lineage.supersedes;
+    }
+  }
+  if (lineage.superseded_by) {
+    response.superseded = true;
+    const successor = getById(db, lineage.superseded_by);
+    if (
+      successor &&
+      canRead(ctx, successor.namespace) &&
+      classificationAllowed(successor.classification, getContextMaxClassification(ctx))
+    ) {
+      response.superseded_by = lineage.superseded_by;
+    }
+  }
   applyUntrustedEnvelope(response, entry.content, entry.tags, policy.untrusted);
   return { response, redacted: false, untrusted: policy.untrusted };
 }
@@ -754,6 +781,7 @@ function formatQueryResult(
     created_at: entry.created_at,
     updated_at: entry.updated_at,
     updated_at_local: toLocalDisplay(entry.updated_at),
+    valid_from: entry.valid_from,
     valid_until: entry.valid_until ?? undefined,
     classification: entry.classification,
     provenance: buildProvenance(entry.agent_id, entry.owner_principal_id),
@@ -1151,6 +1179,7 @@ const VALID_AUDIT_ACTIONS: Array<AuditAction | "delete_namespace" | "log"> = [
   "write",
   "update",
   "patch",
+  "supersede",
   "delete",
   "namespace_delete",
   "log_append",
@@ -3762,7 +3791,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_write",
     description:
-      "Store or update a state entry in memory. If an entry with the same namespace+key exists, it will be overwritten. Use this for mutable facts and non-tracked state. For `status` entries under `projects/*` or `clients/*`, prefer `memory_update_status`. Optional `valid_until` adds soft expiry for temporary state; direct reads still work after expiry, but broad search hides expired state by default.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.\n\nNamespace conventions: projects/<name> for project state, people/<name> for context about people, decisions/<topic> for cross-cutting decisions, meta/<topic> for system notes.\n\nKey conventions: 'status' = compact resumption summary (Phase / Current work / Blockers / Next — keep brief, move details to other keys like 'architecture', 'workflow', 'research'). 'index' = directory of important keys in this namespace and their purpose.\n\nTag vocabulary: Use canonical lifecycle tags on status entries: active, blocked, completed, stopped, maintenance, archived. Aliases are auto-normalized (done→completed, paused→stopped, inactive→archived). Category tags: decision, architecture, preference, milestone, convention. Type tags: bug, feature, research. Prefixed tags for cross-referencing: client:<name>, person:<name>, topic:<topic>, type:<artifact> (pdf, presentation, meeting-notes), source:external/internal.\n\nThe project dashboard is computed automatically from status entries with lifecycle tags. No manual workbench maintenance needed. Compare-and-swap via expected_updated_at is OPTIONAL and supported for any state write (all namespaces), not only 'status' in projects/* or clients/*; omit it for a plain write — only pass it when you want the write to fail if the entry changed since your last read. For an atomic first write, pass create_if_absent:true instead: exactly one competing writer creates the entry, and losers receive error:'conflict', conflict_reason:'already_exists', and current_updated_at. Do not combine create_if_absent:true with expected_updated_at or patch.\n\nTo start a new project: (1) write projects/<name>/status with a lifecycle tag (e.g. 'active'), (2) optionally write projects/<name>/index listing the keys.",
+      "Store or update a state entry in memory. If an entry with the same namespace+key exists, it will be overwritten. Use this for mutable facts and non-tracked state. For `status` entries under `projects/*` or `clients/*`, prefer `memory_update_status`. Optional `valid_until` adds soft expiry for temporary state; direct reads still work after expiry, but broad search hides expired state by default. To preserve a wrong or outdated value as historical evidence, pass its UUID in `supersedes` together with its exact `expected_updated_at`; Munin creates a new revision and normal retrieval hides the predecessor.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.\n\nNamespace conventions: projects/<name> for project state, people/<name> for context about people, decisions/<topic> for cross-cutting decisions, meta/<topic> for system notes.\n\nKey conventions: 'status' = compact resumption summary (Phase / Current work / Blockers / Next — keep brief, move details to other keys like 'architecture', 'workflow', 'research'). 'index' = directory of important keys in this namespace and their purpose.\n\nTag vocabulary: Use canonical lifecycle tags on status entries: active, blocked, completed, stopped, maintenance, archived. Aliases are auto-normalized (done→completed, paused→stopped, inactive→archived). Category tags: decision, architecture, preference, milestone, convention. Type tags: bug, feature, research. Prefixed tags for cross-referencing: client:<name>, person:<name>, topic:<topic>, type:<artifact> (pdf, presentation, meeting-notes), source:external/internal.\n\nThe project dashboard is computed automatically from status entries with lifecycle tags. No manual workbench maintenance needed. Compare-and-swap via expected_updated_at is OPTIONAL and supported for any state write (all namespaces), not only 'status' in projects/* or clients/*; omit it for a plain write — only pass it when you want the write to fail if the entry changed since your last read. For an atomic first write, pass create_if_absent:true instead: exactly one competing writer creates the key, while losers receive error:'conflict', conflict_reason:'already_exists', and current_updated_at. Do not combine create_if_absent:true with expected_updated_at or patch.\n\nTo start a new project: (1) write projects/<name>/status with a lifecycle tag (e.g. 'active'), (2) optionally write projects/<name>/index listing the keys.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -3807,6 +3836,16 @@ const TOOL_DEFINITIONS = [
           type: "string",
           description:
             "Optional compare-and-swap guard for any state write (all namespaces, not only tracked projects/*/clients/* statuses): pass the updated_at from your last read to prevent blind overwrites. Returns a conflict error if the entry was modified since. OPTIONAL — omit it entirely for an unconditional write; it is never required to create a new entry.",
+        },
+        supersedes: {
+          type: "string",
+          description:
+            "Optional entry UUID to correct. Creates a new revision and preserves the target as historical evidence. Requires expected_updated_at and content; mutually exclusive with patch and create_if_absent.",
+        },
+        valid_from: {
+          type: "string",
+          description:
+            "Optional ISO 8601 time at which a correction becomes valid. Only accepted with supersedes; future timestamps are rejected.",
         },
         create_if_absent: {
           type: "boolean",
@@ -3889,7 +3928,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_read",
     description:
-      "Retrieve a specific state entry by namespace and key. Use this when you already know both — it only reads state entries (not logs). If instead you have an entry UUID from `memory_query` results, use `memory_get` (which also works for log entries). Returns the full content, tags, and timestamps. Returns a clear 'not found' message if the entry doesn't exist (not an error). Note: results carry a system-injected `classification:internal` (or higher) tag marking the entry's classification floor — it is set by the server, not by you.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
+      "Retrieve a specific state entry by namespace and key. By default this returns the current revision; pass `as_of` to select the authorized revision valid at a past instant. If instead you have an entry UUID from `memory_query` results, use `memory_get` (which also works for log entries and historical revisions). Returns the full content, tags, and timestamps. Returns a clear 'not found' message if the entry doesn't exist (not an error). Note: results carry a system-injected `classification:internal` (or higher) tag marking the entry's classification floor — it is set by the server, not by you.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -3900,6 +3939,11 @@ const TOOL_DEFINITIONS = [
         key: {
           type: "string",
           description: "The key of the state entry to read",
+        },
+        as_of: {
+          type: "string",
+          description:
+            "Optional ISO 8601 timestamp. Returns the state revision that was valid at that instant. Future timestamps are rejected.",
         },
       },
       required: ["namespace", "key"],
@@ -3931,7 +3975,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_get",
     description:
-      "Retrieve the full content of a single memory entry by its UUID. Use this after `memory_query` returns truncated previews and you have an entry ID. If you already know namespace+key, use `memory_read` instead. Works for both state and log entries.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
+      "Retrieve the full content of a single memory entry by its UUID, including an authorized correction link when present. Use this after `memory_query` returns truncated previews or to inspect a historical superseded UUID. If you already know namespace+key and want current or as-of state, use `memory_read` instead. Works for both state and log entries.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -3989,7 +4033,7 @@ const TOOL_DEFINITIONS = [
         include_expired: {
           type: "boolean",
           description:
-            "Optional. If true, include expired state entries in query results and mark them as expired. Default: false.",
+            "Optional. If true, include expired current state entries and mark them as expired. Superseded revisions remain hidden. Default: false.",
         },
         explain: {
           type: "boolean",
@@ -4070,7 +4114,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_log",
     description:
-      "Append a chronological log entry. Log entries are immutable and timestamped. Use for decisions, events, and milestones with rationale. Status changes do NOT auto-log — log explicitly when decisions are made. Pair with memory_write: state entries hold current truth, log entries hold the history of how you got there.\n\nTag vocabulary: Use canonical tags — decision, milestone, blocker, discovery, correction. Add at most one freeform tag when it clearly improves retrieval.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
+      "Append a chronological log entry. Log entries are immutable and timestamped. Use for decisions, events, and milestones with rationale. To correct a log without editing it, pass its UUID in `supersedes` with its exact `expected_updated_at`; Munin appends a successor and hides the predecessor from normal retrieval while preserving direct historical access. Status changes do NOT auto-log — log explicitly when decisions are made. Pair with memory_write: state entries hold current truth, log entries hold the history of how you got there.\n\nTag vocabulary: Use canonical tags — decision, milestone, blocker, discovery, correction. Add at most one freeform tag when it clearly improves retrieval.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -4097,6 +4141,20 @@ const TOOL_DEFINITIONS = [
         classification_override: {
           type: "boolean",
           description: "Optional owner-only escape hatch for writes below the namespace floor.",
+        },
+        supersedes: {
+          type: "string",
+          description:
+            "Optional log-entry UUID to correct. Appends a new immutable log and links it to the historical target. Requires expected_updated_at.",
+        },
+        expected_updated_at: {
+          type: "string",
+          description: "Required CAS timestamp when supersedes is supplied.",
+        },
+        valid_from: {
+          type: "string",
+          description:
+            "Optional ISO 8601 time at which a correction becomes valid. Only accepted with supersedes; future timestamps are rejected.",
         },
       },
       required: ["namespace", "content"],
@@ -4141,7 +4199,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_history",
     description:
-      "View the chronological audit trail of changes to memory. Returns a timeline of writes, updates, deletes, namespace deletes, and log appends. Use this to answer 'what changed recently?' or 'what happened in this namespace?' — unlike memory_query (which is relevance-based search), this is a change feed ordered by time.\n\nCursor semantics (read carefully): a call WITHOUT `cursor` returns the most recent changes first (newest→oldest); its `next_cursor` is the audit id of the OLDEST row in that page. A call WITH `cursor` switches to ascending sync mode: it returns rows with `id > cursor` in ascending (oldest→newest) order, and `next_cursor` then advances to the NEWEST id seen. For forward polling of new mutations, do an initial cursorless call, then keep passing the latest `next_cursor` you have observed.",
+      "View the chronological audit trail of changes to memory. Returns a timeline of writes, updates, corrections, deletes, namespace deletes, and log appends. Use this to answer 'what changed recently?' or 'what happened in this namespace?' — unlike memory_query (which is relevance-based search), this is a change feed ordered by time.\n\nCursor semantics (read carefully): a call WITHOUT `cursor` returns the most recent changes first (newest→oldest); its `next_cursor` is the audit id of the OLDEST row in that page. A call WITH `cursor` switches to ascending sync mode: it returns rows with `id > cursor` in ascending (oldest→newest) order, and `next_cursor` then advances to the NEWEST id seen. For forward polling of new mutations, do an initial cursorless call, then keep passing the latest `next_cursor` you have observed.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -4157,7 +4215,7 @@ const TOOL_DEFINITIONS = [
         },
         action: {
           type: "string",
-          enum: ["write", "update", "delete", "delete_namespace", "log", "cross_zone_block"],
+          enum: ["write", "update", "supersede", "delete", "delete_namespace", "log", "cross_zone_block"],
           description: "Optional. Filter by action type. 'cross_zone_block' surfaces containment-guard security events.",
         },
         cursor: {
@@ -4351,6 +4409,107 @@ function accessDeniedErrorResponse(
 ) {
   recordAccessDenied(db, ctx.principalId, `memory_${action}`);
   return errResult(action, "access_denied", message);
+}
+
+interface StateCorrectionPreparation {
+  target: Entry | null;
+  validFrom?: string;
+  response?: ReturnType<typeof errResult>;
+}
+
+function prepareStateCorrection(
+  db: Database.Database,
+  ctx: AccessContext,
+  input: {
+    namespace: string;
+    key: string;
+    supersedes?: string;
+    expectedUpdatedAt?: string;
+    validFrom?: string;
+    hasPatch: boolean;
+    createIfAbsent: boolean;
+    classification?: ClassificationLevel;
+  },
+): StateCorrectionPreparation {
+  const { namespace, key, supersedes, expectedUpdatedAt, validFrom } = input;
+  if (supersedes === undefined) {
+    if (validFrom !== undefined) {
+      return {
+        target: null,
+        response: errResult("write", "validation_error", "valid_from is only supported when supersedes is provided."),
+      };
+    }
+    return { target: null };
+  }
+  if (input.hasPatch || input.createIfAbsent) {
+    return {
+      target: null,
+      response: errResult("write", "validation_error", "supersedes is mutually exclusive with patch and create_if_absent."),
+    };
+  }
+  if (typeof supersedes !== "string" || supersedes.length === 0) {
+    return {
+      target: null,
+      response: errResult("write", "validation_error", "supersedes must be a non-empty entry UUID."),
+    };
+  }
+  if (typeof expectedUpdatedAt !== "string") {
+    return {
+      target: null,
+      response: errResult("write", "validation_error", "expected_updated_at is required when supersedes is provided."),
+    };
+  }
+  if (!canRead(ctx, namespace)) {
+    return { target: null, response: accessDeniedResponse(db, ctx, "write") };
+  }
+  if (validFrom !== undefined && ctx.principalType !== "owner") {
+    return {
+      target: null,
+      response: accessDeniedErrorResponse(db, ctx, "write", "Explicit correction backdating is only available to the owner principal."),
+    };
+  }
+
+  const target = getById(db, supersedes);
+  if (
+    !target ||
+    target.entry_type !== "state" ||
+    target.namespace !== namespace ||
+    target.key !== key
+  ) {
+    return {
+      target: null,
+      response: errResult("write", "not_found", "No readable current entry matched the correction target.", { namespace, key }),
+    };
+  }
+  if (
+    (ctx.principalType !== "owner" &&
+      (target.owner_principal_id ?? target.agent_id) !== ctx.principalId) ||
+    !classificationAllowed(target.classification, getContextMaxClassification(ctx))
+  ) {
+    return { target: null, response: accessDeniedResponse(db, ctx, "write") };
+  }
+  if (
+    input.classification !== undefined &&
+    compareClassificationLevels(input.classification, target.classification) < 0
+  ) {
+    return {
+      target: null,
+      response: errResult("write", "classification_error", "A correction cannot lower the classification of the entry it supersedes.", { namespace, key }),
+    };
+  }
+  if (validFrom === undefined) return { target };
+
+  const timestampCheck = normalizeIsoTimestamp(validFrom, "valid_from");
+  if (!timestampCheck.ok) {
+    return { target: null, response: errResult("write", "validation_error", timestampCheck.error) };
+  }
+  if (timestampCheck.value > nowUTC()) {
+    return {
+      target: null,
+      response: errResult("write", "validation_error", "valid_from cannot be in the future."),
+    };
+  }
+  return { target, validFrom: timestampCheck.value };
 }
 
 export function getMaxContentSize(): number {
@@ -6004,6 +6163,8 @@ export function registerTools(
                 valid_until,
                 expected_updated_at,
                 create_if_absent,
+                supersedes,
+                valid_from,
                 patch,
                 classification,
                 classification_override,
@@ -6047,6 +6208,17 @@ export function registerTools(
               if (!canWrite(ctx, namespace)) {
                 return accessDeniedResponse(db, ctx, "write");
               }
+              const correction = prepareStateCorrection(db, ctx, {
+                namespace,
+                key,
+                supersedes,
+                expectedUpdatedAt: expected_updated_at,
+                validFrom: valid_from,
+                hasPatch: patch !== undefined,
+                createIfAbsent: create_if_absent === true,
+                classification,
+              });
+              if (correction.response) return correction.response;
 
               // --- Patch path ---
               if (patch !== undefined) {
@@ -6173,6 +6345,8 @@ export function registerTools(
                 normalizedValidUntil = timestampCheck.value;
               }
 
+              const correctionTarget = correction.target;
+
               const isTrackedStatus = key === "status" && isTrackedNamespace(namespace, resolveTrackedPatterns(db, ctx));
 
               // #167: memory_write is a documented migration path for tracked
@@ -6198,7 +6372,7 @@ export function registerTools(
 
               // Strip server-reserved tags (e.g. source:synthesis) from client input
               // so machine-provenance markers can't be spoofed onto owner content.
-              let effectiveTags = tags ?? [];
+              let effectiveTags = tags ?? (correctionTarget ? parseTags(correctionTarget.tags) : []);
               {
                 const { kept, removed } = stripReservedTags(effectiveTags);
                 if (removed.length > 0) {
@@ -6240,21 +6414,38 @@ export function registerTools(
 
               let result;
               try {
-                result = writeState(
-                  db,
-                  namespace,
-                  key,
-                  content,
-                  effectiveTags,
-                  ctx.principalId,
-                  expected_updated_at,
-                  normalizedValidUntil,
-                  {
-                    classification,
-                    classificationOverride: classification_override,
-                    createIfAbsent: create_if_absent === true,
-                  },
-                );
+                result = supersedes
+                  ? supersedeState(
+                      db,
+                      namespace,
+                      key,
+                      supersedes,
+                      content,
+                      effectiveTags,
+                      ctx.principalId,
+                      expected_updated_at!,
+                      correction.validFrom ?? nowUTC(),
+                      valid_until === undefined ? undefined : normalizedValidUntil,
+                      {
+                        classification,
+                        classificationOverride: classification_override,
+                      },
+                    )
+                  : writeState(
+                      db,
+                      namespace,
+                      key,
+                      content,
+                      effectiveTags,
+                      ctx.principalId,
+                      expected_updated_at,
+                      normalizedValidUntil,
+                      {
+                        classification,
+                        classificationOverride: classification_override,
+                        createIfAbsent: create_if_absent === true,
+                      },
+                    );
               } catch (error) {
                 return errResult("write", "validation_error", (error as Error).message);
               }
@@ -6267,6 +6458,12 @@ export function registerTools(
                   conflict_reason: result.conflict_reason,
                 });
               }
+              if (result.status === "not_found") {
+                return errResult("write", "not_found", result.message, { namespace, key });
+              }
+              if (!("id" in result) || !result.id || !("updated_at" in result) || !result.updated_at) {
+                return errResult("write", "internal_error", "Correction write completed without a revision identifier.");
+              }
 
               const hint = buildWriteHint(db, ctx, namespace, key);
 
@@ -6277,6 +6474,8 @@ export function registerTools(
                 key,
                 updated_at: result.updated_at,
                 classification: result.classification,
+                valid_from: result.status === "superseded" ? result.valid_from : undefined,
+                supersedes: result.status === "superseded" ? result.supersedes : undefined,
                 hint,
                 provenance: buildProvenance(ctx.principalId, ctx.principalId),
               };
@@ -6592,7 +6791,7 @@ export function registerTools(
 
           case "memory_read": {
             const handleMemoryRead = async () => {
-              const { namespace, key } = args as unknown as ReadParams;
+              const { namespace, key, as_of } = args as unknown as ReadParams;
               const nsCheck = validateNamespace(namespace);
               if (!nsCheck.valid) {
                 return errResult("read", "validation_error", nsCheck.error!);
@@ -6604,7 +6803,18 @@ export function registerTools(
               if (!canRead(ctx, namespace)) {
                 return accessDeniedReadResponse(db, ctx, "read");
               }
-              const entry = readState(db, namespace, key);
+              let normalizedAsOf: string | undefined;
+              if (as_of !== undefined) {
+                const timestampCheck = normalizeIsoTimestamp(as_of, "as_of");
+                if (!timestampCheck.ok) {
+                  return errResult("read", "validation_error", timestampCheck.error);
+                }
+                if (timestampCheck.value > nowUTC()) {
+                  return errResult("read", "validation_error", "as_of cannot be in the future.");
+                }
+                normalizedAsOf = timestampCheck.value;
+              }
+              const entry = readState(db, namespace, key, normalizedAsOf);
               if (entry) {
                 const parsed = parseEntry(entry);
                 // Unified read gate (#154): classification redaction + untrusted
@@ -7273,7 +7483,16 @@ export function registerTools(
 
           case "memory_log": {
             const handleMemoryLog = async () => {
-              const { namespace, content, tags, classification, classification_override } = args as unknown as LogParams;
+              const {
+                namespace,
+                content,
+                tags,
+                classification,
+                classification_override,
+                supersedes,
+                expected_updated_at,
+                valid_from,
+              } = args as unknown as LogParams;
               const validation = validateLogInput(namespace, content, tags, maxContentSize);
               if (!validation.valid) {
                 return errResult("log", "validation_error", validation.error!);
@@ -7288,8 +7507,60 @@ export function registerTools(
               if (!canWrite(ctx, namespace)) {
                 return accessDeniedResponse(db, ctx, "log");
               }
+              if (supersedes !== undefined && (typeof supersedes !== "string" || supersedes.length === 0)) {
+                return errResult("log", "validation_error", "supersedes must be a non-empty entry UUID.");
+              }
+              if (supersedes !== undefined && typeof expected_updated_at !== "string") {
+                return errResult("log", "validation_error", "expected_updated_at is required when supersedes is provided.");
+              }
+              if (valid_from !== undefined && supersedes === undefined) {
+                return errResult("log", "validation_error", "valid_from is only supported when supersedes is provided.");
+              }
+              if (valid_from !== undefined && ctx.principalType !== "owner") {
+                return accessDeniedErrorResponse(db, ctx, "log", "Explicit correction backdating is only available to the owner principal.");
+              }
+              if (supersedes !== undefined && !canRead(ctx, namespace)) {
+                return accessDeniedResponse(db, ctx, "log");
+              }
+              const correctionTarget = supersedes ? getById(db, supersedes) : null;
+              if (supersedes) {
+                if (
+                  !correctionTarget ||
+                  correctionTarget.entry_type !== "log" ||
+                  correctionTarget.namespace !== namespace
+                ) {
+                  return errResult("log", "not_found", "No readable log entry matched the correction target.", { namespace });
+                }
+                if (
+                  (ctx.principalType !== "owner" &&
+                    (correctionTarget.owner_principal_id ?? correctionTarget.agent_id) !== ctx.principalId) ||
+                  !classificationAllowed(correctionTarget.classification, getContextMaxClassification(ctx))
+                ) {
+                  return accessDeniedResponse(db, ctx, "log");
+                }
+                if (
+                  classification !== undefined &&
+                  compareClassificationLevels(classification, correctionTarget.classification) < 0
+                ) {
+                  return errResult("log", "classification_error", "A correction cannot lower the classification of the entry it supersedes.", { namespace });
+                }
+              }
+
+              let normalizedValidFrom: string | undefined;
+              if (valid_from !== undefined) {
+                const timestampCheck = normalizeIsoTimestamp(valid_from, "valid_from");
+                if (!timestampCheck.ok) {
+                  return errResult("log", "validation_error", timestampCheck.error);
+                }
+                if (timestampCheck.value > nowUTC()) {
+                  return errResult("log", "validation_error", "valid_from cannot be in the future.");
+                }
+                normalizedValidFrom = timestampCheck.value;
+              }
               // Strip server-reserved tags (e.g. source:synthesis) from client input.
-              const { kept: logTags, removed: logReservedRemoved } = stripReservedTags(tags ?? []);
+              const { kept: logTags, removed: logReservedRemoved } = stripReservedTags(
+                tags ?? (correctionTarget ? parseTags(correctionTarget.tags) : []),
+              );
               // Pre-flight: reject logs that would create Librarian-orphaned entries
               {
                 const orphanError = preflightWriteClassification(
@@ -7302,12 +7573,40 @@ export function registerTools(
               }
               let result;
               try {
-                result = appendLog(db, namespace, content, logTags, ctx.principalId, {
-                  classification,
-                  classificationOverride: classification_override,
-                });
+                result = supersedes
+                  ? supersedeLog(
+                      db,
+                      namespace,
+                      supersedes,
+                      content,
+                      logTags,
+                      ctx.principalId,
+                      expected_updated_at!,
+                      normalizedValidFrom ?? nowUTC(),
+                      {
+                        classification,
+                        classificationOverride: classification_override,
+                      },
+                    )
+                  : appendLog(db, namespace, content, logTags, ctx.principalId, {
+                      classification,
+                      classificationOverride: classification_override,
+                    });
               } catch (error) {
                 return errResult("log", "validation_error", (error as Error).message);
+              }
+              if ("status" in result && result.status === "conflict") {
+                return errResult("log", "conflict", result.message, {
+                  namespace,
+                  current_updated_at: result.current_updated_at,
+                  conflict_reason: result.conflict_reason,
+                });
+              }
+              if ("status" in result && result.status === "not_found") {
+                return errResult("log", "not_found", result.message, { namespace });
+              }
+              if (!("id" in result) || !result.id || !("classification" in result)) {
+                return errResult("log", "internal_error", "Correction log completed without a revision identifier.");
               }
               const logEntry = getById(db, result.id);
               if (logEntry) {
@@ -7321,12 +7620,14 @@ export function registerTools(
                 });
               }
               const logResponse: Record<string, unknown> = {
-                status: "logged",
+                status: "status" in result ? result.status : "logged",
                 id: result.id,
                 namespace,
-                timestamp: result.timestamp,
-                timestamp_local: toLocalDisplay(result.timestamp),
+                timestamp: "timestamp" in result ? result.timestamp : result.updated_at,
+                timestamp_local: toLocalDisplay("timestamp" in result ? result.timestamp : result.updated_at),
                 classification: result.classification,
+                valid_from: "valid_from" in result ? result.valid_from : undefined,
+                supersedes: "supersedes" in result ? result.supersedes : undefined,
                 provenance: buildProvenance(ctx.principalId, ctx.principalId),
               };
               const logNsWarning = uppercaseNamespaceWarning(namespace);
@@ -7498,9 +7799,14 @@ export function registerTools(
                 if (!consumeDeleteToken(delete_token, namespace, key)) {
                   return errResult("delete", "invalid_token", "Delete token is invalid, expired, or doesn't match the requested namespace/key. Request a new preview first.");
                 }
-                const deletedCount = isLibrarianEnabled()
-                  ? executeDeleteByClassification(db, namespace, getContextMaxClassification(ctx), key, ctx.principalId, allowGlobalNamespaceDelete)
-                  : executeDelete(db, namespace, key, ctx.principalId, allowGlobalNamespaceDelete);
+                let deletedCount: number;
+                try {
+                  deletedCount = isLibrarianEnabled()
+                    ? executeDeleteByClassification(db, namespace, getContextMaxClassification(ctx), key, ctx.principalId, allowGlobalNamespaceDelete)
+                    : executeDelete(db, namespace, key, ctx.principalId, allowGlobalNamespaceDelete);
+                } catch (error) {
+                  return errResult("delete", "conflict", (error as Error).message, { namespace, key });
+                }
                 const target = key ? `entry "${key}" in "${namespace}"` : `all entries in "${namespace}"`;
                 return okResult("delete", {
                   phase: "confirmed",
@@ -7675,7 +7981,7 @@ export function registerTools(
                 return errResult(
                   "history",
                   "validation_error",
-                  `Invalid action "${action}". Must be one of: write, update, patch, delete, delete_namespace, log, cross_zone_block, access_denied. Legacy aliases namespace_delete and log_append are also accepted.`,
+                  `Invalid action "${action}". Must be one of: write, update, patch, supersede, delete, delete_namespace, log, cross_zone_block, access_denied. Legacy aliases namespace_delete and log_append are also accepted.`,
                 );
               }
 

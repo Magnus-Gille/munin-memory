@@ -225,7 +225,7 @@ export function getTrackedStatuses(
     .prepare(
       `SELECT id, namespace, key, substr(content, 1, 300) as content_preview, content, tags, agent_id, owner_principal_id, created_at, updated_at, valid_until, classification
        FROM entries
-       WHERE entry_type = 'state' AND key = 'status'
+       WHERE entry_type = 'state' AND key = 'status' AND is_current = 1
          AND ${clause}
        ORDER BY updated_at DESC, rowid`,
     )
@@ -244,6 +244,23 @@ export interface WriteStateResult {
   current_updated_at?: string;
   conflict_reason?: "already_exists" | "version_mismatch";
 }
+
+export type SupersedeEntryResult =
+  | {
+      status: "superseded";
+      id: string;
+      updated_at: string;
+      valid_from: string;
+      classification: ClassificationLevel;
+      tags: string[];
+      supersedes: string;
+    }
+  | {
+      status: "conflict" | "not_found";
+      message: string;
+      current_updated_at?: string;
+      conflict_reason?: "version_mismatch" | "not_current";
+    };
 
 export interface ClassificationWriteOptions {
   classification?: ClassificationLevel;
@@ -382,7 +399,7 @@ export function writeState(
     // transaction. In WAL mode this serializes competing writers before either
     // can observe absence, so create-if-absent has one unambiguous winner.
     const existing = db.prepare(
-      "SELECT id, content, updated_at, valid_until, classification FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'",
+      "SELECT id, content, updated_at, valid_until, classification FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1",
     ).get(namespace, key) as {
       id: string;
       content: string;
@@ -425,12 +442,13 @@ export function writeState(
     if (existing) {
       const nextValidUntil = validUntil === undefined ? existing.valid_until : validUntil;
       db.prepare(
-        `UPDATE entries SET content = ?, tags = ?, updated_at = ?, valid_until = ?, classification = ?, agent_id = ?,
+        `UPDATE entries SET content = ?, tags = ?, updated_at = ?, valid_from = ?, valid_until = ?, classification = ?, agent_id = ?,
          embedding_status = 'pending', embedding_model = NULL
-         WHERE namespace = ? AND key = ? AND entry_type = 'state'`,
+         WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1`,
       ).run(
         content,
         tagsJson,
+        now,
         now,
         nextValidUntil ?? null,
         resolvedClassification.classification,
@@ -455,8 +473,8 @@ export function writeState(
     } else {
       const id = randomUUID();
       db.prepare(
-        `INSERT INTO entries (id, namespace, key, entry_type, content, tags, agent_id, owner_principal_id, created_at, updated_at, valid_until, classification)
-         VALUES (?, ?, ?, 'state', ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO entries (id, namespace, key, entry_type, content, tags, agent_id, owner_principal_id, created_at, updated_at, valid_from, valid_until, classification)
+         VALUES (?, ?, ?, 'state', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         id,
         namespace,
@@ -465,6 +483,7 @@ export function writeState(
         tagsJson,
         agentId,
         agentId,
+        now,
         now,
         now,
         validUntil ?? null,
@@ -518,7 +537,7 @@ export function patchState(
   }
 
   const existing = db.prepare(
-    "SELECT id, content, tags, updated_at, classification FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'",
+    "SELECT id, content, tags, updated_at, classification FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1",
   ).get(namespace, key) as {
     id: string;
     content: string;
@@ -582,12 +601,13 @@ export function patchState(
 
   const txn = db.transaction(() => {
     db.prepare(
-      `UPDATE entries SET content = ?, tags = ?, updated_at = ?, classification = ?, agent_id = ?,
+      `UPDATE entries SET content = ?, tags = ?, updated_at = ?, valid_from = ?, classification = ?, agent_id = ?,
        embedding_status = 'pending', embedding_model = NULL
-       WHERE namespace = ? AND key = ? AND entry_type = 'state'`,
+       WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1`,
     ).run(
       content,
       tagsJson,
+      now,
       now,
       resolvedClassification.classification,
       agentId,
@@ -614,11 +634,27 @@ export function readState(
   db: Database.Database,
   namespace: string,
   key: string,
+  asOf?: string,
 ): Entry | null {
+  if (asOf) {
+    return (
+      db.prepare(
+        `SELECT e.* FROM entries e
+         WHERE e.namespace = ? AND e.key = ? AND e.entry_type = 'state'
+           AND e.valid_from <= ?
+           AND NOT EXISTS (
+             SELECT 1 FROM entry_supersessions s
+             WHERE s.predecessor_id = e.id AND s.effective_at <= ?
+           )
+         ORDER BY e.valid_from DESC, e.rowid DESC
+         LIMIT 1`,
+      ).get(namespace, key, asOf, asOf) as Entry | undefined
+    ) ?? null;
+  }
   return (
     db
       .prepare(
-        "SELECT * FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'",
+        "SELECT * FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1",
       )
       .get(namespace, key) as Entry | undefined
   ) ?? null;
@@ -628,6 +664,138 @@ export function getById(db: Database.Database, id: string): Entry | null {
   return (
     db.prepare("SELECT * FROM entries WHERE id = ?").get(id) as Entry | undefined
   ) ?? null;
+}
+
+export function getSupersessionLineage(
+  db: Database.Database,
+  id: string,
+): { supersedes: string | null; superseded_by: string | null; effective_at: string | null } {
+  const predecessor = db.prepare(
+    "SELECT predecessor_id, effective_at FROM entry_supersessions WHERE successor_id = ?",
+  ).get(id) as { predecessor_id: string; effective_at: string } | undefined;
+  const successor = db.prepare(
+    "SELECT successor_id, effective_at FROM entry_supersessions WHERE predecessor_id = ?",
+  ).get(id) as { successor_id: string; effective_at: string } | undefined;
+  return {
+    supersedes: predecessor?.predecessor_id ?? null,
+    superseded_by: successor?.successor_id ?? null,
+    effective_at: predecessor?.effective_at ?? successor?.effective_at ?? null,
+  };
+}
+
+function cancelSupersededCommitments(
+  db: Database.Database,
+  predecessorId: string,
+  now: string,
+): void {
+  db.prepare(
+    `UPDATE commitments
+     SET status = 'cancelled', resolved_at = ?, updated_at = ?
+     WHERE source_entry_id = ? AND status = 'open'`,
+  ).run(now, now, predecessorId);
+}
+
+export function supersedeState(
+  db: Database.Database,
+  namespace: string,
+  key: string,
+  predecessorId: string,
+  content: string,
+  tags: string[],
+  agentId: string,
+  expectedUpdatedAt: string,
+  validFrom: string,
+  validUntil: string | null | undefined,
+  classificationOptions?: ClassificationWriteOptions,
+): SupersedeEntryResult {
+  const txn = db.transaction((): SupersedeEntryResult => {
+    const existing = db.prepare(
+      `SELECT * FROM entries
+       WHERE id = ? AND namespace = ? AND key = ? AND entry_type = 'state'`,
+    ).get(predecessorId, namespace, key) as Entry | undefined;
+    if (!existing) {
+      return { status: "not_found", message: "No readable current entry matched the correction target." };
+    }
+    if (existing.is_current !== 1 || db.prepare(
+      "SELECT 1 FROM entry_supersessions WHERE predecessor_id = ?",
+    ).get(predecessorId)) {
+      return {
+        status: "conflict",
+        conflict_reason: "not_current",
+        message: "The correction target is no longer the current revision. Read the current entry before retrying.",
+        current_updated_at: readState(db, namespace, key)?.updated_at,
+      };
+    }
+    if (existing.updated_at !== expectedUpdatedAt) {
+      return {
+        status: "conflict",
+        conflict_reason: "version_mismatch",
+        message: `Entry was updated at ${existing.updated_at}, expected ${expectedUpdatedAt}. Read the current version before retrying.`,
+        current_updated_at: existing.updated_at,
+      };
+    }
+    if (validFrom < existing.valid_from) {
+      throw new Error("valid_from cannot precede the correction target's valid_from timestamp.");
+    }
+    if (validFrom > nowUTC()) {
+      throw new Error("valid_from cannot be in the future.");
+    }
+
+    const resolved = resolveWriteClassification(
+      db,
+      namespace,
+      tags,
+      classificationOptions,
+      existing.classification,
+    );
+    if (compareClassificationLevels(resolved.classification, existing.classification) < 0) {
+      throw new Error("A correction cannot lower the classification of the entry it supersedes.");
+    }
+
+    const now = nowUTC();
+    const id = randomUUID();
+    const nextValidUntil = validUntil === undefined ? existing.valid_until : validUntil;
+    db.prepare("UPDATE entries SET is_current = 0 WHERE id = ? AND is_current = 1").run(predecessorId);
+    if (_vecLoaded) {
+      db.prepare("DELETE FROM entries_vec WHERE entry_id = ?").run(predecessorId);
+    }
+    db.prepare(
+      `INSERT INTO entries
+         (id, namespace, key, entry_type, content, tags, agent_id, owner_principal_id,
+          created_at, updated_at, valid_from, valid_until, classification, is_current)
+       VALUES (?, ?, ?, 'state', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+    ).run(
+      id,
+      namespace,
+      key,
+      content,
+      JSON.stringify(resolved.tags),
+      agentId,
+      existing.owner_principal_id,
+      now,
+      now,
+      validFrom,
+      nextValidUntil ?? null,
+      resolved.classification,
+    );
+    db.prepare(
+      `INSERT INTO entry_supersessions
+         (predecessor_id, successor_id, effective_at, actor_principal_id, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(predecessorId, id, validFrom, agentId, now);
+    cancelSupersededCommitments(db, predecessorId, now);
+    insertAuditRow(db, now, agentId, "supersede", namespace, key, "state correction", id);
+    return {
+      status: "superseded",
+      id,
+      updated_at: now,
+      valid_from: validFrom,
+      classification: resolved.classification,
+      tags: resolved.tags,
+      supersedes: predecessorId,
+    };
+  });
+  return txn.immediate();
 }
 
 // --- Log entry operations ---
@@ -652,8 +820,8 @@ export function appendLog(
 
   const txn = db.transaction(() => {
     db.prepare(
-      `INSERT INTO entries (id, namespace, key, entry_type, content, tags, agent_id, owner_principal_id, created_at, updated_at, classification)
-       VALUES (?, ?, NULL, 'log', ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO entries (id, namespace, key, entry_type, content, tags, agent_id, owner_principal_id, created_at, updated_at, valid_from, classification)
+       VALUES (?, ?, NULL, 'log', ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       id,
       namespace,
@@ -661,6 +829,7 @@ export function appendLog(
       tagsJson,
       agentId,
       agentId,
+      now,
       now,
       now,
       resolvedClassification.classification,
@@ -680,6 +849,102 @@ export function appendLog(
     classification: resolvedClassification.classification,
     tags: resolvedClassification.tags,
   };
+}
+
+export function supersedeLog(
+  db: Database.Database,
+  namespace: string,
+  predecessorId: string,
+  content: string,
+  tags: string[],
+  agentId: string,
+  expectedUpdatedAt: string,
+  validFrom: string,
+  classificationOptions?: ClassificationWriteOptions,
+): SupersedeEntryResult {
+  const txn = db.transaction((): SupersedeEntryResult => {
+    const existing = db.prepare(
+      "SELECT * FROM entries WHERE id = ? AND namespace = ? AND entry_type = 'log'",
+    ).get(predecessorId, namespace) as Entry | undefined;
+    if (!existing) {
+      return { status: "not_found", message: "No readable log entry matched the correction target." };
+    }
+    if (
+      existing.is_current !== 1 ||
+      db.prepare("SELECT 1 FROM entry_supersessions WHERE predecessor_id = ?").get(predecessorId)
+    ) {
+      return {
+        status: "conflict",
+        conflict_reason: "not_current",
+        message: "The correction target already has a successor. Correct the current leaf instead.",
+      };
+    }
+    if (existing.updated_at !== expectedUpdatedAt) {
+      return {
+        status: "conflict",
+        conflict_reason: "version_mismatch",
+        message: `Entry was updated at ${existing.updated_at}, expected ${expectedUpdatedAt}.`,
+        current_updated_at: existing.updated_at,
+      };
+    }
+    if (validFrom < existing.valid_from) {
+      throw new Error("valid_from cannot precede the correction target's valid_from timestamp.");
+    }
+    if (validFrom > nowUTC()) {
+      throw new Error("valid_from cannot be in the future.");
+    }
+    const resolved = resolveWriteClassification(
+      db,
+      namespace,
+      tags,
+      classificationOptions,
+      existing.classification,
+    );
+    if (compareClassificationLevels(resolved.classification, existing.classification) < 0) {
+      throw new Error("A correction cannot lower the classification of the entry it supersedes.");
+    }
+
+    const now = nowUTC();
+    const id = randomUUID();
+    db.prepare("UPDATE entries SET is_current = 0 WHERE id = ? AND is_current = 1").run(predecessorId);
+    if (_vecLoaded) {
+      db.prepare("DELETE FROM entries_vec WHERE entry_id = ?").run(predecessorId);
+    }
+    db.prepare(
+      `INSERT INTO entries
+         (id, namespace, key, entry_type, content, tags, agent_id, owner_principal_id,
+          created_at, updated_at, valid_from, classification)
+       VALUES (?, ?, NULL, 'log', ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      id,
+      namespace,
+      content,
+      JSON.stringify(resolved.tags),
+      agentId,
+      existing.owner_principal_id,
+      now,
+      now,
+      validFrom,
+      resolved.classification,
+    );
+    db.prepare(
+      `INSERT INTO entry_supersessions
+         (predecessor_id, successor_id, effective_at, actor_principal_id, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(predecessorId, id, validFrom, agentId, now);
+    cancelSupersededCommitments(db, predecessorId, now);
+    insertAuditRow(db, now, agentId, "supersede", namespace, null, "log correction", id);
+    return {
+      status: "superseded",
+      id,
+      updated_at: now,
+      valid_from: validFrom,
+      classification: resolved.classification,
+      tags: resolved.tags,
+      supersedes: predecessorId,
+    };
+  });
+  return txn.immediate();
 }
 
 // --- Query / search operations ---
@@ -772,7 +1037,7 @@ export function queryEntriesLexicalScored(
   let sql = `
     SELECT e.*, bm25(entries_fts) as lexical_score FROM entries e
     JOIN entries_fts fts ON e.rowid = fts.rowid
-    WHERE entries_fts MATCH ?
+    WHERE entries_fts MATCH ? AND e.is_current = 1
   `;
   const params: unknown[] = [rawFts5 ? query : escapeFtsQuery(query)];
 
@@ -855,7 +1120,7 @@ export function filterIdsMatchingFts(
   const sql = `
     SELECT e.id FROM entries e
     JOIN entries_fts fts ON e.rowid = fts.rowid
-    WHERE entries_fts MATCH ? AND e.id IN (${placeholders})
+    WHERE entries_fts MATCH ? AND e.is_current = 1 AND e.id IN (${placeholders})
   `;
   let rows: Array<{ id: string }>;
   try {
@@ -890,7 +1155,7 @@ export function queryEntriesByFilter(
   const clampedLimit = Math.min(Math.max(limit, 1), 50);
   const now = nowUTC();
 
-  let sql = "SELECT * FROM entries WHERE 1=1";
+  let sql = "SELECT * FROM entries WHERE is_current = 1";
   const params: unknown[] = [];
 
   if (namespace) {
@@ -959,6 +1224,7 @@ export function listNamespaces(db: Database.Database): NamespaceCount[] {
               SUM(CASE WHEN entry_type = 'log' THEN 1 ELSE 0 END) as log_count,
               MAX(updated_at) as last_activity_at
        FROM entries
+       WHERE is_current = 1
        GROUP BY namespace
        ORDER BY namespace`,
     )
@@ -979,7 +1245,7 @@ export function listNamespacesByClassification(
               SUM(CASE WHEN entry_type = 'log' THEN 1 ELSE 0 END) as log_count,
               MAX(updated_at) as last_activity_at
        FROM entries
-       WHERE classification IN (${placeholders})
+       WHERE is_current = 1 AND classification IN (${placeholders})
        GROUP BY namespace
        ORDER BY namespace`,
     )
@@ -1045,6 +1311,7 @@ export function summarizeNamespaceLogsByClassification(
          FROM entries
          WHERE namespace = ?
            AND entry_type = 'log'
+           AND is_current = 1
            AND classification IN (${placeholders})`,
       )
       .get(namespace, ...visibleLevels) as Omit<LogSummary, "recent">
@@ -1058,21 +1325,21 @@ export function listNamespaceContents(
   const stateEntries = db
     .prepare(
       `SELECT id, key, substr(content, 1, 100) as preview, tags, agent_id, owner_principal_id, updated_at, classification
-       FROM entries WHERE namespace = ? AND entry_type = 'state' ORDER BY key`,
+       FROM entries WHERE namespace = ? AND entry_type = 'state' AND is_current = 1 ORDER BY key`,
     )
     .all(namespace) as StateEntryPreview[];
 
   const logStats = (db
     .prepare(
       `SELECT COUNT(*) as log_count, MIN(created_at) as earliest, MAX(created_at) as latest
-       FROM entries WHERE namespace = ? AND entry_type = 'log'`,
+       FROM entries WHERE namespace = ? AND entry_type = 'log' AND is_current = 1`,
     )
     .get(namespace) as { log_count: number; earliest: string | null; latest: string | null }) ?? { log_count: 0, earliest: null, latest: null };
 
   const recentLogs = db
     .prepare(
       `SELECT id, substr(content, 1, 200) as content_preview, tags, agent_id, owner_principal_id, created_at, classification
-       FROM entries WHERE namespace = ? AND entry_type = 'log'
+       FROM entries WHERE namespace = ? AND entry_type = 'log' AND is_current = 1
        ORDER BY rowid DESC LIMIT 5`,
     )
     .all(namespace) as LogPreview[];
@@ -1095,7 +1362,7 @@ export function listEntriesForDerivation(
   options: DerivationEntryOptions = {},
 ): Entry[] {
   const { namespace, since } = options;
-  let sql = "SELECT * FROM entries WHERE 1=1";
+  let sql = "SELECT * FROM entries WHERE is_current = 1";
   const params: unknown[] = [];
 
   if (namespace) {
@@ -1359,7 +1626,7 @@ export function listCommitments(
            COALESCE(c.source_classification, e.classification, '${FALLBACK_RESTRICTED_CLASSIFICATION}') AS source_classification
     FROM commitments c
     JOIN entries e ON e.id = c.source_entry_id
-    WHERE 1=1
+    WHERE e.is_current = 1
   `;
   const params: unknown[] = [];
 
@@ -1595,6 +1862,25 @@ function buildOwnerClause(allowGlobal: boolean, agentId: string): { clause: stri
   return { clause: " AND COALESCE(owner_principal_id, agent_id) = ?", params: [agentId] };
 }
 
+function deleteLineageForSelection(
+  db: Database.Database,
+  selectionSql: string,
+  params: unknown[],
+): void {
+  const partial = db.prepare(
+    `SELECT 1 FROM entry_supersessions
+     WHERE (predecessor_id IN (${selectionSql})) != (successor_id IN (${selectionSql}))
+     LIMIT 1`,
+  ).get(...params, ...params);
+  if (partial) {
+    throw new Error("Deletion would remove only part of a correction chain; no entries were deleted.");
+  }
+  db.prepare(
+    `DELETE FROM entry_supersessions
+     WHERE predecessor_id IN (${selectionSql}) OR successor_id IN (${selectionSql})`,
+  ).run(...params, ...params);
+}
+
 function deleteKeyClassified(
   db: Database.Database,
   now: string,
@@ -1608,12 +1894,16 @@ function deleteKeyClassified(
   const owner = buildOwnerClause(allowGlobal, agentId);
   const stateCond = `namespace = ? AND key = ? AND entry_type = 'state'${owner.clause} AND classification IN (${placeholders})`;
   const selectParams = [namespace, key, ...owner.params, ...visibleLevels];
-  const entry = db.prepare(`SELECT id FROM entries WHERE ${stateCond}`).get(...selectParams) as { id: string } | undefined;
+  const entry = db.prepare(`SELECT id FROM entries WHERE ${stateCond} AND is_current = 1`).get(...selectParams) as { id: string } | undefined;
+  if (!entry) return 0;
+  const selectionSql = `SELECT id FROM entries WHERE ${stateCond}`;
+  if (_vecLoaded) cleanVecNamespace(db, selectionSql, selectParams);
+  deleteLineageForSelection(db, selectionSql, selectParams);
   const result = db.prepare(`DELETE FROM entries WHERE ${stateCond}`).run(...selectParams);
   if (result.changes > 0) {
     insertAuditRow(db, now, agentId, "delete", namespace, key, null, entry?.id ?? null);
   }
-  return result.changes;
+  return result.changes > 0 ? 1 : 0;
 }
 
 function deleteNamespaceClassified(
@@ -1628,6 +1918,8 @@ function deleteNamespaceClassified(
   const owner = buildOwnerClause(allowGlobal, agentId);
   const nsCond = `namespace = ?${owner.clause} AND classification IN (${placeholders})`;
   const params = [namespace, ...owner.params, ...visibleLevels];
+  const selectionSql = `SELECT id FROM entries WHERE ${nsCond}`;
+  deleteLineageForSelection(db, selectionSql, params);
   const result = db.prepare(`DELETE FROM entries WHERE ${nsCond}`).run(...params);
   if (result.changes > 0) {
     insertAuditRow(db, now, agentId, "namespace_delete", namespace, null, `deleted ${result.changes} entries (classification-scoped)`);
@@ -1646,12 +1938,16 @@ function deleteKeySingle(
   const owner = buildOwnerClause(allowGlobal, agentId);
   const stateCond = `namespace = ? AND key = ? AND entry_type = 'state'${owner.clause}`;
   const params = [namespace, key, ...owner.params];
-  const entry = db.prepare(`SELECT id FROM entries WHERE ${stateCond}`).get(...params) as { id: string } | undefined;
+  const entry = db.prepare(`SELECT id FROM entries WHERE ${stateCond} AND is_current = 1`).get(...params) as { id: string } | undefined;
+  if (!entry) return 0;
+  const selectionSql = `SELECT id FROM entries WHERE ${stateCond}`;
+  if (_vecLoaded) cleanVecNamespace(db, selectionSql, params);
+  deleteLineageForSelection(db, selectionSql, params);
   const result = db.prepare(`DELETE FROM entries WHERE ${stateCond}`).run(...params);
   if (result.changes > 0) {
     insertAuditRow(db, now, agentId, "delete", namespace, key, null, entry?.id ?? null);
   }
-  return result.changes;
+  return result.changes > 0 ? 1 : 0;
 }
 
 function deleteNamespaceSingle(
@@ -1664,6 +1960,8 @@ function deleteNamespaceSingle(
   const owner = buildOwnerClause(allowGlobal, agentId);
   const nsCond = `namespace = ?${owner.clause}`;
   const params = [namespace, ...owner.params];
+  const selectionSql = `SELECT id FROM entries WHERE ${nsCond}`;
+  deleteLineageForSelection(db, selectionSql, params);
   const result = db.prepare(`DELETE FROM entries WHERE ${nsCond}`).run(...params);
   if (result.changes > 0) {
     insertAuditRow(db, now, agentId, "namespace_delete", namespace, null, `deleted ${result.changes} entries`);
@@ -1680,8 +1978,8 @@ export function previewDelete(
 ): DeleteInfo {
   if (key) {
     const sql = allowGlobalNamespaceDelete
-      ? "SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'"
-      : "SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND COALESCE(owner_principal_id, agent_id) = ?";
+      ? "SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1"
+      : "SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1 AND COALESCE(owner_principal_id, agent_id) = ?";
     const params = allowGlobalNamespaceDelete ? [namespace, key] : [namespace, key, agentId];
     const entry = db.prepare(sql).get(...params) as { id: string } | undefined;
     return {
@@ -1692,14 +1990,14 @@ export function previewDelete(
   }
 
   const stateSql = allowGlobalNamespaceDelete
-    ? "SELECT key FROM entries WHERE namespace = ? AND entry_type = 'state' ORDER BY key"
-    : "SELECT key FROM entries WHERE namespace = ? AND entry_type = 'state' AND COALESCE(owner_principal_id, agent_id) = ? ORDER BY key";
+    ? "SELECT key FROM entries WHERE namespace = ? AND entry_type = 'state' AND is_current = 1 ORDER BY key"
+    : "SELECT key FROM entries WHERE namespace = ? AND entry_type = 'state' AND is_current = 1 AND COALESCE(owner_principal_id, agent_id) = ? ORDER BY key";
   const stateParams = allowGlobalNamespaceDelete ? [namespace] : [namespace, agentId];
   const stateKeys = db.prepare(stateSql).all(...stateParams) as Array<{ key: string }>;
 
   const logSql = allowGlobalNamespaceDelete
-    ? "SELECT COUNT(*) as cnt FROM entries WHERE namespace = ? AND entry_type = 'log'"
-    : "SELECT COUNT(*) as cnt FROM entries WHERE namespace = ? AND entry_type = 'log' AND COALESCE(owner_principal_id, agent_id) = ?";
+    ? "SELECT COUNT(*) as cnt FROM entries WHERE namespace = ? AND entry_type = 'log' AND is_current = 1"
+    : "SELECT COUNT(*) as cnt FROM entries WHERE namespace = ? AND entry_type = 'log' AND is_current = 1 AND COALESCE(owner_principal_id, agent_id) = ?";
   const logParams = allowGlobalNamespaceDelete ? [namespace] : [namespace, agentId];
   const logCount = (db.prepare(logSql).get(...logParams) as { cnt: number }).cnt;
 
@@ -1725,9 +2023,11 @@ export function previewDeleteByClassification(
     const sql = allowGlobalNamespaceDelete
       ? `SELECT id FROM entries
          WHERE namespace = ? AND key = ? AND entry_type = 'state'
+           AND is_current = 1
            AND classification IN (${placeholders})`
       : `SELECT id FROM entries
          WHERE namespace = ? AND key = ? AND entry_type = 'state'
+           AND is_current = 1
            AND COALESCE(owner_principal_id, agent_id) = ?
            AND classification IN (${placeholders})`;
     const params = allowGlobalNamespaceDelete
@@ -1744,10 +2044,12 @@ export function previewDeleteByClassification(
   const stateSql = allowGlobalNamespaceDelete
     ? `SELECT key FROM entries
        WHERE namespace = ? AND entry_type = 'state'
+         AND is_current = 1
          AND classification IN (${placeholders})
        ORDER BY key`
     : `SELECT key FROM entries
        WHERE namespace = ? AND entry_type = 'state'
+         AND is_current = 1
          AND COALESCE(owner_principal_id, agent_id) = ?
          AND classification IN (${placeholders})
        ORDER BY key`;
@@ -1759,9 +2061,11 @@ export function previewDeleteByClassification(
   const logSql = allowGlobalNamespaceDelete
     ? `SELECT COUNT(*) as cnt FROM entries
        WHERE namespace = ? AND entry_type = 'log'
+         AND is_current = 1
          AND classification IN (${placeholders})`
     : `SELECT COUNT(*) as cnt FROM entries
        WHERE namespace = ? AND entry_type = 'log'
+         AND is_current = 1
          AND COALESCE(owner_principal_id, agent_id) = ?
          AND classification IN (${placeholders})`;
   const logParams = allowGlobalNamespaceDelete
@@ -1909,6 +2213,7 @@ function entryMatchesNamespace(entryNamespace: string, filter: string): boolean 
 }
 
 function passesSemanticFilters(entry: Entry, opts: SemanticFilterOptions): boolean {
+  if (entry.is_current !== 1) return false;
   if (opts.namespace && !entryMatchesNamespace(entry.namespace, opts.namespace)) return false;
   if (opts.entryType && entry.entry_type !== opts.entryType) return false;
   if (!opts.includeExpired && isEntryExpired(entry, opts.now)) return false;
@@ -1950,6 +2255,7 @@ export function queryEntriesSemanticScored(
       sql += "e.namespace = ?";
       params.push(namespace);
     }
+    sql += " AND e.is_current = 1";
 
     // Mixed-space guard: only consider corpus entries generated by the same
     // model as the query embedding. Skipped when queryEmbeddingModel is unset
@@ -1995,7 +2301,7 @@ export function queryEntriesSemanticScored(
       SELECT e.*, vec_distance_L2(v.embedding, ?) AS distance
       FROM entries_vec v
       JOIN entries e ON e.id = v.entry_id
-      WHERE e.embedding_model = ?`;
+      WHERE e.embedding_model = ? AND e.is_current = 1`;
     const params: unknown[] = [queryEmbedding, queryEmbeddingModel];
 
     // Inline namespace pre-filter to reduce scan rows when namespace is given.
@@ -2047,7 +2353,7 @@ export function queryEntriesSemanticScored(
   if (vecResults.length === 0) return [];
 
   // Fetch full entries and apply ALL filters (namespace, type, tags).
-  const getEntry = db.prepare("SELECT * FROM entries WHERE id = ?");
+  const getEntry = db.prepare("SELECT * FROM entries WHERE id = ? AND is_current = 1");
   const results: SemanticQueryResult[] = [];
   const filterOpts: SemanticFilterOptions = { namespace, entryType, tags, includeExpired, since, until, now };
 
@@ -2186,6 +2492,13 @@ export function storeEmbedding(
   embedding: Buffer,
   model: string,
 ): void {
+  const current = db.prepare(
+    "SELECT 1 FROM entries WHERE id = ? AND is_current = 1",
+  ).get(entryId);
+  if (!current) {
+    db.prepare("DELETE FROM entries_vec WHERE entry_id = ?").run(entryId);
+    return;
+  }
   // Delete existing, then insert (vec0 doesn't support UPSERT)
   db.prepare("DELETE FROM entries_vec WHERE entry_id = ?").run(entryId);
   db.prepare(
@@ -2219,6 +2532,7 @@ export function getCompletedTaskNamespaces(db: Database.Database): Set<string> {
        WHERE e.namespace LIKE 'tasks/%'
          AND e.namespace NOT IN ('tasks/admin', 'tasks/_heartbeat')
          AND e.entry_type = 'state'
+         AND e.is_current = 1
          AND e.key = 'status'
          AND t.value IN ('completed', 'failed')
        GROUP BY e.namespace`,
@@ -2241,6 +2555,7 @@ export function getResolvedNamespaces(db: Database.Database): Set<string> {
     .prepare(
       `SELECT e.namespace FROM entries e, json_each(e.tags) t
        WHERE e.entry_type = 'state'
+         AND e.is_current = 1
          AND e.key = 'status'
          AND t.value IN ('completed', 'archived', 'stopped', 'failed')
        GROUP BY e.namespace`,
@@ -3066,7 +3381,7 @@ export function getOtherKeysInNamespace(
 ): string[] {
   const rows = db
     .prepare(
-      "SELECT key FROM entries WHERE namespace = ? AND entry_type = 'state' AND key != ? ORDER BY key",
+      "SELECT key FROM entries WHERE namespace = ? AND entry_type = 'state' AND is_current = 1 AND key != ? ORDER BY key",
     )
     .all(namespace, excludeKey ?? "") as Array<{ key: string }>;
   return rows.map((r) => r.key);
@@ -3084,6 +3399,7 @@ export function getOtherKeysInNamespaceByClassification(
       `SELECT key FROM entries
        WHERE namespace = ?
          AND entry_type = 'state'
+         AND is_current = 1
          AND key != ?
          AND classification IN (${classificationInClause(visibleLevels)})
        ORDER BY key`,
@@ -3101,7 +3417,7 @@ export function getNamespaceStateEntries(
 ): Entry[] {
   return db
     .prepare(
-      "SELECT * FROM entries WHERE namespace = ? AND entry_type = 'state' ORDER BY key",
+      "SELECT * FROM entries WHERE namespace = ? AND entry_type = 'state' AND is_current = 1 ORDER BY key",
     )
     .all(namespace) as Entry[];
 }
@@ -3116,7 +3432,7 @@ export function getNamespaceTagVocabulary(
 ): string[] {
   const rows = db
     .prepare(
-      "SELECT DISTINCT value FROM entries, json_each(entries.tags) WHERE namespace = ? AND entry_type = 'state'",
+      "SELECT DISTINCT value FROM entries, json_each(entries.tags) WHERE namespace = ? AND entry_type = 'state' AND is_current = 1",
     )
     .all(namespace) as Array<{ value: string }>;
   return rows.map((r) => r.value);
@@ -3153,6 +3469,7 @@ export function getNamespacesNeedingConsolidation(
     FROM entries e
     LEFT JOIN consolidation_metadata cm ON cm.namespace = e.namespace
     WHERE e.entry_type = 'log'
+      AND e.is_current = 1
       AND ${trackedClause}
       AND (
         cm.last_log_created_at IS NULL
@@ -3202,6 +3519,7 @@ export function hasMoreLogsAfter(
     .prepare(
       `SELECT 1 FROM entries
          WHERE namespace = ? AND entry_type = 'log'
+           AND is_current = 1
            AND (created_at > ? OR (created_at = ? AND id > ?))
          LIMIT 1`,
     )
@@ -3240,6 +3558,7 @@ export function getLogsForConsolidation(
     const stmt = db.prepare(
       `SELECT * FROM entries
          WHERE namespace = ? AND entry_type = 'log'
+           AND is_current = 1
            ${where}
          ${order}${limitClause}`,
     );
@@ -3252,6 +3571,7 @@ export function getLogsForConsolidation(
   const stmt = db.prepare(
     `SELECT * FROM entries
        WHERE namespace = ? AND entry_type = 'log'
+         AND is_current = 1
        ${order}${limitClause}`,
   );
   return (hasLimit ? stmt.all(namespace, maxLogs) : stmt.all(namespace)) as Entry[];
@@ -3448,7 +3768,7 @@ export function countLogsIncorporated(
   const row = db
     .prepare(
       `SELECT COUNT(*) as cnt FROM entries
-       WHERE namespace = ? AND entry_type = 'log' AND created_at <= ?`,
+       WHERE namespace = ? AND entry_type = 'log' AND is_current = 1 AND created_at <= ?`,
     )
     .get(namespace, meta.last_log_created_at) as { cnt: number };
   return row.cnt;
@@ -3522,7 +3842,8 @@ export function getEmbeddingQueueCounts(
        SUM(CASE WHEN embedding_status = 'generated' AND embedding_model != ? AND embedding_model IS NOT NULL THEN 1 ELSE 0 END) AS generated_stale,
        SUM(CASE WHEN embedding_status = 'generated' AND embedding_model IS NULL THEN 1 ELSE 0 END) AS generated_null,
        COUNT(*) AS total
-     FROM entries`,
+     FROM entries
+     WHERE is_current = 1`,
   ).get(activeModel, activeModel) as {
     pending: number | null;
     processing: number | null;
