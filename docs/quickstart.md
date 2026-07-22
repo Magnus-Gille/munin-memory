@@ -95,8 +95,10 @@ npm run quickstart:smoke
 
 The smoke test creates a temporary HOME-independent data/config root, builds the
 CLI, runs the complete lexical-first flow, checks the five-minute budget and
-owner-only artifact modes, and deletes only its temporary directory. The same
-flow is also covered through Vitest against a fresh database.
+owner-only artifact modes, and deletes only its temporary directory. CI also
+runs the full canonical install on native Linux ARM64 and reports its install,
+cold-start, RSS, database, and disk measurements. The same flow is covered
+through Vitest against a fresh database.
 
 ## Measurement record
 
@@ -112,7 +114,7 @@ fresh data/config directory:
 | lexical-first, profile unset | 4.0 s | 265 ms | 4.29 s | 80.0 MiB | 432 KiB | 502 MiB |
 
 These numbers are evidence for that machine, not a universal promise. CI runs
-the isolated Linux smoke lane. Appliance RAM evidence for `zero-appliance`,
+isolated Linux x64 and native ARM64 smoke lanes. Appliance RAM evidence for `zero-appliance`,
 `zero-plus`, and `full-node` remains in
 [`appliance-profiles.md`](appliance-profiles.md); the quick start defaults to
 lexical mode specifically so model download time and semantic working-set size

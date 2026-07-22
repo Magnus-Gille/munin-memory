@@ -7,7 +7,11 @@ SMOKE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/munin-quickstart-smoke.XXXXXX")"
 trap 'rm -rf "$SMOKE_ROOT"' EXIT
 
 START_SECONDS="$(date +%s)"
-MUNIN_QUICKSTART_SKIP_INSTALL=1 \
+SKIP_INSTALL=1
+if [[ "${MUNIN_QUICKSTART_SMOKE_FULL_INSTALL:-0}" == "1" ]]; then
+  SKIP_INSTALL=0
+fi
+MUNIN_QUICKSTART_SKIP_INSTALL="$SKIP_INSTALL" \
   "$PROJECT_ROOT/scripts/quickstart.sh" \
   --data-dir "$SMOKE_ROOT/data" \
   --config-dir "$SMOKE_ROOT/config" \
@@ -26,5 +30,10 @@ for (const artifact of result.artifacts) {
   const mode = fs.statSync(artifact).mode & 0o077;
   if (mode !== 0) throw new Error(`artifact is not owner-only: ${artifact}`);
 }
-console.log(`Quick-start clean-environment smoke PASS (${elapsed}s)`);
+const metrics = result.metrics;
+console.log(
+  `Quick-start clean-environment smoke PASS (${elapsed}s; arch=${process.arch}; ` +
+  `install=${metrics.installDurationMs}ms; cold=${metrics.coldStartMs}ms; ` +
+  `rss=${metrics.rssBytes}B; db=${metrics.databaseBytes}B; disk=${metrics.diskFootprintBytes}B)`,
+);
 NODE

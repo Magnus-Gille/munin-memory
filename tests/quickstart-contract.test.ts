@@ -22,10 +22,17 @@ describe("canonical quick-start contract", () => {
 
   it("runs the actual entry point in an isolated five-minute CI smoke lane", () => {
     expect(smoke).toContain("mktemp -d");
-    expect(smoke).toContain("MUNIN_QUICKSTART_SKIP_INSTALL=1");
+    expect(smoke).toContain('MUNIN_QUICKSTART_SKIP_INSTALL="$SKIP_INSTALL"');
     expect(smoke).toContain("elapsed >= 300");
     expect(smoke).not.toMatch(/\bHOME=/);
     expect(ci).toContain("run: npm run quickstart:smoke");
+  });
+
+  it("runs the full canonical install on a native Linux ARM64 runner", () => {
+    expect(ci).toContain("runs-on: ubuntu-24.04-arm");
+    expect(ci).toContain('MUNIN_QUICKSTART_SMOKE_FULL_INSTALL: "1"');
+    expect(smoke).toContain("MUNIN_QUICKSTART_SMOKE_FULL_INSTALL");
+    expect(smoke).toContain("arch=${process.arch}");
   });
 
   it("documents rollback boundaries and deliberate data retention", () => {

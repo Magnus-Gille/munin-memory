@@ -15,6 +15,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  quickstart-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      # Native ARM64 evidence for the exact user-facing path, including its own
+      # locked dependency install. The smoke script enforces <5 minutes.
+      - run: npm run quickstart:smoke
+        env:
+          MUNIN_QUICKSTART_SMOKE_FULL_INSTALL: "1"
+
   test:
     runs-on: ubuntu-latest
     strategy:
