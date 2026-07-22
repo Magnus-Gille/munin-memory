@@ -10,6 +10,14 @@ changelog is the canonical record of what moved.
 
 ### Security
 
+- Raised compatible transitive overrides for `body-parser`, `fast-uri`, and
+  `protobufjs` to their patched release lines. The remaining npm advisories are
+  tracked separately because their available fixes require unsupported major
+  overrides in the MCP SDK or Transformers dependency trees and the affected
+  Windows static-file/image-processing paths are not exposed by Munin (#236).
+  `npm audit --omit=dev` therefore still reports four transitive nodes (two
+  moderate, two high); the dated triage note records why they are not reachable
+  in Munin's supported runtime and forbids a zero-advisory claim.
 - Hardened the read-time untrusted-content boundary against sigil-free and
   Unicode-lookalike closure text (#198). Values already identified as untrusted
   retain the existing delimiters, `untrusted_content` flag, and provenance notice,
