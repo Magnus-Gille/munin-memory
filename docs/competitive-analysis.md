@@ -1,5 +1,9 @@
 # Competitive Analysis: AI Memory Tools
 
+> **Superseded for current market and pricing analysis.** See
+> [Agent-memory competitive analysis — July 2026](competitive-analysis-2026-07.md).
+> This April snapshot remains useful for historical context.
+
 > Generated: 2026-04-01 | Research spike for munin-memory
 
 ---

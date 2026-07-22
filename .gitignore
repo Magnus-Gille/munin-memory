@@ -25,6 +25,7 @@ docs/*
 !docs/authorization-matrix.md
 !docs/offsite-backup.md
 !docs/competitive-analysis.md
+!docs/competitive-analysis-2026-07.md
 !docs/librarian-architecture.md
 !docs/librarian-engineering-plan.md
 !docs/state-of-memory-systems-2026.md
