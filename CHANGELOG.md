@@ -8,6 +8,20 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Added
+
+- Added the canonical five-minute local install and first-success flow (#225):
+  `scripts/quickstart.sh` performs locked install/build plus a fail-fast
+  platform, Node, SQLite/FTS5, path/permission, profile/model, port, and auth
+  preflight; generates format-checked placeholder-only configs for Codex,
+  Claude Code/Desktop, and generic Streamable HTTP; and verifies
+  orient/status+health/write/log/resume/read against an owner-only database. The
+  lexical-first default avoids token handling, network exposure, and model
+  download during onboarding. A clean-environment smoke lane enforces the
+  five-minute budget and records duration, RSS, database, and disk footprint.
+  The tool cleanup timer now releases the event loop so one-shot CLI processes
+  terminate normally.
+
 ### Security
 
 - Raised compatible transitive overrides for `body-parser`, `fast-uri`, and

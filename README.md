@@ -102,14 +102,26 @@ No full rewrite is recommended as the first move: keep the MCP and SQLite contra
 - Node.js 20+
 - npm
 
-### Install and build
+### Canonical five-minute path
 
 ```bash
 git clone https://github.com/Magnus-Gille/munin-memory.git
 cd munin-memory
-npm ci
-npm run build
+./scripts/quickstart.sh
 ```
+
+The quick start installs the locked dependencies, builds Munin, preflights the
+runtime/SQLite/paths/profile/port/auth posture, generates placeholder-only
+configs for Codex, Claude Code, Claude Desktop, and generic Streamable HTTP,
+then verifies orient → status/health → write/log → resume → read against a fresh
+or existing owner-only database. It defaults to local stdio and lexical search so
+first success needs neither a bearer credential nor an embedding-model download.
+
+See [the five-minute quick-start guide](docs/quickstart.md) for client setup,
+semantic enablement, measurements, upgrade/rollback, and uninstall behavior.
+
+For developer-only manual setup, run `npm ci && npm run build` and use the
+transport commands below.
 
 ### Local mode (stdio)
 
