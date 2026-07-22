@@ -14,6 +14,7 @@ import {
   readState,
   getById,
   appendLog,
+  computeCommitmentConfidence,
   syncCommitmentsForEntry,
   listCommitments,
   queryEntries,
@@ -516,6 +517,87 @@ describe("commitment classification lifecycle", () => {
     rows = listCommitments(db, { namespace: "projects/test" });
     expect(rows).toHaveLength(1);
     expect(rows[0].source_entry_id).toBe(id);
+  });
+
+  it("keeps a first stale-source derivation from gaining confidence on unchanged reconciliation", () => {
+    const { id } = appendLog(
+      db,
+      "projects/stale-first-derivation",
+      "Will draft the Summary notes by 2099-06-01.",
+      [],
+    );
+    const semanticRevision = new Date(Date.now() - 70 * 24 * 60 * 60 * 1000).toISOString();
+    db.prepare("UPDATE entries SET created_at = ?, updated_at = ? WHERE id = ?")
+      .run(semanticRevision, semanticRevision, id);
+    const derived = {
+      sourceType: "explicit_dated_commitment",
+      fingerprint: "explicit_dated_commitment:summary-notes",
+      text: "Will draft the Summary notes by 2099-06-01.",
+      dueAt: "2099-06-01T23:59:59.000Z",
+      confidence: computeCommitmentConfidence(
+        "explicit_dated_commitment",
+        semanticRevision,
+        true,
+        "Will draft the Summary notes by 2099-06-01.",
+      ),
+    };
+
+    syncCommitmentsForEntry(db, id, [derived]);
+    const first = listCommitments(db, { namespace: "projects/stale-first-derivation" })[0];
+    expect(first.confidence).toBeCloseTo(0.43, 5);
+    expect(first.updated_at).toBe(semanticRevision);
+
+    syncCommitmentsForEntry(db, id, [derived]);
+    const second = listCommitments(db, { namespace: "projects/stale-first-derivation" })[0];
+    expect(second.confidence).toBe(first.confidence);
+  });
+
+  it("does not raise legacy low confidence from a recently bumped semantic basis", () => {
+    const { id } = appendLog(
+      db,
+      "projects/legacy-inflated-basis",
+      "Will draft the Summary notes by 2099-06-01.",
+      [],
+    );
+    const derived = {
+      sourceType: "explicit_dated_commitment",
+      fingerprint: "explicit_dated_commitment:legacy-summary-notes",
+      text: "Will draft the Summary notes by 2099-06-01.",
+      dueAt: "2099-06-01T23:59:59.000Z",
+      confidence: 0.78,
+    };
+    syncCommitmentsForEntry(db, id, [derived]);
+    db.prepare("UPDATE commitments SET confidence = ?, updated_at = ? WHERE source_entry_id = ?")
+      .run(0.43, new Date().toISOString(), id);
+
+    syncCommitmentsForEntry(db, id, [derived]);
+
+    const preserved = listCommitments(db, { namespace: "projects/legacy-inflated-basis" })[0];
+    expect(preserved.confidence).toBe(0.43);
+  });
+
+  it("leaves confidence unchanged when the stored semantic basis is malformed", () => {
+    const { id } = appendLog(
+      db,
+      "projects/malformed-commitment-basis",
+      "Will draft the Summary notes by 2099-06-01.",
+      [],
+    );
+    const derived = {
+      sourceType: "explicit_dated_commitment",
+      fingerprint: "explicit_dated_commitment:malformed-summary-notes",
+      text: "Will draft the Summary notes by 2099-06-01.",
+      dueAt: "2099-06-01T23:59:59.000Z",
+      confidence: 0.78,
+    };
+    syncCommitmentsForEntry(db, id, [derived]);
+    db.prepare("UPDATE commitments SET confidence = ?, updated_at = ? WHERE source_entry_id = ?")
+      .run(0.43, "not-a-timestamp", id);
+
+    expect(() => syncCommitmentsForEntry(db, id, [derived])).not.toThrow();
+
+    const preserved = listCommitments(db, { namespace: "projects/malformed-commitment-basis" })[0];
+    expect(preserved.confidence).toBe(0.43);
   });
 });
 

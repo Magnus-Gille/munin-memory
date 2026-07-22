@@ -1126,6 +1126,58 @@ export interface DerivedCommitmentInput {
   confidence: number;
 }
 
+export function computeCommitmentConfidence(
+  sourceType: string,
+  semanticRevisionAt: string,
+  hasDueDate: boolean,
+  text?: string,
+): number {
+  // Base score by source type
+  // tracked_next_step: from status next-steps sections (most reliable)
+  // explicit_commitment: explicit commitment phrases in logs
+  // explicit_dated_commitment / forward_looking_dated / unknown: implicit mentions
+  const baseByType: Record<string, number> = {
+    tracked_next_step: 0.90,
+    explicit_commitment: 0.80,
+    explicit_dated_commitment: 0.70,
+    forward_looking_dated: 0.70,
+  };
+  const baseScore = baseByType[sourceType] ?? 0.70;
+
+  // Staleness decay multiplier (discrete bands)
+  const daysSinceUpdate =
+    (Date.now() - new Date(semanticRevisionAt).getTime()) / (1000 * 60 * 60 * 24);
+  let decayMultiplier: number;
+  if (daysSinceUpdate >= 60) {
+    decayMultiplier = 0.5;
+  } else if (daysSinceUpdate >= 30) {
+    decayMultiplier = 0.7;
+  } else {
+    decayMultiplier = 1.0;
+  }
+
+  // Specificity modifier (additive)
+  let specificityModifier = 0;
+  if (hasDueDate) {
+    specificityModifier += 0.05;
+  }
+  if (text) {
+    // Specific names: detect capitalized proper nouns (not at sentence start)
+    const hasSpecificNames = /(?<!\.\s{0,5}|\n)\b[A-Z][a-z]{2,}\b/.test(text);
+    if (hasSpecificNames) {
+      specificityModifier += 0.03;
+    }
+    // Vague terms reduce confidence
+    const hasVagueTerms = /\b(?:eventually|someday|maybe|perhaps|sometime|at some point|when possible)\b/i.test(text);
+    if (hasVagueTerms) {
+      specificityModifier -= 0.05;
+    }
+  }
+
+  const raw = baseScore * decayMultiplier + specificityModifier;
+  return Math.min(1.0, Math.max(0.0, raw));
+}
+
 export interface CommitmentRow {
   id: string;
   namespace: string;
@@ -1157,13 +1209,14 @@ export function syncCommitmentsForEntry(
   derivedCommitments: DerivedCommitmentInput[],
 ): void {
   const source = db
-    .prepare("SELECT id, namespace, key, entry_type, classification FROM entries WHERE id = ?")
+    .prepare("SELECT id, namespace, key, entry_type, classification, updated_at FROM entries WHERE id = ?")
     .get(entryId) as {
       id: string;
       namespace: string;
       key: string | null;
       entry_type: EntryType;
       classification: string | null;
+      updated_at: string;
     } | undefined;
 
   if (!source) return;
@@ -1171,11 +1224,20 @@ export function syncCommitmentsForEntry(
 
   const existingRows = db
     .prepare(
-      `SELECT id, source_type, source_fingerprint, status
+      `SELECT id, source_type, source_fingerprint, text, due_at, status, confidence, updated_at
        FROM commitments
        WHERE source_entry_id = ?`,
     )
-    .all(entryId) as Array<{ id: string; source_type: string; source_fingerprint: string; status: CommitmentStatus }>;
+    .all(entryId) as Array<{
+      id: string;
+      source_type: string;
+      source_fingerprint: string;
+      text: string;
+      due_at: string | null;
+      status: CommitmentStatus;
+      confidence: number;
+      updated_at: string;
+    }>;
 
   const existingByFingerprint = new Map(existingRows.map((row) => [row.source_fingerprint, row]));
   const nextFingerprints = new Set(derivedCommitments.map((commitment) => commitment.fingerprint));
@@ -1189,6 +1251,11 @@ export function syncCommitmentsForEntry(
   const updateCommitment = db.prepare(
     `UPDATE commitments
      SET namespace = ?, source_type = ?, text = ?, due_at = ?, confidence = ?, status = 'open', updated_at = ?, resolved_at = NULL, source_classification = ?
+     WHERE id = ?`,
+  );
+  const preserveCommitmentDerivation = db.prepare(
+    `UPDATE commitments
+     SET namespace = ?, confidence = ?, source_classification = ?
      WHERE id = ?`,
   );
   const resolveCommitment = db.prepare(
@@ -1206,11 +1273,43 @@ export function syncCommitmentsForEntry(
     for (const commitment of derivedCommitments) {
       const existing = existingByFingerprint.get(commitment.fingerprint);
       if (existing) {
+        const dueAt = commitment.dueAt ?? null;
+        const semanticRevision = existing.source_type !== commitment.sourceType
+          || existing.text !== commitment.text
+          || existing.due_at !== dueAt;
+
+        // Reconciliation runs on every memory_commitments read. Recompute decay
+        // from the commitment's stored semantic-revision timestamp without
+        // bumping it; metadata-only source touches (such as valid_until) cannot
+        // rejuvenate confidence. A resolved row reappearing is a real
+        // reactivation and still follows the refresh path.
+        if (!semanticRevision && existing.status === "open") {
+          const recomputedConfidence = Number.isFinite(Date.parse(existing.updated_at))
+            ? computeCommitmentConfidence(
+                existing.source_type,
+                existing.updated_at,
+                existing.due_at !== null,
+                existing.text,
+              )
+            : existing.confidence;
+          // Legacy rows may have inflated bases whose true semantic history is
+          // unrecoverable, so deliberately avoid a migration/backfill: min()
+          // gives immediate monotonicity and lets valid bases converge as they age.
+          const preservedConfidence = Math.min(existing.confidence, recomputedConfidence);
+          preserveCommitmentDerivation.run(
+            source.namespace,
+            preservedConfidence,
+            sourceClassification,
+            existing.id,
+          );
+          continue;
+        }
+
         updateCommitment.run(
           source.namespace,
           commitment.sourceType,
           commitment.text,
-          commitment.dueAt ?? null,
+          dueAt,
           commitment.confidence,
           now,
           sourceClassification,
@@ -1229,7 +1328,7 @@ export function syncCommitmentsForEntry(
         commitment.dueAt ?? null,
         commitment.confidence,
         now,
-        now,
+        source.updated_at,
         sourceClassification,
       );
     }

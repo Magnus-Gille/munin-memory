@@ -76,6 +76,93 @@ const BENIGN = "Routine project status update with no special instructions.";
 const UNTRUSTED_MARKER = "⚠ UNTRUSTED";
 
 describe("read-gate envelope — aggregate tool coverage (#154/#152)", () => {
+  describe("memory_update_status response", () => {
+    const updateCases = [
+      {
+        name: "create",
+        namespace: "projects/update-status-envelope-create",
+        seed: undefined,
+        update: {
+          phase: INJECTION,
+          current_work: BENIGN,
+          blockers: "None.",
+          next_steps: ["Review the result"],
+          lifecycle: "active",
+        },
+      },
+      {
+        name: "content update",
+        namespace: "projects/update-status-envelope-content",
+        seed: {
+          content: "## Phase\nActive\n\n## Current Work\nInitial work\n\n## Blockers\nNone.\n\n## Next Steps\n- Review the result",
+          tags: ["active", "source:external"],
+        },
+        update: { current_work: "Updated work" },
+      },
+      {
+        name: "valid_until-only update",
+        namespace: "projects/update-status-envelope-expiry",
+        seed: {
+          content: "## Phase\nActive\n\n## Current Work\nInitial work\n\n## Blockers\nNone.\n\n## Next Steps\n- Review the result",
+          tags: ["active", "source:external"],
+        },
+        update: { valid_until: "2027-08-01T00:00:00Z" },
+      },
+      {
+        name: "legacy replacement",
+        namespace: "projects/update-status-envelope-legacy",
+        seed: {
+          content: "Legacy free-form external status.",
+          tags: ["active", "source:external"],
+        },
+        update: {
+          phase: "Active",
+          current_work: "Canonical replacement",
+          blockers: "None.",
+          next_steps: ["Review the result"],
+          lifecycle: "active",
+        },
+      },
+    ] as const;
+
+    it.each(updateCases)(
+      "matches memory_read's envelope and omits raw structured_status for an untrusted $name",
+      async ({ namespace, seed, update }) => {
+        if (seed) {
+          await callTool("memory_write", {
+            namespace,
+            key: "status",
+            content: seed.content,
+            tags: [...seed.tags],
+          });
+        }
+
+        const updateRaw = await callTool("memory_update_status", { namespace, ...update });
+        const updateResult = parseToolResponse(updateRaw) as {
+          content?: string;
+          structured_status?: unknown;
+          untrusted_content?: boolean;
+          content_provenance_notice?: string;
+          message?: string;
+        };
+        const readRaw = await callTool("memory_read", { namespace, key: "status" });
+        const readResult = parseToolResponse(readRaw) as {
+          content: string;
+          untrusted_content?: boolean;
+          content_provenance_notice?: string;
+        };
+
+        expect(updateResult.content).toBe(readResult.content);
+        expect(updateResult.untrusted_content).toBe(true);
+        expect(updateResult.untrusted_content).toBe(readResult.untrusted_content);
+        expect(updateResult.content_provenance_notice).toBe(readResult.content_provenance_notice);
+        expect(updateResult.content).toContain(UNTRUSTED_MARKER);
+        expect(updateResult.structured_status).toBeUndefined();
+        expect(updateResult.message).toMatch(/structured_status.*untrusted/i);
+      },
+    );
+  });
+
   // ── memory_orient: dashboard status summary ─────────────────────────────
   describe("memory_orient dashboard summary", () => {
     it("standard detail: injection-shaped status content flags the dashboard summary (scan)", async () => {

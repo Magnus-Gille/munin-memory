@@ -63,6 +63,7 @@ export interface StatusUpdateParams {
   next_steps?: string[];
   notes?: string;
   lifecycle?: "active" | "blocked" | "completed" | "stopped" | "maintenance" | "archived";
+  valid_until?: string | null;
   expected_updated_at?: string;
   classification?: ClassificationLevel;
   classification_override?: boolean;

@@ -215,6 +215,149 @@ describe("memory_update_status — access enforcement", () => {
     const result = parse(raw) as { error: string };
     expect(result.error).toBe("access_denied");
   });
+
+  it("write-only principal can update only valid_until without receiving stored content", async () => {
+    await ownerCall("memory_update_status", {
+      namespace: "projects/write-only-expiry",
+      phase: "Active",
+      current_work: "Owner-only implementation detail",
+      blockers: "None.",
+      next_steps: ["Review on the next checkpoint"],
+      lifecycle: "active",
+    });
+    const writeOnlyCall = makeServer(db, {
+      principalId: "writer:expiry",
+      principalType: "external",
+      accessibleNamespaces: [
+        { pattern: "projects/write-only-expiry", permissions: "write" },
+      ],
+    });
+
+    const result = parse(await writeOnlyCall("memory_update_status", {
+      namespace: "projects/write-only-expiry",
+      valid_until: "2027-08-01T00:00:00Z",
+    })) as Record<string, unknown>;
+
+    expect(result.status).toBe("updated");
+    expect(result.valid_until).toBe("2027-08-01T00:00:00.000Z");
+    expect(result.content).toBeUndefined();
+    expect(result.structured_status).toBeUndefined();
+    expect(result.message).toMatch(/content was withheld.*read authorization/i);
+
+    const ownerRead = parse(await ownerCall("memory_read", {
+      namespace: "projects/write-only-expiry",
+      key: "status",
+    })) as { content: string; valid_until: string };
+    expect(ownerRead.content).toContain("Owner-only implementation detail");
+    expect(ownerRead.valid_until).toBe("2027-08-01T00:00:00.000Z");
+  });
+
+  it("write-only principal can partially update status without receiving the merged content", async () => {
+    await ownerCall("memory_update_status", {
+      namespace: "projects/write-only-partial",
+      phase: "Active",
+      current_work: "Owner-only implementation detail",
+      blockers: "Private blocker",
+      next_steps: ["Private next step"],
+      lifecycle: "active",
+    });
+    const writeOnlyCall = makeServer(db, {
+      principalId: "writer:partial",
+      principalType: "external",
+      accessibleNamespaces: [
+        { pattern: "projects/write-only-partial", permissions: "write" },
+      ],
+    });
+
+    const result = parse(await writeOnlyCall("memory_update_status", {
+      namespace: "projects/write-only-partial",
+      current_work: "Writer-supplied replacement",
+    })) as Record<string, unknown>;
+
+    expect(result.status).toBe("updated");
+    expect(result.content).toBeUndefined();
+    expect(result.structured_status).toBeUndefined();
+    expect(result.message).toMatch(/content was withheld.*read authorization/i);
+
+    const ownerRead = parse(await ownerCall("memory_read", {
+      namespace: "projects/write-only-partial",
+      key: "status",
+    })) as { content: string };
+    expect(ownerRead.content).toContain("Writer-supplied replacement");
+    expect(ownerRead.content).toContain("Private blocker");
+    expect(ownerRead.content).toContain("Private next step");
+  });
+
+  it("rw principal receives updated status content", async () => {
+    const readWriteCall = makeServer(db, {
+      principalId: "editor:rw",
+      principalType: "external",
+      accessibleNamespaces: [
+        { pattern: "projects/read-write-status", permissions: "rw" },
+      ],
+    });
+
+    const result = parse(await readWriteCall("memory_update_status", {
+      namespace: "projects/read-write-status",
+      phase: "Active",
+      current_work: "Visible to the editor",
+      lifecycle: "active",
+    })) as Record<string, unknown>;
+
+    expect(result.status).toBe("created");
+    expect(result.content).toContain("Visible to the editor");
+    expect(result.structured_status).toMatchObject({
+      current_work: "Visible to the editor",
+    });
+    expect(result.message).toBeUndefined();
+  });
+
+  it("rw principal below the entry classification ceiling does not receive updated content", async () => {
+    const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+    try {
+      await ownerCall("memory_update_status", {
+        namespace: "clients/classified-status",
+        phase: "Active",
+        current_work: "Confidential implementation detail",
+        lifecycle: "active",
+        classification: "client-confidential",
+      });
+
+      // The existing orphan-prevention gate deliberately refuses a mutation
+      // that is already above the connection ceiling. Let that pre-flight see
+      // the previously authorized ceiling, then lower the effective ceiling at
+      // the response boundary to isolate the response's unified read gate.
+      let maxClassificationChecks = 0;
+      const classifiedEditor: AccessContext = {
+        principalId: "editor:classified",
+        principalType: "external",
+        accessibleNamespaces: [
+          { pattern: "clients/classified-status", permissions: "rw" },
+        ],
+        transportType: "dpa_covered",
+        get maxClassification() {
+          maxClassificationChecks += 1;
+          return maxClassificationChecks === 1 ? "client-confidential" : "internal";
+        },
+      };
+      const classifiedCall = makeServer(db, classifiedEditor);
+
+      const result = parse(await classifiedCall("memory_update_status", {
+        namespace: "clients/classified-status",
+        current_work: "Updated without response disclosure",
+      })) as Record<string, unknown>;
+
+      expect(result.status).toBe("updated");
+      expect(result.classification).toBe("client-confidential");
+      expect(result.content).toBeUndefined();
+      expect(result.structured_status).toBeUndefined();
+      expect(result.message).toMatch(/content was withheld.*read authorization/i);
+    } finally {
+      if (previousLibrarian === undefined) delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      else process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

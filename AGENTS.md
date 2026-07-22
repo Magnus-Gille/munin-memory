@@ -101,7 +101,7 @@ All 23 names registered in `TOOL_DEFINITIONS` must appear exactly once in this t
 | `memory_patterns` | Derive reviewable patterns from decisions and outcomes. |
 | `memory_handoff` | Source-backed current state, decisions, open loops, and next actions. |
 | `memory_write` | Upsert state with validation and optional CAS. |
-| `memory_update_status` | Structured tracked-status update with lifecycle normalization and CAS. |
+| `memory_update_status` | Structured tracked-status update with lifecycle normalization, CAS, and optional `valid_until` expiry. |
 | `memory_read` | Read one state entry. |
 | `memory_read_batch` | Read several state entries. |
 | `memory_get` | Retrieve an entry by UUID. |
