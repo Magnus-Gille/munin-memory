@@ -5,10 +5,14 @@ import { randomUUID } from "node:crypto";
 import { createServer } from "node:net";
 import {
   accessSync,
-  chmodSync,
+  closeSync,
   existsSync,
+  fchmodSync,
+  fstatSync,
+  ftruncateSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   statSync,
   writeFileSync,
@@ -491,11 +495,30 @@ export function redactSensitiveText(text: string, sensitiveValues: string[] = []
 }
 
 function privateWrite(path: string, content: string, sensitiveValues: string[]): void {
-  if (existsSync(path) && lstatSync(path).isSymbolicLink()) {
-    throw new Error(`Refusing to overwrite symbolic-link artifact: ${path}`);
+  let descriptor: number;
+  try {
+    descriptor = openSync(
+      path,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_NOFOLLOW,
+      0o600,
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ELOOP") {
+      throw new Error(`Refusing to overwrite symbolic-link artifact: ${path}`);
+    }
+    throw error;
   }
-  writeFileSync(path, redactSensitiveText(content, sensitiveValues), { mode: 0o600 });
-  chmodSync(path, 0o600);
+  try {
+    const stat = fstatSync(descriptor);
+    if (!stat.isFile() || stat.nlink !== 1) {
+      throw new Error(`Refusing to overwrite non-regular or multiply linked artifact: ${path}`);
+    }
+    fchmodSync(descriptor, 0o600);
+    ftruncateSync(descriptor, 0);
+    writeFileSync(descriptor, redactSensitiveText(content, sensitiveValues), "utf8");
+  } finally {
+    closeSync(descriptor);
+  }
 }
 
 function directorySize(path: string): number {

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -206,9 +206,8 @@ describe("quickstart first success", () => {
     ];
     for (const file of expectedFiles) {
       const path = join(configDir, file);
-      expect(existsSync(path)).toBe(true);
-      expect(statSync(path).mode & 0o077).toBe(0);
       expect(readFileSync(path, "utf8")).not.toContain(secret);
+      expect(statSync(path).mode & 0o077).toBe(0);
     }
     const report = JSON.parse(readFileSync(join(configDir, "last-run.json"), "utf8")) as { artifacts: string[] };
     expect(report.artifacts).toEqual(result.artifacts);
@@ -232,6 +231,26 @@ describe("quickstart first success", () => {
       transport: "stdio",
       embeddings: false,
     })).rejects.toThrow("Refusing to overwrite symbolic-link artifact");
+    expect(readFileSync(target, "utf8")).toBe("original");
+  });
+
+  it("refuses to overwrite a generated artifact through a hard link", async () => {
+    const root = makeTempRoot();
+    const projectRoot = makeProjectRoot(root);
+    const dataDir = join(root, "data");
+    const configDir = join(root, "config");
+    mkdirSync(configDir, { mode: 0o700 });
+    const target = join(root, "must-not-change");
+    writeFileSync(target, "original");
+    linkSync(target, join(configDir, "codex.toml"));
+
+    await expect(runQuickstart({
+      projectRoot,
+      dataDir,
+      configDir,
+      transport: "stdio",
+      embeddings: false,
+    })).rejects.toThrow("multiply linked artifact");
     expect(readFileSync(target, "utf8")).toBe("original");
   });
 });
