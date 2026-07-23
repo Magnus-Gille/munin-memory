@@ -195,6 +195,12 @@ export function validatePublicationReport(
   ) {
     throw new Error("Publication report has an invalid or unreconciled provider-reported cost.");
   }
+  if (
+    typeof evidence.artifacts?.reused_existing !== "boolean"
+    || evidence.artifacts.validation !== "longmemeval_provenance_sha256_v1"
+  ) {
+    throw new Error("Publication report has invalid generated-artifact provenance evidence.");
+  }
   const retries = evidence.retries;
   const retryCounts = retries === undefined
     ? []
@@ -285,6 +291,7 @@ export function renderPublicationSummary(
 | Retrieved-context budget | ${aq.context_token_budget} estimated tokens |
 | Provider prompt / completion tokens | ${usage?.prompt_tokens ?? "n/a"} / ${usage?.completion_tokens ?? "n/a"} |
 | Provider-reported cost | ${formatUsd(evidence.cost_usd!)} |
+| Generated artifacts reused | ${evidence.artifacts.reused_existing ? "yes" : "no"} |
 | Transient retries | ${evidence.retries.total} |
 | Peak process RSS | ${(evidence.resources.peak_rss_bytes / 1024 / 1024).toFixed(1)} MiB |
 | Generated DB + query artifacts | ${(evidence.disk.total_artifact_bytes / 1024 / 1024).toFixed(1)} MiB |

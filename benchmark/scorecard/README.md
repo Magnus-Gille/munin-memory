@@ -60,6 +60,14 @@ no response is returned, so a report with transport retries includes that
 account-level cost limitation while continuing to reconcile every successful
 raw call against provider-reported cost.
 
+Generated database/query artifacts are reused only when the LongMemEval adapter
+schema, source-byte SHA-256, split, granularity, search mode, paths, and limit
+all match their provenance file exactly. This allows an interrupted local
+embedding pass to continue without deleting verified work. The report and
+publication summary disclose reuse, and the limitations state that ingestion
+and embedding durations cover only the resumed process rather than a cold
+build.
+
 The pre-call context estimator is `ceil(UTF-8 bytes / 4)`. Anthropic does not
 publish its tokenizer, so the report clearly separates that conservative
 enforcement estimate from provider-native prompt tokens used for billing.

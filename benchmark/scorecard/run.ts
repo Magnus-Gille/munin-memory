@@ -27,6 +27,10 @@ import {
   type BuildOptions,
 } from "../adapters/longmemeval/build.js";
 import {
+  canReuseExistingArtifacts,
+  readBuildMetadata,
+} from "../adapters/longmemeval/run.js";
+import {
   ensureSafeGeneratedPath,
   populateCorpusEmbeddings,
 } from "../adapters/shared.js";
@@ -714,8 +718,8 @@ export async function runScorecard(
   ensureSafeGeneratedPath(paths.queryPath, "Scorecard query file");
   ensureSafeGeneratedPath(paths.provenancePath, "Scorecard provenance file");
 
-  const ingestionStart = performance.now();
-  buildLongMemEvalArtifacts({
+  const existingMetadata = readBuildMetadata(paths.provenancePath);
+  const reusedExistingArtifacts = canReuseExistingArtifacts({
     split: contract.dataset.split,
     granularity: profile.granularity,
     searchMode: profile.search_mode,
@@ -724,7 +728,25 @@ export async function runScorecard(
     queryPath: paths.queryPath,
     provenancePath: paths.provenancePath,
     limit: profile.limit ?? undefined,
-  });
+    reportDir,
+    reuseExisting: true,
+    runnerMode: profile.runner_mode,
+  }, existingMetadata);
+  const ingestionStart = performance.now();
+  if (!reusedExistingArtifacts) {
+    buildLongMemEvalArtifacts({
+      split: contract.dataset.split,
+      granularity: profile.granularity,
+      searchMode: profile.search_mode,
+      inputPath: paths.inputPath,
+      dbPath: paths.dbPath,
+      queryPath: paths.queryPath,
+      provenancePath: paths.provenancePath,
+      limit: profile.limit ?? undefined,
+    });
+  } else {
+    console.log("Scorecard reused exact provenance-matched generated artifacts.");
+  }
   const ingestionDuration = performance.now() - ingestionStart;
 
   const { queries, source } = loadQueriesWithSource(paths.queryPath);
@@ -945,6 +967,10 @@ export async function runScorecard(
       },
       disk,
       cost_usd: costUsd,
+      artifacts: {
+        reused_existing: reusedExistingArtifacts,
+        validation: "longmemeval_provenance_sha256_v1",
+      },
       retries: {
         total: retryEvents.length,
         http_429: retryEvents.filter((event) => event.reason === "http_429").length,
@@ -960,6 +986,11 @@ export async function runScorecard(
     },
     limitations: [
       ...(isFull ? [] : SMOKE_LIMITATIONS),
+      ...(reusedExistingArtifacts
+        ? [
+          "Generated benchmark artifacts were reused after exact provenance validation; ingestion and embedding durations cover only this resumed process, not the original artifact build.",
+        ]
+        : []),
       ...(retryEvents.some((event) => event.reason.startsWith("transport_"))
         ? [
           "Transport retries are counted in evidence. OpenRouter may charge upstream prompt processing for an attempt whose response was not returned, so provider-reported successful-call cost can understate account-level spend by those failed attempts.",

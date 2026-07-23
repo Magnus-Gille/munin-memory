@@ -140,6 +140,10 @@ export interface MuninAgentMemoryScorecardReport {
       total_artifact_bytes: number;
     };
     cost_usd: number | null;
+    artifacts: {
+      reused_existing: boolean;
+      validation: "longmemeval_provenance_sha256_v1";
+    };
     retries: {
       total: number;
       http_429: number;

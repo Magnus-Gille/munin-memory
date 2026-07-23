@@ -276,6 +276,7 @@ describe("deterministic scorecard smoke", () => {
       transport_fetch_failed: 0,
       transport_terminated: 0,
     });
+    expect(report.evidence.artifacts.reused_existing).toBe(false);
     expect(report.uncertainty.answer_accuracy.point_estimate).toBe(1);
     expect(report.retrieval.query_set_sources[0].sha256).toBe(
       report.answer_quality.query_set_sources[0].sha256,
@@ -331,6 +332,16 @@ describe("deterministic scorecard smoke", () => {
       "hybrid",
       "raw",
     )).toThrow(/retrieval mode degraded/i);
+
+    const resumed = await runScorecard({
+      profile: "smoke",
+      artifactDir,
+      reportDir,
+    });
+    expect(resumed.report.evidence.artifacts.reused_existing).toBe(true);
+    expect(resumed.report.limitations).toContain(
+      "Generated benchmark artifacts were reused after exact provenance validation; ingestion and embedding durations cover only this resumed process, not the original artifact build.",
+    );
   });
 
   it("revalidates raw full-run evidence instead of trusting aggregate counters", async () => {

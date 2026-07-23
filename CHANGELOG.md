@@ -23,6 +23,10 @@ changelog is the canonical record of what moved.
   retries only explicit 429/503 responses and Node fetch transport failures
   whose exact messages are `fetch failed` or `terminated`; every retry is
   counted in publication evidence, while all other failures remain fail-closed.
+  Generated benchmark databases and query files may resume only after exact
+  adapter-schema, source-byte SHA-256, profile, path, and limit provenance
+  validation; reports disclose reuse so resumed preprocessing timings are not
+  presented as cold-start measurements.
 - Added a durable review inbox for `memory_extract` proposals (#223).
   `memory_extract persist:true` now stores bounded, principal-scoped pending
   proposals without changing memory truth, while the new `memory_review` tool

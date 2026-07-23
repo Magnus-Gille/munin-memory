@@ -13,13 +13,13 @@ import { ensureSafeGeneratedPath, populateCorpusEmbeddings, type CorpusEmbedding
 import type { SearchMode } from "../../../src/types.js";
 import type { RunnerMode } from "../../types.js";
 
-interface RunOptions extends BuildOptions {
+export interface ArtifactReuseOptions extends BuildOptions {
   reportDir: string;
   reuseExisting: boolean;
   runnerMode: RunnerMode;
 }
 
-function parseArgs(argv: string[]): RunOptions {
+function parseArgs(argv: string[]): ArtifactReuseOptions {
   const args = new Map<string, string>();
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -68,7 +68,7 @@ function parseArgs(argv: string[]): RunOptions {
   };
 }
 
-function readBuildMetadata(path: string): BuildMetadata | null {
+export function readBuildMetadata(path: string): BuildMetadata | null {
   if (!existsSync(path)) return null;
   try {
     return JSON.parse(readFileSync(path, "utf-8")) as BuildMetadata;
@@ -77,7 +77,10 @@ function readBuildMetadata(path: string): BuildMetadata | null {
   }
 }
 
-export function canReuseExistingArtifacts(options: RunOptions, metadata: BuildMetadata | null): boolean {
+export function canReuseExistingArtifacts(
+  options: ArtifactReuseOptions,
+  metadata: BuildMetadata | null,
+): boolean {
   if (!options.reuseExisting) return false;
   if (!metadata) return false;
   if (!existsSync(options.inputPath)) return false;
