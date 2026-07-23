@@ -1,0 +1,140 @@
+[
+  {
+    "id": "toy-queue-lib",
+    "domain": "engineering",
+    "decision": {
+      "title": "Message queue client library selection",
+      "chosen": "queue-lib-A",
+      "rationale": "queue-lib-A was chosen because it ships prebuilt ARM64 binaries, has an active maintainer team, and our load test showed 40k msgs/sec sustained throughput on the reference workload.",
+      "rejected": [
+        {
+          "option": "queue-lib-B (RabbitMQ wrapper)",
+          "reason": "objectively faster in benchmarks and has a broader plugin ecosystem, but rejected solely because it ships no prebuilt ARM64 wheel — our Pi-class deploy targets would require a from-source compile with an unvetted toolchain, an unacceptable ops burden for a v1."
+        },
+        {
+          "option": "queue-lib-C (in-house rewrite)",
+          "reason": "rejected because the dev estimate was 6 engineer-weeks with no clear performance upside over queue-lib-A."
+        }
+      ],
+      "load_bearing_conditions": [
+        "No prebuilt ARM64 wheel exists for queue-lib-B as of the decision date.",
+        "Deploy targets include Pi-class ARM64 hosts."
+      ]
+    },
+    "memory": {
+      "destination": {
+        "namespace": "projects/toy-queue",
+        "key": "status",
+        "content": "Decision: adopted queue-lib-A as the v1 message queue client. See decision log for rationale.",
+        "tags": ["decision", "active"]
+      },
+      "path_logs": [
+        {
+          "namespace": "projects/toy-queue",
+          "content": "Evaluated queue-lib-A vs queue-lib-B vs queue-lib-C for the v1 message queue client. queue-lib-B benchmarked faster and has a broader plugin ecosystem, but it ships no prebuilt ARM64 wheel — deploy targets include Pi-class ARM64 hosts, and requiring a from-source compile with an unvetted toolchain was judged an unacceptable ops burden for v1. queue-lib-C (in-house rewrite) was estimated at 6 engineer-weeks with no clear performance upside. Chose queue-lib-A: ships prebuilt ARM64 binaries, has an active maintainer team, and hit 40k msgs/sec sustained in our load test.",
+          "tags": ["decision", "rationale"],
+          "ts": "2026-03-01T00:00:00.000Z"
+        }
+      ]
+    },
+    "probes": [
+      {
+        "id": "toy-queue-lib-p1-rationale-switch",
+        "kind": "perturbation",
+        "text": "queue-lib-A's sole maintainer's GitHub account was deleted and the repository has had zero commits in the last 3 months.",
+        "expected": "REOPEN_SWITCH",
+        "attacks": "rationale"
+      },
+      {
+        "id": "toy-queue-lib-p2-rejected-hold",
+        "kind": "perturbation",
+        "text": "queue-lib-B's maintainers opened a GitHub issue proposing to add a prebuilt ARM64 wheel in a future release, with no committed date or maintainer assigned yet.",
+        "expected": "REOPEN_HOLD",
+        "attacks": "rejected-branch"
+      },
+      {
+        "id": "toy-queue-lib-s1-patch-release",
+        "kind": "stasis",
+        "text": "queue-lib-A shipped a patch release with minor bug fixes and no changes to its ARM64 build process.",
+        "expected": "HOLD",
+        "attacks": "none"
+      },
+      {
+        "id": "toy-queue-lib-s2-star-ranking",
+        "kind": "stasis",
+        "text": "An independent blog post ranking message-queue client libraries by GitHub star count lists queue-lib-A in 4th place.",
+        "expected": "HOLD",
+        "attacks": "none"
+      }
+    ]
+  },
+  {
+    "id": "toy-sensor-vendor",
+    "domain": "hardware",
+    "decision": {
+      "title": "Environmental sensor vendor selection for field units",
+      "chosen": "vendor-A (SensorCo Model X)",
+      "rationale": "vendor-A was chosen because it met the accuracy spec (+/-0.1C) at the target price point and, critically, had a 2-week lead time versus a 20-week lead time industry-wide for comparable sensors, letting us hit the pilot deployment window.",
+      "rejected": [
+        {
+          "option": "vendor-B TempSense Pro",
+          "reason": "spec-for-spec superior accuracy (+/-0.05C) and a better long-term reliability track record, but rejected solely because of a quoted 20-week lead time that would have missed the pilot deployment window."
+        },
+        {
+          "option": "vendor-C budget sensor",
+          "reason": "rejected because its accuracy (+/-0.5C) fell outside the required tolerance for the pilot use case."
+        }
+      ],
+      "load_bearing_conditions": [
+        "vendor-B's lead time was 20 weeks at the time of decision.",
+        "The pilot deployment window required parts on-hand within 4 weeks."
+      ]
+    },
+    "memory": {
+      "destination": {
+        "namespace": "projects/toy-sensors",
+        "key": "status",
+        "content": "Decision: adopted vendor-A (SensorCo Model X) for field-unit environmental sensors.",
+        "tags": ["decision", "active"]
+      },
+      "path_logs": [
+        {
+          "namespace": "projects/toy-sensors",
+          "content": "Compared vendor-A, vendor-B TempSense Pro, and vendor-C budget sensor for field-unit environmental sensors. vendor-B has superior accuracy (+/-0.05C) and a better long-term reliability track record but quoted a 20-week lead time — the pilot deployment window required parts on-hand within 4 weeks, so vendor-B was rejected solely on lead time, not merit. vendor-C's accuracy (+/-0.5C) fell outside the required tolerance. Chose vendor-A: meets accuracy spec (+/-0.1C) at the target price with a 2-week lead time.",
+          "tags": ["decision", "rationale"],
+          "ts": "2026-02-10T00:00:00.000Z"
+        }
+      ]
+    },
+    "probes": [
+      {
+        "id": "toy-sensor-vendor-p1-rationale-hold",
+        "kind": "perturbation",
+        "text": "There is an unconfirmed rumor circulating internally that the pilot deployment window might be extended, but no official schedule change has been announced.",
+        "expected": "REOPEN_HOLD",
+        "attacks": "rationale"
+      },
+      {
+        "id": "toy-sensor-vendor-p2-rejected-switch",
+        "kind": "perturbation",
+        "text": "vendor-B has confirmed in writing that it has reduced its lead time to 3 weeks after opening a new manufacturing line, effective for all new orders.",
+        "expected": "REOPEN_SWITCH",
+        "attacks": "rejected-branch"
+      },
+      {
+        "id": "toy-sensor-vendor-s1-firmware",
+        "kind": "stasis",
+        "text": "vendor-A released a firmware update improving battery life by 5%, with no change to accuracy spec or lead time.",
+        "expected": "HOLD",
+        "attacks": "none"
+      },
+      {
+        "id": "toy-sensor-vendor-s2-competitor-announcement",
+        "kind": "stasis",
+        "text": "A competitor announced a new sensor product line at a trade show; it is not yet available for purchase and has no published specs.",
+        "expected": "HOLD",
+        "attacks": "none"
+      }
+    ]
+  }
+]
