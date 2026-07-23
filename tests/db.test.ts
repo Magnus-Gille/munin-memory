@@ -33,6 +33,7 @@ import {
   rebuildFTS,
   logToolCall,
   getToolCallAggregates,
+  getToolCallTelemetrySnapshot,
   queryEntriesSemanticScored,
   storeEmbedding,
   vecLoaded,
@@ -1218,6 +1219,51 @@ describe("getToolCallAggregates p95_response_size_bytes", () => {
       "tool_name",
       "total_calls",
     ]);
+  });
+
+  it("bounds telemetry to the deterministic most-recent sample and reports truncation (#242)", () => {
+    const insertAt = (
+      id: string,
+      timestamp: string,
+      toolName: string,
+      success: boolean,
+      sizeBytes: number,
+      durationMs: number,
+    ) => {
+      db.prepare(
+        `INSERT INTO tool_calls (
+           id, timestamp, session_id, principal_id, tool_name, success,
+           error_type, response_size_bytes, duration_ms
+         ) VALUES (?, ?, NULL, NULL, ?, ?, NULL, ?, ?)`,
+      ).run(id, timestamp, toolName, success ? 1 : 0, sizeBytes, durationMs);
+    };
+
+    const now = Date.now();
+    insertAt("oldest", new Date(now - 4_000).toISOString(), "excluded_tool", true, 999, 999);
+    insertAt("recent-1", new Date(now - 3_000).toISOString(), "memory_read", true, 10, 10);
+    insertAt("recent-2", new Date(now - 2_000).toISOString(), "memory_read", false, 20, 20);
+    insertAt("newest", new Date(now - 1_000).toISOString(), "memory_write", true, 30, 30);
+
+    const snapshot = getToolCallTelemetrySnapshot(db, 7, 3);
+
+    expect(snapshot.telemetry_meta).toEqual({
+      window_days: 7,
+      sampling: "most_recent",
+      sample_limit: 3,
+      sampled_calls: 3,
+      truncated: true,
+    });
+    expect(snapshot.telemetry.map((row) => row.tool_name)).toEqual([
+      "memory_read",
+      "memory_write",
+    ]);
+    expect(snapshot.telemetry.find((row) => row.tool_name === "excluded_tool")).toBeUndefined();
+    expect(snapshot.telemetry.find((row) => row.tool_name === "memory_read")).toMatchObject({
+      total_calls: 2,
+      error_count: 1,
+      avg_duration_ms: 15,
+      p95_response_size_bytes: 20,
+    });
   });
 });
 

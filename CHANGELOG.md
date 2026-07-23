@@ -62,6 +62,12 @@ changelog is the canonical record of what moved.
 
 ### Changed
 
+- **`memory_status` telemetry is now explicitly bounded (#242).** Owner calls
+  aggregate at most the 5,000 most recent tool calls from the seven-day window
+  instead of synchronously scanning and sorting the entire window. The existing
+  per-tool `telemetry` row shape is preserved, while the new owner-only
+  `telemetry_meta` field reports the window, sampling order, row limit, sampled
+  call count, and whether older calls were truncated.
 - **Explicit correction/supersession and temporal validity (#192).** `memory_write`
   and `memory_log` now accept `supersedes` with mandatory compare-and-swap, creating
   a fresh revision while preserving the original UUID as historical evidence. State

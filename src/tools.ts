@@ -67,7 +67,7 @@ import {
   logRetrievalFeedback,
   getRetrievalAggregates,
   logToolCall,
-  getToolCallAggregates,
+  getToolCallTelemetrySnapshot,
   getAuditHistoryPage,
   insertRedactionLog,
   getOtherKeysInNamespaceByClassification,
@@ -8230,7 +8230,9 @@ export function registerTools(
                 librarian,
               };
               if (ctx.principalType === "owner") {
-                statusResponse.telemetry = getToolCallAggregates(db, 7);
+                const telemetrySnapshot = getToolCallTelemetrySnapshot(db, 7);
+                statusResponse.telemetry = telemetrySnapshot.telemetry;
+                statusResponse.telemetry_meta = telemetrySnapshot.telemetry_meta;
                 // Detailed health breakdown (owner-only) — includes circuit breaker
                 // state, failure count, and last error so failures are never silent.
                 statusResponse.consolidation_health = getConsolidationHealth();

@@ -2931,6 +2931,19 @@ export interface ToolCallAggregateRow {
   p95_response_size_bytes: number | null;
 }
 
+export const TOOL_CALL_TELEMETRY_SAMPLE_LIMIT = 5_000;
+
+export interface ToolCallTelemetrySnapshot {
+  telemetry: ToolCallAggregateRow[];
+  telemetry_meta: {
+    window_days: number;
+    sampling: "most_recent";
+    sample_limit: number;
+    sampled_calls: number;
+    truncated: boolean;
+  };
+}
+
 /**
  * Nearest-rank 95th percentile over an ascending-sorted array of finite
  * numbers. Returns null for an empty array. Index is
@@ -2946,53 +2959,118 @@ function computeP95(sortedAsc: number[]): number | null {
   return sortedAsc[idx];
 }
 
+/**
+ * Build owner telemetry from a bounded sample of the most recent calls.
+ *
+ * Fetching one row beyond the limit makes truncation explicit without an
+ * unbounded COUNT/GROUP BY scan. The timestamp index can satisfy the ordered
+ * LIMIT, and all aggregation/sorting work is capped by sampleLimit.
+ */
+export function getToolCallTelemetrySnapshot(
+  db: Database.Database,
+  days: number = 7,
+  sampleLimit: number = TOOL_CALL_TELEMETRY_SAMPLE_LIMIT,
+): ToolCallTelemetrySnapshot {
+  const normalizedDays = Number.isFinite(days) && days > 0 ? days : 7;
+  const normalizedLimit = Math.max(
+    1,
+    Math.min(
+      TOOL_CALL_TELEMETRY_SAMPLE_LIMIT,
+      Number.isFinite(sampleLimit) ? Math.floor(sampleLimit) : TOOL_CALL_TELEMETRY_SAMPLE_LIMIT,
+    ),
+  );
+  const cutoff = new Date(
+    Date.now() - normalizedDays * 24 * 60 * 60 * 1000,
+  ).toISOString();
+  const emptySnapshot = (): ToolCallTelemetrySnapshot => ({
+    telemetry: [],
+    telemetry_meta: {
+      window_days: normalizedDays,
+      sampling: "most_recent",
+      sample_limit: normalizedLimit,
+      sampled_calls: 0,
+      truncated: false,
+    },
+  });
+
+  try {
+    const fetched = db
+      .prepare(
+        `SELECT tool_name, success, response_size_bytes, duration_ms
+         FROM tool_calls
+         WHERE timestamp >= ?
+         ORDER BY timestamp DESC
+         LIMIT ?`,
+      )
+      .all(cutoff, normalizedLimit + 1) as Array<{
+        tool_name: string;
+        success: number;
+        response_size_bytes: number | null;
+        duration_ms: number | null;
+      }>;
+    const truncated = fetched.length > normalizedLimit;
+    const sampled = truncated ? fetched.slice(0, normalizedLimit) : fetched;
+    const aggregates = new Map<string, {
+      totalCalls: number;
+      errorCount: number;
+      durationTotal: number;
+      durationCount: number;
+      responseSizes: number[];
+    }>();
+
+    for (const row of sampled) {
+      const aggregate = aggregates.get(row.tool_name) ?? {
+        totalCalls: 0,
+        errorCount: 0,
+        durationTotal: 0,
+        durationCount: 0,
+        responseSizes: [],
+      };
+      aggregate.totalCalls += 1;
+      if (row.success === 0) aggregate.errorCount += 1;
+      if (row.duration_ms !== null) {
+        aggregate.durationTotal += row.duration_ms;
+        aggregate.durationCount += 1;
+      }
+      if (row.response_size_bytes !== null) {
+        aggregate.responseSizes.push(row.response_size_bytes);
+      }
+      aggregates.set(row.tool_name, aggregate);
+    }
+
+    const telemetry = Array.from(aggregates, ([toolName, aggregate]) => {
+      aggregate.responseSizes.sort((a, b) => a - b);
+      return {
+        tool_name: toolName,
+        total_calls: aggregate.totalCalls,
+        error_count: aggregate.errorCount,
+        avg_duration_ms: aggregate.durationCount > 0
+          ? aggregate.durationTotal / aggregate.durationCount
+          : null,
+        p95_response_size_bytes: computeP95(aggregate.responseSizes),
+      };
+    }).sort((a, b) => b.total_calls - a.total_calls || a.tool_name.localeCompare(b.tool_name));
+
+    return {
+      telemetry,
+      telemetry_meta: {
+        window_days: normalizedDays,
+        sampling: "most_recent",
+        sample_limit: normalizedLimit,
+        sampled_calls: sampled.length,
+        truncated,
+      },
+    };
+  } catch {
+    return emptySnapshot();
+  }
+}
+
 export function getToolCallAggregates(
   db: Database.Database,
   days: number = 7,
 ): ToolCallAggregateRow[] {
-  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
-  try {
-    // Header aggregates (counts, errors, avg duration). p95 is computed
-    // in JS below: easier to unit-test than a SQL window function, and
-    // independent of whichever SQLite build ships with the host driver.
-    const headers = db
-      .prepare(
-        `SELECT
-           tool_name,
-           COUNT(*) AS total_calls,
-           SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS error_count,
-           AVG(duration_ms) AS avg_duration_ms
-         FROM tool_calls
-         WHERE timestamp >= ?
-         GROUP BY tool_name
-         ORDER BY total_calls DESC`,
-      )
-      .all(cutoff) as Array<Omit<ToolCallAggregateRow, "p95_response_size_bytes">>;
-
-    // Per-tool ordered fetch of non-null response sizes. Same cutoff as the
-    // header query so counts and p95 see the same window. Bounded by analytics
-    // retention (MUNIN_ANALYTICS_RETENTION_DAYS, default 90).
-    const sizeStmt = db.prepare(
-      `SELECT response_size_bytes
-         FROM tool_calls
-         WHERE tool_name = ?
-           AND timestamp >= ?
-           AND response_size_bytes IS NOT NULL
-         ORDER BY response_size_bytes ASC`,
-    );
-
-    return headers.map((row) => {
-      const sizes = (sizeStmt.all(row.tool_name, cutoff) as Array<{
-        response_size_bytes: number;
-      }>).map((r) => r.response_size_bytes);
-      return {
-        ...row,
-        p95_response_size_bytes: computeP95(sizes),
-      };
-    });
-  } catch {
-    return [];
-  }
+  return getToolCallTelemetrySnapshot(db, days).telemetry;
 }
 
 export function pruneRetrievalAnalytics(
