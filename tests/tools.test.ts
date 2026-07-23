@@ -7144,9 +7144,15 @@ describe("memory_status", () => {
     };
 
     const raw = await agentCallTool("memory_status", {});
-    const result = parseToolResponse(raw) as { principal: { id: string; type: string } };
+    const result = parseToolResponse(raw) as {
+      principal: { id: string; type: string };
+      telemetry?: unknown;
+      telemetry_meta?: unknown;
+    };
     expect(result.principal.id).toBe("agent:test");
     expect(result.principal.type).toBe("agent");
+    expect(result.telemetry).toBeUndefined();
+    expect(result.telemetry_meta).toBeUndefined();
   });
 
   it("includes telemetry aggregates for owner (#28)", async () => {
@@ -7163,9 +7169,23 @@ describe("memory_status", () => {
         avg_duration_ms: number | null;
         p95_response_size_bytes: number | null;
       }>;
+      telemetry_meta: {
+        window_days: number;
+        sampling: string;
+        sample_limit: number;
+        sampled_calls: number;
+        truncated: boolean;
+      };
     };
 
     expect(Array.isArray(result.telemetry)).toBe(true);
+    expect(result.telemetry_meta).toEqual({
+      window_days: 7,
+      sampling: "most_recent",
+      sample_limit: 5000,
+      sampled_calls: expect.any(Number),
+      truncated: false,
+    });
     // At minimum, the memory_write and memory_read we just did should show up
     const writeRow = result.telemetry.find((r) => r.tool_name === "memory_write");
     const readRow = result.telemetry.find((r) => r.tool_name === "memory_read");

@@ -75,6 +75,12 @@ one place. If a host or deferred tool-discovery layer does not expose `memory_or
 `memory_status` to inspect available tools or `memory_resume` for targeted context as the
 fallback.
 
+For owner callers, `memory_status.telemetry` is calculated from at most the 5,000 most
+recent tool calls in its seven-day window so capability discovery remains responsive at
+production volume. Read `telemetry_meta` alongside the per-tool rows: it reports the
+sampling order and limit, how many calls were sampled, and whether older calls were
+truncated. Non-owner callers receive neither telemetry field.
+
 Use `memory_resume` after that when you already have a likely direction — a project
 name, a namespace, or a user opener such as "continue grimnir parser rollout." It
 returns a compact continuation pack: the most relevant current status, recent decision
