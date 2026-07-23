@@ -499,7 +499,7 @@ describe("callOpenRouter — error handling", () => {
 // ---------------------------------------------------------------------------
 
 describe("checkOpenRouterKey (#168)", () => {
-  it("hits the authenticated /auth/key endpoint (not /models) with a Bearer token", async () => {
+  it("hits the current authenticated /key endpoint (not /models) with a Bearer token", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -510,7 +510,7 @@ describe("checkOpenRouterKey (#168)", () => {
     const result = await checkOpenRouterKey("sk-valid");
 
     expect(fetchMock).toHaveBeenCalledOnce();
-    expect(fetchMock.mock.calls[0][0]).toBe(`${DEFAULT_BASE_URL}/auth/key`);
+    expect(fetchMock.mock.calls[0][0]).toBe(`${DEFAULT_BASE_URL}/key`);
     const init = fetchMock.mock.calls[0][1] as { method: string; headers: Record<string, string> };
     expect(init.method).toBe("GET");
     expect(init.headers["Authorization"]).toBe("Bearer sk-valid");
@@ -551,7 +551,7 @@ describe("checkOpenRouterKey (#168)", () => {
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     await checkOpenRouterKey("sk-test");
-    expect(fetchMock.mock.calls[0][0]).toBe("http://localhost:1234/v1/auth/key");
+    expect(fetchMock.mock.calls[0][0]).toBe("http://localhost:1234/v1/key");
   });
 
   it("redacts the key if a reflected error body echoes it (defense-in-depth)", async () => {

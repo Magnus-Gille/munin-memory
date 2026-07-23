@@ -88,6 +88,10 @@ changelog is the canonical record of what moved.
 
 ### Changed
 
+- Updated OpenRouter key health checks to the current authenticated
+  `/api/v1/key` endpoint. The retired `/api/v1/auth/key` path returned a
+  misleading missing-authentication response and blocked the scorecard
+  preflight before any paid model call.
 - **`memory_status` telemetry is now explicitly bounded (#242).** Owner calls
   aggregate at most the 5,000 most recent tool calls from the seven-day window
   instead of synchronously scanning and sorting the entire window. The existing

@@ -201,7 +201,7 @@ export interface KeyHealthResult {
 }
 
 /**
- * Verify an OpenRouter API key against the authenticated `/auth/key` endpoint.
+ * Verify an OpenRouter API key against the authenticated `/key` endpoint.
  *
  * `/models` returns 200 *unauthenticated*, so a stale/invalid key is masked
  * until the first real completion call fails with `401 {"User not found."}` —
@@ -225,7 +225,7 @@ export async function checkOpenRouterKey(
     if (!apiKey) return s;
     return s.split(`Bearer ${apiKey}`).join("Bearer [REDACTED]").split(apiKey).join("[REDACTED]");
   };
-  const endpoint = `${getLlmBaseUrl(env)}/auth/key`;
+  const endpoint = `${getLlmBaseUrl(env)}/key`;
   try {
     const response = await fetch(endpoint, {
       method: "GET",
