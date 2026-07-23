@@ -3423,6 +3423,45 @@ export function getNamespaceStateEntries(
 }
 
 /**
+ * Return a bounded set of current, non-expired entries that are visible at the
+ * supplied classification ceiling. Intake and other derived analysis must use
+ * this instead of computing over hidden rows and filtering afterward.
+ */
+export function getNamespaceEntriesForIntake(
+  db: Database.Database,
+  namespace: string,
+  maxClassification: ClassificationLevel,
+  limit = 100,
+): Entry[] {
+  const visibleLevels = getVisibleClassificationLevels(maxClassification);
+  const boundedLimit = Math.min(Math.max(Math.trunc(limit), 1), 200);
+  const maxContentChars = 8_000;
+  const now = nowUTC();
+  return db
+    .prepare(
+      `SELECT id, namespace, key, entry_type,
+              substr(content, 1, ?) AS content,
+              tags, agent_id, owner_principal_id, created_at, updated_at,
+              valid_from, valid_until, is_current, classification,
+              embedding_status, embedding_model
+       FROM entries
+       WHERE namespace = ?
+         AND is_current = 1
+         AND (entry_type != 'state' OR valid_until IS NULL OR valid_until > ?)
+         AND classification IN (${classificationInClause(visibleLevels)})
+       ORDER BY updated_at DESC, rowid DESC
+       LIMIT ?`,
+    )
+    .all(
+      maxContentChars,
+      namespace,
+      now,
+      ...visibleLevels,
+      boundedLimit,
+    ) as Entry[];
+}
+
+/**
  * Return the unique set of tags used across all state entries in a namespace.
  * Used for tag vocabulary / consistency checking.
  */

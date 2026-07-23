@@ -6394,7 +6394,10 @@ describe("lifecycle validation (memory_write)", () => {
       content: "Random",
     });
     const result = parseToolResponse(raw) as { warnings?: string[] };
-    expect(result.warnings).toBeUndefined();
+    const lifecycleWarnings = (result.warnings ?? []).filter(w =>
+      w.includes("lifecycle tag") || w.includes("Multiple lifecycle")
+    );
+    expect(lifecycleWarnings).toHaveLength(0);
   });
 });
 

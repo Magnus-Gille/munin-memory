@@ -124,6 +124,27 @@ guard for an entry you have read, not an assertion that a key exists or is absen
 Soft expiry also does not make a key absent: a state row past `valid_until` remains directly
 addressable, so `create_if_absent: true` returns `already_exists` until that row is deleted.
 
+### Advisory intake quality
+
+Successful full `memory_write` and `memory_log` calls include an `intake` object and
+human-readable `[intake:*]` warnings when local heuristics find duplicate-key updates,
+content overlap, likely consolidation candidates, sparse content, tag-vocabulary drift, or
+unusually deep namespaces. The report is advisory: it cannot reject or roll back a valid
+write, and an analysis or metadata-persistence failure is surfaced as a warning while the
+memory operation still succeeds.
+
+Related-entry analysis is bounded to 100 current entries that the caller was already
+authorized to read at the connection's classification ceiling. Write-only callers still
+receive intrinsic checks such as sparse-content and namespace-depth warnings, but no
+related-entry identifiers, keys, counts, or scores. One versioned `entry_intake` row is
+stored per entry for later measurement; mutable state updates replace that entry's prior
+advisory row, and deletion cascades to it.
+
+The first implementation deliberately does not add a `memory_audit` MCP tool or a
+caller-controlled strict mode. The roadmap requires evidence that another front door
+improves outcomes before expanding the tool catalog, and stored content must never become
+an autonomous rejection policy.
+
 ### Corrections and temporal reads
 
 An ordinary state upsert remains mutable. When the old wording must remain auditable, use an
