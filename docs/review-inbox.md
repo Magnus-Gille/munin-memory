@@ -66,9 +66,12 @@ updates or deletes from that event table.
 
 Pending and edited proposals expire after 30 days. Declined, expired, and failed
 proposal payloads are purged seven days after their terminal transition; the
-minimal proposal tombstone and append-only events remain. Approved proposals retain
-the prior entry snapshot for a 30-day reviewed-undo window, after which maintenance
-removes that snapshot.
+minimal proposal tombstone and append-only events remain. Approved and superseded
+proposals retain their payloads and any prior entry snapshot for a 30-day
+reviewed-undo window, after which maintenance reduces them to the same tombstone.
+If a prior entry was more restricted than the accepted replacement, the proposal
+inherits that higher classification while the snapshot is retained, and an undo
+restores the prior classification.
 
 Maintenance runs at startup, on the normal cleanup interval, and when the queue is
 opened. Queue counts are computed only from proposals still visible to the caller,

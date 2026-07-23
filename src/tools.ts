@@ -136,6 +136,7 @@ import {
   type ReviewApplyResult,
   type ReviewOperation,
   type ReviewProposal,
+  type ReviewProposalEvent,
   type ReviewProposalStatus,
   type ReviewSourceRef,
 } from "./review-inbox.js";
@@ -2973,6 +2974,14 @@ function prepareReviewOperation(
       error: "operation.action must be memory_write, memory_log, or memory_update_status.",
     };
   }
+  const operationSecretCheck = scanForSecrets(JSON.stringify(operation));
+  if (!operationSecretCheck.valid) {
+    return {
+      ok: false,
+      code: "validation_error",
+      error: operationSecretCheck.error!,
+    };
+  }
   if (typeof operation.namespace !== "string") {
     return { ok: false, code: "validation_error", error: "operation.namespace is required." };
   }
@@ -3351,6 +3360,20 @@ function snapshotReviewEntry(entry: Entry | null): Record<string, unknown> | nul
   };
 }
 
+function retainedReviewClassification(
+  acceptedClassification: ClassificationLevel,
+  priorEntry: Entry | null,
+): ClassificationLevel {
+  const priorClassification = priorEntry?.classification;
+  if (
+    isClassificationLevel(priorClassification)
+    && compareClassificationLevels(priorClassification, acceptedClassification) > 0
+  ) {
+    return priorClassification;
+  }
+  return acceptedClassification;
+}
+
 function applyPreparedReviewOperation(
   db: Database.Database,
   ctx: AccessContext,
@@ -3432,6 +3455,10 @@ function applyPreparedReviewOperation(
       entryId,
       entryUpdatedAt,
       priorEntrySnapshot: prior,
+      retainedClassification: retainedReviewClassification(
+        prepared.classification,
+        prepared.existing,
+      ),
     };
   }
 
@@ -3503,6 +3530,10 @@ function applyPreparedReviewOperation(
     entryId: result.id,
     entryUpdatedAt: result.updated_at,
     priorEntrySnapshot: prior,
+    retainedClassification: retainedReviewClassification(
+      prepared.classification,
+      prepared.existing,
+    ),
   };
 }
 
@@ -3538,12 +3569,34 @@ function presentReviewProposal(
       ? { source_refs_redacted: true }
       : {}),
   };
+  if (proposal.terminal_detail) {
+    const safeTerminalDetail = safenText(proposal.terminal_detail);
+    response.terminal_detail = safeTerminalDetail.text;
+    if (safeTerminalDetail.untrusted) response.untrusted_content = true;
+  }
   if (proposal.source_untrusted && proposal.source_excerpt) {
     const safe = safenText(proposal.source_excerpt, ["untrusted"]);
     response.source_excerpt = safe.text;
     response.untrusted_content = true;
   }
   return response;
+}
+
+function presentReviewEvent(event: ReviewProposalEvent): Record<string, unknown> {
+  let untrusted = false;
+  const detail = Object.fromEntries(
+    Object.entries(event.detail).map(([key, value]) => {
+      if (typeof value !== "string") return [key, value];
+      const safe = safenText(value);
+      if (safe.untrusted) untrusted = true;
+      return [key, safe.text];
+    }),
+  );
+  return {
+    ...event,
+    detail,
+    ...(untrusted ? { untrusted_content: true } : {}),
+  };
 }
 
 const NARRATIVE_LONG_GAP_DAYS = 14;
@@ -6784,7 +6837,11 @@ export function registerTools(
               if (action === "get") {
                 return okResult("review", {
                   ...presentReviewProposal(db, ctx, proposal),
-                  events: listReviewProposalEvents(db, proposal.id, ctx.principalId),
+                  events: listReviewProposalEvents(
+                    db,
+                    proposal.id,
+                    ctx.principalId,
+                  ).map(presentReviewEvent),
                 });
               }
 
@@ -6963,7 +7020,9 @@ export function registerTools(
                       : accepted.key,
                     content: prior.content,
                     tags: prior.tags as string[],
-                    classification: proposal.classification,
+                    classification: isClassificationLevel(prior.classification)
+                      ? prior.classification
+                      : proposal.classification,
                     supersedes: proposal.applied_entry_id,
                     expected_updated_at: proposal.applied_entry_updated_at,
                     valid_from: now,
@@ -7023,6 +7082,24 @@ export function registerTools(
                   undo_proposal_id: created.id,
                   original_proposal_id: proposal.id,
                   expires_at: created.expires_at,
+                });
+              }
+
+              if (proposal.status === "approved") {
+                const duplicate = approveReviewProposal(
+                  db,
+                  proposal.id,
+                  ctx.principalId,
+                  () => ({
+                    outcome: "failed",
+                    code: "unexpected_reapply",
+                    detail: "An approved proposal must not be applied again.",
+                  }),
+                  now,
+                );
+                return okResult("review", {
+                  ...duplicate,
+                  proposal_id: proposal.id,
                 });
               }
 

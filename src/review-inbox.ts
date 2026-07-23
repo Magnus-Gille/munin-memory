@@ -157,6 +157,7 @@ export type ReviewApplyResult =
       entryId: string;
       entryUpdatedAt: string;
       priorEntrySnapshot: Record<string, unknown> | null;
+      retainedClassification?: ClassificationLevel;
     }
   | {
       outcome: "conflict";
@@ -685,7 +686,8 @@ export function approveReviewProposal(
       `UPDATE review_proposals
        SET status = 'approved', updated_at = ?, terminal_at = ?,
            applied_entry_id = ?, applied_entry_updated_at = ?,
-           prior_entry_snapshot = ?, terminal_code = NULL, terminal_detail = NULL
+           prior_entry_snapshot = ?, classification = ?,
+           terminal_code = NULL, terminal_detail = NULL
        WHERE id = ?`,
     ).run(
       now,
@@ -693,6 +695,7 @@ export function approveReviewProposal(
       result.entryId,
       result.entryUpdatedAt,
       result.priorEntrySnapshot ? JSON.stringify(result.priorEntrySnapshot) : null,
+      result.retainedClassification ?? row.classification,
       id,
     );
     insertEvent(
@@ -746,11 +749,17 @@ export function pruneReviewProposals(
 
     const purgeable = db.prepare(
       `SELECT * FROM review_proposals
-       WHERE status IN ('declined', 'expired', 'failed')
-         AND terminal_at <= ? AND payload_purged_at IS NULL
+       WHERE payload_purged_at IS NULL
+         AND (
+           (status IN ('declined', 'expired', 'failed') AND terminal_at <= ?)
+           OR
+           (status IN ('approved', 'superseded') AND terminal_at <= ?)
+         )
        ORDER BY terminal_at, id`,
-    ).all(terminalCutoff) as ReviewProposalRow[];
+    ).all(terminalCutoff, undoCutoff) as ReviewProposalRow[];
+    let undoSnapshotsPurged = 0;
     for (const row of purgeable) {
+      if (row.prior_entry_snapshot !== null) undoSnapshotsPurged += 1;
       db.prepare(
         `UPDATE review_proposals
          SET reasons = '[]', source_refs = '[]', source_excerpt = NULL,
@@ -772,17 +781,10 @@ export function pruneReviewProposals(
       );
     }
 
-    const undoPurge = db.prepare(
-      `UPDATE review_proposals
-       SET prior_entry_snapshot = NULL, updated_at = ?
-       WHERE status IN ('approved', 'superseded')
-         AND terminal_at <= ? AND prior_entry_snapshot IS NOT NULL`,
-    ).run(now, undoCutoff);
-
     return {
       expired: expiring.length,
       payloads_purged: purgeable.length,
-      undo_snapshots_purged: undoPurge.changes,
+      undo_snapshots_purged: undoSnapshotsPurged,
     };
   });
   return txn.immediate();

@@ -20,9 +20,12 @@ changelog is the canonical record of what moved.
   approval additionally rechecks source hashes and target CAS preconditions in
   the same SQLite transaction as the memory mutation, making duplicate and
   crash/retry approval idempotent. Declined, expired, and failed payloads are
-  purged after seven days while minimal audit tombstones remain; approved prior
-  snapshots support correction-based undo for 30 days. Instruction-shaped
-  sources remain advisory, visibly untrusted data and never become commands.
+  purged after seven days while minimal audit tombstones remain; approved and
+  superseded payloads are retained only for the 30-day reviewed-undo window.
+  Retained prior snapshots raise the proposal to their classification when
+  necessary, and reviewed undo restores the prior classification.
+  Instruction-shaped sources and review reasons remain advisory, visibly
+  untrusted data and never become commands.
 - Added the first advisory write-time intake quality gate (#181). Successful
   full state and log writes now report bounded local signals for duplicate
   keys, overlap/consolidation candidates, sparse content, tag drift, and deep

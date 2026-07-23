@@ -569,4 +569,48 @@ describe("review proposal retention", () => {
       .toBe("system:maintenance");
     db.close();
   });
+
+  it("purges approved proposal payloads after the reviewed-undo window", () => {
+    const db = initDatabase(":memory:");
+    const created = createPending(db);
+    approveReviewProposal(
+      db,
+      created.id,
+      "owner",
+      () => ({
+        outcome: "applied",
+        entryId: "entry-id",
+        entryUpdatedAt: "2026-07-23T10:05:00.000Z",
+        priorEntrySnapshot: {
+          content: "sensitive prior truth",
+          classification: "client-restricted",
+        },
+      }),
+      "2026-07-23T10:05:00.000Z",
+    );
+
+    const pruned = pruneReviewProposals(
+      db,
+      "2026-08-23T10:06:00.000Z",
+      { terminalPayloadDays: 7, approvedUndoDays: 30 },
+    );
+    const tombstone = getReviewProposal(db, created.id, "owner");
+
+    expect(pruned).toMatchObject({
+      payloads_purged: 1,
+      undo_snapshots_purged: 1,
+    });
+    expect(tombstone).toMatchObject({
+      status: "approved",
+      original_operation: null,
+      current_operation: null,
+      prior_entry_snapshot: null,
+      source_excerpt: null,
+      source_refs: [],
+    });
+    expect(tombstone?.applied_entry_id).toBe("entry-id");
+    expect(listReviewProposalEvents(db, created.id, "owner").at(-1))
+      .toMatchObject({ event_type: "payload_purged", to_status: "approved" });
+    db.close();
+  });
 });
