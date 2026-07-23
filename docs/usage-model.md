@@ -110,6 +110,35 @@ over history instead of appending to it. If you find yourself wondering "what ha
 you needed log entries. If you find yourself wondering "where does this stand," you needed
 a state entry.
 
+### Extract, review, approve, resume
+
+Use the durable review path when raw notes or a conversation may contain several
+capture-worthy signals and a human or supervising agent should decide what becomes
+memory:
+
+1. Call `memory_extract` with `persist:true`. It returns suggestions and durable
+   proposal IDs, but does not change state or append logs.
+2. Call `memory_review` with `action:"preview"` for the exact operation, source
+   references, and freshness/CAS preconditions. Use `edit` or `decline` as needed.
+3. Call `memory_review` with `action:"approve"` only after review. Approval
+   re-runs the ordinary write gates and applies the operation atomically with the
+   proposal transition.
+4. Call `memory_resume` or `memory_read` to verify the accepted memory in normal
+   retrieval.
+
+The queue is scoped to the principal that created each proposal, even when another
+principal knows its UUID or can otherwise read the target namespace. A changed or
+superseded source produces a review conflict rather than a stale write. Duplicate
+approval returns the stored applied result without writing twice.
+
+`prepare_undo` never mutates memory. It creates another pending proposal. If that
+proposal is approved, Munin uses the correction lineage (`supersedes` plus CAS) to
+restore prior state or withdraw a reviewed log while retaining both revisions.
+Newly created state has no non-destructive prior revision and is therefore not
+undoable through this path.
+
+See [review-inbox.md](review-inbox.md) for lifecycle, retention, and security details.
+
 ### Concurrent state writes
 
 The full-content `memory_write` path has three explicit write modes. Patch writes retain

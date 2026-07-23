@@ -37,7 +37,7 @@ Munin is more than a key-value store for AI. The features are designed around ho
 - **Dual auth** — Bearer token (simple) + OAuth 2.1 with dynamic client registration and PKCE (for web and mobile clients).
 - **Two transports** — stdio (local) and Streamable HTTP (network).
 
-Twenty-three MCP tools in total. The compact checked inventory is in [AGENTS.md](AGENTS.md#mcp-tools-exposed).
+Twenty-four MCP tools in total. The compact checked inventory is in [AGENTS.md](AGENTS.md#mcp-tools-exposed).
 
 ## What it looks like in practice
 
@@ -50,6 +50,10 @@ These features exist to solve specific friction points that appear once you actu
 - **Honest retrospection.** `memory_patterns` only surfaces patterns that are backed by actual source entries. `memory_commitments` tracks open, overdue, at-risk, and completed follow-through. Nothing is invented — every signal points back to a source.
 - **Shared memory with scoped access.** A family member or a research agent can use the same Munin server without seeing your work namespaces. Principals have namespace rules and the server enforces them on every tool call, with denial semantics that make disallowed namespaces invisible rather than merely refused.
 - **Handoff between agents.** When one agent (or one environment) hands work to another, `memory_handoff` assembles a source-backed pack: current state, recent decisions, open loops, recent actors, and recommended next actions. Tuned for multi-agent setups where context transfer matters.
+- **Durable review before capture.** `memory_extract persist:true` saves bounded,
+  principal-scoped proposals without changing memory truth. `memory_review`
+  provides exact preview, edit, approve, decline, and reviewed undo; approval
+  re-runs authorization, classification, secret, source-freshness, and CAS gates.
 
 ## Architecture
 
@@ -337,7 +341,7 @@ npm run test:watch    # Watch mode
 
 Early-stage open source and intended for technically comfortable self-hosters.
 
-Available today: 23 MCP tools, background consolidation through OpenRouter or a
+Available today: 24 MCP tools, background consolidation through OpenRouter or a
 compatible local endpoint, lifecycle and retrospective views, multi-principal
 authorization, OAuth and service tokens, retrieval signals, and encrypted backup
 helpers. The constrained profile has been validated under cgroup memory limits on
@@ -357,6 +361,7 @@ Built by Claude (Opus 4.6) and Magnus Gille, adversarially reviewed by Codex (GP
 - [docs/roadmap.md](docs/roadmap.md)
 - [docs/appliance-profiles.md](docs/appliance-profiles.md)
 - [docs/usage-model.md](docs/usage-model.md)
+- [docs/review-inbox.md](docs/review-inbox.md)
 - [docs/competitive-analysis.md](docs/competitive-analysis.md)
 - [PUBLICATION.md](PUBLICATION.md) — publication and history-audit boundary
 - [CONTRIBUTING.md](CONTRIBUTING.md)

@@ -878,6 +878,108 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 22,
+    description: "Add durable principal-scoped review proposals and append-only lifecycle events (#223)",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS review_proposals (
+          id TEXT PRIMARY KEY,
+          creator_principal_id TEXT NOT NULL,
+          operation_type TEXT NOT NULL
+            CHECK(operation_type IN ('memory_write', 'memory_log', 'memory_update_status')),
+          target_namespace TEXT NOT NULL,
+          target_key TEXT,
+          classification TEXT NOT NULL
+            CHECK(classification IN ('public', 'internal', 'client-confidential', 'client-restricted')),
+          confidence REAL NOT NULL
+            CHECK(confidence >= 0.0 AND confidence <= 1.0),
+          reasons TEXT NOT NULL DEFAULT '[]'
+            CHECK(json_valid(reasons) AND json_type(reasons) = 'array'),
+          source_refs TEXT NOT NULL DEFAULT '[]'
+            CHECK(json_valid(source_refs) AND json_type(source_refs) = 'array'),
+          source_excerpt TEXT,
+          source_hash TEXT,
+          source_untrusted INTEGER NOT NULL DEFAULT 0
+            CHECK(source_untrusted IN (0, 1)),
+          injection_flags TEXT NOT NULL DEFAULT '[]'
+            CHECK(json_valid(injection_flags) AND json_type(injection_flags) = 'array'),
+          original_operation TEXT
+            CHECK(original_operation IS NULL OR json_valid(original_operation)),
+          current_operation TEXT
+            CHECK(current_operation IS NULL OR json_valid(current_operation)),
+          status TEXT NOT NULL
+            CHECK(status IN ('pending', 'approved', 'declined', 'edited', 'superseded', 'expired', 'failed')),
+          applied_entry_id TEXT,
+          applied_entry_updated_at TEXT,
+          prior_entry_snapshot TEXT
+            CHECK(prior_entry_snapshot IS NULL OR json_valid(prior_entry_snapshot)),
+          undo_of_proposal_id TEXT
+            REFERENCES review_proposals(id) ON DELETE RESTRICT,
+          terminal_code TEXT,
+          terminal_detail TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          terminal_at TEXT,
+          payload_purged_at TEXT,
+          CHECK(
+            (operation_type = 'memory_log' AND target_key IS NULL) OR
+            (operation_type = 'memory_update_status' AND target_key = 'status') OR
+            (operation_type = 'memory_write' AND target_key IS NOT NULL)
+          )
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_review_proposals_creator_status_updated
+          ON review_proposals(creator_principal_id, status, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_review_proposals_expiry
+          ON review_proposals(status, expires_at);
+        CREATE INDEX IF NOT EXISTS idx_review_proposals_undo_of
+          ON review_proposals(undo_of_proposal_id);
+
+        CREATE TABLE IF NOT EXISTS review_proposal_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          proposal_id TEXT NOT NULL
+            REFERENCES review_proposals(id) ON DELETE RESTRICT,
+          actor_principal_id TEXT NOT NULL,
+          event_type TEXT NOT NULL
+            CHECK(event_type IN (
+              'created', 'edited', 'approved', 'declined', 'expired',
+              'failed', 'superseded', 'undo_created', 'payload_purged',
+              'approval_conflict'
+            )),
+          from_status TEXT
+            CHECK(from_status IS NULL OR from_status IN (
+              'pending', 'approved', 'declined', 'edited',
+              'superseded', 'expired', 'failed'
+            )),
+          to_status TEXT NOT NULL
+            CHECK(to_status IN (
+              'pending', 'approved', 'declined', 'edited',
+              'superseded', 'expired', 'failed'
+            )),
+          detail TEXT NOT NULL DEFAULT '{}'
+            CHECK(json_valid(detail) AND json_type(detail) = 'object'),
+          created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_review_proposal_events_proposal_created
+          ON review_proposal_events(proposal_id, created_at, id);
+
+        CREATE TRIGGER IF NOT EXISTS review_proposal_events_no_update
+        BEFORE UPDATE ON review_proposal_events
+        BEGIN
+          SELECT RAISE(ABORT, 'review proposal events are append-only');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS review_proposal_events_no_delete
+        BEFORE DELETE ON review_proposal_events
+        BEGIN
+          SELECT RAISE(ABORT, 'review proposal events are append-only');
+        END;
+      `);
+    },
+  },
 ];
 
 /**

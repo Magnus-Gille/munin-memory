@@ -30,6 +30,7 @@ import {
   type RateLimitScope,
 } from "./rate-limit.js";
 import { SERVER_VERSION } from "./version.js";
+import { pruneReviewProposals } from "./review-inbox.js";
 
 export {
   RATE_LIMIT_MAX,
@@ -62,6 +63,7 @@ function getRedactionLogRetentionDays(): number {
 export function runMaintenancePrune(database: Database.Database): void {
   pruneRetrievalAnalytics(database, getAnalyticsRetentionDays());
   pruneRedactionLog(database, getRedactionLogRetentionDays());
+  pruneReviewProposals(database, nowUTC());
 }
 
 // --- Configuration ---
