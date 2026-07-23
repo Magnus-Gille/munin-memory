@@ -1032,7 +1032,7 @@ describe("startConsolidationWorker — OpenRouter key health check (#168)", () =
     else process.env.MUNIN_LLM_BASE_URL = savedBaseUrl;
   });
 
-  it("probes /auth/key when a key is present on the default host", async () => {
+  it("probes /key when a key is present on the default host", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -1043,7 +1043,9 @@ describe("startConsolidationWorker — OpenRouter key health check (#168)", () =
 
     startConsolidationWorker(db);
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
-    expect(String(fetchMock.mock.calls[0][0])).toContain("/auth/key");
+    expect(String(fetchMock.mock.calls[0][0])).toBe(
+      "https://openrouter.ai/api/v1/key",
+    );
     expect(errorSpy).not.toHaveBeenCalled();
   });
 
