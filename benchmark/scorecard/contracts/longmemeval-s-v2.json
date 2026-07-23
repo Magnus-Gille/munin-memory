@@ -1,0 +1,106 @@
+{
+  "contract_schema_version": 2,
+  "contract_id": "munin-longmemeval-s-e2e-v2",
+  "publication_status": "publication_candidate",
+  "dataset": {
+    "adapter": "longmemeval",
+    "split": "s",
+    "source_url": "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json",
+    "expected_full_question_count": 500,
+    "haystack_policy": "per_question_namespace"
+  },
+  "ingestion": {
+    "entry_type": "state",
+    "classification": "public",
+    "answer_labels_stored_in_corpus": false
+  },
+  "context_budget": {
+    "unit": "estimated_tokens",
+    "top_k": 10,
+    "retrieved_token_budget": 8192,
+    "estimator": "utf8_bytes_div4_ceil_v1",
+    "limitation": "The pre-call budget uses a pinned UTF-8 byte estimate because Anthropic does not publish its tokenizer. Provider-native prompt tokens and charged cost are reported from every response."
+  },
+  "grading": {
+    "rubric_version": "answer-quality-v1",
+    "correct_signal": "judge_boolean"
+  },
+  "uncertainty": {
+    "method": "deterministic_bootstrap_percentile_95",
+    "confidence": 0.95,
+    "resamples": 2000,
+    "seed": 227
+  },
+  "provider_policy": {
+    "gateway": "openrouter",
+    "routing": "zdr_balanced",
+    "require_response_model": true,
+    "require_provider": true,
+    "require_provider_reported_cost": true
+  },
+  "trust_lanes": {
+    "authorization": "deterministic_production_primitives_v1",
+    "instruction_shaped_content": "deterministic_structure_plus_live_reader_v1",
+    "full_profile_requires_live_poison_pass": true
+  },
+  "profiles": {
+    "smoke": {
+      "profile_id": "deterministic_pipeline_smoke",
+      "input_path": "benchmark/adapters/longmemeval/fixtures/sample-longmemeval.json",
+      "expected_question_count": 2,
+      "limit": 2,
+      "granularity": "session",
+      "runner_mode": "raw",
+      "search_mode": "lexical",
+      "serialization": "linear",
+      "top_k": 10,
+      "reader": {
+        "model": "munin/deterministic-scorecard-smoke-reader-v2",
+        "temperature": 0,
+        "temperature_policy": "fixed_zero",
+        "max_output_tokens": 128
+      },
+      "judge": {
+        "model": "munin/deterministic-scorecard-smoke-judge-v2",
+        "temperature": 0,
+        "temperature_policy": "fixed_zero",
+        "max_output_tokens": 128
+      },
+      "repetitions": 1,
+      "seed_policy": "fixed_fixture_stub",
+      "publication_eligible": false
+    },
+    "full": {
+      "profile_id": "longmemeval_s_full_on_demand",
+      "input_path": "benchmark/data/raw/longmemeval/longmemeval_s_cleaned.json",
+      "expected_question_count": 500,
+      "limit": null,
+      "granularity": "session",
+      "runner_mode": "production_ranker",
+      "search_mode": "hybrid",
+      "serialization": "linear",
+      "top_k": 10,
+      "reader": {
+        "model": "anthropic/claude-haiku-4.5",
+        "temperature": 0,
+        "temperature_policy": "fixed_zero",
+        "max_output_tokens": 256
+      },
+      "judge": {
+        "model": "anthropic/claude-sonnet-4.5",
+        "temperature": 0,
+        "temperature_policy": "fixed_zero",
+        "max_output_tokens": 256
+      },
+      "repetitions": 1,
+      "seed_policy": "temperature_zero_provider_no_seed",
+      "publication_eligible": true
+    }
+  },
+  "limitations": [
+    "This is a Munin Phase A result, not a competitor comparison.",
+    "The retrieved-context budget is a deterministic estimate; provider-native prompt-token counts remain authoritative for billing.",
+    "A single temperature-zero run reports seeded bootstrap confidence intervals over questions, not across-provider repeatability.",
+    "The deterministic trust lanes and one live poison challenge complement, but do not replace, the repository security regression suite."
+  ]
+}

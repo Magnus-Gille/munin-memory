@@ -46,7 +46,10 @@ import {
   serializeOrder,
   type SerializationMode,
 } from "../src/internal/retrieval-shared.js";
-import { serializeContext } from "../benchmark/answer-quality/serialize.js";
+import {
+  estimateContextTokens,
+  serializeContext,
+} from "../benchmark/answer-quality/serialize.js";
 import { judgeAnswer, generateAnswer, JUDGE_SYSTEM_SENTINEL, type ChatFn } from "../benchmark/answer-quality/judge.js";
 import {
   runAnswerQuality,
@@ -125,8 +128,11 @@ function makeMockChat(
   return vi.fn(async (opts: OpenRouterCallOptions): Promise<ChatCompletionResponse> => {
     const isJudge = opts.messages.some((m) => m.content.includes(JUDGE_SYSTEM_SENTINEL));
     return {
+      id: isJudge ? "generation-judge" : "generation-reader",
+      model: opts.model,
+      provider: "test-provider",
       choices: [{ message: { content: isJudge ? judgeJson : answerText } }],
-      usage: { prompt_tokens: 100, completion_tokens: 50 },
+      usage: { prompt_tokens: 100, completion_tokens: 50, cost: 0.001 },
     };
   });
 }
@@ -184,6 +190,43 @@ describe("serialization parity", () => {
     // The display-order IDs should match what boundarySerialize applied to the linear order produces
     expect(boundaryIds).toEqual(boundarySerialize([...linearIds]));
   });
+
+  it("enforces a deterministic retrieved-context token budget", () => {
+    const entries: Entry[] = [
+      makeStubEntry({
+        id: "e1",
+        namespace: "ns/a",
+        key: "k1",
+        content: "alpha ".repeat(80),
+      }),
+      makeStubEntry({
+        id: "e2",
+        namespace: "ns/b",
+        key: "k2",
+        content: "beta ".repeat(80),
+      }),
+    ];
+
+    const serialized = serializeContext(entries, "linear", {
+      maxEstimatedTokens: 64,
+      estimator: "utf8_bytes_div4_ceil_v1",
+    });
+
+    expect(serialized.estimatedTokens).toBeLessThanOrEqual(64);
+    expect(estimateContextTokens(serialized.text)).toBe(serialized.estimatedTokens);
+    expect(serialized.budget).toEqual({
+      max_estimated_tokens: 64,
+      estimated_tokens: serialized.estimatedTokens,
+      estimator: "utf8_bytes_div4_ceil_v1",
+      truncated: true,
+      candidate_entry_count: 2,
+      included_entry_count: 1,
+      dropped_entry_count: 1,
+    });
+    expect(serialized.orderedIds).toEqual(["e1"]);
+    expect(serialized.text).toContain("alpha");
+    expect(serialized.text).not.toContain("beta");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -223,11 +266,12 @@ describe("runAnswerQuality happy path", () => {
       searchMode: "lexical",
       answerModel: "test/model",
       judgeModel: "test/judge",
+      contextTokenBudget: 128,
       chat,
     });
 
     expect(report.report_kind).toBe("answer_quality");
-    expect(report.report_schema_version).toBe(2);
+    expect(report.report_schema_version).toBe(3);
     expect(report.skipped).toBeUndefined();
     expect(report.query_count).toBe(1);
     expect(report.skipped_no_reference).toBe(0);
@@ -239,6 +283,31 @@ describe("runAnswerQuality happy path", () => {
     expect(report.results[0].verdict.correct).toBe(true);
     expect(report.results[0].verdict.parse_ok).toBe(true);
     expect(report.results[0].serialization).toBe("linear");
+    expect(report.results[0].stage_duration_ms.retrieval).toBeGreaterThanOrEqual(0);
+    expect(report.results[0].stage_duration_ms.serialization).toBeGreaterThanOrEqual(0);
+    expect(report.results[0].stage_duration_ms.reader).toBeGreaterThanOrEqual(0);
+    expect(report.results[0].stage_duration_ms.judge).toBeGreaterThanOrEqual(0);
+    expect(report.results[0].context_budget.estimated_tokens).toBeGreaterThan(0);
+    expect(report.results[0].answer_call).toMatchObject({
+      response_model: "test/model",
+      provider: "test-provider",
+      generation_id: "generation-reader",
+    });
+    expect(report.results[0].judge_call).toMatchObject({
+      response_model: "test/judge",
+      provider: "test-provider",
+      generation_id: "generation-judge",
+    });
+    expect(report.total_usage).toEqual({
+      prompt_tokens: 200,
+      completion_tokens: 100,
+      cost: 0.002,
+    });
+    expect(report.usage_accounting).toEqual({
+      expected_calls: 2,
+      usage_reported_calls: 2,
+      cost_reported_calls: 2,
+    });
     // retrieved_ids and serialized_order_ids both present
     expect(Array.isArray(report.results[0].retrieved_ids)).toBe(true);
     expect(Array.isArray(report.results[0].serialized_order_ids)).toBe(true);
@@ -395,6 +464,39 @@ describe("runAnswerQuality happy path", () => {
     expect(report.results[0].answer_error).toBe("provider unavailable");
     expect(report.results[0].judge_error).toBe("provider unavailable");
     expect(report.judge_parse_failures).toBe(1);
+  });
+
+  it("fails immediately with query and role when publication evidence is incomplete", async () => {
+    const { db, dbPath } = makeTempDb();
+    writeState(db, "projects/evidence", "s", "evidence context", []);
+    db.close();
+    const chat: ChatFn = vi.fn(async (opts) => ({
+      id: "generation-without-cost",
+      model: opts.model,
+      provider: "test-provider",
+      choices: [{ message: { content: "answer" } }],
+      usage: { prompt_tokens: 10, completion_tokens: 5 },
+    }));
+
+    await expect(runAnswerQuality({
+      snapshotPath: dbPath,
+      queries: [{
+        id: "q-missing-reader-cost",
+        query: "What is the evidence?",
+        source: "derived",
+        category: "evidence",
+        search_mode: "lexical",
+        reference_answer: "answer",
+      }],
+      serialization: "linear",
+      runnerMode: "raw",
+      searchMode: "lexical",
+      answerModel: "test/model",
+      judgeModel: "test/judge",
+      chat,
+      requireCompleteUsage: true,
+    })).rejects.toThrow(/q-missing-reader-cost.*reader.*cost/i);
+    expect(vi.mocked(chat)).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -812,8 +914,8 @@ describe("live smoke (opt-in: MUNIN_LIVE_OPENROUTER_TESTS=1 + OPENROUTER_API_KEY
       serialization: "linear",
       runnerMode: "raw",
       searchMode: "lexical",
-      answerModel: process.env.MUNIN_ANSWER_MODEL ?? "anthropic/claude-haiku-4-5",
-      judgeModel: process.env.MUNIN_JUDGE_MODEL ?? "anthropic/claude-haiku-4-5",
+      answerModel: process.env.MUNIN_ANSWER_MODEL ?? "anthropic/claude-haiku-4.5",
+      judgeModel: process.env.MUNIN_JUDGE_MODEL ?? "anthropic/claude-haiku-4.5",
       apiKey: OPENROUTER_API_KEY,
     });
 

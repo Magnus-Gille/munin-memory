@@ -6,7 +6,13 @@
  * auth) while keeping the default path byte-for-byte unchanged.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { callOpenRouter, getLlmBaseUrl, isCustomLlmBaseUrl, checkOpenRouterKey } from "../src/internal/openrouter.js";
+import {
+  callOpenRouter,
+  getLlmBaseUrl,
+  isCustomLlmBaseUrl,
+  checkOpenRouterKey,
+  OpenRouterHttpError,
+} from "../src/internal/openrouter.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -466,6 +472,25 @@ describe("callOpenRouter — error handling", () => {
         apiKey: "sk-test",
       }),
     ).rejects.toThrow("LLM API error 524: HTML error page: A timeout occurred");
+  });
+
+  it("preserves status and Retry-After evidence on HTTP failures", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 429,
+      headers: { get: (name: string) => (name.toLowerCase() === "retry-after" ? "2.5" : null) },
+      text: () => Promise.resolve("rate limited"),
+    } as unknown as Response);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const failure = await callOpenRouter({
+      model: "test-model",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "sk-test",
+    }).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(OpenRouterHttpError);
+    expect(failure).toMatchObject({ status: 429, retryAfterMs: 2500 });
   });
 });
 

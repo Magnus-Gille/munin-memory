@@ -1,7 +1,27 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
+import {
+  mkdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import {
+  arch,
+  cpus,
+  platform,
+  release,
+  totalmem,
+} from "node:os";
+import {
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+} from "node:path";
 import { fileURLToPath } from "node:url";
+import { performance } from "node:perf_hooks";
 import {
   buildLongMemEvalArtifacts,
   type BuildOptions,
@@ -15,9 +35,23 @@ import { runAnswerQuality } from "../answer-quality/runner.js";
 import type { AnswerQualityReport } from "../answer-quality/types.js";
 import { loadQueriesWithSource, runBenchmark } from "../runner.js";
 import type { BenchmarkQuery, BenchmarkReport } from "../types.js";
+import {
+  callOpenRouter,
+  checkOpenRouterKey,
+  getOpenRouterApiKey,
+  isCustomLlmBaseUrl,
+  OpenRouterHttpError,
+} from "../../src/internal/openrouter.js";
+import {
+  runDeterministicTrustLanes,
+  runLivePoisonLane,
+} from "./trust-lanes.js";
 import type {
   MuninAgentMemoryScorecardReport,
   ScorecardContract,
+  ScorecardEnvironmentEvidence,
+  ScorecardInterval,
+  ScorecardModelContract,
   ScorecardProfileContract,
   ScorecardProfileName,
 } from "./types.js";
@@ -26,14 +60,11 @@ const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_CONTRACT_PATH = join(
   MODULE_DIR,
   "contracts",
-  "longmemeval-s-v1.json",
+  "longmemeval-s-v2.json",
 );
 
-const FOUNDATION_LIMITATIONS = [
+const SMOKE_LIMITATIONS = [
   "The deterministic smoke uses fixture-specific stub models and is not a publishable quality result.",
-  "A retrieved-token budget is not yet enforced; context is limited by top_k entries.",
-  "Stage-separated latency, peak RAM, disk footprint, monetary cost, repeated-run variance, and adversarial authorization/poison lanes remain to be added.",
-  "No complete 500-question result is published by this foundation.",
 ] as const;
 
 export interface RunScorecardOptions {
@@ -57,7 +88,10 @@ function assertPositiveInteger(value: unknown, label: string): asserts value is 
   }
 }
 
-function validateModelContract(value: unknown, label: string): void {
+function validateModelContract(
+  value: unknown,
+  label: string,
+): asserts value is ScorecardModelContract {
   assertObject(value, label);
   if (typeof value.model !== "string" || value.model.trim().length === 0) {
     throw new Error(`${label}.model must be a non-empty string.`);
@@ -72,7 +106,7 @@ function validateModelContract(value: unknown, label: string): void {
     throw new Error(`${label}.temperature must be a finite number in [0, 2].`);
   }
   if (value.temperature_policy !== "fixed_zero" || value.temperature !== 0) {
-    throw new Error(`${label} must use fixed_zero temperature in contract v1.`);
+    throw new Error(`${label} must use fixed_zero temperature in contract v2.`);
   }
 }
 
@@ -83,16 +117,16 @@ function validateModelContract(value: unknown, label: string): void {
  */
 export function validateScorecardContract(value: unknown): ScorecardContract {
   assertObject(value, "Scorecard contract");
-  if (value.contract_schema_version !== 1) {
+  if (value.contract_schema_version !== 2) {
     throw new Error(
       `Unsupported scorecard contract_schema_version: ${String(value.contract_schema_version)}.`,
     );
   }
-  if (value.contract_id !== "munin-longmemeval-s-e2e-v1") {
+  if (value.contract_id !== "munin-longmemeval-s-e2e-v2") {
     throw new Error(`Unsupported scorecard contract_id: ${String(value.contract_id)}.`);
   }
-  if (value.publication_status !== "unpublished_foundation") {
-    throw new Error("Phase A foundation contract must remain unpublished.");
+  if (value.publication_status !== "publication_candidate") {
+    throw new Error("Phase A v2 contract must remain a publication candidate.");
   }
   assertObject(value.dataset, "dataset");
   if (
@@ -101,7 +135,7 @@ export function validateScorecardContract(value: unknown): ScorecardContract {
     value.dataset.expected_full_question_count !== 500 ||
     value.dataset.haystack_policy !== "per_question_namespace"
   ) {
-    throw new Error("Scorecard dataset contract does not match LongMemEval-S isolation v1.");
+    throw new Error("Scorecard dataset contract does not match LongMemEval-S isolation v2.");
   }
   assertObject(value.ingestion, "ingestion");
   if (
@@ -120,15 +154,47 @@ export function validateScorecardContract(value: unknown): ScorecardContract {
   }
   assertObject(value.context_budget, "context_budget");
   assertPositiveInteger(value.context_budget.top_k, "context_budget.top_k");
+  assertPositiveInteger(
+    value.context_budget.retrieved_token_budget,
+    "context_budget.retrieved_token_budget",
+  );
   if (
-    value.context_budget.unit !== "entries" ||
-    value.context_budget.retrieved_token_budget !== null ||
+    value.context_budget.unit !== "estimated_tokens" ||
+    value.context_budget.estimator !== "utf8_bytes_div4_ceil_v1" ||
     typeof value.context_budget.limitation !== "string" ||
     value.context_budget.limitation.length === 0
   ) {
     throw new Error(
-      "Foundation context budget must declare entry-count limiting and the unenforced token-budget limitation.",
+      "Scorecard context budget must enforce estimated tokens with the v1 UTF-8 estimator.",
     );
+  }
+  assertObject(value.uncertainty, "uncertainty");
+  assertPositiveInteger(value.uncertainty.resamples, "uncertainty.resamples");
+  if (
+    value.uncertainty.method !== "deterministic_bootstrap_percentile_95"
+    || value.uncertainty.confidence !== 0.95
+    || value.uncertainty.seed !== 227
+  ) {
+    throw new Error("Scorecard uncertainty contract is unsupported.");
+  }
+  assertObject(value.provider_policy, "provider_policy");
+  if (
+    value.provider_policy.gateway !== "openrouter"
+    || value.provider_policy.routing !== "zdr_balanced"
+    || value.provider_policy.require_response_model !== true
+    || value.provider_policy.require_provider !== true
+    || value.provider_policy.require_provider_reported_cost !== true
+  ) {
+    throw new Error("Scorecard provider identity/cost policy is unsupported.");
+  }
+  assertObject(value.trust_lanes, "trust_lanes");
+  if (
+    value.trust_lanes.authorization !== "deterministic_production_primitives_v1"
+    || value.trust_lanes.instruction_shaped_content
+      !== "deterministic_structure_plus_live_reader_v1"
+    || value.trust_lanes.full_profile_requires_live_poison_pass !== true
+  ) {
+    throw new Error("Scorecard trust-lane contract is unsupported.");
   }
   assertObject(value.profiles, "profiles");
   for (const name of ["smoke", "full"] as const) {
@@ -138,16 +204,13 @@ export function validateScorecardContract(value: unknown): ScorecardContract {
     assertPositiveInteger(profile.top_k, `profiles.${name}.top_k`);
     assertPositiveInteger(profile.repetitions, `profiles.${name}.repetitions`);
     if (profile.repetitions !== 1) {
-      throw new Error(`profiles.${name}.repetitions must remain 1 in the unpublished foundation.`);
+      throw new Error(`profiles.${name}.repetitions must remain 1 under the bootstrap-v2 contract.`);
     }
     if (profile.granularity !== "session" || profile.serialization !== "linear") {
       throw new Error(`profiles.${name} must use session granularity and linear serialization.`);
     }
     validateModelContract(profile.reader, `profiles.${name}.reader`);
     validateModelContract(profile.judge, `profiles.${name}.judge`);
-    if (profile.publication_eligible !== false) {
-      throw new Error(`profiles.${name} must not be publication eligible.`);
-    }
     if (profile.top_k !== value.context_budget.top_k) {
       throw new Error(`profiles.${name}.top_k must match context_budget.top_k.`);
     }
@@ -156,6 +219,8 @@ export function validateScorecardContract(value: unknown): ScorecardContract {
   const full = value.profiles.full;
   assertObject(smoke, "profiles.smoke");
   assertObject(full, "profiles.full");
+  validateModelContract(full.reader, "profiles.full.reader");
+  validateModelContract(full.judge, "profiles.full.judge");
   if (
     smoke.profile_id !== "deterministic_pipeline_smoke" ||
     smoke.expected_question_count !== 2 ||
@@ -164,7 +229,8 @@ export function validateScorecardContract(value: unknown): ScorecardContract {
     smoke.runner_mode !== "raw" ||
     smoke.search_mode !== "lexical" ||
     smoke.serialization !== "linear" ||
-    smoke.seed_policy !== "fixed_fixture_stub"
+    smoke.seed_policy !== "fixed_fixture_stub" ||
+    smoke.publication_eligible !== false
   ) {
     throw new Error("Smoke profile must remain deterministic, lexical, raw, and fixture-backed.");
   }
@@ -176,16 +242,25 @@ export function validateScorecardContract(value: unknown): ScorecardContract {
     full.runner_mode !== "production_ranker" ||
     full.search_mode !== "hybrid" ||
     full.serialization !== "linear" ||
-    full.seed_policy !== "temperature_zero_provider_no_seed"
+    full.seed_policy !== "temperature_zero_provider_no_seed" ||
+    full.publication_eligible !== true
   ) {
-    throw new Error("Full profile must remain the 500-question production-ranker hybrid on-demand run.");
+    throw new Error(
+      "Full profile must be publication eligible and remain the 500-question production-ranker hybrid on-demand run.",
+    );
   }
   if (
-    !Array.isArray(value.required_before_publication) ||
-    value.required_before_publication.length === 0 ||
-    value.required_before_publication.some((item) => typeof item !== "string" || item.length === 0)
+    full.reader.model !== "anthropic/claude-haiku-4.5"
+    || full.judge.model !== "anthropic/claude-sonnet-4.5"
   ) {
-    throw new Error("required_before_publication must list the remaining publication gates.");
+    throw new Error("Full profile must use the pinned OpenRouter Claude 4.5 model slugs.");
+  }
+  if (
+    !Array.isArray(value.limitations)
+    || value.limitations.length === 0
+    || value.limitations.some((item) => typeof item !== "string" || item.length === 0)
+  ) {
+    throw new Error("Scorecard contract must disclose non-empty limitations.");
   }
   return value as unknown as ScorecardContract;
 }
@@ -201,6 +276,148 @@ export function loadScorecardContract(
     sha256: createHash("sha256").update(raw).digest("hex"),
     path,
   };
+}
+
+function seededRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state += 0x6D2B79F5;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+export function bootstrapMeanInterval(
+  values: number[],
+  options: { confidence: 0.95; resamples: number; seed: number },
+): ScorecardInterval {
+  if (values.length === 0) {
+    throw new Error("Cannot compute a scorecard interval over an empty sample.");
+  }
+  if (
+    values.some((value) => !Number.isFinite(value))
+    || !Number.isSafeInteger(options.resamples)
+    || options.resamples <= 0
+  ) {
+    throw new Error("Scorecard interval requires finite values and positive resamples.");
+  }
+  const random = seededRandom(options.seed);
+  const means: number[] = [];
+  for (let sampleIndex = 0; sampleIndex < options.resamples; sampleIndex += 1) {
+    let total = 0;
+    for (let valueIndex = 0; valueIndex < values.length; valueIndex += 1) {
+      total += values[Math.floor(random() * values.length)]!;
+    }
+    means.push(total / values.length);
+  }
+  means.sort((a, b) => a - b);
+  const alpha = 1 - options.confidence;
+  const lowerIndex = Math.floor((alpha / 2) * (means.length - 1));
+  const upperIndex = Math.ceil((1 - alpha / 2) * (means.length - 1));
+  const round = (value: number) => Math.round(value * 1_000_000) / 1_000_000;
+  return {
+    point_estimate: round(values.reduce((sum, value) => sum + value, 0) / values.length),
+    lower: round(means[lowerIndex]!),
+    upper: round(means[upperIndex]!),
+    confidence: options.confidence,
+    method: "deterministic_bootstrap_percentile",
+    resamples: options.resamples,
+    seed: options.seed,
+  };
+}
+
+function sha256File(path: string): string {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+function gitOutput(args: string[]): string | null {
+  try {
+    return execFileSync("git", args, {
+      cwd: process.cwd(),
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+function captureEnvironmentEvidence(): ScorecardEnvironmentEvidence {
+  const cpuList = cpus();
+  const dirtyOutput = gitOutput(["status", "--porcelain"]);
+  return {
+    node_version: process.version,
+    platform: platform(),
+    arch: arch(),
+    os_release: release(),
+    cpu_model: cpuList[0]?.model ?? "unknown",
+    cpu_count: cpuList.length,
+    total_memory_bytes: totalmem(),
+    git_commit: gitOutput(["rev-parse", "HEAD"]),
+    git_dirty: dirtyOutput === null ? null : dirtyOutput.length > 0,
+    package_json_sha256: sha256File(resolve("package.json")),
+    package_lock_sha256: sha256File(resolve("package-lock.json")),
+  };
+}
+
+function currentPeakRssBytes(): number {
+  return process.resourceUsage().maxRSS * 1024;
+}
+
+function retryableScorecardStatus(error: unknown): 429 | 503 | null {
+  if (error instanceof OpenRouterHttpError) {
+    return error.status === 429 || error.status === 503 ? error.status : null;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  const match = message.match(/^LLM API error (429|503)\b/);
+  return match?.[1] === "429" ? 429 : match?.[1] === "503" ? 503 : null;
+}
+
+export function withScorecardRetry(
+  chat: ChatFn,
+  options: {
+    maxAttempts?: number;
+    wait?: (delayMs: number) => Promise<void>;
+  } = {},
+): ChatFn {
+  const maxAttempts = options.maxAttempts ?? 4;
+  if (!Number.isSafeInteger(maxAttempts) || maxAttempts <= 0) {
+    throw new Error("Scorecard retry maxAttempts must be a positive safe integer.");
+  }
+  const wait = options.wait ?? (
+    (delayMs: number) => new Promise((resolveWait) => {
+      setTimeout(resolveWait, delayMs);
+    })
+  );
+  return async (callOptions) => {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        return await chat(callOptions);
+      } catch (error) {
+        lastError = error;
+        if (retryableScorecardStatus(error) === null || attempt === maxAttempts) {
+          throw error;
+        }
+        const providerDelay = error instanceof OpenRouterHttpError
+          ? error.retryAfterMs
+          : undefined;
+        await wait(providerDelay ?? 1000 * (2 ** (attempt - 1)));
+      }
+    }
+    throw lastError;
+  };
+}
+
+function portableReportPath(path: string): string {
+  if (!isAbsolute(path)) return path;
+  const relativePath = relative(process.cwd(), path);
+  if (relativePath.startsWith("..")) {
+    throw new Error(`Scorecard report path escapes the repository: ${path}`);
+  }
+  return relativePath;
 }
 
 /** Run before retrieval or model calls so incomplete paid suites fail cheaply. */
@@ -358,6 +575,9 @@ function deterministicSmokeChat(): ChatFn {
       const candidate = String(payload.candidate_answer ?? "");
       const correct = reference.length > 0 && candidate === reference;
       return {
+        id: "scorecard-smoke-judge",
+        model: options.model,
+        provider: "deterministic-local",
         choices: [{
           message: {
             content: JSON.stringify({
@@ -367,7 +587,7 @@ function deterministicSmokeChat(): ChatFn {
             }),
           },
         }],
-        usage: { prompt_tokens: 0, completion_tokens: 0 },
+        usage: { prompt_tokens: 0, completion_tokens: 0, cost: 0 },
       };
     }
     const question = String(payload.question ?? "");
@@ -387,8 +607,11 @@ function deterministicSmokeChat(): ChatFn {
       ? expected.answer
       : "I cannot find the answer in the provided context.";
     return {
+      id: "scorecard-smoke-reader",
+      model: options.model,
+      provider: "deterministic-local",
       choices: [{ message: { content: answer } }],
-      usage: { prompt_tokens: 0, completion_tokens: 0 },
+      usage: { prompt_tokens: 0, completion_tokens: 0, cost: 0 },
     };
   };
 }
@@ -398,7 +621,9 @@ function artifactPaths(
   profile: ScorecardProfileContract,
   artifactDir: string,
 ): Pick<BuildOptions, "inputPath" | "dbPath" | "queryPath" | "provenancePath"> {
-  const prefix = profileName === "smoke" ? "scorecard-smoke-v1" : "scorecard-longmemeval-s-v1";
+  const prefix = profileName === "smoke"
+    ? "scorecard-smoke-v2"
+    : "scorecard-longmemeval-s-v2";
   return {
     inputPath: resolve(profile.input_path),
     dbPath: join(artifactDir, `${prefix}.db`),
@@ -421,8 +646,37 @@ function writeScorecardReport(
 export async function runScorecard(
   options: RunScorecardOptions,
 ): Promise<{ report: MuninAgentMemoryScorecardReport; reportPath: string }> {
+  const totalStart = performance.now();
+  const initialRssBytes = process.memoryUsage().rss;
   const { contract, sha256 } = loadScorecardContract(options.contractPath);
   const profile = contract.profiles[options.profile];
+  const environment = captureEnvironmentEvidence();
+  const isFull = options.profile === "full";
+  const apiKey = getOpenRouterApiKey() ?? "";
+  const scorecardChat = isFull
+    ? withScorecardRetry(options.chat ?? callOpenRouter)
+    : deterministicSmokeChat();
+  if (isFull) {
+    if (isCustomLlmBaseUrl()) {
+      throw new Error("Publication-candidate full scorecard must use the pinned OpenRouter gateway.");
+    }
+    if (!options.chat && apiKey.length === 0) {
+      throw new Error("Publication-candidate full scorecard requires OPENROUTER_API_KEY.");
+    }
+    if (!options.chat) {
+      const keyHealth = await checkOpenRouterKey(apiKey);
+      if (!keyHealth.ok) {
+        throw new Error(
+          `OpenRouter key preflight failed${keyHealth.status === undefined ? "" : ` (${keyHealth.status})`}: ${keyHealth.error ?? "unknown error"}`,
+        );
+      }
+    }
+    if (environment.git_dirty !== false || environment.git_commit === null) {
+      throw new Error(
+        "Publication-candidate full scorecard requires a clean Git commit for environment lineage.",
+      );
+    }
+  }
   const artifactDir = resolve(options.artifactDir ?? "benchmark/generated/scorecard");
   const reportDir = resolve(options.reportDir ?? "benchmark/reports/scorecard");
   mkdirSync(artifactDir, { recursive: true });
@@ -431,6 +685,7 @@ export async function runScorecard(
   ensureSafeGeneratedPath(paths.queryPath, "Scorecard query file");
   ensureSafeGeneratedPath(paths.provenancePath, "Scorecard provenance file");
 
+  const ingestionStart = performance.now();
   buildLongMemEvalArtifacts({
     split: contract.dataset.split,
     granularity: profile.granularity,
@@ -441,6 +696,7 @@ export async function runScorecard(
     provenancePath: paths.provenancePath,
     limit: profile.limit ?? undefined,
   });
+  const ingestionDuration = performance.now() - ingestionStart;
 
   const { queries, source } = loadQueriesWithSource(paths.queryPath);
   preflightScorecardQueries(
@@ -449,6 +705,7 @@ export async function runScorecard(
     profile.expected_question_count,
   );
 
+  const embeddingStart = performance.now();
   if (profile.search_mode !== "lexical") {
     const embeddings = await populateCorpusEmbeddings(paths.dbPath);
     if (embeddings.total > 0 && embeddings.vector_rows === 0) {
@@ -457,7 +714,9 @@ export async function runScorecard(
       );
     }
   }
+  const embeddingDuration = performance.now() - embeddingStart;
 
+  const retrievalStart = performance.now();
   const retrieval = await runBenchmark(paths.dbPath, queries, {
     querySetSources: [source],
     runnerMode: profile.runner_mode,
@@ -470,7 +729,29 @@ export async function runScorecard(
     profile.search_mode,
     profile.runner_mode,
   );
+  const retrievalDuration = performance.now() - retrievalStart;
 
+  const trustStart = performance.now();
+  const trustLanes = await runDeterministicTrustLanes();
+  if (isFull) {
+    trustLanes.live_poison = await runLivePoisonLane({
+      model: profile.reader.model,
+      apiKey,
+      temperature: profile.reader.temperature,
+      maxTokens: profile.reader.max_output_tokens,
+      chat: scorecardChat,
+    });
+    trustLanes.overall_pass =
+      trustLanes.authorization.status === "pass"
+      && trustLanes.instruction_shaped_content.status === "pass"
+      && trustLanes.live_poison.status === "pass";
+  }
+  if (!trustLanes.overall_pass) {
+    throw new Error("Scorecard trust lane failed; refusing to continue to the paid suite.");
+  }
+  const trustDuration = performance.now() - trustStart;
+
+  const answerQualityStart = performance.now();
   const answerQuality = await runAnswerQuality({
     snapshotPath: paths.dbPath,
     queries,
@@ -478,6 +759,7 @@ export async function runScorecard(
     runnerMode: profile.runner_mode,
     searchMode: profile.search_mode,
     topK: profile.top_k,
+    contextTokenBudget: contract.context_budget.retrieved_token_budget,
     answerModel: profile.reader.model,
     judgeModel: profile.judge.model,
     answerTemperature: profile.reader.temperature,
@@ -485,7 +767,15 @@ export async function runScorecard(
     judgeTemperature: profile.judge.temperature,
     judgeMaxTokens: profile.judge.max_output_tokens,
     querySetSources: [source],
-    chat: options.profile === "smoke" ? deterministicSmokeChat() : options.chat,
+    chat: scorecardChat,
+    requireCompleteUsage: isFull,
+    onProgress: isFull
+      ? (completed, total) => {
+          if (completed === total || completed % 25 === 0) {
+            console.log(`Scorecard answer-quality progress: ${completed}/${total}`);
+          }
+        }
+      : undefined,
   });
   validateScorecardAnswerQualityReport(
     answerQuality,
@@ -493,6 +783,54 @@ export async function runScorecard(
     profile.expected_question_count,
     profile.search_mode,
   );
+  const answerQualityDuration = performance.now() - answerQualityStart;
+  const overBudget = answerQuality.results
+    .filter((result) =>
+      result.context_budget.estimated_tokens
+      > contract.context_budget.retrieved_token_budget)
+    .map((result) => result.query_id);
+  if (overBudget.length > 0) {
+    throw new Error(
+      `Scorecard context budget exceeded on: ${overBudget.slice(0, 10).join(", ")}.`,
+    );
+  }
+  if (isFull) {
+    if (answerQuality.execution_identity.missing_identity_calls !== 0) {
+      throw new Error(
+        `Scorecard provider/model identity missing on ${answerQuality.execution_identity.missing_identity_calls} calls.`,
+      );
+    }
+    if (answerQuality.total_usage?.cost === undefined) {
+      throw new Error("Scorecard full run did not receive provider-reported monetary cost.");
+    }
+    if (
+      answerQuality.usage_accounting.usage_reported_calls
+        !== answerQuality.usage_accounting.expected_calls
+      || answerQuality.usage_accounting.cost_reported_calls
+        !== answerQuality.usage_accounting.expected_calls
+      || answerQuality.results.some((result) =>
+        [result.answer_usage, result.judge_usage].some((usage) =>
+          usage === undefined
+          || !Number.isFinite(usage.prompt_tokens)
+          || usage.prompt_tokens < 0
+          || !Number.isFinite(usage.completion_tokens)
+          || usage.completion_tokens < 0
+          || usage.cost === undefined
+          || !Number.isFinite(usage.cost)
+          || usage.cost < 0))
+    ) {
+      throw new Error("Scorecard full run has incomplete or invalid per-call usage/cost accounting.");
+    }
+    if (
+      trustLanes.live_poison.call_identity?.response_model === undefined
+      || trustLanes.live_poison.call_identity.provider === undefined
+      || trustLanes.live_poison.usage?.cost === undefined
+      || !Number.isFinite(trustLanes.live_poison.usage.cost)
+      || trustLanes.live_poison.usage.cost < 0
+    ) {
+      throw new Error("Scorecard live poison lane lacks provider model identity or cost.");
+    }
+  }
   const retrievalSources = retrieval.query_set_sources
     .map((item) => `${item.filename}:${item.sha256}`)
     .sort();
@@ -502,20 +840,88 @@ export async function runScorecard(
   if (JSON.stringify(retrievalSources) !== JSON.stringify(answerSources)) {
     throw new Error("Scorecard harness query-set source bytes differ; refusing to compose report.");
   }
+  retrieval.snapshot_path = portableReportPath(retrieval.snapshot_path);
+  retrieval.query_set_sources = retrieval.query_set_sources.map((item) => ({
+    ...item,
+    path: portableReportPath(item.path),
+  }));
+  answerQuality.snapshot_path = portableReportPath(answerQuality.snapshot_path);
+  answerQuality.query_set_sources = answerQuality.query_set_sources.map((item) => ({
+    ...item,
+    path: portableReportPath(item.path),
+  }));
+
+  const uncertaintyOptions = {
+    confidence: contract.uncertainty.confidence,
+    resamples: contract.uncertainty.resamples,
+    seed: contract.uncertainty.seed,
+  } as const;
+  const uncertainty = {
+    answer_accuracy: bootstrapMeanInterval(
+      answerQuality.results.map((result) => result.verdict.correct ? 1 : 0),
+      uncertaintyOptions,
+    ),
+    retrieval_recall_at_5: bootstrapMeanInterval(
+      retrieval.queries.map((result) => result.scores.recallAt5),
+      uncertaintyOptions,
+    ),
+  };
+  const disk = {
+    database_bytes: statSync(paths.dbPath).size,
+    query_bytes: statSync(paths.queryPath).size,
+    provenance_bytes: statSync(paths.provenancePath).size,
+    total_artifact_bytes: 0,
+  };
+  disk.total_artifact_bytes =
+    disk.database_bytes + disk.query_bytes + disk.provenance_bytes;
+  const finalRssBytes = process.memoryUsage().rss;
+  const costUsd = answerQuality.total_usage?.cost === undefined
+    && trustLanes.live_poison.usage?.cost === undefined
+    ? null
+    : (answerQuality.total_usage?.cost ?? 0)
+      + (trustLanes.live_poison.usage?.cost ?? 0);
+  const roundDuration = (value: number) => Math.round(value * 100) / 100;
 
   const report: MuninAgentMemoryScorecardReport = {
     report_kind: "munin_agent_memory_scorecard",
-    report_schema_version: 1,
+    report_schema_version: 2,
     run_at: new Date().toISOString(),
     contract_id: contract.contract_id,
     contract_schema_version: contract.contract_schema_version,
     contract_sha256: sha256,
     profile: profile.profile_id,
-    publication_status: "unpublished_foundation",
-    publication_eligible: false,
+    publication_status: isFull ? "publication_candidate" : "pipeline_smoke",
+    publication_eligible: isFull && profile.publication_eligible,
     retrieval,
     answer_quality: answerQuality,
-    limitations: [...FOUNDATION_LIMITATIONS, ...contract.required_before_publication],
+    uncertainty,
+    evidence: {
+      environment,
+      stage_duration_ms: {
+        ingestion: roundDuration(ingestionDuration),
+        embedding: roundDuration(embeddingDuration),
+        retrieval: roundDuration(retrievalDuration),
+        answer_quality: roundDuration(answerQualityDuration),
+        trust_lanes: roundDuration(trustDuration),
+        total: roundDuration(performance.now() - totalStart),
+      },
+      resources: {
+        initial_rss_bytes: initialRssBytes,
+        final_rss_bytes: finalRssBytes,
+        peak_rss_bytes: Math.max(
+          initialRssBytes,
+          finalRssBytes,
+          currentPeakRssBytes(),
+        ),
+      },
+      disk,
+      cost_usd: costUsd,
+      trust_lanes: trustLanes,
+    },
+    limitations: [
+      ...(isFull ? [] : SMOKE_LIMITATIONS),
+      ...contract.limitations,
+    ],
   };
   const reportPath = writeScorecardReport(report, reportDir);
   return { report, reportPath };

@@ -10,6 +10,16 @@ changelog is the canonical record of what moved.
 
 ### Added
 
+- Added the publication-grade Phase A agent-memory scorecard (#227). The pinned
+  LongMemEval-S full profile now requires all 500 questions, the production
+  hybrid ranker, an enforced deterministic retrieved-context budget, separate
+  reader and judge models, provider-native model/token/cost evidence for every
+  call, deterministic bootstrap intervals, environment and Git lineage, and
+  authorization plus stored-instruction poison lanes. A one-question offline
+  smoke remains explicitly ineligible for publication, while a separate
+  validator publishes only complete, clean, portable, secret-scanned full-run
+  reports under `benchmark/scorecard/results/`. The prior v1 foundation
+  contract remains frozen for historical reproducibility.
 - Added a durable review inbox for `memory_extract` proposals (#223).
   `memory_extract persist:true` now stores bounded, principal-scoped pending
   proposals without changing memory truth, while the new `memory_review` tool

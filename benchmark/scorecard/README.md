@@ -1,14 +1,14 @@
-# Agent-memory scorecard foundation
+# Agent-memory scorecard
 
-This directory defines the unpublished Phase A foundation for Munin's
-end-to-end LongMemEval-S scorecard. It composes the shipped retrieval and
-answer-quality harnesses; it does not implement a competing retrieval or QA
-runner.
+This directory defines Munin's Phase A end-to-end LongMemEval-S scorecard. It
+composes the shipped adapter, retrieval runner, and answer-quality harness; it
+does not implement a second retrieval or QA stack.
 
-The committed contract is
-[`contracts/longmemeval-s-v1.json`](./contracts/longmemeval-s-v1.json). Its raw
-bytes are SHA-256 stamped into each scorecard report. Both profiles are
-deliberately `publication_eligible: false`.
+The current contract is
+[`contracts/longmemeval-s-v2.json`](./contracts/longmemeval-s-v2.json). Its raw
+bytes are SHA-256 stamped into every report. The original unpublished
+foundation remains frozen as
+[`contracts/longmemeval-s-v1.json`](./contracts/longmemeval-s-v1.json).
 
 ## Deterministic smoke
 
@@ -18,50 +18,58 @@ npm run scorecard:smoke
 
 The smoke profile is offline and uses the two-question committed LongMemEval
 fixture, lexical/raw retrieval, and fixture-specific deterministic reader and
-judge stubs. It proves that adapter ingestion, per-question retrieval,
-answer-generation wiring, judging, and combined report persistence still work.
-Its reported answer score is a pipeline assertion, **not model quality or
-end-to-end accuracy**, and the report is permanently marked
-`publication_eligible: false`.
+judge stubs. It proves adapter ingestion, per-question retrieval,
+budgeted-context serialization, answer generation, judging, trust probes,
+uncertainty, and combined report persistence. Its answer score is a pipeline
+assertion—not model quality—and it is always `publication_eligible: false`.
 
-Generated databases, query files, provenance, and reports remain under the
-gitignored `benchmark/generated/` and `benchmark/reports/` trees.
+Generated databases and unpublished reports remain under gitignored
+`benchmark/generated/` and `benchmark/reports/`.
 
-## Full on-demand foundation run
+## Full on-demand run
 
 ```bash
 OPENROUTER_API_KEY=... npm run scorecard:longmemeval:s
 ```
 
-This command downloads LongMemEval-S, builds the isolated 500-question corpus,
-and performs a fail-closed preflight before retrieval or paid model calls. The
-preflight requires exactly 500 questions, a reference answer for every
-question, a dataset-supplied question date, unique IDs, and a per-question
-namespace. It then populates corpus embeddings, runs the production-ranker
-hybrid retrieval harness, and runs the existing answer-quality reader/judge
-harness over the same query bytes. Reader and judge temperature/output-token
-settings are pinned by the contract and recorded in the answer-quality report.
-The npm command sets `MUNIN_EMBEDDINGS_ENABLED=true` before the scorecard module
-loads, because embedding configuration is resolved at process startup. Direct
-programmatic callers must likewise start the process with embeddings enabled
-for the hybrid full profile; a disabled runtime fails rather than degrading to
-lexical.
+The command downloads LongMemEval-S and fails closed before the paid suite
+unless all of the following hold:
 
-This command does **not** publish a result. The foundation report stays
-`unpublished_foundation` and `publication_eligible: false`, even after a
-successful 500-question run. Raw local output alone is not a product claim.
+- exactly 500 unique, dated, per-question-scoped questions have references;
+- hybrid embeddings and the production ranker are available without fallback;
+- the evaluation runs from a clean, identified Git commit;
+- the OpenRouter key preflight succeeds and no custom gateway overrides the
+  pinned provider policy;
+- deterministic namespace/classification and instruction-boundary probes pass;
+- a live poison challenge returns the stored fact instead of the attacker value.
 
-## Known publication blockers
+The v2 contract pins the OpenRouter model slugs, temperature, output ceilings,
+top K, an 8,192 estimated-token retrieved-context budget, and a deterministic
+bootstrap policy. Every provider response must return its actual model,
+provider, native token counts, and charged cost. The report includes all 500 raw
+retrieval and answer results, stage latency, peak process RSS, generated disk
+footprint, provider cost, environment and Git lineage, trust-lane evidence, and
+95% bootstrap intervals.
 
-- Context is limited to top-10 entries; a model-appropriate retrieved-token
-  budget is not yet enforced or reported.
-- Provider model revisions and full execution-environment metadata are not yet
-  pinned in the report.
-- Stage-separated latency, peak RAM, disk footprint, monetary cost, repeated
-  run variance/confidence intervals, and adversarial authorization/poison lanes
-  are not yet present.
-- No complete 500-question raw report or dated summary is committed here.
+The pre-call context estimator is `ceil(UTF-8 bytes / 4)`. Anthropic does not
+publish its tokenizer, so the report clearly separates that conservative
+enforcement estimate from provider-native prompt tokens used for billing.
 
-Until those gaps close, retrieval `R@K` remains retrieval recall and must never
-be described as answer accuracy. Answer-quality results remain separate inside
-the combined report so the two layers stay auditable.
+## Publish a completed run
+
+```bash
+npm run scorecard:publish -- \
+  --report benchmark/reports/scorecard/<generated-report>.json
+```
+
+Publication validates the complete 500-question report again, rejects dirty or
+missing Git lineage, missing provider identity/cost, failed trust lanes,
+over-budget contexts, machine-local absolute paths, and secret-shaped content.
+It then writes a raw report plus dated Markdown summary under
+`benchmark/scorecard/results/<run-date>/`, ready for review and commit.
+
+The result remains a Munin Phase A result, not an apples-to-apples competitor
+claim. Retrieval recall and final-answer accuracy remain separate nested
+reports. See
+[`COMPETITOR-NEUTRALITY.md`](./COMPETITOR-NEUTRALITY.md) for the optional
+Phase B policy.

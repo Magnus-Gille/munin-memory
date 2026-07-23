@@ -33,8 +33,28 @@ export interface OpenRouterCallOptions {
 }
 
 export interface ChatCompletionResponse {
+  id?: string;
+  model?: string;
+  provider?: string;
   choices: Array<{ message: { content: string } }>;
-  usage?: { prompt_tokens: number; completion_tokens: number };
+  usage?: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    /** OpenRouter reports charged credits in USD for non-streaming calls. */
+    cost?: number;
+  };
+}
+
+/** Structured non-success response used by scorecard retry policy and callers. */
+export class OpenRouterHttpError extends Error {
+  constructor(
+    public readonly status: number,
+    detail: string,
+    public readonly retryAfterMs?: number,
+  ) {
+    super(`LLM API error ${status}${detail ? `: ${detail}` : ""}`);
+    this.name = "OpenRouterHttpError";
+  }
 }
 
 // --- Constants ---
@@ -68,6 +88,14 @@ function summarizeErrorBody(response: Response, text: string): string {
   const titleMatch = trimmed.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
   const title = titleMatch?.[1]?.replace(/\s+/g, " ").trim();
   return title ? `HTML error page: ${title}` : "HTML error page";
+}
+
+function retryAfterMs(response: Response): number | undefined {
+  const raw = getHeader(response, "retry-after");
+  if (raw === null) return undefined;
+  const seconds = Number(raw);
+  if (!Number.isFinite(seconds) || seconds < 0) return undefined;
+  return Math.round(seconds * 1000);
 }
 
 // --- Base-URL resolution ---
@@ -147,7 +175,7 @@ export async function callOpenRouter(opts: OpenRouterCallOptions): Promise<ChatC
   if (!response.ok) {
     const text = await response.text().catch(() => "");
     const detail = summarizeErrorBody(response, text);
-    throw new Error(`LLM API error ${response.status}${detail ? `: ${detail}` : ""}`);
+    throw new OpenRouterHttpError(response.status, detail, retryAfterMs(response));
   }
 
   return response.json() as Promise<ChatCompletionResponse>;

@@ -61,9 +61,9 @@ export function parseArgs(argv: string[]): {
   }
 
   const defaultAnswerModel =
-    process.env.MUNIN_ANSWER_MODEL ?? "anthropic/claude-haiku-4-5";
+    process.env.MUNIN_ANSWER_MODEL ?? "anthropic/claude-haiku-4.5";
   const defaultJudgeModel =
-    process.env.MUNIN_JUDGE_MODEL ?? "anthropic/claude-sonnet-4-5";
+    process.env.MUNIN_JUDGE_MODEL ?? "anthropic/claude-sonnet-4.5";
 
   // Preserve raw --top-k string so validateParsedArgs can apply strict validation.
   // When --top-k is present but its value was consumed as the next arg, args.get("top-k")

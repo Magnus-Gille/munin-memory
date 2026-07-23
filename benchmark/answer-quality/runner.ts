@@ -40,6 +40,7 @@ import {
   type AnswerQualityReport,
   type AnswerQualityResult,
   type AnswerQualityCategorySummary,
+  type LlmCallIdentity,
   type TokenUsage,
   type SerializationMode,
 } from "./types.js";
@@ -57,6 +58,8 @@ export interface AnswerQualityOptions {
   searchRecencyWeight?: number;
   /** Number of top entries serialized into context. Defaults to 10. */
   topK?: number;
+  /** Enforced retrieved-context budget using the pinned UTF-8/4 estimator. */
+  contextTokenBudget?: number;
   /** Model for answer generation. */
   answerModel: string;
   /** Model for judging. Should differ from answerModel to reduce self-preference. */
@@ -75,6 +78,14 @@ export interface AnswerQualityOptions {
   apiKey?: string | null;
   /** Per-file lineage metadata for the query set(s). */
   querySetSources?: QuerySetSource[];
+  /** Optional progress hook for long paid suites. */
+  onProgress?: (completed: number, total: number) => void;
+  /**
+   * Fail at the individual call boundary unless provider-native usage, cost,
+   * response model, and provider identity are complete. Publication harnesses
+   * enable this; exploratory answer-quality runs preserve graceful diagnostics.
+   */
+  requireCompleteUsage?: boolean;
 }
 
 // --- Skip predicate (also exported for unit tests) ---
@@ -144,10 +155,48 @@ function summarizeDurations(durations: number[]): DurationSummary {
 
 function addUsage(a: TokenUsage | undefined, b: TokenUsage | undefined): TokenUsage | undefined {
   if (!a && !b) return undefined;
+  const cost = (a?.cost ?? 0) + (b?.cost ?? 0);
+  const hasCost = a?.cost !== undefined || b?.cost !== undefined;
   return {
     prompt_tokens: (a?.prompt_tokens ?? 0) + (b?.prompt_tokens ?? 0),
     completion_tokens: (a?.completion_tokens ?? 0) + (b?.completion_tokens ?? 0),
+    ...(hasCost ? { cost } : {}),
   };
+}
+
+function requireCompleteCallEvidence(
+  queryId: string,
+  role: "reader" | "judge",
+  usage: TokenUsage | undefined,
+  identity: LlmCallIdentity | undefined,
+  callError: string | undefined,
+): void {
+  const prefix = `Scorecard query ${queryId} ${role}`;
+  if (callError !== undefined) {
+    throw new Error(`${prefix} call failed: ${callError}`);
+  }
+  if (usage === undefined) {
+    throw new Error(`${prefix} call is missing provider-native usage.`);
+  }
+  if (
+    !Number.isSafeInteger(usage.prompt_tokens)
+    || usage.prompt_tokens < 0
+    || !Number.isSafeInteger(usage.completion_tokens)
+    || usage.completion_tokens < 0
+  ) {
+    throw new Error(`${prefix} call has invalid provider-native token usage.`);
+  }
+  if (usage.cost === undefined || !Number.isFinite(usage.cost) || usage.cost < 0) {
+    throw new Error(`${prefix} call is missing a valid provider-reported cost.`);
+  }
+  if (
+    identity?.response_model === undefined
+    || identity.response_model.trim().length === 0
+    || identity.provider === undefined
+    || identity.provider.trim().length === 0
+  ) {
+    throw new Error(`${prefix} call is missing provider/model execution identity.`);
+  }
 }
 
 function computeQuerySetChecksum(sources: QuerySetSource[]): string {
@@ -175,6 +224,13 @@ export async function runAnswerQuality(
   const runnerMode: RunnerMode = opts.runnerMode ?? "production_ranker";
   const searchMode: SearchMode = opts.searchMode ?? "hybrid";
   const topK = opts.topK ?? 10;
+  const contextTokenBudget = opts.contextTokenBudget ?? null;
+  if (
+    contextTokenBudget !== null
+    && (!Number.isSafeInteger(contextTokenBudget) || contextTokenBudget <= 0)
+  ) {
+    throw new Error("contextTokenBudget must be a positive safe integer.");
+  }
   const searchRecencyWeight = opts.searchRecencyWeight ?? null;
   const answerTemperature = opts.answerTemperature ?? null;
   const answerMaxTokens = opts.answerMaxTokens ?? 4096;
@@ -186,7 +242,7 @@ export async function runAnswerQuality(
   if (skipReason) {
     return {
       report_kind: "answer_quality",
-      report_schema_version: 2,
+      report_schema_version: 3,
       run_at: runAt,
       snapshot_path: opts.snapshotPath,
       snapshot_schema_version: 0,
@@ -196,6 +252,8 @@ export async function runAnswerQuality(
       search_mode: searchMode,
       search_recency_weight: searchRecencyWeight,
       top_k: topK,
+      context_token_budget: contextTokenBudget,
+      context_token_estimator: "utf8_bytes_div4_ceil_v1",
       answer_model: opts.answerModel,
       answer_temperature: answerTemperature,
       answer_max_output_tokens: answerMaxTokens,
@@ -212,6 +270,18 @@ export async function runAnswerQuality(
       overall_duration: { p50_ms: null, p95_ms: null, total_ms: 0 },
       by_category: [],
       results: [],
+      usage_accounting: {
+        expected_calls: 0,
+        usage_reported_calls: 0,
+        cost_reported_calls: 0,
+      },
+      execution_identity: {
+        requested_answer_model: opts.answerModel,
+        requested_judge_model: opts.judgeModel,
+        response_models: [],
+        providers: [],
+        missing_identity_calls: 0,
+      },
       embedding_summary: null,
       skipped: true,
       skip_reason: skipReason,
@@ -349,6 +419,7 @@ export async function runAnswerQualityInner(
 
   for (const query of eligible) {
     const queryStart = performance.now();
+    const retrievalStart = queryStart;
 
     // Retrieve — honor per-query search_mode override (skip when "all", use global then)
     const querySearchMode = query.search_mode === "all" ? searchMode : query.search_mode;
@@ -376,19 +447,34 @@ export async function runAnswerQualityInner(
     } else {
       finalEntries = rawEntries.slice(0, topK);
     }
+    const retrievalMs = performance.now() - retrievalStart;
 
     const retrievedIds = finalEntries.map((e) => e.id);
 
     // Serialize context
-    const { text: contextText, orderedIds: serializedOrderIds } = serializeContext(
+    const serializationStart = performance.now();
+    const {
+      text: contextText,
+      orderedIds: serializedOrderIds,
+      budget: contextBudget,
+    } = serializeContext(
       finalEntries,
       serialization,
+      opts.contextTokenBudget === undefined
+        ? undefined
+        : {
+            maxEstimatedTokens: opts.contextTokenBudget,
+            estimator: "utf8_bytes_div4_ceil_v1",
+          },
     );
+    const serializationMs = performance.now() - serializationStart;
 
     // Generate answer
     let candidateAnswer = "";
     let answerUsage: TokenUsage | undefined;
+    let answerCall: LlmCallIdentity | undefined;
     let answerError: string | undefined;
+    const readerStart = performance.now();
     try {
       const generated = await generateAnswer(
         {
@@ -404,16 +490,29 @@ export async function runAnswerQualityInner(
       );
       candidateAnswer = generated.answer;
       answerUsage = generated.usage;
+      answerCall = generated.call_identity;
     } catch (err) {
       answerError = err instanceof Error ? err.message : String(err);
       candidateAnswer = `[answer generation failed: ${answerError}]`;
+    }
+    const readerMs = performance.now() - readerStart;
+    if (opts.requireCompleteUsage) {
+      requireCompleteCallEvidence(
+        query.id,
+        "reader",
+        answerUsage,
+        answerCall,
+        answerError,
+      );
     }
 
     // Judge
     const referenceAnswer = query.reference_answer!;
     let verdict;
     let judgeUsage: TokenUsage | undefined;
+    let judgeCall: LlmCallIdentity | undefined;
     let judgeError: string | undefined;
+    const judgeStart = performance.now();
     try {
       const judgeResult = await judgeAnswer(
         {
@@ -430,6 +529,7 @@ export async function runAnswerQualityInner(
       );
       verdict = judgeResult;
       judgeUsage = judgeResult.usage;
+      judgeCall = judgeResult.call_identity;
     } catch (err) {
       judgeError = err instanceof Error ? err.message : String(err);
       verdict = {
@@ -439,6 +539,16 @@ export async function runAnswerQualityInner(
         parse_ok: false,
         raw: undefined,
       };
+    }
+    const judgeMs = performance.now() - judgeStart;
+    if (opts.requireCompleteUsage) {
+      requireCompleteCallEvidence(
+        query.id,
+        "judge",
+        judgeUsage,
+        judgeCall,
+        judgeError,
+      );
     }
 
     const durationMs = Math.round((performance.now() - queryStart) * 100) / 100;
@@ -459,9 +569,19 @@ export async function runAnswerQualityInner(
       effective_search_mode: effectiveMode,
       verdict,
       duration_ms: durationMs,
+      stage_duration_ms: {
+        retrieval: Math.round(retrievalMs * 100) / 100,
+        serialization: Math.round(serializationMs * 100) / 100,
+        reader: Math.round(readerMs * 100) / 100,
+        judge: Math.round(judgeMs * 100) / 100,
+      },
+      context_budget: contextBudget,
+      answer_call: answerCall,
+      judge_call: judgeCall,
       answer_usage: answerUsage,
       judge_usage: judgeUsage,
     });
+    opts.onProgress?.(results.length, eligible.length);
   }
 
   // Aggregate
@@ -503,10 +623,35 @@ export async function runAnswerQualityInner(
     });
   }
   byCategory.sort((a, b) => a.category.localeCompare(b.category));
+  const callIdentities = results.flatMap((result) =>
+    [result.answer_call, result.judge_call].filter(
+      (identity): identity is LlmCallIdentity => identity !== undefined,
+    ),
+  );
+  const responseModels = [...new Set(
+    callIdentities
+      .map((identity) => identity.response_model)
+      .filter((model): model is string => model !== undefined),
+  )].sort();
+  const providers = [...new Set(
+    callIdentities
+      .map((identity) => identity.provider)
+      .filter((provider): provider is string => provider !== undefined),
+  )].sort();
+  const missingIdentityCalls =
+    (results.length * 2)
+    - callIdentities.filter(
+      (identity) => identity.response_model !== undefined && identity.provider !== undefined,
+    ).length;
+  const usages = results.flatMap((result) =>
+    [result.answer_usage, result.judge_usage].filter(
+      (usage): usage is TokenUsage => usage !== undefined,
+    ),
+  );
 
   return {
     report_kind: "answer_quality",
-    report_schema_version: 2,
+    report_schema_version: 3,
     run_at: runAt,
     snapshot_path: opts.snapshotPath,
     snapshot_schema_version: snapshotSchemaVersion,
@@ -516,6 +661,8 @@ export async function runAnswerQualityInner(
     search_mode: searchMode,
     search_recency_weight: searchRecencyWeight,
     top_k: topK,
+    context_token_budget: opts.contextTokenBudget ?? null,
+    context_token_estimator: "utf8_bytes_div4_ceil_v1",
     answer_model: opts.answerModel,
     answer_temperature: answerTemperature,
     answer_max_output_tokens: answerMaxTokens,
@@ -533,6 +680,18 @@ export async function runAnswerQualityInner(
     by_category: byCategory,
     results,
     total_usage: totalUsage,
+    usage_accounting: {
+      expected_calls: results.length * 2,
+      usage_reported_calls: usages.length,
+      cost_reported_calls: usages.filter((usage) => usage.cost !== undefined).length,
+    },
+    execution_identity: {
+      requested_answer_model: opts.answerModel,
+      requested_judge_model: opts.judgeModel,
+      response_models: responseModels,
+      providers,
+      missing_identity_calls: missingIdentityCalls,
+    },
     warnings: warnings.length > 0 ? warnings : undefined,
     embedding_summary: embeddingSummary,
   };
