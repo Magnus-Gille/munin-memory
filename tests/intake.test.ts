@@ -248,6 +248,30 @@ describe("write-path intake integration", () => {
     )).toContain("content_overlap");
   });
 
+  it("does not flag a corrected log against the predecessor it supersedes", async () => {
+    const first = await ownerCall("memory_log", {
+      namespace: "projects/intake",
+      content:
+        "Decided to keep the write-time quality gate advisory so optional analysis cannot block durable memory writes.",
+      tags: ["decision"],
+    });
+    const correction = await ownerCall("memory_log", {
+      namespace: "projects/intake",
+      content:
+        "Decided to keep the write-time quality gate advisory so optional analysis can never block durable memory writes.",
+      tags: ["decision"],
+      supersedes: first.id,
+      expected_updated_at: first.timestamp,
+    });
+    const checks = (
+      correction.intake as { flags: Array<{ check: string }> }
+    ).flags.map((flag) => flag.check);
+
+    expect(correction.status).toBe("superseded");
+    expect(checks).not.toContain("content_overlap");
+    expect(checks).not.toContain("consolidation_candidate");
+  });
+
   it("does not leak higher-classification related entries through intake", async () => {
     const restricted = await ownerCall("memory_write", {
       namespace: "projects/isolated",
@@ -341,6 +365,26 @@ describe("write-path intake integration", () => {
 
     expect(intake.flags.some((flag) => flag.related_entry_id === expired.id)).toBe(false);
     expect(intake.metadata.related_keys).toEqual([]);
+  });
+
+  it("does not treat reviving an expired state key as a duplicate overwrite", async () => {
+    await ownerCall("memory_write", {
+      namespace: "projects/expired-intake",
+      key: "revived",
+      content: "Old temporary state that has already expired.",
+      valid_until: "2025-01-01T00:00:00.000Z",
+    });
+    const result = await ownerCall("memory_write", {
+      namespace: "projects/expired-intake",
+      key: "revived",
+      content: "Fresh current state replacing the expired temporary value.",
+    });
+    const checks = (
+      result.intake as { flags: Array<{ check: string }> }
+    ).flags.map((flag) => flag.check);
+
+    expect(result.status).toBe("updated");
+    expect(checks).not.toContain("duplicate_key");
   });
 
   it("keeps writes successful when optional intake persistence is unavailable", async () => {

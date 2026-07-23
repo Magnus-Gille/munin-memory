@@ -732,6 +732,7 @@ function getVisibleIntakeCandidates(
   const exact = readState(db, namespace, key);
   if (
     exact
+    && !isEntryExpired(exact)
     && classificationAllowed(exact.classification, getContextMaxClassification(ctx))
   ) {
     return [exact, ...candidates].slice(0, 100);
@@ -747,18 +748,23 @@ function evaluateIntakeAdvisory(
     key: string | null;
     content: string;
     tags: string[];
+    excludeEntryIds?: string[];
   },
   warnings: string[],
 ): IntakeResult | undefined {
   try {
+    const excluded = new Set(input.excludeEntryIds ?? []);
     const result = evaluateIntake({
-      ...input,
+      namespace: input.namespace,
+      key: input.key,
+      content: input.content,
+      tags: input.tags,
       candidates: getVisibleIntakeCandidates(
         db,
         ctx,
         input.namespace,
         input.key,
-      ),
+      ).filter((candidate) => !excluded.has(candidate.id)),
     });
     for (const flag of result.flags) {
       warnings.push(`[intake:${flag.check}] ${flag.message}`);
@@ -7684,6 +7690,7 @@ export function registerTools(
                   key: null,
                   content,
                   tags: logTags,
+                  excludeEntryIds: correctionTarget ? [correctionTarget.id] : [],
                 },
                 logWarnings,
               );
