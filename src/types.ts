@@ -139,6 +139,8 @@ export interface ExtractParams {
   namespace_hint?: string;
   project_hint?: string;
   max_suggestions?: number;
+  persist?: boolean;
+  classification?: ClassificationLevel;
 }
 
 export interface NarrativeParams {

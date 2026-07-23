@@ -334,15 +334,16 @@ enough that those benefits are not erased by operator burden.
    explicit, or complete first success in lexical mode and enable embeddings
    afterward.
 
-3. **A review inbox over `memory_extract`.** Supermemory's approve/decline/undo
-   flow is the right productization of Munin's existing suggestion-only safety
-   model. Persist proposed operations, show the source, allow correction, and
-   apply with CAS. Do not silently auto-write.
+3. **Validate the shipped review inbox over `memory_extract`.** Munin now
+   persists bounded principal-scoped proposals, shows exact source/precondition
+   context, supports edit/decline/approve and reviewed correction-based undo,
+   and applies with CAS without silent writes. The next question is measured
+   dogfood value, not another proposal mechanism.
 
 4. **Measure and simplify the remaining agent-facing friction.** Munin already
    ships task-level `memory_orient`, `memory_resume`, and `memory_handoff` tools.
    Measure real tool-choice failures, then add the smallest missing context-pack
-   contract instead of reflexively adding more front doors to the 23-tool catalog.
+   contract instead of reflexively adding more front doors to the 24-tool catalog.
 
 ### P1 — high-value extensions
 
@@ -408,7 +409,7 @@ enough that those benefits are not erased by operator burden.
 2. **More retrieval micro-tuning before end-to-end evidence.** R@10 is already
    strong. The bottleneck is query/tool use, context assembly, answer quality, and
    outcome measurement.
-3. **More MCP tools.** Twenty-three is enough. Improve discoverability, task-level
+3. **More MCP tools.** Twenty-four is enough. Improve discoverability, task-level
    recipes, and composite context packs.
 4. **Further artificial RAM-floor proofs.** Semantic fit is established. Test the
    real appliance experience: install, cold start, SD wear, power, Wi-Fi failure,

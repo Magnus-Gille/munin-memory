@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { initDatabase } from "../src/db.js";
 import { runMaintenancePrune } from "../src/index.js";
+import { createReviewProposal, declineReviewProposal } from "../src/review-inbox.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -24,6 +25,62 @@ function insertRedactionLog(db: ReturnType<typeof initDatabase>, id: string, cre
 }
 
 describe("runMaintenancePrune", () => {
+  it("expires stale review proposals and prunes terminal proposal payloads", () => {
+    const db = initDatabase(":memory:");
+    const created = createReviewProposal(db, {
+      creatorPrincipalId: "owner",
+      operation: {
+        action: "memory_log",
+        namespace: "projects/test",
+        content: "Review me",
+      },
+      classification: "internal",
+      confidence: 0.8,
+      reasons: ["test"],
+      sourceRefs: [],
+      sourceExcerpt: "Review me",
+      sourceHash: "hash",
+      createdAt: "2000-01-01T00:00:00.000Z",
+      expiresAt: "2000-01-31T00:00:00.000Z",
+    });
+    const declined = createReviewProposal(db, {
+      creatorPrincipalId: "owner",
+      operation: {
+        action: "memory_log",
+        namespace: "projects/test",
+        content: "Purge me",
+      },
+      classification: "internal",
+      confidence: 0.8,
+      reasons: ["test"],
+      sourceRefs: [],
+      sourceExcerpt: "Purge me",
+      sourceHash: "hash",
+      createdAt: "2000-01-01T00:00:00.000Z",
+      expiresAt: "2000-01-31T00:00:00.000Z",
+    });
+    declineReviewProposal(
+      db,
+      declined.id,
+      "owner",
+      "old decline",
+      "2000-01-02T00:00:00.000Z",
+    );
+
+    runMaintenancePrune(db);
+
+    expect(db.prepare(
+      "SELECT status FROM review_proposals WHERE id = ?",
+    ).get(created.id)).toEqual({ status: "expired" });
+    expect(db.prepare(
+      "SELECT current_operation, payload_purged_at FROM review_proposals WHERE id = ?",
+    ).get(declined.id)).toEqual({
+      current_operation: null,
+      payload_purged_at: expect.any(String),
+    });
+    db.close();
+  });
+
   it("prunes expired redaction log rows", () => {
     const db = initDatabase(":memory:");
     const originalRetention = process.env.MUNIN_REDACTION_LOG_RETENTION_DAYS;

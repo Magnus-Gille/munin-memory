@@ -974,6 +974,46 @@ describe("memory_extract — access enforcement", () => {
 });
 
 // ---------------------------------------------------------------------------
+// memory_review
+// ---------------------------------------------------------------------------
+
+describe("memory_review — access enforcement", () => {
+  it("does not reveal an owner proposal to another principal who knows its ID", async () => {
+    const extracted = parse(await ownerCall("memory_extract", {
+      conversation_text: "We decided to keep this owner proposal private.",
+      namespace_hint: "projects/foo",
+      persist: true,
+    })) as { proposals: Array<{ id: string }> };
+
+    const result = parse(await familyCall("memory_review", {
+      action: "get",
+      proposal_id: extracted.proposals[0].id,
+    })) as Record<string, unknown>;
+
+    expect(result).toMatchObject({ error: "not_found" });
+    expect(JSON.stringify(result)).not.toContain("projects/foo");
+  });
+
+  it("lets a principal review only proposals created in its own writable scope", async () => {
+    const extracted = parse(await familyCall("memory_extract", {
+      conversation_text: "We decided to keep this Alice note.",
+      namespace_hint: "users/alice/notes",
+      persist: true,
+    })) as { proposals: Array<{ id: string }> };
+
+    const result = parse(await familyCall("memory_review", {
+      action: "get",
+      proposal_id: extracted.proposals[0].id,
+    })) as { creator_principal_id: string; target_namespace: string };
+
+    expect(result).toMatchObject({
+      creator_principal_id: "alice",
+      target_namespace: "users/alice/notes",
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // memory_narrative
 // ---------------------------------------------------------------------------
 
@@ -1599,6 +1639,7 @@ describe("meta: all registered tools are covered", () => {
       "memory_orient",
       "memory_resume",
       "memory_extract",
+      "memory_review",
       "memory_narrative",
       "memory_commitments",
       "memory_patterns",

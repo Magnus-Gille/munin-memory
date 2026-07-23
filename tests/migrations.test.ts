@@ -75,6 +75,8 @@ describe("runMigrations", () => {
     expect(names).toContain("audit_log");
     expect(names).toContain("entries_fts");
     expect(names).toContain("entry_intake");
+    expect(names).toContain("review_proposals");
+    expect(names).toContain("review_proposal_events");
     expect(names).toContain("schema_version");
     db.close();
   });
@@ -97,6 +99,9 @@ describe("runMigrations", () => {
     expect(names).toContain("idx_entries_ns_owner");
     expect(names).toContain("idx_audit_timestamp");
     expect(names).toContain("idx_audit_entry_id");
+    expect(names).toContain("idx_review_proposals_creator_status_updated");
+    expect(names).toContain("idx_review_proposals_expiry");
+    expect(names).toContain("idx_review_proposal_events_proposal_created");
     db.close();
   });
 
@@ -145,6 +150,69 @@ describe("runMigrations", () => {
       .prepare("SELECT content FROM entries WHERE id = 'test-id'")
       .get() as { content: string } | undefined;
     expect(entry?.content).toBe("survives re-migration");
+    db.close();
+  });
+});
+
+describe("migration v22 — durable review inbox", () => {
+  it("does not let review audit metadata prevent later entry deletion", () => {
+    const db = openRawDb();
+    runMigrations(db);
+    const foreignKeys = db.prepare(
+      "PRAGMA foreign_key_list(review_proposals)",
+    ).all() as Array<{ table: string }>;
+
+    expect(foreignKeys.some((foreignKey) => foreignKey.table === "entries")).toBe(false);
+    db.close();
+  });
+
+  it("enforces proposal lifecycle values and append-only review events", () => {
+    const db = openRawDb();
+    runMigrations(db);
+    const now = "2026-07-23T10:00:00.000Z";
+
+    db.prepare(
+      `INSERT INTO review_proposals
+         (id, creator_principal_id, operation_type, target_namespace, target_key,
+          classification, confidence, reasons, source_refs, source_excerpt,
+          source_hash, original_operation, current_operation, status,
+          created_at, updated_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      "proposal-1",
+      "owner",
+      "memory_write",
+      "projects/test",
+      "status",
+      "internal",
+      0.9,
+      '["explicit current state"]',
+      "[]",
+      "bounded source",
+      "source-hash",
+      '{"action":"memory_write"}',
+      '{"action":"memory_write"}',
+      "pending",
+      now,
+      now,
+      "2026-08-22T10:00:00.000Z",
+    );
+
+    db.prepare(
+      `INSERT INTO review_proposal_events
+         (proposal_id, actor_principal_id, event_type, from_status, to_status, detail, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run("proposal-1", "owner", "created", null, "pending", "{}", now);
+
+    expect(() => db.prepare(
+      "UPDATE review_proposal_events SET detail = '{}' WHERE proposal_id = ?",
+    ).run("proposal-1")).toThrow(/append-only/i);
+    expect(() => db.prepare(
+      "DELETE FROM review_proposal_events WHERE proposal_id = ?",
+    ).run("proposal-1")).toThrow(/append-only/i);
+    expect(() => db.prepare(
+      "UPDATE review_proposals SET status = 'unknown' WHERE id = ?",
+    ).run("proposal-1")).toThrow();
     db.close();
   });
 });
