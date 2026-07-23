@@ -140,6 +140,13 @@ export interface MuninAgentMemoryScorecardReport {
       total_artifact_bytes: number;
     };
     cost_usd: number | null;
+    retries: {
+      total: number;
+      http_429: number;
+      http_503: number;
+      transport_fetch_failed: number;
+      transport_terminated: number;
+    };
     trust_lanes: ScorecardTrustLaneReport;
   };
   limitations: string[];

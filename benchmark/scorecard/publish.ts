@@ -195,6 +195,24 @@ export function validatePublicationReport(
   ) {
     throw new Error("Publication report has an invalid or unreconciled provider-reported cost.");
   }
+  const retries = evidence.retries;
+  const retryCounts = retries === undefined
+    ? []
+    : [
+      retries.http_429,
+      retries.http_503,
+      retries.transport_fetch_failed,
+      retries.transport_terminated,
+    ];
+  if (
+    retries === undefined
+    || !Number.isSafeInteger(retries.total)
+    || retries.total < 0
+    || retryCounts.some((count) => !Number.isSafeInteger(count) || count < 0)
+    || retryCounts.reduce((sum, count) => sum + count, 0) !== retries.total
+  ) {
+    throw new Error("Publication report has invalid or unreconciled retry evidence.");
+  }
   if (
     evidence.environment.git_dirty !== false
     || evidence.environment.git_commit === null
@@ -267,6 +285,7 @@ export function renderPublicationSummary(
 | Retrieved-context budget | ${aq.context_token_budget} estimated tokens |
 | Provider prompt / completion tokens | ${usage?.prompt_tokens ?? "n/a"} / ${usage?.completion_tokens ?? "n/a"} |
 | Provider-reported cost | ${formatUsd(evidence.cost_usd!)} |
+| Transient retries | ${evidence.retries.total} |
 | Peak process RSS | ${(evidence.resources.peak_rss_bytes / 1024 / 1024).toFixed(1)} MiB |
 | Generated DB + query artifacts | ${(evidence.disk.total_artifact_bytes / 1024 / 1024).toFixed(1)} MiB |
 

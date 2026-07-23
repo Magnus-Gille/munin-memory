@@ -51,6 +51,15 @@ retrieval and answer results, stage latency, peak process RSS, generated disk
 footprint, provider cost, environment and Git lineage, trust-lane evidence, and
 95% bootstrap intervals.
 
+The paid caller uses bounded exponential retry for explicit OpenRouter 429/503
+responses and the two narrow Node fetch transport failures observed during the
+full run (`fetch failed` and `terminated`). Every retry is recorded in the
+report and dated publication summary. Other errors remain fail-closed.
+OpenRouter notes that upstream prompt processing can sometimes be charged when
+no response is returned, so a report with transport retries includes that
+account-level cost limitation while continuing to reconcile every successful
+raw call against provider-reported cost.
+
 The pre-call context estimator is `ceil(UTF-8 bytes / 4)`. Anthropic does not
 publish its tokenizer, so the report clearly separates that conservative
 enforcement estimate from provider-native prompt tokens used for billing.

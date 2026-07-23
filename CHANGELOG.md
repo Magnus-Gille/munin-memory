@@ -19,7 +19,10 @@ changelog is the canonical record of what moved.
   smoke remains explicitly ineligible for publication, while a separate
   validator publishes only complete, clean, portable, secret-scanned full-run
   reports under `benchmark/scorecard/results/`. The prior v1 foundation
-  contract remains frozen for historical reproducibility.
+  contract remains frozen for historical reproducibility. The paid runner
+  retries only explicit 429/503 responses and Node fetch transport failures
+  whose exact messages are `fetch failed` or `terminated`; every retry is
+  counted in publication evidence, while all other failures remain fail-closed.
 - Added a durable review inbox for `memory_extract` proposals (#223).
   `memory_extract persist:true` now stores bounded, principal-scoped pending
   proposals without changing memory truth, while the new `memory_review` tool

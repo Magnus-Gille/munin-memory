@@ -179,17 +179,20 @@ describe("Phase A scorecard contract", () => {
     expect(report.overall_pass).toBe(true);
   });
 
-  it("retries only explicit 429/503 responses and honors Retry-After", async () => {
+  it("retries explicit 429/503 and narrow fetch transport failures", async () => {
     const delays: number[] = [];
+    const retries: Array<{ reason: string; attempt: number }> = [];
     const transient = vi.fn()
       .mockRejectedValueOnce(new OpenRouterHttpError(429, "rate limited", 2500))
       .mockRejectedValueOnce(new OpenRouterHttpError(503, "unavailable"))
+      .mockRejectedValueOnce(new TypeError("terminated"))
       .mockResolvedValue({
         choices: [{ message: { content: "ok" } }],
       });
     const retried = withScorecardRetry(transient, {
       maxAttempts: 4,
       wait: async (delayMs) => { delays.push(delayMs); },
+      onRetry: (event) => { retries.push(event); },
     });
     const call = {
       model: "test/model",
@@ -199,13 +202,19 @@ describe("Phase A scorecard contract", () => {
     await expect(retried(call)).resolves.toMatchObject({
       choices: [{ message: { content: "ok" } }],
     });
-    expect(transient).toHaveBeenCalledTimes(3);
-    expect(delays).toEqual([2500, 2000]);
+    expect(transient).toHaveBeenCalledTimes(4);
+    expect(delays).toEqual([2500, 2000, 4000]);
+    expect(retries).toEqual([
+      { reason: "http_429", attempt: 1 },
+      { reason: "http_503", attempt: 2 },
+      { reason: "transport_terminated", attempt: 3 },
+    ]);
 
     for (const error of [
       new OpenRouterHttpError(401, "unauthorized"),
       new OpenRouterHttpError(408, "timeout"),
-      new Error("fetch failed: ECONNRESET"),
+      new Error("terminated"),
+      new TypeError("invalid_argument"),
     ]) {
       const noRetryCall = vi.fn().mockRejectedValue(error);
       const noRetry = withScorecardRetry(noRetryCall, {
@@ -260,6 +269,13 @@ describe("deterministic scorecard smoke", () => {
     expect(report.evidence.resources.peak_rss_bytes).toBeGreaterThan(0);
     expect(report.evidence.disk.total_artifact_bytes).toBeGreaterThan(0);
     expect(report.evidence.cost_usd).toBe(0);
+    expect(report.evidence.retries).toEqual({
+      total: 0,
+      http_429: 0,
+      http_503: 0,
+      transport_fetch_failed: 0,
+      transport_terminated: 0,
+    });
     expect(report.uncertainty.answer_accuracy.point_estimate).toBe(1);
     expect(report.retrieval.query_set_sources[0].sha256).toBe(
       report.answer_quality.query_set_sources[0].sha256,

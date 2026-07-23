@@ -366,13 +366,31 @@ function currentPeakRssBytes(): number {
   return process.resourceUsage().maxRSS * 1024;
 }
 
-function retryableScorecardStatus(error: unknown): 429 | 503 | null {
+export type ScorecardRetryReason =
+  | "http_429"
+  | "http_503"
+  | "transport_fetch_failed"
+  | "transport_terminated";
+
+function retryableScorecardReason(error: unknown): ScorecardRetryReason | null {
   if (error instanceof OpenRouterHttpError) {
-    return error.status === 429 || error.status === 503 ? error.status : null;
+    return error.status === 429
+      ? "http_429"
+      : error.status === 503
+        ? "http_503"
+        : null;
   }
   const message = error instanceof Error ? error.message : String(error);
   const match = message.match(/^LLM API error (429|503)\b/);
-  return match?.[1] === "429" ? 429 : match?.[1] === "503" ? 503 : null;
+  if (match?.[1] === "429") return "http_429";
+  if (match?.[1] === "503") return "http_503";
+  if (error instanceof TypeError && message === "fetch failed") {
+    return "transport_fetch_failed";
+  }
+  if (error instanceof TypeError && message === "terminated") {
+    return "transport_terminated";
+  }
+  return null;
 }
 
 export function withScorecardRetry(
@@ -380,6 +398,7 @@ export function withScorecardRetry(
   options: {
     maxAttempts?: number;
     wait?: (delayMs: number) => Promise<void>;
+    onRetry?: (event: { reason: ScorecardRetryReason; attempt: number }) => void;
   } = {},
 ): ChatFn {
   const maxAttempts = options.maxAttempts ?? 4;
@@ -398,9 +417,11 @@ export function withScorecardRetry(
         return await chat(callOptions);
       } catch (error) {
         lastError = error;
-        if (retryableScorecardStatus(error) === null || attempt === maxAttempts) {
+        const reason = retryableScorecardReason(error);
+        if (reason === null || attempt === maxAttempts) {
           throw error;
         }
+        options.onRetry?.({ reason, attempt });
         const providerDelay = error instanceof OpenRouterHttpError
           ? error.retryAfterMs
           : undefined;
@@ -653,8 +674,16 @@ export async function runScorecard(
   const environment = captureEnvironmentEvidence();
   const isFull = options.profile === "full";
   const apiKey = getOpenRouterApiKey() ?? "";
+  const retryEvents: Array<{ reason: ScorecardRetryReason; attempt: number }> = [];
   const scorecardChat = isFull
-    ? withScorecardRetry(options.chat ?? callOpenRouter)
+    ? withScorecardRetry(options.chat ?? callOpenRouter, {
+      onRetry: (event) => {
+        retryEvents.push(event);
+        console.warn(
+          `Scorecard transient retry: ${event.reason} after attempt ${event.attempt}.`,
+        );
+      },
+    })
     : deterministicSmokeChat();
   if (isFull) {
     if (isCustomLlmBaseUrl()) {
@@ -916,10 +945,26 @@ export async function runScorecard(
       },
       disk,
       cost_usd: costUsd,
+      retries: {
+        total: retryEvents.length,
+        http_429: retryEvents.filter((event) => event.reason === "http_429").length,
+        http_503: retryEvents.filter((event) => event.reason === "http_503").length,
+        transport_fetch_failed: retryEvents.filter(
+          (event) => event.reason === "transport_fetch_failed",
+        ).length,
+        transport_terminated: retryEvents.filter(
+          (event) => event.reason === "transport_terminated",
+        ).length,
+      },
       trust_lanes: trustLanes,
     },
     limitations: [
       ...(isFull ? [] : SMOKE_LIMITATIONS),
+      ...(retryEvents.some((event) => event.reason.startsWith("transport_"))
+        ? [
+          "Transport retries are counted in evidence. OpenRouter may charge upstream prompt processing for an attempt whose response was not returned, so provider-reported successful-call cost can understate account-level spend by those failed attempts.",
+        ]
+        : []),
       ...contract.limitations,
     ],
   };
