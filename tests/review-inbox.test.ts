@@ -218,6 +218,23 @@ describe("review proposal lifecycle", () => {
     db.close();
   });
 
+  it("bounds JSON-expanding review reasons without aborting the transition", () => {
+    const db = initDatabase(":memory:");
+    const created = createPending(db);
+
+    expect(declineReviewProposal(
+      db,
+      created.id,
+      "owner",
+      "\u0001".repeat(500),
+      "2026-07-23T10:05:00.000Z",
+    )).toMatchObject({ status: "declined", duplicate: false });
+    expect(getReviewProposal(db, created.id, "owner")?.terminal_detail).toHaveLength(250);
+    expect(listReviewProposalEvents(db, created.id, "owner").at(-1))
+      .toMatchObject({ event_type: "declined", to_status: "declined" });
+    db.close();
+  });
+
   it("atomically approves once and returns the stored result on duplicate approval", () => {
     const db = initDatabase(":memory:");
     const created = createPending(db);

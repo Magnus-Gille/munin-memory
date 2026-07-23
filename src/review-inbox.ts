@@ -275,6 +275,13 @@ function boundedDetail(detail: Record<string, unknown>): string {
   return serialized;
 }
 
+function boundedReviewReason(reason: string): string {
+  // A JSON-escaped control character can expand to six characters. Keeping the
+  // raw prefix at 250 therefore leaves ample room under boundedDetail's 2,000
+  // character ceiling without silently dropping the lifecycle transition.
+  return reason.slice(0, 250);
+}
+
 function insertEvent(
   db: Database.Database,
   proposalId: string,
@@ -483,7 +490,7 @@ export function editReviewProposal(
       "edited",
       row.status,
       "edited",
-      { reason: reason.slice(0, 500) },
+      { reason: boundedReviewReason(reason) },
       now,
     );
     return { status: "edited" };
@@ -577,7 +584,7 @@ export function declineReviewProposal(
        SET status = 'declined', updated_at = ?, terminal_at = ?,
            terminal_code = 'reviewer_declined', terminal_detail = ?
        WHERE id = ?`,
-    ).run(now, now, reason.slice(0, 500), id);
+    ).run(now, now, boundedReviewReason(reason), id);
     insertEvent(
       db,
       id,
@@ -585,7 +592,7 @@ export function declineReviewProposal(
       "declined",
       row.status,
       "declined",
-      { reason: reason.slice(0, 500) },
+      { reason: boundedReviewReason(reason) },
       now,
     );
     return { status: "declined", duplicate: false };
