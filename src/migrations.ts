@@ -851,6 +851,33 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 21,
+    description: "Persist bounded advisory intake evaluations (#181)",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS entry_intake (
+          entry_id TEXT PRIMARY KEY
+            REFERENCES entries(id) ON DELETE CASCADE,
+          status TEXT NOT NULL
+            CHECK(status IN ('accepted', 'flagged')),
+          flags TEXT NOT NULL DEFAULT '[]'
+            CHECK(json_valid(flags) AND json_type(flags) = 'array'),
+          score REAL NOT NULL
+            CHECK(score >= 0.0 AND score <= 1.0),
+          related_keys TEXT NOT NULL DEFAULT '[]'
+            CHECK(json_valid(related_keys) AND json_type(related_keys) = 'array'),
+          redundancy_flag TEXT
+            CHECK(redundancy_flag IS NULL OR json_valid(redundancy_flag)),
+          evaluated_at TEXT NOT NULL,
+          evaluator_version INTEGER NOT NULL DEFAULT 1
+            CHECK(evaluator_version >= 1)
+        );
+        CREATE INDEX IF NOT EXISTS idx_entry_intake_status_evaluated
+          ON entry_intake(status, evaluated_at DESC);
+      `);
+    },
+  },
 ];
 
 /**

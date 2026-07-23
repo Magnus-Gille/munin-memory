@@ -71,6 +71,7 @@ import {
   getAuditHistoryPage,
   insertRedactionLog,
   getOtherKeysInNamespaceByClassification,
+  getNamespaceEntriesForIntake,
   getNamespacesNeedingConsolidation,
   getCrossReferences,
   countLogsIncorporated,
@@ -137,6 +138,7 @@ import {
   getConsolidationBacklog,
   getConsolidationHealth,
 } from "./consolidation.js";
+import { evaluateIntake, persistIntake } from "./intake.js";
 import type {
   WriteParams,
   StatusUpdateParams,
@@ -185,6 +187,7 @@ import type {
   RetrievalFeedbackParams,
   RetrievalAggregates,
   ClassificationLevel,
+  IntakeResult,
 } from "./types.js";
 
 // In-memory delete token store (debate resolution #9)
@@ -708,6 +711,85 @@ function getVisibleOtherKeysInNamespace(
     getContextMaxClassification(ctx),
     excludeKey,
   );
+}
+
+function getVisibleIntakeCandidates(
+  db: Database.Database,
+  ctx: AccessContext,
+  namespace: string,
+  key: string | null,
+): Entry[] {
+  if (!canRead(ctx, namespace)) return [];
+  const candidates = getNamespaceEntriesForIntake(
+    db,
+    namespace,
+    getContextMaxClassification(ctx),
+    100,
+  );
+  if (key === null || candidates.some((entry) => entry.key === key)) {
+    return candidates;
+  }
+  const exact = readState(db, namespace, key);
+  if (
+    exact
+    && classificationAllowed(exact.classification, getContextMaxClassification(ctx))
+  ) {
+    return [exact, ...candidates].slice(0, 100);
+  }
+  return candidates;
+}
+
+function evaluateIntakeAdvisory(
+  db: Database.Database,
+  ctx: AccessContext,
+  input: {
+    namespace: string;
+    key: string | null;
+    content: string;
+    tags: string[];
+  },
+  warnings: string[],
+): IntakeResult | undefined {
+  try {
+    const result = evaluateIntake({
+      ...input,
+      candidates: getVisibleIntakeCandidates(
+        db,
+        ctx,
+        input.namespace,
+        input.key,
+      ),
+    });
+    for (const flag of result.flags) {
+      warnings.push(`[intake:${flag.check}] ${flag.message}`);
+    }
+    return result;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`[intake] advisory evaluation failed: ${message}`);
+    warnings.push(
+      "[intake:unavailable] Advisory quality evaluation was unavailable; the write was not blocked.",
+    );
+    return undefined;
+  }
+}
+
+function persistIntakeAdvisory(
+  db: Database.Database,
+  entryId: string,
+  result: IntakeResult | undefined,
+  warnings: string[],
+): void {
+  if (!result) return;
+  try {
+    persistIntake(db, entryId, result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`[intake] advisory metadata persistence failed: ${message}`);
+    warnings.push(
+      "[intake:persistence_unavailable] The memory write succeeded, but optional intake metadata was not persisted.",
+    );
+  }
 }
 
 function uppercaseNamespaceWarning(namespace: string): string | undefined {
@@ -3794,6 +3876,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_write",
     description:
+      "Successful full writes return a local, bounded, authorization-filtered advisory `intake` report for duplicate keys, overlap/consolidation candidates, sparse content, tag drift, and deep namespaces. Intake never blocks the write.\n\n" +
       "Store or update a state entry in memory. If an entry with the same namespace+key exists, it will be overwritten. Use this for mutable facts and non-tracked state. For `status` entries under `projects/*` or `clients/*`, prefer `memory_update_status`. Optional `valid_until` adds soft expiry for temporary state; direct reads still work after expiry, but broad search hides expired state by default. To preserve a wrong or outdated value as historical evidence, pass its UUID in `supersedes` together with its exact `expected_updated_at`; Munin creates a new revision and normal retrieval hides the predecessor.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.\n\nNamespace conventions: projects/<name> for project state, people/<name> for context about people, decisions/<topic> for cross-cutting decisions, meta/<topic> for system notes.\n\nKey conventions: 'status' = compact resumption summary (Phase / Current work / Blockers / Next — keep brief, move details to other keys like 'architecture', 'workflow', 'research'). 'index' = directory of important keys in this namespace and their purpose.\n\nTag vocabulary: Use canonical lifecycle tags on status entries: active, blocked, completed, stopped, maintenance, archived. Aliases are auto-normalized (done→completed, paused→stopped, inactive→archived). Category tags: decision, architecture, preference, milestone, convention. Type tags: bug, feature, research. Prefixed tags for cross-referencing: client:<name>, person:<name>, topic:<topic>, type:<artifact> (pdf, presentation, meeting-notes), source:external/internal.\n\nThe project dashboard is computed automatically from status entries with lifecycle tags. No manual workbench maintenance needed. Compare-and-swap via expected_updated_at is OPTIONAL and supported for any state write (all namespaces), not only 'status' in projects/* or clients/*; omit it for a plain write — only pass it when you want the write to fail if the entry changed since your last read. For an atomic first write, pass create_if_absent:true instead: exactly one competing writer creates the key, while losers receive error:'conflict', conflict_reason:'already_exists', and current_updated_at. Do not combine create_if_absent:true with expected_updated_at or patch.\n\nTo start a new project: (1) write projects/<name>/status with a lifecycle tag (e.g. 'active'), (2) optionally write projects/<name>/index listing the keys.",
     inputSchema: {
       type: "object" as const,
@@ -4117,6 +4200,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_log",
     description:
+      "Successful log writes return the same non-blocking, authorization-filtered advisory `intake` report as full state writes.\n\n" +
       "Append a chronological log entry. Log entries are immutable and timestamped. Use for decisions, events, and milestones with rationale. To correct a log without editing it, pass its UUID in `supersedes` with its exact `expected_updated_at`; Munin appends a successor and hides the predecessor from normal retrieval while preserving direct historical access. Status changes do NOT auto-log — log explicitly when decisions are made. Pair with memory_write: state entries hold current truth, log entries hold the history of how you got there.\n\nTag vocabulary: Use canonical tags — decision, milestone, blocker, discovery, correction. Add at most one freeform tag when it clearly improves retrieval.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
@@ -6415,6 +6499,18 @@ export function registerTools(
                 }
               }
 
+              const intakeResult = evaluateIntakeAdvisory(
+                db,
+                ctx,
+                {
+                  namespace,
+                  key,
+                  content,
+                  tags: effectiveTags,
+                },
+                warnings,
+              );
+
               let result;
               try {
                 result = supersedes
@@ -6467,6 +6563,7 @@ export function registerTools(
               if (!("id" in result) || !result.id || !("updated_at" in result) || !result.updated_at) {
                 return errResult("write", "internal_error", "Correction write completed without a revision identifier.");
               }
+              persistIntakeAdvisory(db, result.id, intakeResult, warnings);
 
               const hint = buildWriteHint(db, ctx, namespace, key);
 
@@ -6479,6 +6576,7 @@ export function registerTools(
                 classification: result.classification,
                 valid_from: result.status === "superseded" ? result.valid_from : undefined,
                 supersedes: result.status === "superseded" ? result.supersedes : undefined,
+                intake: intakeResult,
                 hint,
                 provenance: buildProvenance(ctx.principalId, ctx.principalId),
               };
@@ -7564,6 +7662,10 @@ export function registerTools(
               const { kept: logTags, removed: logReservedRemoved } = stripReservedTags(
                 tags ?? (correctionTarget ? parseTags(correctionTarget.tags) : []),
               );
+              const logWarnings: string[] = [];
+              if (logReservedRemoved.length > 0) {
+                logWarnings.push(`Removed reserved tag(s): ${logReservedRemoved.join(", ")}`);
+              }
               // Pre-flight: reject logs that would create Librarian-orphaned entries
               {
                 const orphanError = preflightWriteClassification(
@@ -7574,6 +7676,17 @@ export function registerTools(
                   return errResult("log", "classification_error", orphanError, { namespace });
                 }
               }
+              const logIntakeResult = evaluateIntakeAdvisory(
+                db,
+                ctx,
+                {
+                  namespace,
+                  key: null,
+                  content,
+                  tags: logTags,
+                },
+                logWarnings,
+              );
               let result;
               try {
                 result = supersedes
@@ -7611,6 +7724,7 @@ export function registerTools(
               if (!("id" in result) || !result.id || !("classification" in result)) {
                 return errResult("log", "internal_error", "Correction log completed without a revision identifier.");
               }
+              persistIntakeAdvisory(db, result.id, logIntakeResult, logWarnings);
               const logEntry = getById(db, result.id);
               if (logEntry) {
                 syncCommitmentsForEntry(db, logEntry.id, extractCommitmentsFromEntry(logEntry, getResolvedNamespaces(db), resolveTrackedPatterns(db, ctx)));
@@ -7631,14 +7745,11 @@ export function registerTools(
                 classification: result.classification,
                 valid_from: "valid_from" in result ? result.valid_from : undefined,
                 supersedes: "supersedes" in result ? result.supersedes : undefined,
+                intake: logIntakeResult,
                 provenance: buildProvenance(ctx.principalId, ctx.principalId),
               };
               const logNsWarning = uppercaseNamespaceWarning(namespace);
               if (logNsWarning) logResponse.warning = logNsWarning;
-              const logWarnings: string[] = [];
-              if (logReservedRemoved.length > 0) {
-                logWarnings.push(`Removed reserved tag(s): ${logReservedRemoved.join(", ")}`);
-              }
               // Advisory: flag instruction-shaped content (prompt-injection / memory-poisoning).
               const logInjectionWarning = injectionWarning(content);
               if (logInjectionWarning) logWarnings.push(logInjectionWarning);

@@ -74,6 +74,7 @@ describe("runMigrations", () => {
     expect(names).toContain("entries");
     expect(names).toContain("audit_log");
     expect(names).toContain("entries_fts");
+    expect(names).toContain("entry_intake");
     expect(names).toContain("schema_version");
     db.close();
   });

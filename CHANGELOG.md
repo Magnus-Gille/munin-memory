@@ -10,6 +10,16 @@ changelog is the canonical record of what moved.
 
 ### Added
 
+- Added the first advisory write-time intake quality gate (#181). Successful
+  full state and log writes now report bounded local signals for duplicate
+  keys, overlap/consolidation candidates, sparse content, tag drift, and deep
+  namespaces. Candidate sources are authorized before analysis, write-only
+  callers receive no related-entry data, and optional evaluation or persistence
+  failures never block memory writes. Migration 21 adds one versioned,
+  cascade-cleaned `entry_intake` record per evaluated entry for measurement.
+  The current roadmap intentionally defers a `memory_audit` MCP tool and
+  caller-controlled strict rejection until evidence justifies another front
+  door or policy mode.
 - Added the canonical five-minute local install and first-success flow (#225):
   `scripts/quickstart.sh` performs locked install/build plus a fail-fast
   platform, Node, SQLite/FTS5, path/permission, profile/model, port, and auth

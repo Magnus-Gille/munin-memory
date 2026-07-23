@@ -227,6 +227,7 @@ export interface WriteResponse {
   valid_from?: string;
   supersedes?: string;
   warnings?: string[];
+  intake?: IntakeResult;
 }
 
 export interface StatusUpdateResponse extends WriteResponse {
@@ -417,6 +418,8 @@ export interface LogResponse {
   supersedes?: string;
   classification?: ClassificationLevel;
   provenance?: EntryProvenance;
+  warnings?: string[];
+  intake?: IntakeResult;
 }
 
 export interface NamespaceSummary {
