@@ -84,7 +84,8 @@ export function validatePublicationReport(
   }
   if (
     retrieval.queries.some((result) =>
-      result.search_mode !== "hybrid" || result.actual_mode !== "hybrid")
+      result.search_mode !== "hybrid"
+      || (result.actual_mode !== undefined && result.actual_mode !== "hybrid"))
     || answerQuality.results.some((result) =>
       result.effective_search_mode !== "hybrid")
   ) {

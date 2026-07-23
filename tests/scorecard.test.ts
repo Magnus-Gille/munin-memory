@@ -373,7 +373,7 @@ describe("deterministic scorecard smoke", () => {
       ...retrievalTemplate,
       query_id: `publication-q-${index}`,
       search_mode: "hybrid",
-      actual_mode: "hybrid",
+      actual_mode: undefined,
     }));
     candidate.answer_quality.runner_mode = "production_ranker";
     candidate.answer_quality.search_mode = "hybrid";
@@ -429,6 +429,12 @@ describe("deterministic scorecard smoke", () => {
     candidate.evidence.cost_usd = 1.504;
 
     expect(validatePublicationReport(candidate)).toBe(candidate);
+
+    const explicitlyDegraded = structuredClone(candidate);
+    explicitlyDegraded.retrieval.queries[237]!.actual_mode = "lexical";
+    expect(() => validatePublicationReport(explicitlyDegraded)).toThrow(
+      /degraded or non-hybrid/i,
+    );
 
     const missingRawCost = structuredClone(candidate);
     delete missingRawCost.answer_quality.results[237]!.judge_usage!.cost;

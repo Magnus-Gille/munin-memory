@@ -203,6 +203,11 @@ changelog is the canonical record of what moved.
 
 ### Fixed
 
+- **Scorecard publication now accepts the production ranker's optional
+  `actual_mode` evidence field when it is absent.** The publisher still rejects
+  any query that declares a non-hybrid requested or actual mode, but no longer
+  rejects a clean production report merely because the optional actual-mode
+  annotation was omitted.
 - **Public-release compatibility and deployment safety.** Owner aliases and the
   canonical owner-profile namespace are configurable while retaining existing
   `people/magnus` data and concealment detection; the public Grimnir example has
