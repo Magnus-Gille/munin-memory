@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BenchmarkQuery } from "../benchmark/types.js";
 import {
+  assertSufficientKeyBudget,
   loadScorecardContract,
   bootstrapMeanInterval,
   preflightScorecardQueries,
@@ -85,6 +86,39 @@ describe("Phase A scorecard contract", () => {
       ...contract,
       retrieval_policy: undefined,
     })).toThrow(/retrieval_policy/i);
+  });
+
+  it("refuses the paid suite when the key's own limit cannot cover the estimated run", () => {
+    // Observed 2026-07-24: the full run died at 400/500 on a 403 key-limit
+    // error, spending the budget and publishing nothing.
+    expect(() => assertSufficientKeyBudget(
+      { ok: true, status: 200, limit_remaining_usd: 0 },
+      500,
+    )).toThrow(/budget preflight failed.*\$0\.00 remaining/is);
+    expect(() => assertSufficientKeyBudget(
+      { ok: true, status: 200, limit_remaining_usd: 4.6 },
+      500,
+    )).toThrow(/below the \$5\.69 estimated for 500 questions/i);
+  });
+
+  it("allows the paid suite for sufficient, unlimited, or unreported key budgets", () => {
+    // Comfortably above the estimate.
+    expect(() => assertSufficientKeyBudget(
+      { ok: true, status: 200, limit_remaining_usd: 15 },
+      500,
+    )).not.toThrow();
+    // `null` means the key declares no limit — never treat that as zero.
+    expect(() => assertSufficientKeyBudget(
+      { ok: true, status: 200, limit_remaining_usd: null },
+      500,
+    )).not.toThrow();
+    // Absent means the probe reported no parseable budget: unknown, not empty.
+    expect(() => assertSufficientKeyBudget({ ok: true, status: 200 }, 500)).not.toThrow();
+    // The smoke-sized run stays far below any realistic limit.
+    expect(() => assertSufficientKeyBudget(
+      { ok: true, status: 200, limit_remaining_usd: 0.5 },
+      2,
+    )).not.toThrow();
   });
 
   it("rejects an incomplete full query set before any model call", () => {

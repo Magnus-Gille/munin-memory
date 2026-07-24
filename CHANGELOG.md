@@ -23,6 +23,15 @@ changelog is the canonical record of what moved.
   re-validating against its own frozen contract (regression-tested), and the
   applied recency weight is bound fail-closed on both the retrieval and
   answer-quality stages.
+- **Key-budget preflight before the paid scorecard suite.** `checkOpenRouterKey`
+  now also surfaces the key's remaining limit (`limit_remaining_usd`; `null`
+  for an unlimited key, absent when the probe reports no parseable budget), and
+  the full scorecard profile refuses to start when a *known* remaining limit
+  cannot cover the estimated run cost with headroom. The harness is
+  fail-closed, so a mid-run credit exhaustion previously spent the entire paid
+  budget and published nothing (observed 2026-07-24: aborted at 400/500 on a
+  403 key-limit error). Unlimited and unreported budgets still proceed, so the
+  advisory estimate cannot block a legitimate run.
 
 ## [0.6.0] — 2026-07-24
 

@@ -45,6 +45,7 @@ import {
   checkOpenRouterKey,
   getOpenRouterApiKey,
   isCustomLlmBaseUrl,
+  type KeyHealthResult,
   OpenRouterHttpError,
 } from "../../src/internal/openrouter.js";
 import {
@@ -482,6 +483,46 @@ function portableReportPath(path: string): string {
 }
 
 /** Run before retrieval or model calls so incomplete paid suites fail cheaply. */
+/**
+ * Cost model for the paid stage, calibrated on the published 2026-07-23 run:
+ * $4.562177 of provider-reported cost for 500 questions (two calls each), i.e.
+ * ~$0.0091 per question.
+ */
+const ESTIMATED_USD_PER_QUESTION = 0.0091;
+
+/**
+ * Headroom multiplier applied to the estimate before the paid suite starts.
+ * A run that exhausts the key mid-flight is the worst possible outcome: the
+ * harness is fail-closed, so it emits no report at all while the spend is
+ * already gone (observed 2026-07-24, aborted at 400/500 on a 403 "Key limit
+ * exceeded" with roughly $7 consumed and nothing published).
+ */
+const KEY_BUDGET_HEADROOM = 1.25;
+
+/**
+ * Refuse to start the paid suite when the key's own limit cannot cover the
+ * estimated run. Fail-closed only on a *known* shortfall: an unlimited key
+ * (`null`) or a probe that reported no budget (absent) proceeds, because the
+ * estimate is advisory and must not block runs against keys or gateways that
+ * do not report a limit.
+ */
+export function assertSufficientKeyBudget(
+  keyHealth: KeyHealthResult,
+  expectedQuestionCount: number,
+): void {
+  const remaining = keyHealth.limit_remaining_usd;
+  if (typeof remaining !== "number") return;
+  const estimate = expectedQuestionCount * ESTIMATED_USD_PER_QUESTION * KEY_BUDGET_HEADROOM;
+  if (remaining < estimate) {
+    throw new Error(
+      `OpenRouter key budget preflight failed: $${remaining.toFixed(2)} remaining on the key's `
+      + `limit is below the $${estimate.toFixed(2)} estimated for ${expectedQuestionCount} questions `
+      + "(including headroom). Raise the key limit before starting the paid suite — a mid-run "
+      + "exhaustion spends the budget and publishes nothing.",
+    );
+  }
+}
+
 export function preflightScorecardQueries(
   queries: BenchmarkQuery[],
   profile: ScorecardProfileName,
@@ -752,6 +793,7 @@ export async function runScorecard(
           `OpenRouter key preflight failed${keyHealth.status === undefined ? "" : ` (${keyHealth.status})`}: ${keyHealth.error ?? "unknown error"}`,
         );
       }
+      assertSufficientKeyBudget(keyHealth, profile.expected_question_count);
     }
     if (environment.git_dirty !== false || environment.git_commit === null) {
       throw new Error(

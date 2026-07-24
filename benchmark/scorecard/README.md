@@ -47,6 +47,9 @@ unless all of the following hold:
 - the evaluation runs from a clean, identified Git commit;
 - the OpenRouter key preflight succeeds and no custom gateway overrides the
   pinned provider policy;
+- the key's reported remaining limit covers the estimated run cost with
+  headroom (a key that declares no limit, or a probe that reports none, is
+  treated as unknown and allowed — the estimate is advisory);
 - deterministic namespace/classification and instruction-boundary probes pass;
 - a live poison challenge returns the stored fact instead of the attacker value.
 
