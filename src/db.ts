@@ -1031,7 +1031,7 @@ export function queryEntriesLexicalScored(
   options: QueryOptions,
 ): LexicalQueryResult[] {
   const { query, namespace, entryType, tags, limit = 10, includeExpired = false, since, until, rawFts5 = false } = options;
-  const clampedLimit = Math.min(Math.max(limit, 1), 50);
+  const clampedLimit = Math.min(Math.max(limit, 1), MAX_QUERY_LIMIT);
   const now = nowUTC();
 
   let sql = `
@@ -1152,7 +1152,7 @@ export function queryEntriesByFilter(
   options: FilterOptions,
 ): Entry[] {
   const { namespace, entryType, tags, limit = 10, includeExpired = false, since, until } = options;
-  const clampedLimit = Math.min(Math.max(limit, 1), 50);
+  const clampedLimit = Math.min(Math.max(limit, 1), MAX_QUERY_LIMIT);
   const now = nowUTC();
 
   let sql = "SELECT * FROM entries WHERE is_current = 1";
@@ -1384,6 +1384,13 @@ export function listEntriesForDerivation(
   sql += " ORDER BY updated_at DESC";
   return db.prepare(sql).all(...params) as Entry[];
 }
+
+/**
+ * Maximum results any single retrieval query may return. The storage layer
+ * clamps to this; `memory_query` warns when a caller asks for more so a
+ * truncated page is never mistaken for an exhausted result set.
+ */
+export const MAX_QUERY_LIMIT = 50;
 
 export interface DerivedCommitmentInput {
   sourceType: string;
@@ -2231,7 +2238,7 @@ export function queryEntriesSemanticScored(
   options: SemanticQueryOptions,
 ): SemanticQueryResult[] {
   const { queryEmbedding, namespace, entryType, tags, limit = 10, includeExpired = false, since, until, maxDistance, queryEmbeddingModel } = options;
-  const clampedLimit = Math.min(Math.max(limit, 1), 50);
+  const clampedLimit = Math.min(Math.max(limit, 1), MAX_QUERY_LIMIT);
   const now = nowUTC();
 
   // Exact namespace-local scan (benchmark-only).
@@ -2784,7 +2791,7 @@ export function getInsightsByEntry(
   restrictToTracked?: boolean,
   trackedPatterns: readonly string[] = DEFAULT_TRACKED_PATTERNS,
 ): EntryInsightRow[] {
-  const clampedLimit = Math.min(Math.max(limit, 1), 50);
+  const clampedLimit = Math.min(Math.max(limit, 1), MAX_QUERY_LIMIT);
 
   // Build namespace filter clause (applies to e.namespace from LEFT JOIN entries)
   let nsFilter = "";
@@ -3222,10 +3229,16 @@ export function getRetrievalAggregates(
       .get(periodStart, periodEnd) as { cnt: number }
   ).cnt;
 
+  // Count *events that produced at least one* positive outcome, not raw
+  // outcomes: a single query routinely yields several opens, so COUNT(*) over
+  // outcomes divided by total_events is not a rate and exceeded 1.0 in
+  // production (observed 3.457). DISTINCT keeps positive_outcome_rate a true
+  // 0–1 fraction and comparable with reformulation_rate. Raw outcome volume
+  // remains available as `total_outcomes`.
   const positiveOutcomeCount = (
     db
       .prepare(
-        `SELECT COUNT(*) as cnt FROM retrieval_outcomes ro
+        `SELECT COUNT(DISTINCT ro.retrieval_event_id) as cnt FROM retrieval_outcomes ro
          JOIN retrieval_events re ON re.id = ro.retrieval_event_id
          WHERE ro.outcome_type IN (
            'opened_result', 'opened_namespace_context',
