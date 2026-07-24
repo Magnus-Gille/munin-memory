@@ -397,6 +397,8 @@ function retryableScorecardReason(error: unknown): ScorecardRetryReason | null {
   return null;
 }
 
+const MAX_RETRY_DELAY_MS = 60_000;
+
 export function withScorecardRetry(
   chat: ChatFn,
   options: {
@@ -429,7 +431,9 @@ export function withScorecardRetry(
         const providerDelay = error instanceof OpenRouterHttpError
           ? error.retryAfterMs
           : undefined;
-        await wait(providerDelay ?? 1000 * (2 ** (attempt - 1)));
+        // A provider Retry-After is honored but capped: an anomalous header
+        // (e.g. Retry-After: 100000) must not stall the paid harness for hours.
+        await wait(Math.min(providerDelay ?? 1000 * (2 ** (attempt - 1)), MAX_RETRY_DELAY_MS));
       }
     }
     throw lastError;

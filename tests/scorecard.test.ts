@@ -225,6 +225,27 @@ describe("Phase A scorecard contract", () => {
       expect(noRetryCall).toHaveBeenCalledTimes(1);
     }
   });
+
+  it("caps a provider Retry-After delay so a bad header cannot stall the run", async () => {
+    const delays: number[] = [];
+    const capped = vi.fn()
+      .mockRejectedValueOnce(new OpenRouterHttpError(429, "rate limited", 100_000_000))
+      .mockResolvedValue({
+        choices: [{ message: { content: "ok" } }],
+      });
+    const retried = withScorecardRetry(capped, {
+      maxAttempts: 2,
+      wait: async (delayMs) => { delays.push(delayMs); },
+    });
+
+    await expect(retried({
+      model: "test/model",
+      messages: [{ role: "user" as const, content: "test" }],
+    })).resolves.toMatchObject({
+      choices: [{ message: { content: "ok" } }],
+    });
+    expect(delays).toEqual([60_000]);
+  });
 });
 
 describe("deterministic scorecard smoke", () => {

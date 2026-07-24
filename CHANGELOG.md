@@ -15,7 +15,7 @@ changelog is the canonical record of what moved.
   hybrid ranker, an enforced deterministic retrieved-context budget, separate
   reader and judge models, provider-native model/token/cost evidence for every
   call, deterministic bootstrap intervals, environment and Git lineage, and
-  authorization plus stored-instruction poison lanes. A one-question offline
+  authorization plus stored-instruction poison lanes. A two-question offline
   smoke remains explicitly ineligible for publication, while a separate
   validator publishes only complete, clean, portable, secret-scanned full-run
   reports under `benchmark/scorecard/results/`. The prior v1 foundation
