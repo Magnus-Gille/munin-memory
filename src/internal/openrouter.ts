@@ -198,6 +198,14 @@ export interface KeyHealthResult {
   status?: number;
   /** Truncated, secret-free error detail (response body or fetch error). */
   error?: string;
+  /**
+   * Remaining spend allowed by the key's configured limit, in USD.
+   *
+   * `null` means the key reports no configured limit (spend is bounded by the
+   * account instead). The field is absent when the probe response carried no
+   * parseable budget — callers must treat absence as "unknown", never as zero.
+   */
+  limit_remaining_usd?: number | null;
 }
 
 /**
@@ -239,7 +247,28 @@ export async function checkOpenRouterKey(
       const text = await response.text().catch(() => "");
       return { ok: false, status: response.status, error: redact(text).slice(0, 200) };
     }
-    return { ok: true, status: response.status };
+    // Best-effort budget read. A missing or unparseable body must never turn a
+    // healthy key into a failure — the field simply stays absent ("unknown").
+    let limitRemaining: number | null | undefined;
+    try {
+      const body = await response.json() as {
+        data?: { limit?: number | null; limit_remaining?: number | null };
+      };
+      const data = body?.data;
+      if (data && typeof data === "object") {
+        if (typeof data.limit_remaining === "number") {
+          limitRemaining = data.limit_remaining;
+        } else if (data.limit === null) {
+          // Explicitly unlimited: the key carries no configured spend cap.
+          limitRemaining = null;
+        }
+      }
+    } catch {
+      // Body unavailable or not JSON — leave the budget unknown.
+    }
+    return limitRemaining === undefined
+      ? { ok: true, status: response.status }
+      : { ok: true, status: response.status, limit_remaining_usd: limitRemaining };
   } catch (err) {
     return { ok: false, error: redact(err instanceof Error ? err.message : String(err)) };
   }

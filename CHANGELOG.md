@@ -8,6 +8,38 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Added
+
+- **Scorecard contract v3: reranker recency pinned to zero (#248).** The #248
+  ablation attributed the published LongMemEval-S retrieval collapse entirely
+  to the production reranker's freshness weighting (identical artifacts and
+  embeddings: raw R@5 91.7%, production ranker at recency 0 91.5%, at the 0.2
+  default 14.5%). The new default contract pins `search_recency_weight: 0`
+  through the public `memory_query` parameter of the same name and hashes the
+  rationale into the contract as `retrieval_policy`; the disclosure is carried
+  into every report's limitations. The v2 contract remains frozen and must not
+  carry the pin. The publisher now resolves each report's contract by
+  `contract_id`, so the committed 2026-07-23 v2 publication artifact keeps
+  re-validating against its own frozen contract (regression-tested), and the
+  applied recency weight is bound fail-closed on both the retrieval and
+  answer-quality stages.
+- **Key-budget preflight before the paid scorecard suite.** `checkOpenRouterKey`
+  now also surfaces the key's remaining limit (`limit_remaining_usd`; `null`
+  for an unlimited key, absent when the probe reports no parseable budget), and
+  the full scorecard profile refuses to start when a *known* remaining limit
+  cannot cover the estimated run cost with headroom. The harness is
+  fail-closed, so a mid-run credit exhaustion previously spent the entire paid
+  budget and published nothing (observed 2026-07-24: aborted at 400/500 on a
+  403 key-limit error). Unlimited and unreported budgets still proceed, so the
+  advisory estimate cannot block a legitimate run.
+- **Published the v3 scorecard result (2026-07-24).** Under the recency-pinned
+  contract, end-to-end answer accuracy is **52.8%** (95% bootstrap CI
+  48.6%–57.2%) and retrieval R@5 is **91.5%** (89.4%–93.4%) over all 500
+  questions, at $4.7095 provider-reported cost with zero transient retries —
+  versus 10.2% / 14.5% under the v2 default recency weight on the same
+  dataset, reader, judge, and context budget. The 2026-07-23 v2 artifact stays
+  committed and unmodified as the superseded baseline.
+
 ## [0.6.0] — 2026-07-24
 
 ### Added

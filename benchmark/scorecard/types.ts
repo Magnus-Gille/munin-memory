@@ -20,6 +20,12 @@ export interface ScorecardProfileContract {
   granularity: "session" | "round";
   runner_mode: RunnerMode;
   search_mode: SearchMode;
+  /**
+   * Contract-pinned reranker recency weight passed through the public
+   * `memory_query` parameter of the same name. Required (and 0) in the v3
+   * contract; must be absent in the frozen v2 contract.
+   */
+  search_recency_weight?: number;
   serialization: SerializationMode;
   top_k: number;
   reader: ScorecardModelContract;
@@ -31,7 +37,7 @@ export interface ScorecardProfileContract {
 
 export interface ScorecardContract {
   contract_schema_version: 2;
-  contract_id: "munin-longmemeval-s-e2e-v2";
+  contract_id: "munin-longmemeval-s-e2e-v2" | "munin-longmemeval-s-e2e-v3";
   publication_status: "publication_candidate";
   dataset: {
     adapter: "longmemeval";
@@ -75,6 +81,14 @@ export interface ScorecardContract {
     full_profile_requires_live_poison_pass: true;
   };
   profiles: Record<ScorecardProfileName, ScorecardProfileContract>;
+  /**
+   * v3-only hashed disclosure of the pinned reranker recency policy. Absent in
+   * the frozen v2 contract.
+   */
+  retrieval_policy?: {
+    search_recency_weight: number;
+    disclosure: string;
+  };
   limitations: string[];
 }
 

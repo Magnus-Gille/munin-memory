@@ -517,6 +517,51 @@ describe("checkOpenRouterKey (#168)", () => {
     expect(result).toEqual({ ok: true, status: 200 });
   });
 
+  it("surfaces the key's remaining limit so callers can preflight a paid run", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        data: { usage: 6.89, limit: 15, limit_remaining: 8.11 },
+      }),
+    } as unknown as Response);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(checkOpenRouterKey("sk-valid")).resolves.toEqual({
+      ok: true,
+      status: 200,
+      limit_remaining_usd: 8.11,
+    });
+  });
+
+  it("reports an unlimited key as null rather than an unknown or zero budget", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ data: { usage: 1.2, limit: null, limit_remaining: null } }),
+    } as unknown as Response);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(checkOpenRouterKey("sk-valid")).resolves.toEqual({
+      ok: true,
+      status: 200,
+      limit_remaining_usd: null,
+    });
+  });
+
+  it("stays healthy when the probe body is missing or unparseable", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.reject(new Error("not json")),
+    } as unknown as Response);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await checkOpenRouterKey("sk-valid");
+    expect(result.ok).toBe(true);
+    expect(result.limit_remaining_usd).toBeUndefined();
+  });
+
   it("reports ok:false with the status on a 401 (the masked stale-key failure)", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: false,

@@ -38,12 +38,14 @@ import { JUDGE_SYSTEM_SENTINEL, type ChatFn } from "../answer-quality/judge.js";
 import { runAnswerQuality } from "../answer-quality/runner.js";
 import type { AnswerQualityReport } from "../answer-quality/types.js";
 import { loadQueriesWithSource, runBenchmark } from "../runner.js";
+import { DEFAULT_SEARCH_RECENCY_WEIGHT } from "../../src/internal/reranker.js";
 import type { BenchmarkQuery, BenchmarkReport } from "../types.js";
 import {
   callOpenRouter,
   checkOpenRouterKey,
   getOpenRouterApiKey,
   isCustomLlmBaseUrl,
+  type KeyHealthResult,
   OpenRouterHttpError,
 } from "../../src/internal/openrouter.js";
 import {
@@ -64,7 +66,7 @@ const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_CONTRACT_PATH = join(
   MODULE_DIR,
   "contracts",
-  "longmemeval-s-v2.json",
+  "longmemeval-s-v3.json",
 );
 
 const SMOKE_LIMITATIONS = [
@@ -126,11 +128,31 @@ export function validateScorecardContract(value: unknown): ScorecardContract {
       `Unsupported scorecard contract_schema_version: ${String(value.contract_schema_version)}.`,
     );
   }
-  if (value.contract_id !== "munin-longmemeval-s-e2e-v2") {
+  if (
+    value.contract_id !== "munin-longmemeval-s-e2e-v2"
+    && value.contract_id !== "munin-longmemeval-s-e2e-v3"
+  ) {
     throw new Error(`Unsupported scorecard contract_id: ${String(value.contract_id)}.`);
   }
+  const isV3 = value.contract_id === "munin-longmemeval-s-e2e-v3";
+  if (isV3) {
+    // v3 pins the reranker recency weight to 0 through the public
+    // memory_query parameter and must carry the hashed disclosure (#248).
+    assertObject(value.retrieval_policy, "retrieval_policy");
+    if (
+      value.retrieval_policy.search_recency_weight !== 0
+      || typeof value.retrieval_policy.disclosure !== "string"
+      || value.retrieval_policy.disclosure.trim().length === 0
+    ) {
+      throw new Error(
+        "v3 retrieval_policy must pin search_recency_weight to 0 with a non-empty disclosure.",
+      );
+    }
+  } else if (value.retrieval_policy !== undefined) {
+    throw new Error("The frozen v2 contract must not carry a retrieval_policy block.");
+  }
   if (value.publication_status !== "publication_candidate") {
-    throw new Error("Phase A v2 contract must remain a publication candidate.");
+    throw new Error("Phase A contract must remain a publication candidate.");
   }
   assertObject(value.dataset, "dataset");
   if (
@@ -208,7 +230,7 @@ export function validateScorecardContract(value: unknown): ScorecardContract {
     assertPositiveInteger(profile.top_k, `profiles.${name}.top_k`);
     assertPositiveInteger(profile.repetitions, `profiles.${name}.repetitions`);
     if (profile.repetitions !== 1) {
-      throw new Error(`profiles.${name}.repetitions must remain 1 under the bootstrap-v2 contract.`);
+      throw new Error(`profiles.${name}.repetitions must remain 1 under the bootstrap contract.`);
     }
     if (profile.granularity !== "session" || profile.serialization !== "linear") {
       throw new Error(`profiles.${name} must use session granularity and linear serialization.`);
@@ -217,6 +239,17 @@ export function validateScorecardContract(value: unknown): ScorecardContract {
     validateModelContract(profile.judge, `profiles.${name}.judge`);
     if (profile.top_k !== value.context_budget.top_k) {
       throw new Error(`profiles.${name}.top_k must match context_budget.top_k.`);
+    }
+    if (isV3) {
+      if (profile.search_recency_weight !== value.retrieval_policy!.search_recency_weight) {
+        throw new Error(
+          `profiles.${name}.search_recency_weight must match retrieval_policy.search_recency_weight in contract v3.`,
+        );
+      }
+    } else if (profile.search_recency_weight !== undefined) {
+      throw new Error(
+        `profiles.${name}.search_recency_weight must be absent in the frozen v2 contract.`,
+      );
     }
   }
   const smoke = value.profiles.smoke;
@@ -450,6 +483,46 @@ function portableReportPath(path: string): string {
 }
 
 /** Run before retrieval or model calls so incomplete paid suites fail cheaply. */
+/**
+ * Cost model for the paid stage, calibrated on the published 2026-07-23 run:
+ * $4.562177 of provider-reported cost for 500 questions (two calls each), i.e.
+ * ~$0.0091 per question.
+ */
+const ESTIMATED_USD_PER_QUESTION = 0.0091;
+
+/**
+ * Headroom multiplier applied to the estimate before the paid suite starts.
+ * A run that exhausts the key mid-flight is the worst possible outcome: the
+ * harness is fail-closed, so it emits no report at all while the spend is
+ * already gone (observed 2026-07-24, aborted at 400/500 on a 403 "Key limit
+ * exceeded" with roughly $7 consumed and nothing published).
+ */
+const KEY_BUDGET_HEADROOM = 1.25;
+
+/**
+ * Refuse to start the paid suite when the key's own limit cannot cover the
+ * estimated run. Fail-closed only on a *known* shortfall: an unlimited key
+ * (`null`) or a probe that reported no budget (absent) proceeds, because the
+ * estimate is advisory and must not block runs against keys or gateways that
+ * do not report a limit.
+ */
+export function assertSufficientKeyBudget(
+  keyHealth: KeyHealthResult,
+  expectedQuestionCount: number,
+): void {
+  const remaining = keyHealth.limit_remaining_usd;
+  if (typeof remaining !== "number") return;
+  const estimate = expectedQuestionCount * ESTIMATED_USD_PER_QUESTION * KEY_BUDGET_HEADROOM;
+  if (remaining < estimate) {
+    throw new Error(
+      `OpenRouter key budget preflight failed: $${remaining.toFixed(2)} remaining on the key's `
+      + `limit is below the $${estimate.toFixed(2)} estimated for ${expectedQuestionCount} questions `
+      + "(including headroom). Raise the key limit before starting the paid suite — a mid-run "
+      + "exhaustion spends the budget and publishes nothing.",
+    );
+  }
+}
+
 export function preflightScorecardQueries(
   queries: BenchmarkQuery[],
   profile: ScorecardProfileName,
@@ -550,10 +623,23 @@ export function validateScorecardRetrievalReport(
   expectedQuestionCount: number,
   expectedSearchMode: ScorecardProfileContract["search_mode"],
   expectedRunnerMode: ScorecardProfileContract["runner_mode"],
+  contractRecencyWeight?: number,
 ): void {
   if (report.runner_mode !== expectedRunnerMode || report.warnings?.length) {
     throw new Error(
       `Scorecard ${profile} retrieval degraded or warned: ${(report.warnings ?? []).join("; ") || `${report.runner_mode} != ${expectedRunnerMode}`}`,
+    );
+  }
+  // Raw mode skips the reranker entirely and reports null; production mode
+  // must have applied exactly the contract-pinned weight (or the production
+  // default when the contract does not pin one, as in frozen v2).
+  const expectedAppliedWeight = expectedRunnerMode === "raw"
+    ? null
+    : contractRecencyWeight ?? DEFAULT_SEARCH_RECENCY_WEIGHT;
+  if (report.search_recency_weight !== expectedAppliedWeight) {
+    throw new Error(
+      `Scorecard ${profile} retrieval recency weight drifted: `
+      + `${String(report.search_recency_weight)} != ${String(expectedAppliedWeight)}.`,
     );
   }
   if (report.query_count !== expectedQuestionCount) {
@@ -707,6 +793,7 @@ export async function runScorecard(
           `OpenRouter key preflight failed${keyHealth.status === undefined ? "" : ` (${keyHealth.status})`}: ${keyHealth.error ?? "unknown error"}`,
         );
       }
+      assertSufficientKeyBudget(keyHealth, profile.expected_question_count);
     }
     if (environment.git_dirty !== false || environment.git_commit === null) {
       throw new Error(
@@ -775,6 +862,7 @@ export async function runScorecard(
   const retrieval = await runBenchmark(paths.dbPath, queries, {
     querySetSources: [source],
     runnerMode: profile.runner_mode,
+    searchRecencyWeight: profile.search_recency_weight,
     manifestPath: null,
   });
   validateScorecardRetrievalReport(
@@ -783,6 +871,7 @@ export async function runScorecard(
     profile.expected_question_count,
     profile.search_mode,
     profile.runner_mode,
+    profile.search_recency_weight,
   );
   const retrievalDuration = performance.now() - retrievalStart;
 
@@ -813,6 +902,7 @@ export async function runScorecard(
     serialization: profile.serialization,
     runnerMode: profile.runner_mode,
     searchMode: profile.search_mode,
+    searchRecencyWeight: profile.search_recency_weight,
     topK: profile.top_k,
     contextTokenBudget: contract.context_budget.retrieved_token_budget,
     answerModel: profile.reader.model,
@@ -1000,6 +1090,7 @@ export async function runScorecard(
           "Transport retries are counted in evidence. OpenRouter may charge upstream prompt processing for an attempt whose response was not returned, so provider-reported successful-call cost can understate account-level spend by those failed attempts.",
         ]
         : []),
+      ...(contract.retrieval_policy ? [contract.retrieval_policy.disclosure] : []),
       ...contract.limitations,
     ],
   };
