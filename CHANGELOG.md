@@ -8,6 +8,22 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Changed
+
+- **`memory_orient` is bounded by default in every detail mode (#254).** It is
+  the mandatory first call, and on a mature estate it had grown large enough to
+  exceed MCP client tool-output limits — three of four independent test agents
+  hit the failure on their very first call. Measured on a 424-namespace
+  production corpus: `standard` returned **85,792 bytes** (dominated by the
+  complete namespace list, which had no default cap) and `compact` — documented
+  as the token-sensitive mode — returned **31,933 bytes** from 108 uncapped
+  dashboard one-liners. The per-group dashboard cap of 10 now applies in every
+  mode, and the namespace overview defaults to 50 outside `compact` (which keeps
+  20), bringing the same corpus to **17,791 bytes compact / 40,982 standard**
+  (−44% / −52%). Nothing is hidden silently: `dashboard_meta.counts` /
+  `truncated_groups` and `namespaces_meta.total` / `truncated` still describe the
+  full estate, and both caps remain caller-overridable.
+
 ### Security
 
 - **The secret scanner now rejects Anthropic, Google, Hugging Face, and OpenAI
