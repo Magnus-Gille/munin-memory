@@ -17,6 +17,15 @@ updates:
         update-types:
           - version-update:semver-major
           - version-update:semver-minor
+      # better-sqlite3 13.x declares `node >=22` while this project still
+      # supports Node 20 (the v13 bump crashed the Node 20 CI workers 36× on
+      # #215). Taking v13 is a deliberate drop-Node-20 decision, not a routine
+      # bump. The #215 comment-command decline did not stick because grouped
+      # PRs ignore per-PR commands (see #246). Lift this when Node 20 support
+      # is dropped.
+      - dependency-name: "better-sqlite3"
+        update-types:
+          - version-update:semver-major
     groups:
       dev-dependencies:
         dependency-type: development
