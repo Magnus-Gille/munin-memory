@@ -32,6 +32,13 @@ changelog is the canonical record of what moved.
   budget and published nothing (observed 2026-07-24: aborted at 400/500 on a
   403 key-limit error). Unlimited and unreported budgets still proceed, so the
   advisory estimate cannot block a legitimate run.
+- **Published the v3 scorecard result (2026-07-24).** Under the recency-pinned
+  contract, end-to-end answer accuracy is **52.8%** (95% bootstrap CI
+  48.6%–57.2%) and retrieval R@5 is **91.5%** (89.4%–93.4%) over all 500
+  questions, at $4.7095 provider-reported cost with zero transient retries —
+  versus 10.2% / 14.5% under the v2 default recency weight on the same
+  dataset, reader, judge, and context budget. The 2026-07-23 v2 artifact stays
+  committed and unmodified as the superseded baseline.
 
 ## [0.6.0] — 2026-07-24
 

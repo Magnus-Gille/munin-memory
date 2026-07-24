@@ -373,7 +373,10 @@ export function publishScorecard(
     outputDir ?? join("benchmark", "scorecard", "results", runDate),
   );
   mkdirSync(targetDir, { recursive: true });
-  const rawPath = join(targetDir, "longmemeval-s-v2-report.json");
+  // Name the artifact after the contract revision it was produced under, so a
+  // results directory never mislabels which pinned contract a run binds to.
+  const revision = report.contract_id.replace(/^munin-longmemeval-s-e2e-/, "");
+  const rawPath = join(targetDir, `longmemeval-s-${revision}-report.json`);
   const summaryPath = join(targetDir, "README.md");
   writeFileSync(rawPath, `${JSON.stringify(report, null, 2)}\n`, "utf-8");
   writeFileSync(summaryPath, renderPublicationSummary(report), "utf-8");
