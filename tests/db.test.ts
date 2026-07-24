@@ -475,6 +475,102 @@ describe("appendLog", () => {
   });
 });
 
+describe("commitment revision identity (#253)", () => {
+  const trackedStep = (text: string) => ({
+    sourceType: "tracked_next_step",
+    fingerprint: `tracked_next_step:${text.toLowerCase()}`,
+    text,
+    dueAt: null,
+    confidence: 0.8,
+  });
+
+  it("treats a reworded next step as the same commitment, not a completion plus a twin", () => {
+    const { id } = writeState(db, "projects/test", "status", "## Next Steps\n- placeholder", ["active"]);
+
+    syncCommitmentsForEntry(db, id, [
+      trackedStep("Produce the privacy-safe dogfood/TCO case study (#222)"),
+    ]);
+    const before = listCommitments(db, { namespace: "projects/test" });
+    expect(before).toHaveLength(1);
+    const originalId = before[0].id;
+
+    // Same work item, reworded — exactly what happens when a status is edited.
+    syncCommitmentsForEntry(db, id, [
+      trackedStep("Produce the privacy-safe dogfood and TCO case study (#222), including restore evidence"),
+    ]);
+
+    const after = listCommitments(db, { namespace: "projects/test" });
+    expect(after).toHaveLength(1);
+    expect(after[0].id).toBe(originalId);
+    expect(after[0].status).toBe("open");
+    expect(after[0].resolved_at).toBeNull();
+    expect(after[0].text).toContain("restore evidence");
+    // The bug this guards: live work reported as delivered.
+    expect(after.some((row) => row.status === "done")).toBe(false);
+  });
+
+  it("still resolves a next step that genuinely disappears", () => {
+    const { id } = writeState(db, "projects/gone", "status", "## Next Steps\n- placeholder", ["active"]);
+
+    syncCommitmentsForEntry(db, id, [trackedStep("Ship the release notes")]);
+    syncCommitmentsForEntry(db, id, [trackedStep("Investigate an entirely unrelated telemetry regression")]);
+
+    const rows = listCommitments(db, { namespace: "projects/gone" });
+    const shipped = rows.find((row) => row.text === "Ship the release notes");
+    expect(shipped?.status).toBe("done");
+    expect(shipped?.resolved_at).not.toBeNull();
+    expect(rows.filter((row) => row.status === "open")).toHaveLength(1);
+  });
+
+  it("never reports one commitment as both open and recently resolved", () => {
+    const { id } = writeState(db, "projects/dual", "status", "## Next Steps\n- placeholder", ["active"]);
+
+    syncCommitmentsForEntry(db, id, [trackedStep("Run the second-principal household onboarding pilot (#5)")]);
+    syncCommitmentsForEntry(db, id, [trackedStep("Run the real second-principal household pilot (#5)")]);
+
+    const rows = listCommitments(db, { namespace: "projects/dual" });
+    const open = rows.filter((row) => row.status === "open");
+    const done = rows.filter((row) => row.status === "done");
+    expect(open).toHaveLength(1);
+    expect(done).toHaveLength(0);
+  });
+
+  it("does not conflate distinct sequential steps that share an issue reference", () => {
+    const { id } = writeState(db, "projects/shared-issue", "status", "## Next Steps\n- placeholder", ["active"]);
+    syncCommitmentsForEntry(db, id, [trackedStep("Write the incident recovery runbook for #222")]);
+    syncCommitmentsForEntry(db, id, [trackedStep("Run the production restore exercise for #222")]);
+
+    const rows = listCommitments(db, { namespace: "projects/shared-issue" });
+    expect(rows.find((row) => row.text.includes("recovery runbook"))?.status).toBe("done");
+    expect(rows.find((row) => row.text.includes("production restore exercise"))?.status).toBe("open");
+    expect(rows).toHaveLength(2);
+  });
+
+  it("leaves ambiguous multiple rewording candidates unpaired instead of guessing", () => {
+    const { id } = writeState(db, "projects/ambiguous", "status", "## Next Steps\n- placeholder", ["active"]);
+    syncCommitmentsForEntry(db, id, [
+      trackedStep("Draft the migration plan for the platform"),
+      trackedStep("Draft the migration plan for the database"),
+    ]);
+    syncCommitmentsForEntry(db, id, [trackedStep("Draft the migration plan for the service")]);
+
+    const rows = listCommitments(db, { namespace: "projects/ambiguous" });
+    expect(rows.filter((row) => row.status === "done")).toHaveLength(2);
+    expect(rows.filter((row) => row.status === "open")).toHaveLength(1);
+    expect(rows.find((row) => row.status === "open")?.text).toContain("service");
+  });
+
+  it("does not pair steps with different nonempty issue-reference sets", () => {
+    const { id } = writeState(db, "projects/different-issues", "status", "## Next Steps\n- placeholder", ["active"]);
+    syncCommitmentsForEntry(db, id, [trackedStep("Draft the recovery plan for #222")]);
+    syncCommitmentsForEntry(db, id, [trackedStep("Draft the recovery plan for #223")]);
+
+    const rows = listCommitments(db, { namespace: "projects/different-issues" });
+    expect(rows.filter((row) => row.status === "done")).toHaveLength(1);
+    expect(rows.filter((row) => row.status === "open")).toHaveLength(1);
+  });
+});
+
 describe("commitment classification lifecycle", () => {
   it("propagates source classification and scrubs client-restricted derivatives", () => {
     const { id } = appendLog(

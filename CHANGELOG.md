@@ -33,6 +33,15 @@ changelog is the canonical record of what moved.
   connection committing between check and DELETE cannot reopen the same
   window.
 
+- **A reworded next step no longer reads as a completed commitment (#253).** A
+  commitment's identity was its normalized text, so editing a `## Next Steps`
+  line changed its fingerprint. Reconciliation then resolved the old row
+  `done` while inserting the reworded successor as `open`, so one live item
+  appeared in both buckets. An unambiguous, meaningfully similar rewording now
+  revises the existing row in place; issue references constrain matches but
+  cannot alone identify a step, and different non-empty reference sets never
+  pair. A genuinely removed step still resolves.
+
 ## [0.6.1] — 2026-07-25
 
 ### Changed
