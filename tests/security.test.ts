@@ -14,10 +14,34 @@ import {
 } from "../src/security.js";
 
 describe("scanForSecrets", () => {
-  it("rejects OpenAI/Anthropic API keys", () => {
+  it("rejects generic sk- API keys", () => {
     const result = scanForSecrets("my key is sk-abc123def456ghi789jkl012mno345");
     expect(result.valid).toBe(false);
     expect(result.error).toContain("API key");
+  });
+
+  /**
+   * One representative (fake) key per supported vendor format.
+   *
+   * Hyphenated vendor prefixes do NOT fall through to the generic `sk-` rule —
+   * it cannot match across a hyphen. `sk-ant-` was accepted and stored in
+   * production until 2026-07-24 for exactly that reason, while the test above
+   * was named "OpenAI/Anthropic" and asserted coverage it never had. Add a row
+   * here whenever a pattern is added to SECRET_PATTERNS.
+   */
+  it.each([
+    ["Anthropic", "sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-AbCdEfGhIjKl", "Anthropic API key"],
+    ["OpenRouter", "sk-or-v1-0123456789abcdef0123456789abcdef0123456789abcdef", "OpenRouter API key"],
+    ["OpenAI project", "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij", "OpenAI project API key"],
+    ["OpenAI service account", "sk-svcacct-ABCDEFGHIJKLMNOPQRSTUVWXYZ-abcdefghij", "OpenAI service-account key"],
+    ["Google", "AIzaSyA1234567890abcdefghijklmnopqrstuvw", "Google API key"],
+    ["Hugging Face", "hf_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef", "Hugging Face access token"],
+    ["GitHub PAT", "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij", "GitHub personal access token"],
+    ["AWS", "AKIAIOSFODNN7EXAMPLE", "AWS access key"],
+  ])("rejects a %s key before storage", (_vendor, key, label) => {
+    const result = scanForSecrets(`here is the credential: ${key}`);
+    expect(result.valid).toBe(false);
+    expect(result.error).toContain(label);
   });
 
   it("rejects OpenAI project API keys (sk-proj-)", () => {

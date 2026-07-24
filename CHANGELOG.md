@@ -8,6 +8,22 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Security
+
+- **The secret scanner now rejects Anthropic, Google, Hugging Face, and OpenAI
+  service-account keys (found by multi-model user testing, 2026-07-24).** The
+  generic `sk-` rule cannot match across a hyphen — it requires 20+
+  *alphanumeric* characters after `sk-` — so every hyphenated vendor prefix
+  escaped it. `sk-ant-api03-…` keys were therefore **accepted and stored in
+  plaintext**, violating the documented "reject common API keys before storage"
+  invariant on the format this ecosystem is most likely to encounter, while
+  lesser formats were correctly blocked. Two independent test agents hit this
+  within minutes of each other. The pre-existing test was named "rejects
+  OpenAI/Anthropic API keys" but only exercised the generic form, so it
+  asserted coverage that never existed; it is now one table-driven case per
+  vendor format, and `SECRET_PATTERNS` documents that hyphenated prefixes
+  require their own entry.
+
 ### Added
 
 - **Scorecard contract v3: reranker recency pinned to zero (#248).** The #248

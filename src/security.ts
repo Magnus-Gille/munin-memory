@@ -1,10 +1,25 @@
 import type { SecurityResult } from "./types.js";
 import { resolveOwnerAliases } from "./owner-config.js";
 
+/**
+ * Credential formats rejected before storage.
+ *
+ * **Vendor prefixes need their own entry.** The generic `sk-` rule below cannot
+ * match across a hyphen — after `sk-` it requires 20+ *alphanumeric* characters
+ * — so every vendor whose prefix is itself hyphenated (`sk-ant-`, `sk-proj-`,
+ * `sk-or-v1-`, `sk-svcacct-`) escapes it and must be listed explicitly. A
+ * user-testing pass on 2026-07-24 found `sk-ant-api03-…` keys being accepted
+ * and stored precisely because of this gap. When a new provider appears, add a
+ * pattern here *and* a row to the table-driven test in `tests/security.test.ts`.
+ */
 const SECRET_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /sk-or-v1-[a-zA-Z0-9_-]{20,}/, label: "OpenRouter API key" },
+  { pattern: /sk-ant-[a-zA-Z0-9_-]{20,}/, label: "Anthropic API key (sk-ant-...)" },
+  { pattern: /sk-svcacct-[a-zA-Z0-9_-]{20,}/, label: "OpenAI service-account key (sk-svcacct-...)" },
   { pattern: /sk-[a-zA-Z0-9]{20,}/, label: "API key (sk-...)" },
   { pattern: /sk-proj-[a-zA-Z0-9]{20,}/, label: "OpenAI project API key (sk-proj-...)" },
+  { pattern: /AIza[0-9A-Za-z_-]{35}/, label: "Google API key" },
+  { pattern: /hf_[a-zA-Z0-9]{20,}/, label: "Hugging Face access token" },
   { pattern: /ghp_[a-zA-Z0-9]{36,}/, label: "GitHub personal access token" },
   { pattern: /gho_[a-zA-Z0-9]{36,}/, label: "GitHub OAuth token" },
   { pattern: /github_pat_[a-zA-Z0-9_]{22,}/, label: "GitHub fine-grained PAT" },
