@@ -11,7 +11,7 @@ import {
   type ChatCompletionResponse,
   type OpenRouterCallOptions,
 } from "../../src/internal/openrouter.js";
-import type { JudgeVerdict, TokenUsage } from "./types.js";
+import type { JudgeVerdict, LlmCallIdentity, TokenUsage } from "./types.js";
 
 /** Injectable LLM call function — signature matches the shared callOpenRouter. */
 export type ChatFn = (opts: OpenRouterCallOptions) => Promise<ChatCompletionResponse>;
@@ -34,6 +34,7 @@ export interface GenerateAnswerArgs {
 export interface GeneratedAnswer {
   answer: string;
   usage?: TokenUsage;
+  call_identity: LlmCallIdentity;
 }
 
 /**
@@ -82,8 +83,15 @@ Answer the question using only information found in the context:`;
       ? {
           prompt_tokens: response.usage.prompt_tokens,
           completion_tokens: response.usage.completion_tokens,
+          ...(response.usage.cost === undefined ? {} : { cost: response.usage.cost }),
         }
       : undefined,
+    call_identity: {
+      requested_model: args.model,
+      ...(response.model === undefined ? {} : { response_model: response.model }),
+      ...(response.provider === undefined ? {} : { provider: response.provider }),
+      ...(response.id === undefined ? {} : { generation_id: response.id }),
+    },
   };
 }
 
@@ -161,17 +169,27 @@ Judge the candidate answer against the reference answer:`;
   });
 
   const raw = response.choices?.[0]?.message?.content ?? "";
-  return parseJudgeResponse(raw, response.usage);
+  return parseJudgeResponse(raw, response.usage, {
+    requested_model: args.model,
+    ...(response.model === undefined ? {} : { response_model: response.model }),
+    ...(response.provider === undefined ? {} : { provider: response.provider }),
+    ...(response.id === undefined ? {} : { generation_id: response.id }),
+  });
 }
 
 // --- Response parsing (mirrors parseSynthesisResponse's defensive approach) ---
 
 function parseJudgeResponse(
   text: string,
-  usage?: { prompt_tokens: number; completion_tokens: number },
+  usage?: { prompt_tokens: number; completion_tokens: number; cost?: number },
+  callIdentity?: LlmCallIdentity,
 ): JudgeVerdict {
   const judgeUsage: TokenUsage | undefined = usage
-    ? { prompt_tokens: usage.prompt_tokens, completion_tokens: usage.completion_tokens }
+    ? {
+        prompt_tokens: usage.prompt_tokens,
+        completion_tokens: usage.completion_tokens,
+        ...(usage.cost === undefined ? {} : { cost: usage.cost }),
+      }
     : undefined;
 
   // Strip markdown fences if present
@@ -188,6 +206,7 @@ function parseJudgeResponse(
       parse_ok: false,
       raw: text.slice(0, 500),
       usage: judgeUsage,
+      call_identity: callIdentity,
     };
   }
 
@@ -203,6 +222,7 @@ function parseJudgeResponse(
       parse_ok: false,
       raw: text.slice(0, 500),
       usage: judgeUsage,
+      call_identity: callIdentity,
     };
   }
 
@@ -214,6 +234,7 @@ function parseJudgeResponse(
       parse_ok: false,
       raw: text.slice(0, 500),
       usage: judgeUsage,
+      call_identity: callIdentity,
     };
   }
 
@@ -230,6 +251,7 @@ function parseJudgeResponse(
       parse_ok: false,
       raw: text.slice(0, 500),
       usage: judgeUsage,
+      call_identity: callIdentity,
     };
   }
   const correct = obj.correct;
@@ -242,6 +264,13 @@ function parseJudgeResponse(
   const reasoning =
     typeof obj.reasoning === "string" ? obj.reasoning.trim() : "(no reasoning)";
 
-  return { correct, score, reasoning, parse_ok: true, usage: judgeUsage };
+  return {
+    correct,
+    score,
+    reasoning,
+    parse_ok: true,
+    usage: judgeUsage,
+    call_identity: callIdentity,
+  };
 }
 // (dead extractJudgeUsage removed — judge usage now travels on JudgeVerdict.usage)

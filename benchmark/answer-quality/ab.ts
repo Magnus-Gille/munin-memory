@@ -62,7 +62,7 @@ export async function runAnswerQualityAb(
 
   return {
     report_kind: "answer_quality_ab",
-    report_schema_version: 2,
+    report_schema_version: 3,
     run_at: runAt,
     variable: "serialization",
     // Identity contract

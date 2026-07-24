@@ -74,20 +74,23 @@ attention inputs are time-relative and would rot a committed baseline.
 Raw-vs-production parity is guarded separately by `tests/runner-parity.test.ts`.
 Extending the gate to a time-frozen `production_ranker` run is future work.
 
-## End-to-end scorecard foundation
+## End-to-end scorecard
 
-The unpublished Phase A scorecard composes the existing LongMemEval adapter,
-retrieval runner, and answer-quality harness under one versioned contract. Run
-the deterministic offline wiring check with:
+The Phase A scorecard composes the existing LongMemEval adapter, retrieval
+runner, and answer-quality harness under a versioned contract. Run the
+deterministic offline wiring check with:
 
 ```bash
 npm run scorecard:smoke
 ```
 
-The paid 500-question foundation command is documented in
-[`scorecard/README.md`](./scorecard/README.md). Neither profile is publication
-eligible yet. In particular, existing LongMemEval `R@K` values are retrieval
-recall, never end-to-end answer accuracy.
+The paid 500-question publication-candidate command and publication validator
+are documented in [`scorecard/README.md`](./scorecard/README.md). The smoke is
+never publication eligible. A full run is eligible only after it records the
+complete raw result, enforced context budget, provider identity/cost,
+environment lineage, stage/resource evidence, uncertainty, and passing trust
+lanes. Retrieval `R@K` remains retrieval recall, never end-to-end answer
+accuracy.
 
 ## Ground-Truth Query Pipeline
 
@@ -175,6 +178,13 @@ npx tsx benchmark/adapters/longmemeval/run.ts --split s
 Reports under `reports/` follow the shape defined in `types.ts` as
 `BenchmarkReport`. The `report_schema_version` field tags additive
 revisions; consumers should branch on it before reading new fields.
+
+Answer-quality reports use a separate schema family. Version 3 adds an enforced
+retrieved-context budget record per question, retrieval/serialization/reader/
+judge stage timing, actual response-model/provider/generation identity, and
+provider-reported cost alongside native token usage. It deliberately remains
+separate from retrieval reports so answer accuracy cannot be confused with
+`R@K`.
 
 ### v3 changes (#58)
 

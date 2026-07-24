@@ -265,11 +265,11 @@ export function startConsolidationWorker(db: Database.Database): void {
   workerDb = db;
 
   // #168: proactively verify the OpenRouter key against the authenticated
-  // /auth/key endpoint. /models returns 200 unauthenticated and masks a stale
+  // /key endpoint. /models returns 200 unauthenticated and masks a stale
   // key, so without this a 401 only surfaces on the first synthesis call —
   // silently blocking consolidation. Fire-and-forget so it never blocks
   // startup; only meaningful against the default OpenRouter host (a custom/local
-  // base URL has no /auth/key and no bearer auth). The logged detail is
+  // base URL has no /key and no bearer auth). The logged detail is
   // secret-free (status + response body only, never the key).
   if (apiKey !== null && !isCustomLlmBaseUrl()) {
     const keyForCheck = apiKey;

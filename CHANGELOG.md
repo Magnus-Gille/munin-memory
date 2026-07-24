@@ -10,6 +10,23 @@ changelog is the canonical record of what moved.
 
 ### Added
 
+- Added the publication-grade Phase A agent-memory scorecard (#227). The pinned
+  LongMemEval-S full profile now requires all 500 questions, the production
+  hybrid ranker, an enforced deterministic retrieved-context budget, separate
+  reader and judge models, provider-native model/token/cost evidence for every
+  call, deterministic bootstrap intervals, environment and Git lineage, and
+  authorization plus stored-instruction poison lanes. A two-question offline
+  smoke remains explicitly ineligible for publication, while a separate
+  validator publishes only complete, clean, portable, secret-scanned full-run
+  reports under `benchmark/scorecard/results/`. The prior v1 foundation
+  contract remains frozen for historical reproducibility. The paid runner
+  retries only explicit 429/503 responses and Node fetch transport failures
+  whose exact messages are `fetch failed` or `terminated`; every retry is
+  counted in publication evidence, while all other failures remain fail-closed.
+  Generated benchmark databases and query files may resume only after exact
+  adapter-schema, source-byte SHA-256, profile, path, and limit provenance
+  validation; reports disclose reuse so resumed preprocessing timings are not
+  presented as cold-start measurements.
 - Added a durable review inbox for `memory_extract` proposals (#223).
   `memory_extract persist:true` now stores bounded, principal-scoped pending
   proposals without changing memory truth, while the new `memory_review` tool
@@ -78,6 +95,10 @@ changelog is the canonical record of what moved.
 
 ### Changed
 
+- Updated OpenRouter key health checks to the current authenticated
+  `/api/v1/key` endpoint. The retired `/api/v1/auth/key` path returned a
+  misleading missing-authentication response and blocked the scorecard
+  preflight before any paid model call.
 - **`memory_status` telemetry is now explicitly bounded (#242).** Owner calls
   aggregate at most the 5,000 most recent tool calls from the seven-day window
   instead of synchronously scanning and sorting the entire window. The existing
@@ -182,6 +203,11 @@ changelog is the canonical record of what moved.
 
 ### Fixed
 
+- **Scorecard publication now accepts the production ranker's optional
+  `actual_mode` evidence field when it is absent.** The publisher still rejects
+  any query that declares a non-hybrid requested or actual mode, but no longer
+  rejects a clean production report merely because the optional actual-mode
+  annotation was omitted.
 - **Public-release compatibility and deployment safety.** Owner aliases and the
   canonical owner-profile namespace are configurable while retaining existing
   `people/magnus` data and concealment detection; the public Grimnir example has

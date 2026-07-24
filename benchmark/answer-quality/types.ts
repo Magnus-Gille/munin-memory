@@ -13,6 +13,7 @@ import type { QuerySetSource, DurationSummary, RunnerMode } from "../types.js";
 import type { SearchMode } from "../../src/types.js";
 import type { SerializationMode } from "../../src/internal/retrieval-shared.js";
 import type { CorpusEmbeddingSummary } from "../adapters/shared.js";
+import type { SerializedContextBudget } from "./serialize.js";
 
 export type { SerializationMode };
 
@@ -20,6 +21,15 @@ export type { SerializationMode };
 export interface TokenUsage {
   prompt_tokens: number;
   completion_tokens: number;
+  /** Provider-reported charged amount in US dollars/credits, when available. */
+  cost?: number;
+}
+
+export interface LlmCallIdentity {
+  requested_model: string;
+  response_model?: string;
+  provider?: string;
+  generation_id?: string;
 }
 
 /** Judge verdict for one answer. */
@@ -40,6 +50,7 @@ export interface JudgeVerdict {
   raw?: string;
   /** Token usage of the judge call, when the provider reported it. */
   usage?: TokenUsage;
+  call_identity?: LlmCallIdentity;
 }
 
 /** Result for one evaluated query. */
@@ -65,6 +76,15 @@ export interface AnswerQualityResult {
   verdict: JudgeVerdict;
   /** End-to-end wall time (retrieve + answer + judge) in milliseconds. */
   duration_ms: number;
+  stage_duration_ms: {
+    retrieval: number;
+    serialization: number;
+    reader: number;
+    judge: number;
+  };
+  context_budget: SerializedContextBudget;
+  answer_call?: LlmCallIdentity;
+  judge_call?: LlmCallIdentity;
   answer_usage?: TokenUsage;
   judge_usage?: TokenUsage;
 }
@@ -88,10 +108,10 @@ export interface AnswerQualityReport {
   report_kind: "answer_quality";
   /**
    * Independent version line, separate from BenchmarkReport.report_schema_version.
-   * v2 adds question-date lineage plus explicit reader/judge sampling and
-   * output-token settings.
+   * v3 adds retrieved-context budgeting, stage timings, provider/model identity,
+   * and complete provider-native usage/cost accounting.
    */
-  report_schema_version: 2;
+  report_schema_version: 3;
   /** ISO 8601 run timestamp. */
   run_at: string;
   snapshot_path: string;
@@ -103,6 +123,8 @@ export interface AnswerQualityReport {
   search_mode: SearchMode;
   search_recency_weight: number | null;
   top_k: number;
+  context_token_budget: number | null;
+  context_token_estimator: "utf8_bytes_div4_ceil_v1";
   answer_model: string;
   /** Null means the provider/model default was used. */
   answer_temperature: number | null;
@@ -124,6 +146,18 @@ export interface AnswerQualityReport {
   by_category: AnswerQualityCategorySummary[];
   results: AnswerQualityResult[];
   total_usage?: TokenUsage;
+  usage_accounting: {
+    expected_calls: number;
+    usage_reported_calls: number;
+    cost_reported_calls: number;
+  };
+  execution_identity: {
+    requested_answer_model: string;
+    requested_judge_model: string;
+    response_models: string[];
+    providers: string[];
+    missing_identity_calls: number;
+  };
   warnings?: string[];
   /** Summary of corpus embedding pre-population (populated for hybrid/semantic runs). */
   embedding_summary?: CorpusEmbeddingSummary | null;
@@ -135,7 +169,7 @@ export interface AnswerQualityReport {
 /** A/B comparison report: linear vs boundary serialization. */
 export interface AnswerQualityAbReport {
   report_kind: "answer_quality_ab";
-  report_schema_version: 2;
+  report_schema_version: 3;
   run_at: string;
   /** The A/B variable being tested. */
   variable: "serialization";

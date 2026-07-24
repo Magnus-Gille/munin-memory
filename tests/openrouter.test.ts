@@ -6,7 +6,13 @@
  * auth) while keeping the default path byte-for-byte unchanged.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { callOpenRouter, getLlmBaseUrl, isCustomLlmBaseUrl, checkOpenRouterKey } from "../src/internal/openrouter.js";
+import {
+  callOpenRouter,
+  getLlmBaseUrl,
+  isCustomLlmBaseUrl,
+  checkOpenRouterKey,
+  OpenRouterHttpError,
+} from "../src/internal/openrouter.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -467,6 +473,25 @@ describe("callOpenRouter — error handling", () => {
       }),
     ).rejects.toThrow("LLM API error 524: HTML error page: A timeout occurred");
   });
+
+  it("preserves status and Retry-After evidence on HTTP failures", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 429,
+      headers: { get: (name: string) => (name.toLowerCase() === "retry-after" ? "2.5" : null) },
+      text: () => Promise.resolve("rate limited"),
+    } as unknown as Response);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const failure = await callOpenRouter({
+      model: "test-model",
+      messages: [{ role: "user", content: "hi" }],
+      apiKey: "sk-test",
+    }).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(OpenRouterHttpError);
+    expect(failure).toMatchObject({ status: 429, retryAfterMs: 2500 });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -474,7 +499,7 @@ describe("callOpenRouter — error handling", () => {
 // ---------------------------------------------------------------------------
 
 describe("checkOpenRouterKey (#168)", () => {
-  it("hits the authenticated /auth/key endpoint (not /models) with a Bearer token", async () => {
+  it("hits the current authenticated /key endpoint (not /models) with a Bearer token", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -485,7 +510,7 @@ describe("checkOpenRouterKey (#168)", () => {
     const result = await checkOpenRouterKey("sk-valid");
 
     expect(fetchMock).toHaveBeenCalledOnce();
-    expect(fetchMock.mock.calls[0][0]).toBe(`${DEFAULT_BASE_URL}/auth/key`);
+    expect(fetchMock.mock.calls[0][0]).toBe(`${DEFAULT_BASE_URL}/key`);
     const init = fetchMock.mock.calls[0][1] as { method: string; headers: Record<string, string> };
     expect(init.method).toBe("GET");
     expect(init.headers["Authorization"]).toBe("Bearer sk-valid");
@@ -526,7 +551,7 @@ describe("checkOpenRouterKey (#168)", () => {
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     await checkOpenRouterKey("sk-test");
-    expect(fetchMock.mock.calls[0][0]).toBe("http://localhost:1234/v1/auth/key");
+    expect(fetchMock.mock.calls[0][0]).toBe("http://localhost:1234/v1/key");
   });
 
   it("redacts the key if a reflected error body echoes it (defense-in-depth)", async () => {
