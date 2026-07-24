@@ -8,6 +8,23 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A uniquely-named entry is no longer buried by structural ranking bonuses
+  (#252, partial).** `getQueryHeuristicScore` is purely structural — it rewards
+  tracked statuses, entry type and freshness, and never looks at how well an
+  entry matches the query — so relevance survived only as the final tie-break.
+  User testing found a globally unique token that ranked `lexical_rank: 1` with
+  the highest fusion score returned *seventh*, behind six unrelated entries
+  scoring 26 on "tracked status, recently updated" against its -3. An identifier
+  lookup now keeps its answer first, gated tightly: a non-orientation query of
+  at most three distinctive terms where **exactly one** candidate contains all
+  of them and is not a tombstone. Replaying 258 distinct real production queries
+  showed the gate firing zero times — only 25 are identifier-shaped and none had
+  a unique match — so ordinary topical ranking, including the #74 recency
+  tie-break parity, is provably unchanged. The broader issue that structural
+  score can outweigh relevance on multi-term queries remains open in #252.
+
 ### Security
 
 - **The secret scanner now rejects Anthropic, Google, Hugging Face, and OpenAI

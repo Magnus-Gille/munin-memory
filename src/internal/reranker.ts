@@ -499,6 +499,92 @@ export function injectAttentionQueryEntries(
   return merged;
 }
 
+/** Heuristic at or below this marks deliberately demoted content (tombstones). */
+const DEMOTED_HEURISTIC_CEILING = -10;
+
+/** Longest query, in searchable terms, still treated as an identifier lookup. */
+const ANCHOR_MAX_TERMS = 3;
+
+/** Shortest term considered distinctive enough to anchor on. */
+const ANCHOR_MIN_TERM_LENGTH = 4;
+
+/**
+ * Terms worth anchoring on: distinctive enough that a caller typing them is
+ * naming a specific thing rather than describing a topic.
+ */
+function anchorTerms(queryLower: string): string[] {
+  return (queryLower.match(/[a-z0-9][a-z0-9_-]*/g) ?? []).filter(
+    (term) => term.length >= ANCHOR_MIN_TERM_LENGTH || /\d/.test(term),
+  );
+}
+
+function entryContainsAllTerms(entry: Entry, terms: string[]): boolean {
+  const haystack = `${entry.namespace} ${entry.key ?? ""} ${entry.content}`.toLowerCase();
+  return terms.every((term) => haystack.includes(term));
+}
+
+/**
+ * Keep an unambiguous identifier hit at the top.
+ *
+ * The heuristic score is structural — it rewards tracked statuses, freshness
+ * and entry type, and never looks at how well an entry matches the query — so
+ * on a short, distinctive lookup it could bury the one entry the caller
+ * literally named. Observed in user testing: a globally unique token ranked
+ * `lexical_rank: 1` with the highest fusion score came back **seventh**, behind
+ * six unrelated entries scoring 26 on "tracked status, recently updated"
+ * against its -3 (#252).
+ *
+ * Deliberately narrow, because the structural heuristic is right for the
+ * operational queries it was built for. This only fires when all of:
+ *   - the caller supplied a query that is not a broad orientation/triage ask;
+ *   - it is at most a few distinctive terms — an identifier lookup, not a topic;
+ *   - **exactly one** candidate contains every one of those terms verbatim, so
+ *     the caller has named a specific thing rather than described a subject;
+ *   - that candidate is the best-relevance result and is not deliberately
+ *     demoted (a tombstone).
+ *
+ * The uniqueness requirement is what keeps this from hijacking ordinary
+ * queries: when several candidates match the terms there is no single thing
+ * being named, so structural score and recency continue to decide — including
+ * the recency tie-break parity guarantees from #74.
+ *
+ * Everything below position one keeps the existing structural order.
+ */
+function applyExactAnchorFloor(
+  ranked: Array<{ entry: Entry; heuristic: number }>,
+  bestRelevance: Entry | undefined,
+  queryLower: string,
+  params: QueryParams,
+): Array<{ entry: Entry; heuristic: number }> {
+  if (!bestRelevance || ranked.length < 2) return ranked;
+  if (!queryLower.trim()) return ranked;
+  if (isBroadOrientationQuery(queryLower, params) || isAttentionTriageQuery(queryLower, params)) {
+    return ranked;
+  }
+
+  const terms = anchorTerms(queryLower);
+  if (terms.length === 0 || terms.length > ANCHOR_MAX_TERMS) return ranked;
+  if (!entryContainsAllTerms(bestRelevance, terms)) return ranked;
+
+  // Unique anchor only: if more than one candidate carries every term, the
+  // caller described a subject rather than naming one entry, and the existing
+  // structural/recency ordering is the right answer.
+  let matchCount = 0;
+  for (const item of ranked) {
+    if (entryContainsAllTerms(item.entry, terms)) {
+      matchCount += 1;
+      if (matchCount > 1) return ranked;
+    }
+  }
+
+  const currentIndex = ranked.findIndex((item) => item.entry.id === bestRelevance.id);
+  if (currentIndex <= 0) return ranked;
+  if (ranked[currentIndex]!.heuristic <= DEMOTED_HEURISTIC_CEILING) return ranked;
+
+  const promoted = ranked[currentIndex]!;
+  return [promoted, ...ranked.slice(0, currentIndex), ...ranked.slice(currentIndex + 1)];
+}
+
 /**
  * Rerank query results by heuristic score + freshness, applying the
  * default suppression filter when appropriate.
@@ -522,7 +608,7 @@ export function rerankQueryResults(
     return true;
   });
 
-  return filtered
+  const scored = filtered
     .map((entry, index) => ({
       entry,
       index,
@@ -545,7 +631,12 @@ export function rerankQueryResults(
       }
       return a.index - b.index;
     })
-    .map((item) => item.entry);
+    .map((item) => ({ entry: item.entry, heuristic: item.heuristic }));
+
+  // `filtered[0]` is the best-relevance candidate: the retrieval layer hands
+  // results over in fusion/lexical rank order, and the structural sort below
+  // preserves that order only as its final tie-break.
+  return applyExactAnchorFloor(scored, filtered[0], queryLower, params).map((item) => item.entry);
 }
 
 export function resolveSearchRecencyWeight(params: QueryParams): { ok: true; value: number } | { ok: false; error: string } {

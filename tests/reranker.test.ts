@@ -967,3 +967,58 @@ function makeSimpleEntry(namespace: string, key: string | null, content: string)
   }
   return row;
 }
+
+/**
+ * Regression guard for #252: a structural heuristic that never looks at the
+ * query must not bury the one entry the caller literally named.
+ *
+ * Found in user testing — a globally unique token that ranked `lexical_rank: 1`
+ * with the highest fusion score was returned *seventh*, behind six unrelated
+ * entries scoring 26 on "tracked status, recently updated" against its -3.
+ */
+describe("rerankQueryResults exact-anchor floor (#252)", () => {
+  function noiseEntries(count: number): Entry[] {
+    const entries: Entry[] = [];
+    for (let i = 0; i < count; i++) {
+      // Tracked statuses: the shape that earns the big structural bonuses.
+      writeState(db, `projects/noise-${i}`, "status", `## Phase\nActive work ${i}`, ["active"]);
+      const id = (db.prepare("SELECT id FROM entries WHERE namespace=?").get(`projects/noise-${i}`) as { id: string }).id;
+      entries.push(getById(db, id)!);
+    }
+    return entries;
+  }
+
+  it("keeps a uniquely-named entry first instead of letting structural bonuses bury it", () => {
+    // A plain log entry — heuristic-poor, exactly like the canary in the report.
+    appendLog(db, "testing/canary", "Milestone: the canary token is zarquon-flimflam-42.", []);
+    const anchorId = (db.prepare("SELECT id FROM entries WHERE namespace='testing/canary'").get() as { id: string }).id;
+    const anchor = getById(db, anchorId)!;
+    const noise = noiseEntries(6);
+
+    // Retrieval hands the best fusion hit over first; the ranker must not sink it.
+    const order = rerankQueryResults(
+      [anchor, ...noise],
+      { query: "zarquon-flimflam-42" } as Parameters<typeof rerankQueryResults>[1],
+      new Set(),
+    );
+    expect(order[0]!.id).toBe(anchor.id);
+  });
+
+  it("leaves ordinary topical queries to the structural heuristic", () => {
+    // Several entries carry the term, so nothing is uniquely named and the
+    // existing tracked-status/recency ordering must still win.
+    appendLog(db, "testing/topic-a", "Notes about deployment planning.", []);
+    appendLog(db, "testing/topic-b", "More deployment planning notes.", []);
+    const a = getById(db, (db.prepare("SELECT id FROM entries WHERE namespace='testing/topic-a'").get() as { id: string }).id)!;
+    const b = getById(db, (db.prepare("SELECT id FROM entries WHERE namespace='testing/topic-b'").get() as { id: string }).id)!;
+    const noise = noiseEntries(3);
+
+    const order = rerankQueryResults(
+      [a, b, ...noise],
+      { query: "deployment planning" } as Parameters<typeof rerankQueryResults>[1],
+      new Set(),
+    );
+    // A tracked status still outranks a bare log on a topical query.
+    expect(order[0]!.key).toBe("status");
+  });
+});
