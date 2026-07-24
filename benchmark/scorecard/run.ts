@@ -38,6 +38,7 @@ import { JUDGE_SYSTEM_SENTINEL, type ChatFn } from "../answer-quality/judge.js";
 import { runAnswerQuality } from "../answer-quality/runner.js";
 import type { AnswerQualityReport } from "../answer-quality/types.js";
 import { loadQueriesWithSource, runBenchmark } from "../runner.js";
+import { DEFAULT_SEARCH_RECENCY_WEIGHT } from "../../src/internal/reranker.js";
 import type { BenchmarkQuery, BenchmarkReport } from "../types.js";
 import {
   callOpenRouter,
@@ -64,7 +65,7 @@ const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_CONTRACT_PATH = join(
   MODULE_DIR,
   "contracts",
-  "longmemeval-s-v2.json",
+  "longmemeval-s-v3.json",
 );
 
 const SMOKE_LIMITATIONS = [
@@ -126,8 +127,28 @@ export function validateScorecardContract(value: unknown): ScorecardContract {
       `Unsupported scorecard contract_schema_version: ${String(value.contract_schema_version)}.`,
     );
   }
-  if (value.contract_id !== "munin-longmemeval-s-e2e-v2") {
+  if (
+    value.contract_id !== "munin-longmemeval-s-e2e-v2"
+    && value.contract_id !== "munin-longmemeval-s-e2e-v3"
+  ) {
     throw new Error(`Unsupported scorecard contract_id: ${String(value.contract_id)}.`);
+  }
+  const isV3 = value.contract_id === "munin-longmemeval-s-e2e-v3";
+  if (isV3) {
+    // v3 pins the reranker recency weight to 0 through the public
+    // memory_query parameter and must carry the hashed disclosure (#248).
+    assertObject(value.retrieval_policy, "retrieval_policy");
+    if (
+      value.retrieval_policy.search_recency_weight !== 0
+      || typeof value.retrieval_policy.disclosure !== "string"
+      || value.retrieval_policy.disclosure.trim().length === 0
+    ) {
+      throw new Error(
+        "v3 retrieval_policy must pin search_recency_weight to 0 with a non-empty disclosure.",
+      );
+    }
+  } else if (value.retrieval_policy !== undefined) {
+    throw new Error("The frozen v2 contract must not carry a retrieval_policy block.");
   }
   if (value.publication_status !== "publication_candidate") {
     throw new Error("Phase A v2 contract must remain a publication candidate.");
@@ -217,6 +238,17 @@ export function validateScorecardContract(value: unknown): ScorecardContract {
     validateModelContract(profile.judge, `profiles.${name}.judge`);
     if (profile.top_k !== value.context_budget.top_k) {
       throw new Error(`profiles.${name}.top_k must match context_budget.top_k.`);
+    }
+    if (isV3) {
+      if (profile.search_recency_weight !== value.retrieval_policy!.search_recency_weight) {
+        throw new Error(
+          `profiles.${name}.search_recency_weight must match retrieval_policy.search_recency_weight in contract v3.`,
+        );
+      }
+    } else if (profile.search_recency_weight !== undefined) {
+      throw new Error(
+        `profiles.${name}.search_recency_weight must be absent in the frozen v2 contract.`,
+      );
     }
   }
   const smoke = value.profiles.smoke;
@@ -550,10 +582,23 @@ export function validateScorecardRetrievalReport(
   expectedQuestionCount: number,
   expectedSearchMode: ScorecardProfileContract["search_mode"],
   expectedRunnerMode: ScorecardProfileContract["runner_mode"],
+  contractRecencyWeight?: number,
 ): void {
   if (report.runner_mode !== expectedRunnerMode || report.warnings?.length) {
     throw new Error(
       `Scorecard ${profile} retrieval degraded or warned: ${(report.warnings ?? []).join("; ") || `${report.runner_mode} != ${expectedRunnerMode}`}`,
+    );
+  }
+  // Raw mode skips the reranker entirely and reports null; production mode
+  // must have applied exactly the contract-pinned weight (or the production
+  // default when the contract does not pin one, as in frozen v2).
+  const expectedAppliedWeight = expectedRunnerMode === "raw"
+    ? null
+    : contractRecencyWeight ?? DEFAULT_SEARCH_RECENCY_WEIGHT;
+  if (report.search_recency_weight !== expectedAppliedWeight) {
+    throw new Error(
+      `Scorecard ${profile} retrieval recency weight drifted: `
+      + `${String(report.search_recency_weight)} != ${String(expectedAppliedWeight)}.`,
     );
   }
   if (report.query_count !== expectedQuestionCount) {
@@ -775,6 +820,7 @@ export async function runScorecard(
   const retrieval = await runBenchmark(paths.dbPath, queries, {
     querySetSources: [source],
     runnerMode: profile.runner_mode,
+    searchRecencyWeight: profile.search_recency_weight,
     manifestPath: null,
   });
   validateScorecardRetrievalReport(
@@ -783,6 +829,7 @@ export async function runScorecard(
     profile.expected_question_count,
     profile.search_mode,
     profile.runner_mode,
+    profile.search_recency_weight,
   );
   const retrievalDuration = performance.now() - retrievalStart;
 
@@ -813,6 +860,7 @@ export async function runScorecard(
     serialization: profile.serialization,
     runnerMode: profile.runner_mode,
     searchMode: profile.search_mode,
+    searchRecencyWeight: profile.search_recency_weight,
     topK: profile.top_k,
     contextTokenBudget: contract.context_budget.retrieved_token_budget,
     answerModel: profile.reader.model,
@@ -1000,6 +1048,7 @@ export async function runScorecard(
           "Transport retries are counted in evidence. OpenRouter may charge upstream prompt processing for an attempt whose response was not returned, so provider-reported successful-call cost can understate account-level spend by those failed attempts.",
         ]
         : []),
+      ...(contract.retrieval_policy ? [contract.retrieval_policy.disclosure] : []),
       ...contract.limitations,
     ],
   };

@@ -6,6 +6,7 @@ import {
 import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { scanForSecrets } from "../../src/security.js";
+import { DEFAULT_SEARCH_RECENCY_WEIGHT } from "../../src/internal/reranker.js";
 import type { MuninAgentMemoryScorecardReport } from "./types.js";
 import { loadScorecardContract } from "./run.js";
 
@@ -18,6 +19,19 @@ function assertObject(
   }
 }
 
+const MODULE_DIR = fileURLToPath(new URL(".", import.meta.url));
+
+/**
+ * Each publishable contract revision stays committed and frozen; a report
+ * binds to the exact revision it ran under via contract_id + contract hash,
+ * so historical publication artifacts keep re-validating after a new revision
+ * ships.
+ */
+const CONTRACT_FILES: Record<string, string> = {
+  "munin-longmemeval-s-e2e-v2": "longmemeval-s-v2.json",
+  "munin-longmemeval-s-e2e-v3": "longmemeval-s-v3.json",
+};
+
 export function validatePublicationReport(
   value: unknown,
 ): MuninAgentMemoryScorecardReport {
@@ -25,13 +39,14 @@ export function validatePublicationReport(
   if (
     value.report_kind !== "munin_agent_memory_scorecard"
     || value.report_schema_version !== 2
-    || value.contract_id !== "munin-longmemeval-s-e2e-v2"
+    || typeof value.contract_id !== "string"
+    || CONTRACT_FILES[value.contract_id] === undefined
     || value.contract_schema_version !== 2
     || value.profile !== "longmemeval_s_full_on_demand"
     || value.publication_status !== "publication_candidate"
     || value.publication_eligible !== true
   ) {
-    throw new Error("Report is not an eligible LongMemEval-S v2 publication candidate.");
+    throw new Error("Report is not an eligible LongMemEval-S publication candidate.");
   }
   assertObject(value.retrieval, "retrieval");
   assertObject(value.answer_quality, "answer_quality");
@@ -41,9 +56,27 @@ export function validatePublicationReport(
   const answerQuality =
     value.answer_quality as unknown as MuninAgentMemoryScorecardReport["answer_quality"];
   const evidence = value.evidence as unknown as MuninAgentMemoryScorecardReport["evidence"];
-  const currentContract = loadScorecardContract();
+  const currentContract = loadScorecardContract(
+    join(MODULE_DIR, "contracts", CONTRACT_FILES[value.contract_id]),
+  );
   if (value.contract_sha256 !== currentContract.sha256) {
-    throw new Error("Publication report contract hash does not match the shipped v2 contract.");
+    throw new Error(
+      `Publication report contract hash does not match the shipped ${value.contract_id} contract.`,
+    );
+  }
+  // Bind the applied reranker recency weight to the contract revision:
+  // v3 pins 0 through the public memory_query parameter; the frozen v2 ran
+  // with the production default and recorded no explicit weight.
+  const contractRecencyWeight =
+    currentContract.contract.profiles.full.search_recency_weight ?? null;
+  const expectedRetrievalWeight = contractRecencyWeight ?? DEFAULT_SEARCH_RECENCY_WEIGHT;
+  if (
+    answerQuality.search_recency_weight !== contractRecencyWeight
+    || retrieval.search_recency_weight !== expectedRetrievalWeight
+  ) {
+    throw new Error(
+      "Publication report recency weight does not match the contract retrieval policy.",
+    );
   }
   if (
     retrieval.report_schema_version !== 3
@@ -290,6 +323,7 @@ export function renderPublicationSummary(
 | Retrieval latency p50 / p95 | ${report.retrieval.overall_duration.p50_ms?.toFixed(1) ?? "n/a"} / ${report.retrieval.overall_duration.p95_ms?.toFixed(1) ?? "n/a"} ms |
 | Answer pipeline latency p50 / p95 | ${aq.overall_duration.p50_ms?.toFixed(1) ?? "n/a"} / ${aq.overall_duration.p95_ms?.toFixed(1) ?? "n/a"} ms |
 | Retrieved-context budget | ${aq.context_token_budget} estimated tokens |
+| Reranker recency weight | ${aq.search_recency_weight === null ? "production default" : String(aq.search_recency_weight)} (contract-pinned via public \`memory_query\` \`search_recency_weight\`) |
 | Provider prompt / completion tokens | ${usage?.prompt_tokens ?? "n/a"} / ${usage?.completion_tokens ?? "n/a"} |
 | Provider-reported cost | ${formatUsd(evidence.cost_usd!)} |
 | Generated artifacts reused | ${evidence.artifacts.reused_existing ? "yes" : "no"} |

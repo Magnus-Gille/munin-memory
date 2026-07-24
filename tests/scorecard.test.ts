@@ -27,11 +27,11 @@ afterEach(() => {
 });
 
 describe("Phase A scorecard contract", () => {
-  it("loads the publication-candidate v2 contract with enforced evidence gates", () => {
+  it("loads the publication-candidate v3 contract with enforced evidence gates", () => {
     const { contract, sha256 } = loadScorecardContract();
 
     expect(contract.contract_schema_version).toBe(2);
-    expect(contract.contract_id).toBe("munin-longmemeval-s-e2e-v2");
+    expect(contract.contract_id).toBe("munin-longmemeval-s-e2e-v3");
     expect(contract.dataset.expected_full_question_count).toBe(500);
     expect(contract.profiles.smoke.publication_eligible).toBe(false);
     expect(contract.profiles.full.publication_eligible).toBe(true);
@@ -39,6 +39,10 @@ describe("Phase A scorecard contract", () => {
     expect(contract.context_budget.estimator).toBe("utf8_bytes_div4_ceil_v1");
     expect(contract.profiles.full.reader.model).toBe("anthropic/claude-haiku-4.5");
     expect(contract.profiles.full.judge.model).toBe("anthropic/claude-sonnet-4.5");
+    expect(contract.profiles.smoke.search_recency_weight).toBe(0);
+    expect(contract.profiles.full.search_recency_weight).toBe(0);
+    expect(contract.retrieval_policy?.search_recency_weight).toBe(0);
+    expect(contract.retrieval_policy?.disclosure).toMatch(/#248/);
     expect(contract.uncertainty).toMatchObject({
       method: "deterministic_bootstrap_percentile_95",
       confidence: 0.95,
@@ -46,6 +50,41 @@ describe("Phase A scorecard contract", () => {
       seed: 227,
     });
     expect(sha256).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("keeps the frozen v2 contract valid and free of any recency pin", () => {
+    const v2Path = resolve("benchmark/scorecard/contracts/longmemeval-s-v2.json");
+    const { contract } = loadScorecardContract(v2Path);
+    expect(contract.contract_id).toBe("munin-longmemeval-s-e2e-v2");
+    expect(contract.retrieval_policy).toBeUndefined();
+    expect(contract.profiles.full.search_recency_weight).toBeUndefined();
+    // Freeze: v2 must reject a retroactive recency pin either way around.
+    expect(() => validateScorecardContract({
+      ...contract,
+      profiles: {
+        ...contract.profiles,
+        full: { ...contract.profiles.full, search_recency_weight: 0 },
+      },
+    })).toThrow(/must be absent in the frozen v2 contract/i);
+    expect(() => validateScorecardContract({
+      ...contract,
+      retrieval_policy: { search_recency_weight: 0, disclosure: "x" },
+    })).toThrow(/must not carry a retrieval_policy/i);
+  });
+
+  it("rejects a v3 contract whose profiles drift from the pinned recency policy", () => {
+    const { contract } = loadScorecardContract();
+    expect(() => validateScorecardContract({
+      ...contract,
+      profiles: {
+        ...contract.profiles,
+        full: { ...contract.profiles.full, search_recency_weight: 0.2 },
+      },
+    })).toThrow(/must match retrieval_policy.search_recency_weight/i);
+    expect(() => validateScorecardContract({
+      ...contract,
+      retrieval_policy: undefined,
+    })).toThrow(/retrieval_policy/i);
   });
 
   it("rejects an incomplete full query set before any model call", () => {
@@ -448,8 +487,23 @@ describe("deterministic scorecard smoke", () => {
     };
     candidate.evidence.trust_lanes.overall_pass = true;
     candidate.evidence.cost_usd = 1.504;
+    // The smoke ran raw (recency null); the publication candidate must carry
+    // the v3 contract-pinned applied weight on the production retrieval stage.
+    candidate.retrieval.search_recency_weight = 0;
 
     expect(validatePublicationReport(candidate)).toBe(candidate);
+
+    const defaultRecency = structuredClone(candidate);
+    defaultRecency.retrieval.search_recency_weight = 0.2;
+    expect(() => validatePublicationReport(defaultRecency)).toThrow(
+      /recency weight does not match the contract/i,
+    );
+
+    const unpinnedAnswerRecency = structuredClone(candidate);
+    unpinnedAnswerRecency.answer_quality.search_recency_weight = null;
+    expect(() => validatePublicationReport(unpinnedAnswerRecency)).toThrow(
+      /recency weight does not match the contract/i,
+    );
 
     const explicitlyDegraded = structuredClone(candidate);
     explicitlyDegraded.retrieval.queries[237]!.actual_mode = "lexical";
@@ -468,5 +522,14 @@ describe("deterministic scorecard smoke", () => {
     expect(() => validatePublicationReport(wrongContract)).toThrow(
       /contract hash/i,
     );
+  });
+
+  it("keeps the committed 2026-07-23 v2 publication artifact re-validating against its frozen contract", () => {
+    const committed = JSON.parse(readFileSync(
+      resolve("benchmark/scorecard/results/2026-07-23/longmemeval-s-v2-report.json"),
+      "utf8",
+    )) as MuninAgentMemoryScorecardReport;
+    expect(committed.contract_id).toBe("munin-longmemeval-s-e2e-v2");
+    expect(validatePublicationReport(committed)).toBe(committed);
   });
 });
