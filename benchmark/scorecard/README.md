@@ -5,9 +5,16 @@ composes the shipped adapter, retrieval runner, and answer-quality harness; it
 does not implement a second retrieval or QA stack.
 
 The current contract is
-[`contracts/longmemeval-s-v2.json`](./contracts/longmemeval-s-v2.json). Its raw
-bytes are SHA-256 stamped into every report. The original unpublished
-foundation remains frozen as
+[`contracts/longmemeval-s-v3.json`](./contracts/longmemeval-s-v3.json). Its raw
+bytes are SHA-256 stamped into every report. v3 pins the production reranker's
+recency weight to 0 through the public `memory_query` `search_recency_weight`
+parameter, with the rationale hashed into the contract as `retrieval_policy`
+(issue #248: LongMemEval write-recency is an ingestion-order artifact, and the
+0.2 production default buried evidence sessions — R@5 14.5% vs 91.5% at weight
+0 on identical artifacts). Earlier revisions remain frozen and committed:
+[`contracts/longmemeval-s-v2.json`](./contracts/longmemeval-s-v2.json) (the
+published 2026-07-23 run binds to it and keeps re-validating) and the original
+unpublished foundation
 [`contracts/longmemeval-s-v1.json`](./contracts/longmemeval-s-v1.json).
 
 ## Deterministic smoke
@@ -43,9 +50,9 @@ unless all of the following hold:
 - deterministic namespace/classification and instruction-boundary probes pass;
 - a live poison challenge returns the stored fact instead of the attacker value.
 
-The v2 contract pins the OpenRouter model slugs, temperature, output ceilings,
-top K, an 8,192 estimated-token retrieved-context budget, and a deterministic
-bootstrap policy. Every provider response must return its actual model,
+The full-run contract pins the OpenRouter model slugs, temperature, output
+ceilings, top K, an 8,192 estimated-token retrieved-context budget, the
+reranker recency weight, and a deterministic bootstrap policy. Every provider response must return its actual model,
 provider, native token counts, and charged cost. The report includes all 500 raw
 retrieval and answer results, stage latency, peak process RSS, generated disk
 footprint, provider cost, environment and Git lineage, trust-lane evidence, and

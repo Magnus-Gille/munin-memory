@@ -8,6 +8,22 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Added
+
+- **Scorecard contract v3: reranker recency pinned to zero (#248).** The #248
+  ablation attributed the published LongMemEval-S retrieval collapse entirely
+  to the production reranker's freshness weighting (identical artifacts and
+  embeddings: raw R@5 91.7%, production ranker at recency 0 91.5%, at the 0.2
+  default 14.5%). The new default contract pins `search_recency_weight: 0`
+  through the public `memory_query` parameter of the same name and hashes the
+  rationale into the contract as `retrieval_policy`; the disclosure is carried
+  into every report's limitations. The v2 contract remains frozen and must not
+  carry the pin. The publisher now resolves each report's contract by
+  `contract_id`, so the committed 2026-07-23 v2 publication artifact keeps
+  re-validating against its own frozen contract (regression-tested), and the
+  applied recency weight is bound fail-closed on both the retrieval and
+  answer-quality stages.
+
 ## [0.6.0] — 2026-07-24
 
 ### Added

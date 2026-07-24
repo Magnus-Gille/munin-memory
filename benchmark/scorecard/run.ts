@@ -151,7 +151,7 @@ export function validateScorecardContract(value: unknown): ScorecardContract {
     throw new Error("The frozen v2 contract must not carry a retrieval_policy block.");
   }
   if (value.publication_status !== "publication_candidate") {
-    throw new Error("Phase A v2 contract must remain a publication candidate.");
+    throw new Error("Phase A contract must remain a publication candidate.");
   }
   assertObject(value.dataset, "dataset");
   if (
@@ -229,7 +229,7 @@ export function validateScorecardContract(value: unknown): ScorecardContract {
     assertPositiveInteger(profile.top_k, `profiles.${name}.top_k`);
     assertPositiveInteger(profile.repetitions, `profiles.${name}.repetitions`);
     if (profile.repetitions !== 1) {
-      throw new Error(`profiles.${name}.repetitions must remain 1 under the bootstrap-v2 contract.`);
+      throw new Error(`profiles.${name}.repetitions must remain 1 under the bootstrap contract.`);
     }
     if (profile.granularity !== "session" || profile.serialization !== "linear") {
       throw new Error(`profiles.${name} must use session granularity and linear serialization.`);
