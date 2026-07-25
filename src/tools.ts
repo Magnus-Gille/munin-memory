@@ -47,6 +47,7 @@ import {
   summarizeNamespaceLogsByClassification,
   previewDelete,
   previewDeleteByClassification,
+  type DeleteInfo,
   executeDelete,
   executeDeleteByClassification,
   listCommitments,
@@ -213,28 +214,50 @@ import type {
 } from "./types.js";
 
 // In-memory delete token store (debate resolution #9)
-const deleteTokens = new Map<string, { namespace: string; key?: string; expiresAt: number }>();
+type DeleteTokenRecord = {
+  namespace: string;
+  key?: string;
+  expiresAt: number;
+  /** Digest of the rows the preview showed; a confirm whose targets moved is refused (#266). */
+  fingerprint: string;
+  stateCount: number;
+  logCount: number;
+};
+const deleteTokens = new Map<string, DeleteTokenRecord>();
 const DELETE_TOKEN_TTL_MS = 60_000; // 1 minute
 
-function generateDeleteToken(namespace: string, key?: string): string {
+function generateDeleteToken(namespace: string, info: DeleteInfo, key?: string): string {
   const token = randomBytes(16).toString("hex");
   deleteTokens.set(token, {
     namespace,
     key,
     expiresAt: Date.now() + DELETE_TOKEN_TTL_MS,
+    fingerprint: info.fingerprint,
+    stateCount: info.stateCount,
+    logCount: info.logCount,
   });
   return token;
 }
 
-function consumeDeleteToken(token: string, namespace: string, key?: string): boolean {
+type DeleteTokenCheck =
+  | { ok: true; record: DeleteTokenRecord }
+  | { ok: false; reason: "invalid" };
+
+/**
+ * Consume a delete token. The token is always spent, valid or not: a rejected
+ * confirmation must force a fresh preview rather than leave a retryable token
+ * behind. Fingerprint matching is checked by the caller against freshly read
+ * state, so this only covers identity and expiry.
+ */
+function consumeDeleteToken(token: string, namespace: string, key?: string): DeleteTokenCheck {
   const entry = deleteTokens.get(token);
-  if (!entry) return false;
+  if (!entry) return { ok: false, reason: "invalid" };
   deleteTokens.delete(token);
 
-  if (entry.expiresAt < Date.now()) return false;
-  if (entry.namespace !== namespace) return false;
-  if (entry.key !== key) return false;
-  return true;
+  if (entry.expiresAt < Date.now()) return { ok: false, reason: "invalid" };
+  if (entry.namespace !== namespace) return { ok: false, reason: "invalid" };
+  if (entry.key !== key) return { ok: false, reason: "invalid" };
+  return { ok: true, record: entry };
 }
 
 // Clean expired tokens periodically. The timer must not keep one-shot consumers
@@ -5375,7 +5398,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_delete",
     description:
-      "Delete a specific state entry by namespace+key, or all entries in a namespace. First call without delete_token to preview what will be deleted. Then call with the returned delete_token to execute.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
+      "Delete a specific state entry by namespace+key, or all entries in a namespace. First call without delete_token to preview what will be deleted. Then call with the returned delete_token to execute. The token is bound to the exact entries the preview showed: if any of them is written, added, or removed before you confirm, the delete is refused with `preview_stale` and you must preview again.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -9538,10 +9561,39 @@ export function registerTools(
                 );
               }
 
+              // Both phases resolve the delete target the same way, so the
+              // fingerprint stored on the token and the one checked at confirm
+              // time can never describe different row sets.
+              const readDeleteTarget = (): DeleteInfo =>
+                isLibrarianEnabled()
+                  ? previewDeleteByClassification(
+                      db,
+                      namespace,
+                      getContextMaxClassification(ctx),
+                      key,
+                      ctx.principalId,
+                      allowGlobalNamespaceDelete,
+                    )
+                  : previewDelete(db, namespace, key, ctx.principalId, allowGlobalNamespaceDelete);
+
               // Execute with token
               if (delete_token) {
-                if (!consumeDeleteToken(delete_token, namespace, key)) {
+                const tokenCheck = consumeDeleteToken(delete_token, namespace, key);
+                if (!tokenCheck.ok) {
                   return errResult("delete", "invalid_token", "Delete token is invalid, expired, or doesn't match the requested namespace/key. Request a new preview first.");
+                }
+                // Refuse to delete anything the preview did not show. Without this
+                // a token minted before an update still destroys the newer, unseen
+                // revision (#266).
+                const current = readDeleteTarget();
+                if (current.fingerprint !== tokenCheck.record.fingerprint) {
+                  return errResult(
+                    "delete",
+                    "preview_stale",
+                    `The delete target changed since the preview was generated (previewed ${tokenCheck.record.stateCount} state / ${tokenCheck.record.logCount} log entries, now ${current.stateCount} state / ${current.logCount} log). ` +
+                    "The token has been discarded. Preview again and review the current contents before confirming.",
+                    { namespace, key: key ?? undefined },
+                  );
                 }
                 let deletedCount: number;
                 try {
@@ -9562,17 +9614,8 @@ export function registerTools(
               }
 
               // Preview
-              const info = isLibrarianEnabled()
-                ? previewDeleteByClassification(
-                    db,
-                    namespace,
-                    getContextMaxClassification(ctx),
-                    key,
-                    ctx.principalId,
-                    allowGlobalNamespaceDelete,
-                  )
-                : previewDelete(db, namespace, key, ctx.principalId, allowGlobalNamespaceDelete);
-              const token = generateDeleteToken(namespace, key);
+              const info = readDeleteTarget();
+              const token = generateDeleteToken(namespace, info, key);
               const target = key ? `entry "${key}" in "${namespace}"` : `all entries in "${namespace}"`;
               return okResult("delete", {
                 phase: "preview",

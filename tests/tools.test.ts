@@ -3259,6 +3259,81 @@ describe("memory_delete", () => {
     expect(result.error).toBe("invalid_token");
   });
 
+  it("rejects a preview token after the target entry changed (#266)", async () => {
+    await callTool("memory_write", { namespace: "projects/test", key: "victim", content: "version one before delete preview" });
+
+    const previewRaw = await callTool("memory_delete", {
+      namespace: "projects/test",
+      key: "victim",
+    });
+    const preview = parseToolResponse(previewRaw) as { delete_token: string };
+
+    // Someone updates the entry between preview and confirm.
+    await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "victim",
+      content: "version two after delete preview; the stale token must not delete this",
+    });
+
+    const confirmRaw = await callTool("memory_delete", {
+      namespace: "projects/test",
+      key: "victim",
+      delete_token: preview.delete_token,
+    });
+    const confirm = parseToolResponse(confirmRaw) as { ok: boolean; error: string; message: string };
+    expect(confirm.ok).toBe(false);
+    expect(confirm.error).toBe("preview_stale");
+    expect(confirm.message).toContain("changed since the preview");
+
+    // The newer version must survive.
+    const readRaw = await callTool("memory_read", { namespace: "projects/test", key: "victim" });
+    const readResult = parseToolResponse(readRaw) as { found: boolean; content: string };
+    expect(readResult.found).toBe(true);
+    expect(readResult.content).toContain("version two");
+  });
+
+  it("rejects a namespace-wide preview token after a new entry appears (#266)", async () => {
+    process.env.MUNIN_ALLOW_NAMESPACE_DELETE = "true";
+    await callTool("memory_write", { namespace: "projects/racens", key: "a", content: "first entry" });
+
+    const previewRaw = await callTool("memory_delete", { namespace: "projects/racens" });
+    const preview = parseToolResponse(previewRaw) as { delete_token: string };
+
+    // A second entry lands in the namespace after the operator previewed.
+    await callTool("memory_write", { namespace: "projects/racens", key: "b", content: "entry the operator never saw" });
+
+    const confirmRaw = await callTool("memory_delete", {
+      namespace: "projects/racens",
+      delete_token: preview.delete_token,
+    });
+    const confirm = parseToolResponse(confirmRaw) as { ok: boolean; error: string };
+    expect(confirm.ok).toBe(false);
+    expect(confirm.error).toBe("preview_stale");
+
+    const readRaw = await callTool("memory_read", { namespace: "projects/racens", key: "b" });
+    expect((parseToolResponse(readRaw) as { found: boolean }).found).toBe(true);
+  });
+
+  it("still confirms when the target is untouched between preview and confirm (#266)", async () => {
+    await callTool("memory_write", { namespace: "projects/test", key: "stable", content: "unchanged between preview and confirm" });
+
+    const previewRaw = await callTool("memory_delete", { namespace: "projects/test", key: "stable" });
+    const preview = parseToolResponse(previewRaw) as { delete_token: string };
+
+    // An unrelated entry changes; it must not invalidate this key-scoped token.
+    await callTool("memory_write", { namespace: "projects/test", key: "bystander", content: "unrelated write" });
+
+    const confirmRaw = await callTool("memory_delete", {
+      namespace: "projects/test",
+      key: "stable",
+      delete_token: preview.delete_token,
+    });
+    const confirm = parseToolResponse(confirmRaw) as { ok: boolean; phase: string; deleted_count: number };
+    expect(confirm.ok).toBe(true);
+    expect(confirm.phase).toBe("confirmed");
+    expect(confirm.deleted_count).toBe(1);
+  });
+
   it("rejects token used for wrong namespace", async () => {
     await callTool("memory_write", { namespace: "projects/a", key: "s", content: "c" });
     await callTool("memory_write", { namespace: "projects/b", key: "s", content: "c" });

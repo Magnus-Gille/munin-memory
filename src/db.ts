@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import * as sqliteVec from "sqlite-vec";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { mkdirSync, chmodSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { homedir } from "node:os";
@@ -1841,6 +1841,37 @@ export interface DeleteInfo {
   stateCount: number;
   logCount: number;
   keys: string[];
+  /**
+   * Digest of the exact rows this preview covers. The delete token is bound to it,
+   * so a confirmation whose target moved since the preview is refused instead of
+   * destroying a revision the caller never saw (#266). Computed from the same
+   * queries that produce the counts above, so the fingerprint and the preview can
+   * never describe different row sets.
+   */
+  fingerprint: string;
+}
+
+type DeleteTargetRow = { id: string; updated_at: string; content: string };
+
+/**
+ * Digest of a delete target set, hashed in the caller's SQL-ordered sequence.
+ *
+ * Content is part of the digest because `updated_at` only has millisecond
+ * resolution: a rewrite landing in the same millisecond as the preview would
+ * otherwise be invisible, and the stale token would delete it (#266).
+ */
+function fingerprintDeleteRows(rows: Iterable<DeleteTargetRow>): string {
+  const hash = createHash("sha256");
+  for (const row of rows) {
+    // Escaped-NUL separators so no field value can forge a record boundary.
+    hash.update(row.id);
+    hash.update("\u0000");
+    hash.update(row.updated_at ?? "");
+    hash.update("\u0000");
+    hash.update(row.content ?? "");
+    hash.update("\u0000");
+  }
+  return hash.digest("hex");
 }
 
 function classificationInClause(levels: ClassificationLevel[]): string {
@@ -1985,33 +2016,35 @@ export function previewDelete(
 ): DeleteInfo {
   if (key) {
     const sql = allowGlobalNamespaceDelete
-      ? "SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1"
-      : "SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1 AND COALESCE(owner_principal_id, agent_id) = ?";
+      ? "SELECT id, updated_at, content FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1"
+      : "SELECT id, updated_at, content FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1 AND COALESCE(owner_principal_id, agent_id) = ?";
     const params = allowGlobalNamespaceDelete ? [namespace, key] : [namespace, key, agentId];
-    const entry = db.prepare(sql).get(...params) as { id: string } | undefined;
+    const entry = db.prepare(sql).get(...params) as DeleteTargetRow | undefined;
     return {
       stateCount: entry ? 1 : 0,
       logCount: 0,
       keys: entry ? [key] : [],
+      fingerprint: fingerprintDeleteRows(entry ? [entry] : []),
     };
   }
 
   const stateSql = allowGlobalNamespaceDelete
-    ? "SELECT key FROM entries WHERE namespace = ? AND entry_type = 'state' AND is_current = 1 ORDER BY key"
-    : "SELECT key FROM entries WHERE namespace = ? AND entry_type = 'state' AND is_current = 1 AND COALESCE(owner_principal_id, agent_id) = ? ORDER BY key";
+    ? "SELECT key, id, updated_at, content FROM entries WHERE namespace = ? AND entry_type = 'state' AND is_current = 1 ORDER BY key, id"
+    : "SELECT key, id, updated_at, content FROM entries WHERE namespace = ? AND entry_type = 'state' AND is_current = 1 AND COALESCE(owner_principal_id, agent_id) = ? ORDER BY key, id";
   const stateParams = allowGlobalNamespaceDelete ? [namespace] : [namespace, agentId];
-  const stateKeys = db.prepare(stateSql).all(...stateParams) as Array<{ key: string }>;
+  const stateKeys = db.prepare(stateSql).all(...stateParams) as Array<{ key: string } & DeleteTargetRow>;
 
   const logSql = allowGlobalNamespaceDelete
-    ? "SELECT COUNT(*) as cnt FROM entries WHERE namespace = ? AND entry_type = 'log' AND is_current = 1"
-    : "SELECT COUNT(*) as cnt FROM entries WHERE namespace = ? AND entry_type = 'log' AND is_current = 1 AND COALESCE(owner_principal_id, agent_id) = ?";
+    ? "SELECT id, updated_at, content FROM entries WHERE namespace = ? AND entry_type = 'log' AND is_current = 1 ORDER BY id"
+    : "SELECT id, updated_at, content FROM entries WHERE namespace = ? AND entry_type = 'log' AND is_current = 1 AND COALESCE(owner_principal_id, agent_id) = ? ORDER BY id";
   const logParams = allowGlobalNamespaceDelete ? [namespace] : [namespace, agentId];
-  const logCount = (db.prepare(logSql).get(...logParams) as { cnt: number }).cnt;
+  const logRows = db.prepare(logSql).all(...logParams) as DeleteTargetRow[];
 
   return {
     stateCount: stateKeys.length,
-    logCount,
+    logCount: logRows.length,
     keys: stateKeys.map((r) => r.key),
+    fingerprint: fingerprintDeleteRows([...stateKeys, ...logRows]),
   };
 }
 
@@ -2028,11 +2061,11 @@ export function previewDeleteByClassification(
 
   if (key) {
     const sql = allowGlobalNamespaceDelete
-      ? `SELECT id FROM entries
+      ? `SELECT id, updated_at, content FROM entries
          WHERE namespace = ? AND key = ? AND entry_type = 'state'
            AND is_current = 1
            AND classification IN (${placeholders})`
-      : `SELECT id FROM entries
+      : `SELECT id, updated_at, content FROM entries
          WHERE namespace = ? AND key = ? AND entry_type = 'state'
            AND is_current = 1
            AND COALESCE(owner_principal_id, agent_id) = ?
@@ -2040,50 +2073,54 @@ export function previewDeleteByClassification(
     const params = allowGlobalNamespaceDelete
       ? [namespace, key, ...visibleLevels]
       : [namespace, key, agentId, ...visibleLevels];
-    const entry = db.prepare(sql).get(...params) as { id: string } | undefined;
+    const entry = db.prepare(sql).get(...params) as DeleteTargetRow | undefined;
     return {
       stateCount: entry ? 1 : 0,
       logCount: 0,
       keys: entry ? [key] : [],
+      fingerprint: fingerprintDeleteRows(entry ? [entry] : []),
     };
   }
 
   const stateSql = allowGlobalNamespaceDelete
-    ? `SELECT key FROM entries
+    ? `SELECT key, id, updated_at, content FROM entries
        WHERE namespace = ? AND entry_type = 'state'
          AND is_current = 1
          AND classification IN (${placeholders})
-       ORDER BY key`
-    : `SELECT key FROM entries
+       ORDER BY key, id`
+    : `SELECT key, id, updated_at, content FROM entries
        WHERE namespace = ? AND entry_type = 'state'
          AND is_current = 1
          AND COALESCE(owner_principal_id, agent_id) = ?
          AND classification IN (${placeholders})
-       ORDER BY key`;
+       ORDER BY key, id`;
   const stateParams = allowGlobalNamespaceDelete
     ? [namespace, ...visibleLevels]
     : [namespace, agentId, ...visibleLevels];
-  const stateKeys = db.prepare(stateSql).all(...stateParams) as Array<{ key: string }>;
+  const stateKeys = db.prepare(stateSql).all(...stateParams) as Array<{ key: string } & DeleteTargetRow>;
 
   const logSql = allowGlobalNamespaceDelete
-    ? `SELECT COUNT(*) as cnt FROM entries
+    ? `SELECT id, updated_at, content FROM entries
        WHERE namespace = ? AND entry_type = 'log'
          AND is_current = 1
-         AND classification IN (${placeholders})`
-    : `SELECT COUNT(*) as cnt FROM entries
+         AND classification IN (${placeholders})
+       ORDER BY id`
+    : `SELECT id, updated_at, content FROM entries
        WHERE namespace = ? AND entry_type = 'log'
          AND is_current = 1
          AND COALESCE(owner_principal_id, agent_id) = ?
-         AND classification IN (${placeholders})`;
+         AND classification IN (${placeholders})
+       ORDER BY id`;
   const logParams = allowGlobalNamespaceDelete
     ? [namespace, ...visibleLevels]
     : [namespace, agentId, ...visibleLevels];
-  const logCount = (db.prepare(logSql).get(...logParams) as { cnt: number }).cnt;
+  const logRows = db.prepare(logSql).all(...logParams) as DeleteTargetRow[];
 
   return {
     stateCount: stateKeys.length,
-    logCount,
+    logCount: logRows.length,
     keys: stateKeys.map((r) => r.key),
+    fingerprint: fingerprintDeleteRows([...stateKeys, ...logRows]),
   };
 }
 

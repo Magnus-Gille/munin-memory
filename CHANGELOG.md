@@ -8,6 +8,23 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`memory_delete` preview tokens are bound to the entries they previewed
+  (#266).** A token carried only `{namespace, key, expiresAt}`, so a preview
+  taken before an update still authorised the delete afterwards: preview an
+  entry, let anything rewrite it, confirm with the old token, and the newer
+  revision the caller never saw was destroyed with `ok:true` and no warning.
+  Found by an independent user-test agent that reproduced it live against
+  production. The preview now computes a digest over the id, `updated_at` and
+  content of every row in scope — content included because `updated_at` has
+  only millisecond resolution, and a same-millisecond rewrite would otherwise
+  be invisible — and confirmation recomputes it from the same queries. A
+  mismatch returns the new `preview_stale` error with the previewed and current
+  counts, and spends the token so a fresh preview is required. This covers the
+  namespace-wide path too: an entry appearing in the namespace after the
+  preview now blocks the confirm rather than being swept up silently.
+
 ## [0.6.1] — 2026-07-25
 
 ### Changed
