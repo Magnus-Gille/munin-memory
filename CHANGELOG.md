@@ -8,6 +8,23 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`memory_insights.positive_outcome_rate` is a rate again (#255).** It divided
+  the *count of positive outcomes* by the *number of retrieval events*, but one
+  query routinely yields several opened results, so the value exceeded 1.0
+  (3.457 observed in production) while sibling fields were normalised 0–1. It
+  now counts events that produced at least one positive outcome. Raw outcome
+  volume remains available as `total_outcomes`.
+- **`memory_history` can filter for `patch` (#255).** Partial writes are audited
+  as `patch`, but the `action` enum offered only `update`, so filtering for a
+  just-audited patch returned zero rows and the published vocabulary was wrong.
+- **`memory_query` says when it clamps an over-limit request (#255).** A `limit`
+  above the documented maximum of 50 was silently clamped by the storage layer,
+  so a truncated page was indistinguishable from an exhausted result set. The
+  response now carries an explicit warning, and the maximum is a single exported
+  `MAX_QUERY_LIMIT` constant rather than a magic number repeated across clamps.
+
 ### Security
 
 - **The secret scanner now rejects Anthropic, Google, Hugging Face, and OpenAI
