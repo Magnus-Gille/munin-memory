@@ -52,6 +52,7 @@ import {
   listCommitments,
   syncCommitmentsForEntry,
   type DerivedCommitmentInput,
+  MAX_QUERY_LIMIT,
   type CommitmentRow,
   computeCommitmentConfidence,
   getOtherKeysInNamespace,
@@ -4677,12 +4678,12 @@ const TOOL_DEFINITIONS = [
         dashboard_limit_per_group: {
           type: "integer",
           description:
-            "Optional. Maximum entries to return per lifecycle group in the dashboard. `standard`/`full` default to 10 (bounds output size); `compact` returns all groups (already one-liners). Set explicitly to override. `dashboard_meta.truncated_groups` lists groups that were capped.",
+            "Optional. Maximum entries to return per lifecycle group in the dashboard. Defaults to 10 in every detail mode so the mandatory first call stays bounded as an estate grows. Raise it explicitly when you can afford the tokens. `dashboard_meta.counts` reports the true size of each group and `dashboard_meta.truncated_groups` lists the ones that were capped.",
         },
         namespace_limit: {
           type: "integer",
           description:
-            "Optional. Maximum namespaces to return in the namespace overview. `compact` defaults to 20; other detail levels return all namespaces unless this is set.",
+            "Optional. Maximum namespaces to return in the namespace overview. Defaults to 20 in `compact` and 50 otherwise; on a large estate the full list is the single biggest contributor to orient's response size. `namespaces_meta` reports `total`, `returned`, and `truncated` so a capped list is never mistaken for the whole estate — use `memory_list` to page through all of them.",
         },
         include_namespaces: {
           type: "boolean",
@@ -5356,8 +5357,8 @@ const TOOL_DEFINITIONS = [
         },
         action: {
           type: "string",
-          enum: ["write", "update", "supersede", "delete", "delete_namespace", "log", "cross_zone_block"],
-          description: "Optional. Filter by action type. 'cross_zone_block' surfaces containment-guard security events.",
+          enum: ["write", "update", "patch", "supersede", "delete", "delete_namespace", "log", "cross_zone_block"],
+          description: "Optional. Filter by action type. 'patch' covers partial writes (content_append/prepend, tags_add/remove), which are audited separately from full-content 'update'. 'cross_zone_block' surfaces containment-guard security events.",
         },
         cursor: {
           type: "integer",
@@ -5837,13 +5838,22 @@ export function registerTools(
               const { include_demo, include_completed_tasks } = orientArgs;
               const detail = resolveOrientDetail(orientArgs);
               const includeNamespaces = orientArgs.include_namespaces ?? detail !== "compact";
-              // Default a sensible per-group cap in non-compact modes so
-              // standard/full output can't grow unbounded (#78). Compact already
-              // emits one-liners and is bounded by namespace_limit. Callers can
-              // override explicitly.
+              // Every branch of orient is capped by default: it is the mandatory
+              // first call, so an estate that has grown for months must not make
+              // it fail (#254). Measured on a 424-namespace production corpus,
+              // the uncapped forms produced 85,792 bytes (standard, dominated by
+              // the full namespace list) and 31,933 bytes (compact, 108
+              // dashboard one-liners) — enough to exceed MCP client tool-output
+              // limits on the very first handshake.
+              //
+              // Truncation is never silent: `dashboard_meta.counts` /
+              // `truncated_groups` and `namespaces_meta.total` / `truncated`
+              // report the full picture, and callers can raise either cap
+              // explicitly when they know they can afford it.
               const dashboardLimit = clampOptionalLimit(orientArgs.dashboard_limit_per_group, 50)
-                ?? (detail === "compact" ? undefined : 10);
-              const namespaceLimit = clampOptionalLimit(orientArgs.namespace_limit, 200) ?? (detail === "compact" ? 20 : undefined);
+                ?? 10;
+              const namespaceLimit = clampOptionalLimit(orientArgs.namespace_limit, 200)
+                ?? (detail === "compact" ? 20 : 50);
               // Namespace list and tracked statuses (conventions resolved below)
               const namespaces = listVisibleNamespaces(db, ctx).filter(ns => canRead(ctx, ns.namespace));
               const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_orient", sessionId);
@@ -8791,6 +8801,12 @@ export function registerTools(
               const requestedMode: SearchMode = search_mode ?? "hybrid";
               let actualMode: SearchMode = requestedMode;
               let warning: string | undefined;
+              // The storage layer clamps to MAX_QUERY_LIMIT, so an over-limit
+              // request used to return fewer rows than asked for with no signal
+              // — indistinguishable from "that is all there was". Say so.
+              if (typeof limit === "number" && Number.isFinite(limit) && limit > MAX_QUERY_LIMIT) {
+                warning = `Requested limit ${limit} exceeds the maximum of ${MAX_QUERY_LIMIT}; returning at most ${MAX_QUERY_LIMIT} results. Narrow with filters or since/until rather than paging.`;
+              }
               let fallbackReason: string | null = null;
               let relaxedLexical = false;
               let expiredFilteredCount = 0;

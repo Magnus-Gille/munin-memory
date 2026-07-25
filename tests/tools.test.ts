@@ -8437,3 +8437,44 @@ describe("memory_health", () => {
     }
   });
 });
+
+describe("memory_orient default output caps (#254)", () => {
+  it("bounds the dashboard and namespace list in every detail mode, and says so", async () => {
+    // A mature estate: more tracked projects than the per-group cap, and more
+    // namespaces than the overview cap.
+    for (let i = 0; i < 14; i++) {
+      writeState(db, `projects/capped-${i}`, "status", `## Phase\nProject ${i}`, ["active"]);
+    }
+    for (let i = 0; i < 60; i++) {
+      writeState(db, `notes/filler-${i}`, "note", `Filler ${i}`, []);
+    }
+
+    const compact = parseToolResponse(await callTool("memory_orient", { detail: "compact" })) as {
+      dashboard: Record<string, unknown[]>;
+      dashboard_meta: { counts: Record<string, number>; truncated_groups: string[] };
+    };
+    // Pre-fix, compact returned every active row — the largest branch of the
+    // one call clients are told to make first.
+    expect(compact.dashboard.active.length).toBe(10);
+    expect(compact.dashboard_meta.counts.active).toBeGreaterThanOrEqual(14);
+    expect(compact.dashboard_meta.truncated_groups).toContain("active");
+
+    const standard = parseToolResponse(await callTool("memory_orient", { detail: "standard" })) as {
+      namespaces: unknown[];
+      namespaces_meta: { total: number; returned: number; truncated: boolean };
+    };
+    // Pre-fix, standard returned the entire namespace list (424 on production).
+    expect(standard.namespaces.length).toBe(50);
+    expect(standard.namespaces_meta.total).toBeGreaterThan(50);
+    expect(standard.namespaces_meta.truncated).toBe(true);
+
+    // The caps are defaults, not ceilings — an informed caller can still opt in.
+    const wide = parseToolResponse(await callTool("memory_orient", {
+      detail: "standard",
+      dashboard_limit_per_group: 50,
+      namespace_limit: 200,
+    })) as { dashboard: Record<string, unknown[]>; namespaces: unknown[] };
+    expect(wide.dashboard.active.length).toBeGreaterThan(10);
+    expect(wide.namespaces.length).toBeGreaterThan(50);
+  });
+});
