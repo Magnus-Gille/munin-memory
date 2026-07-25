@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import * as sqliteVec from "sqlite-vec";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash, type Hash } from "node:crypto";
 import { mkdirSync, chmodSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { homedir } from "node:os";
@@ -1841,6 +1841,55 @@ export interface DeleteInfo {
   stateCount: number;
   logCount: number;
   keys: string[];
+  /**
+   * Digest of the exact rows this preview covers. The delete token is bound to it,
+   * so a confirmation whose target moved since the preview is refused instead of
+   * destroying a revision the caller never saw (#266). Computed from the same
+   * queries that produce the counts above, so the fingerprint and the preview can
+   * never describe different row sets.
+   */
+  fingerprint: string;
+}
+
+/**
+ * Raised when a delete confirmation's fingerprint no longer matches the rows in
+ * scope. Thrown from inside the delete transaction so the check and the DELETE
+ * observe one snapshot — a second connection committing between an outside check
+ * and the DELETE would otherwise reopen the very window this closes (#266).
+ */
+export class DeletePreviewStaleError extends Error {
+  constructor(readonly current: DeleteInfo) {
+    super("Delete target changed since the preview was generated.");
+    this.name = "DeletePreviewStaleError";
+  }
+}
+
+type DeleteTargetRow = {
+  id: string;
+  updated_at: string;
+  content: string;
+  tags: string | null;
+  classification: string | null;
+  valid_until: string | null;
+};
+
+/** Columns every delete-target query must select so the digest sees the whole row. */
+const DELETE_TARGET_COLUMNS = "id, updated_at, content, tags, classification, valid_until";
+
+/**
+ * Fold one delete-target row into a digest.
+ *
+ * Every mutable, caller-visible field is hashed, not just `updated_at`: that
+ * column has only millisecond resolution, so a rewrite — including a tags-only
+ * or classification-only patch — landing in the same millisecond as the preview
+ * would otherwise be invisible and a stale token would delete it (#266).
+ */
+function hashDeleteRow(hash: Hash, row: DeleteTargetRow): void {
+  // Escaped-NUL separators so no field value can forge a record boundary.
+  for (const field of [row.id, row.updated_at, row.content, row.tags, row.classification, row.valid_until]) {
+    hash.update(field ?? "");
+    hash.update("\u0000");
+  }
 }
 
 function classificationInClause(levels: ClassificationLevel[]): string {
@@ -1983,35 +2032,51 @@ export function previewDelete(
   agentId = "default",
   allowGlobalNamespaceDelete = false,
 ): DeleteInfo {
+  const hash = createHash("sha256");
+
   if (key) {
     const sql = allowGlobalNamespaceDelete
-      ? "SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1"
-      : "SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1 AND COALESCE(owner_principal_id, agent_id) = ?";
+      ? `SELECT ${DELETE_TARGET_COLUMNS} FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1`
+      : `SELECT ${DELETE_TARGET_COLUMNS} FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1 AND COALESCE(owner_principal_id, agent_id) = ?`;
     const params = allowGlobalNamespaceDelete ? [namespace, key] : [namespace, key, agentId];
-    const entry = db.prepare(sql).get(...params) as { id: string } | undefined;
+    const entry = db.prepare(sql).get(...params) as DeleteTargetRow | undefined;
+    if (entry) hashDeleteRow(hash, entry);
     return {
       stateCount: entry ? 1 : 0,
       logCount: 0,
       keys: entry ? [key] : [],
+      fingerprint: hash.digest("hex"),
     };
   }
 
   const stateSql = allowGlobalNamespaceDelete
-    ? "SELECT key FROM entries WHERE namespace = ? AND entry_type = 'state' AND is_current = 1 ORDER BY key"
-    : "SELECT key FROM entries WHERE namespace = ? AND entry_type = 'state' AND is_current = 1 AND COALESCE(owner_principal_id, agent_id) = ? ORDER BY key";
+    ? `SELECT key, ${DELETE_TARGET_COLUMNS} FROM entries WHERE namespace = ? AND entry_type = 'state' AND is_current = 1 ORDER BY key, id`
+    : `SELECT key, ${DELETE_TARGET_COLUMNS} FROM entries WHERE namespace = ? AND entry_type = 'state' AND is_current = 1 AND COALESCE(owner_principal_id, agent_id) = ? ORDER BY key, id`;
   const stateParams = allowGlobalNamespaceDelete ? [namespace] : [namespace, agentId];
-  const stateKeys = db.prepare(stateSql).all(...stateParams) as Array<{ key: string }>;
 
   const logSql = allowGlobalNamespaceDelete
-    ? "SELECT COUNT(*) as cnt FROM entries WHERE namespace = ? AND entry_type = 'log' AND is_current = 1"
-    : "SELECT COUNT(*) as cnt FROM entries WHERE namespace = ? AND entry_type = 'log' AND is_current = 1 AND COALESCE(owner_principal_id, agent_id) = ?";
+    ? `SELECT ${DELETE_TARGET_COLUMNS} FROM entries WHERE namespace = ? AND entry_type = 'log' AND is_current = 1 ORDER BY id`
+    : `SELECT ${DELETE_TARGET_COLUMNS} FROM entries WHERE namespace = ? AND entry_type = 'log' AND is_current = 1 AND COALESCE(owner_principal_id, agent_id) = ? ORDER BY id`;
   const logParams = allowGlobalNamespaceDelete ? [namespace] : [namespace, agentId];
-  const logCount = (db.prepare(logSql).get(...logParams) as { cnt: number }).cnt;
+
+  // Streamed, not materialised: a namespace delete may cover thousands of rows
+  // and the digest needs their content, which we never want to hold at once.
+  const keys: string[] = [];
+  for (const row of db.prepare(stateSql).iterate(...stateParams) as Iterable<{ key: string } & DeleteTargetRow>) {
+    keys.push(row.key);
+    hashDeleteRow(hash, row);
+  }
+  let logCount = 0;
+  for (const row of db.prepare(logSql).iterate(...logParams) as Iterable<DeleteTargetRow>) {
+    logCount += 1;
+    hashDeleteRow(hash, row);
+  }
 
   return {
-    stateCount: stateKeys.length,
+    stateCount: keys.length,
     logCount,
-    keys: stateKeys.map((r) => r.key),
+    keys,
+    fingerprint: hash.digest("hex"),
   };
 }
 
@@ -2025,14 +2090,15 @@ export function previewDeleteByClassification(
 ): DeleteInfo {
   const visibleLevels = getVisibleClassificationLevels(maxClassification);
   const placeholders = classificationInClause(visibleLevels);
+  const hash = createHash("sha256");
 
   if (key) {
     const sql = allowGlobalNamespaceDelete
-      ? `SELECT id FROM entries
+      ? `SELECT ${DELETE_TARGET_COLUMNS} FROM entries
          WHERE namespace = ? AND key = ? AND entry_type = 'state'
            AND is_current = 1
            AND classification IN (${placeholders})`
-      : `SELECT id FROM entries
+      : `SELECT ${DELETE_TARGET_COLUMNS} FROM entries
          WHERE namespace = ? AND key = ? AND entry_type = 'state'
            AND is_current = 1
            AND COALESCE(owner_principal_id, agent_id) = ?
@@ -2040,50 +2106,64 @@ export function previewDeleteByClassification(
     const params = allowGlobalNamespaceDelete
       ? [namespace, key, ...visibleLevels]
       : [namespace, key, agentId, ...visibleLevels];
-    const entry = db.prepare(sql).get(...params) as { id: string } | undefined;
+    const entry = db.prepare(sql).get(...params) as DeleteTargetRow | undefined;
+    if (entry) hashDeleteRow(hash, entry);
     return {
       stateCount: entry ? 1 : 0,
       logCount: 0,
       keys: entry ? [key] : [],
+      fingerprint: hash.digest("hex"),
     };
   }
 
   const stateSql = allowGlobalNamespaceDelete
-    ? `SELECT key FROM entries
+    ? `SELECT key, ${DELETE_TARGET_COLUMNS} FROM entries
        WHERE namespace = ? AND entry_type = 'state'
          AND is_current = 1
          AND classification IN (${placeholders})
-       ORDER BY key`
-    : `SELECT key FROM entries
+       ORDER BY key, id`
+    : `SELECT key, ${DELETE_TARGET_COLUMNS} FROM entries
        WHERE namespace = ? AND entry_type = 'state'
          AND is_current = 1
          AND COALESCE(owner_principal_id, agent_id) = ?
          AND classification IN (${placeholders})
-       ORDER BY key`;
+       ORDER BY key, id`;
   const stateParams = allowGlobalNamespaceDelete
     ? [namespace, ...visibleLevels]
     : [namespace, agentId, ...visibleLevels];
-  const stateKeys = db.prepare(stateSql).all(...stateParams) as Array<{ key: string }>;
 
   const logSql = allowGlobalNamespaceDelete
-    ? `SELECT COUNT(*) as cnt FROM entries
+    ? `SELECT ${DELETE_TARGET_COLUMNS} FROM entries
        WHERE namespace = ? AND entry_type = 'log'
          AND is_current = 1
-         AND classification IN (${placeholders})`
-    : `SELECT COUNT(*) as cnt FROM entries
+         AND classification IN (${placeholders})
+       ORDER BY id`
+    : `SELECT ${DELETE_TARGET_COLUMNS} FROM entries
        WHERE namespace = ? AND entry_type = 'log'
          AND is_current = 1
          AND COALESCE(owner_principal_id, agent_id) = ?
-         AND classification IN (${placeholders})`;
+         AND classification IN (${placeholders})
+       ORDER BY id`;
   const logParams = allowGlobalNamespaceDelete
     ? [namespace, ...visibleLevels]
     : [namespace, agentId, ...visibleLevels];
-  const logCount = (db.prepare(logSql).get(...logParams) as { cnt: number }).cnt;
+
+  const keys: string[] = [];
+  for (const row of db.prepare(stateSql).iterate(...stateParams) as Iterable<{ key: string } & DeleteTargetRow>) {
+    keys.push(row.key);
+    hashDeleteRow(hash, row);
+  }
+  let logCount = 0;
+  for (const row of db.prepare(logSql).iterate(...logParams) as Iterable<DeleteTargetRow>) {
+    logCount += 1;
+    hashDeleteRow(hash, row);
+  }
 
   return {
-    stateCount: stateKeys.length,
+    stateCount: keys.length,
     logCount,
-    keys: stateKeys.map((r) => r.key),
+    keys,
+    fingerprint: hash.digest("hex"),
   };
 }
 
@@ -2094,12 +2174,17 @@ export function executeDeleteByClassification(
   key?: string,
   agentId = "default",
   allowGlobalNamespaceDelete = false,
+  expectedFingerprint?: string,
 ): number {
   const now = nowUTC();
   const visibleLevels = getVisibleClassificationLevels(maxClassification);
   const placeholders = classificationInClause(visibleLevels);
 
   const txn = db.transaction(() => {
+    if (expectedFingerprint !== undefined) {
+      const current = previewDeleteByClassification(db, namespace, maxClassification, key, agentId, allowGlobalNamespaceDelete);
+      if (current.fingerprint !== expectedFingerprint) throw new DeletePreviewStaleError(current);
+    }
     // App-level vec cleanup (no SQL trigger — extension may not be loaded)
     if (_vecLoaded) {
       const owner = buildOwnerClause(allowGlobalNamespaceDelete, agentId);
@@ -2127,10 +2212,15 @@ export function executeDelete(
   key?: string,
   agentId = "default",
   allowGlobalNamespaceDelete = false,
+  expectedFingerprint?: string,
 ): number {
   const now = nowUTC();
 
   const txn = db.transaction(() => {
+    if (expectedFingerprint !== undefined) {
+      const current = previewDelete(db, namespace, key, agentId, allowGlobalNamespaceDelete);
+      if (current.fingerprint !== expectedFingerprint) throw new DeletePreviewStaleError(current);
+    }
     // App-level vec cleanup (no SQL trigger — extension may not be loaded)
     if (_vecLoaded) {
       const owner = buildOwnerClause(allowGlobalNamespaceDelete, agentId);

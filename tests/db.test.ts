@@ -26,6 +26,7 @@ import {
   listNamespaces,
   listNamespaceContents,
   previewDelete,
+  DeletePreviewStaleError,
   executeDelete,
   getOtherKeysInNamespace,
   getNamespaceStateEntries,
@@ -947,6 +948,60 @@ describe("previewDelete + executeDelete", () => {
     const preview = previewDelete(db, "projects/test");
     expect(preview.stateCount).toBe(2);
     expect(preview.logCount).toBe(1);
+  });
+
+  // The delete-token fingerprint must notice any caller-visible mutation, not
+  // only a content rewrite. updated_at has millisecond resolution, so these
+  // tests mutate a single column directly and hold updated_at fixed — the exact
+  // situation a same-millisecond patch produces in production (#266).
+  describe("fingerprint covers every mutable field (#266)", () => {
+    const mutations: Array<[string, string]> = [
+      ["tags", "UPDATE entries SET tags = '[\"decision\"]' WHERE namespace = ? AND key = ?"],
+      ["content", "UPDATE entries SET content = 'rewritten' WHERE namespace = ? AND key = ?"],
+      ["classification", "UPDATE entries SET classification = 'client-confidential' WHERE namespace = ? AND key = ?"],
+      ["valid_until", "UPDATE entries SET valid_until = '2030-01-01T00:00:00.000Z' WHERE namespace = ? AND key = ?"],
+    ];
+
+    for (const [field, sql] of mutations) {
+      it(`changes when ${field} changes with updated_at held fixed`, () => {
+        writeState(db, "projects/fp", "target", "original", ["research"]);
+        const before = previewDelete(db, "projects/fp", "target");
+        const beforeUpdatedAt = readState(db, "projects/fp", "target")!.updated_at;
+
+        db.prepare(sql).run("projects/fp", "target");
+        // Prove the clock cannot be doing the work for us.
+        expect(readState(db, "projects/fp", "target")!.updated_at).toBe(beforeUpdatedAt);
+
+        const after = previewDelete(db, "projects/fp", "target");
+        expect(after.fingerprint).not.toBe(before.fingerprint);
+      });
+    }
+
+    it("is stable when nothing changes", () => {
+      writeState(db, "projects/fp", "target", "original", ["research"]);
+      expect(previewDelete(db, "projects/fp", "target").fingerprint).toBe(
+        previewDelete(db, "projects/fp", "target").fingerprint,
+      );
+    });
+
+    it("refuses the delete inside the transaction when the fingerprint is stale", () => {
+      writeState(db, "projects/fp", "target", "original", []);
+      const stale = previewDelete(db, "projects/fp", "target").fingerprint;
+      db.prepare("UPDATE entries SET content = 'rewritten' WHERE namespace = ? AND key = ?").run("projects/fp", "target");
+
+      expect(() =>
+        executeDelete(db, "projects/fp", "target", "default", false, stale),
+      ).toThrow(DeletePreviewStaleError);
+      // Nothing was deleted: the guard runs inside the delete transaction.
+      expect(readState(db, "projects/fp", "target")).not.toBeNull();
+    });
+
+    it("proceeds when the fingerprint still matches", () => {
+      writeState(db, "projects/fp", "target", "original", []);
+      const fresh = previewDelete(db, "projects/fp", "target").fingerprint;
+      expect(executeDelete(db, "projects/fp", "target", "default", false, fresh)).toBe(1);
+      expect(readState(db, "projects/fp", "target")).toBeNull();
+    });
   });
 
   it("executes single key deletion", () => {
