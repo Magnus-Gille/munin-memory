@@ -101,23 +101,26 @@ describe("advisory intake evaluator", () => {
     expect(overlap.metadata.redundancy_flag?.existing_key).toBe("architecture");
   });
 
+  /**
+   * The tag-vocabulary check only runs once a namespace has an established
+   * vocabulary, so seeding it takes more than a couple of entries.
+   */
+  function seedEstablishedNamespace(namespace = "projects/example"): void {
+    const seeds: Array<[string, string, string[]]> = [
+      ["architecture", "Architecture decision record with enough meaningful implementation context.", ["architecture", "decision"]],
+      ["storage", "Storage design notes with durable persistence and recovery boundaries.", ["architecture", "storage"]],
+      ["retrieval", "Retrieval design notes covering lexical ranking and fusion behaviour.", ["architecture", "storage"]],
+      ["rollout", "Rollout notes describing staged deployment across the appliance fleet.", ["storage"]],
+      ["operations", "Operational runbook covering backup verification and restore drills.", ["storage"]],
+      ["review", "Review notes capturing the cross-model critique of the storage design.", ["architecture"]],
+    ];
+    for (const [key, content, tags] of seeds) {
+      writeState(db, namespace, key, content, tags, "owner");
+    }
+  }
+
   it("flags sparse content, deep namespaces, and novel tag vocabularies", () => {
-    writeState(
-      db,
-      "projects/example",
-      "architecture",
-      "Architecture decision record with enough meaningful implementation context.",
-      ["architecture", "decision"],
-      "owner",
-    );
-    writeState(
-      db,
-      "projects/example",
-      "storage",
-      "Storage design notes with durable persistence and recovery boundaries.",
-      ["architecture", "storage"],
-      "owner",
-    );
+    seedEstablishedNamespace();
 
     const result = evaluateIntake({
       namespace: "projects/example/too/deep",
@@ -131,6 +134,86 @@ describe("advisory intake evaluator", () => {
       expect.arrayContaining(["low_relevance", "namespace_depth", "tag_inconsistency"]),
     );
     expect(result.status).toBe("flagged");
+  });
+
+  it("never reports a documented canonical tag as new to a namespace", () => {
+    seedEstablishedNamespace();
+    const candidates = getNamespaceStateEntries(db, "projects/example");
+
+    // `milestone` is published in memory_log's own tag vocabulary, and no
+    // seeded entry carries it — the old check called that an inconsistency.
+    for (const tag of ["milestone", "decision", "blocker", "active", "research"]) {
+      const result = evaluateIntake({
+        namespace: "projects/example",
+        key: null,
+        content: "Shipped the offsite backup verification drill and recorded the outcome.",
+        tags: [tag],
+        candidates,
+      });
+      expect(
+        result.flags.map((flag) => flag.check),
+        `canonical tag "${tag}" must not be flagged`,
+      ).not.toContain("tag_inconsistency");
+    }
+  });
+
+  it("does not report tag inconsistency before a namespace has a vocabulary", () => {
+    // Three entries: past the old threshold of 2, below the new minimum. A
+    // handful of entries is not yet a convention worth policing.
+    writeState(
+      db,
+      "projects/fresh",
+      "status",
+      "Phase: kickoff. Current work: standing up the initial project skeleton.",
+      ["active"],
+      "owner",
+    );
+    writeState(
+      db,
+      "projects/fresh",
+      "architecture",
+      "Initial architecture sketch covering storage and retrieval boundaries.",
+      ["architecture"],
+      "owner",
+    );
+    writeState(
+      db,
+      "projects/fresh",
+      "plan",
+      "Delivery plan describing the first two milestones and their exit criteria.",
+      ["architecture"],
+      "owner",
+    );
+
+    const result = evaluateIntake({
+      namespace: "projects/fresh",
+      key: null,
+      content: "Chose SQLite over Postgres for the appliance profile after benchmarking.",
+      tags: ["zebra", "quantum"],
+      candidates: getNamespaceStateEntries(db, "projects/fresh"),
+    });
+
+    expect(result.flags.map((flag) => flag.check)).not.toContain("tag_inconsistency");
+  });
+
+  it("still flags genuinely novel freeform tags once a vocabulary exists", () => {
+    seedEstablishedNamespace();
+
+    const result = evaluateIntake({
+      namespace: "projects/example",
+      key: null,
+      content: "Recorded the quarterly capacity planning outcome for the appliance fleet.",
+      // One canonical tag alongside genuinely ad-hoc vocabulary: the canonical
+      // tag must not dilute the ratio into silence.
+      tags: ["milestone", "zebra", "quantum"],
+      candidates: getNamespaceStateEntries(db, "projects/example"),
+    });
+
+    const inconsistency = result.flags.find((flag) => flag.check === "tag_inconsistency");
+    expect(inconsistency).toBeDefined();
+    expect(inconsistency?.message).toContain("zebra");
+    expect(inconsistency?.message).toContain("quantum");
+    expect(inconsistency?.message).not.toContain("milestone");
   });
 
   it("bounds candidate content before loading it from SQLite", () => {
