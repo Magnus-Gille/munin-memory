@@ -48,6 +48,7 @@ import {
   previewDelete,
   previewDeleteByClassification,
   type DeleteInfo,
+  DeletePreviewStaleError,
   executeDelete,
   executeDeleteByClassification,
   listCommitments,
@@ -9561,9 +9562,9 @@ export function registerTools(
                 );
               }
 
-              // Both phases resolve the delete target the same way, so the
-              // fingerprint stored on the token and the one checked at confirm
-              // time can never describe different row sets.
+              // The preview and the in-transaction confirm check call the same
+              // functions, so the fingerprint stored on the token and the one
+              // verified at confirm time can never describe different row sets.
               const readDeleteTarget = (): DeleteInfo =>
                 isLibrarianEnabled()
                   ? previewDeleteByClassification(
@@ -9582,25 +9583,24 @@ export function registerTools(
                 if (!tokenCheck.ok) {
                   return errResult("delete", "invalid_token", "Delete token is invalid, expired, or doesn't match the requested namespace/key. Request a new preview first.");
                 }
-                // Refuse to delete anything the preview did not show. Without this
-                // a token minted before an update still destroys the newer, unseen
-                // revision (#266).
-                const current = readDeleteTarget();
-                if (current.fingerprint !== tokenCheck.record.fingerprint) {
-                  return errResult(
-                    "delete",
-                    "preview_stale",
-                    `The delete target changed since the preview was generated (previewed ${tokenCheck.record.stateCount} state / ${tokenCheck.record.logCount} log entries, now ${current.stateCount} state / ${current.logCount} log). ` +
-                    "The token has been discarded. Preview again and review the current contents before confirming.",
-                    { namespace, key: key ?? undefined },
-                  );
-                }
+                // Refuse to delete anything the preview did not show. The check
+                // runs inside the delete transaction so a concurrent writer cannot
+                // slip between verification and DELETE (#266).
                 let deletedCount: number;
                 try {
                   deletedCount = isLibrarianEnabled()
-                    ? executeDeleteByClassification(db, namespace, getContextMaxClassification(ctx), key, ctx.principalId, allowGlobalNamespaceDelete)
-                    : executeDelete(db, namespace, key, ctx.principalId, allowGlobalNamespaceDelete);
+                    ? executeDeleteByClassification(db, namespace, getContextMaxClassification(ctx), key, ctx.principalId, allowGlobalNamespaceDelete, tokenCheck.record.fingerprint)
+                    : executeDelete(db, namespace, key, ctx.principalId, allowGlobalNamespaceDelete, tokenCheck.record.fingerprint);
                 } catch (error) {
+                  if (error instanceof DeletePreviewStaleError) {
+                    return errResult(
+                      "delete",
+                      "preview_stale",
+                      `The delete target changed since the preview was generated (previewed ${tokenCheck.record.stateCount} state / ${tokenCheck.record.logCount} log entries, now ${error.current.stateCount} state / ${error.current.logCount} log). ` +
+                      "Nothing was deleted and the token has been discarded. Preview again and review the current contents before confirming.",
+                      { namespace, key: key ?? undefined },
+                    );
+                  }
                   return errResult("delete", "conflict", (error as Error).message, { namespace, key });
                 }
                 const target = key ? `entry "${key}" in "${namespace}"` : `all entries in "${namespace}"`;

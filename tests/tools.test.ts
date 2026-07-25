@@ -3292,6 +3292,54 @@ describe("memory_delete", () => {
     expect(readResult.content).toContain("version two");
   });
 
+  it("rejects a preview token after a tags-only patch that kept the content (#266)", async () => {
+    // updated_at has millisecond resolution, so a metadata-only patch in the same
+    // millisecond as the preview is invisible unless every mutable field is hashed.
+    await callTool("memory_write", { namespace: "projects/test", key: "tagged", content: "content stays identical", tags: ["research"] });
+
+    const previewRaw = await callTool("memory_delete", { namespace: "projects/test", key: "tagged" });
+    const preview = parseToolResponse(previewRaw) as { delete_token: string };
+
+    await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "tagged",
+      patch: { tags_add: ["decision"] },
+    });
+
+    const confirmRaw = await callTool("memory_delete", {
+      namespace: "projects/test",
+      key: "tagged",
+      delete_token: preview.delete_token,
+    });
+    const confirm = parseToolResponse(confirmRaw) as { ok: boolean; error: string };
+    expect(confirm.ok).toBe(false);
+    expect(confirm.error).toBe("preview_stale");
+
+    const readRaw = await callTool("memory_read", { namespace: "projects/test", key: "tagged" });
+    expect((parseToolResponse(readRaw) as { found: boolean }).found).toBe(true);
+  });
+
+  it("spends a stale token so it cannot be retried (#266)", async () => {
+    await callTool("memory_write", { namespace: "projects/test", key: "spent", content: "one" });
+    const previewRaw = await callTool("memory_delete", { namespace: "projects/test", key: "spent" });
+    const preview = parseToolResponse(previewRaw) as { delete_token: string };
+    await callTool("memory_write", { namespace: "projects/test", key: "spent", content: "two" });
+
+    const first = parseToolResponse(
+      await callTool("memory_delete", { namespace: "projects/test", key: "spent", delete_token: preview.delete_token }),
+    ) as { error: string };
+    expect(first.error).toBe("preview_stale");
+
+    // Replaying the same token must not work even though the entry is now stable.
+    const second = parseToolResponse(
+      await callTool("memory_delete", { namespace: "projects/test", key: "spent", delete_token: preview.delete_token }),
+    ) as { error: string };
+    expect(second.error).toBe("invalid_token");
+
+    const readRaw = await callTool("memory_read", { namespace: "projects/test", key: "spent" });
+    expect((parseToolResponse(readRaw) as { found: boolean }).found).toBe(true);
+  });
+
   it("rejects a namespace-wide preview token after a new entry appears (#266)", async () => {
     process.env.MUNIN_ALLOW_NAMESPACE_DELETE = "true";
     await callTool("memory_write", { namespace: "projects/racens", key: "a", content: "first entry" });
@@ -3312,6 +3360,34 @@ describe("memory_delete", () => {
 
     const readRaw = await callTool("memory_read", { namespace: "projects/racens", key: "b" });
     expect((parseToolResponse(readRaw) as { found: boolean }).found).toBe(true);
+    delete process.env.MUNIN_ALLOW_NAMESPACE_DELETE;
+  });
+
+  it("rejects a stale token with the librarian enabled (#266)", async () => {
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+    try {
+      await callTool("memory_write", { namespace: "projects/test", key: "librarian-victim", content: "version one" });
+      const preview = parseToolResponse(
+        await callTool("memory_delete", { namespace: "projects/test", key: "librarian-victim" }),
+      ) as { delete_token: string };
+
+      await callTool("memory_write", { namespace: "projects/test", key: "librarian-victim", content: "version two, never previewed" });
+
+      const confirm = parseToolResponse(
+        await callTool("memory_delete", {
+          namespace: "projects/test",
+          key: "librarian-victim",
+          delete_token: preview.delete_token,
+        }),
+      ) as { ok: boolean; error: string };
+      expect(confirm.ok).toBe(false);
+      expect(confirm.error).toBe("preview_stale");
+
+      const readRaw = await callTool("memory_read", { namespace: "projects/test", key: "librarian-victim" });
+      expect((parseToolResponse(readRaw) as { found: boolean }).found).toBe(true);
+    } finally {
+      delete process.env.MUNIN_LIBRARIAN_ENABLED;
+    }
   });
 
   it("still confirms when the target is untouched between preview and confirm (#266)", async () => {

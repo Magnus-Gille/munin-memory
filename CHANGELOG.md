@@ -25,6 +25,14 @@ changelog is the canonical record of what moved.
   namespace-wide path too: an entry appearing in the namespace after the
   preview now blocks the confirm rather than being swept up silently.
 
+  Cross-model review tightened two details before merge. The digest covers
+  `tags`, `classification` and `valid_until` as well as content, because a
+  metadata-only patch (say `tags_add`) sharing a millisecond with the preview
+  would otherwise leave the fingerprint unchanged. And the comparison now runs
+  *inside* the delete transaction rather than just before it, so a second
+  connection committing between check and DELETE cannot reopen the same
+  window.
+
 ## [0.6.1] — 2026-07-25
 
 ### Changed
