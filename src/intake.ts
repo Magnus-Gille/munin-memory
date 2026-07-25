@@ -19,6 +19,43 @@ const OVERLAP_THRESHOLD = 0.5;
 const CONSOLIDATION_THRESHOLD = 0.75;
 const MIN_OVERLAP_TOKENS = 4;
 const TAG_NOVELTY_THRESHOLD = 0.5;
+/**
+ * A namespace has no tag convention to deviate from until it holds a body of
+ * entries. Below this, every tag is trivially "new" and the check fires
+ * exactly where it carries the least information.
+ */
+const MIN_CANDIDATES_FOR_TAG_CHECK = 5;
+
+/**
+ * The tag vocabulary Munin publishes in the `memory_write` and `memory_log`
+ * tool descriptions. Munin tells agents to use these, so their first use in a
+ * namespace is compliance, not inconsistency, and must never be flagged.
+ */
+const CANONICAL_TAGS = new Set([
+  // Lifecycle (memory_write / memory_update_status)
+  "active", "blocked", "completed", "stopped", "maintenance", "archived",
+  // Log vocabulary (memory_log)
+  "decision", "milestone", "blocker", "discovery", "correction",
+  // Category
+  "architecture", "preference", "convention",
+  // Type
+  "bug", "feature", "research",
+]);
+
+/**
+ * Documented cross-referencing prefixes. Their values are unbounded by design
+ * (`topic:<topic>`, `person:<name>`), so a first occurrence in a namespace is
+ * expected rather than anomalous.
+ */
+const CANONICAL_TAG_PREFIXES = ["client:", "person:", "topic:", "type:", "source:"];
+
+function isCanonicalTag(tag: string): boolean {
+  const normalized = tag.trim().toLowerCase();
+  return (
+    CANONICAL_TAGS.has(normalized)
+    || CANONICAL_TAG_PREFIXES.some((prefix) => normalized.startsWith(prefix))
+  );
+}
 
 const STOPWORDS = new Set([
   "a", "an", "and", "are", "as", "at", "be", "by", "for", "from",
@@ -182,13 +219,18 @@ export function evaluateIntake(input: EvaluateIntakeInput): IntakeResult {
     }
   }
 
-  if (input.tags.length > 0 && candidates.length >= 2) {
+  // Only freeform tags can be inconsistent with a namespace convention, so
+  // canonical vocabulary is excluded from both sides of the ratio: it must not
+  // be reported as novel, and it must not dilute the ratio and mask tags that
+  // genuinely are.
+  const freeformTags = input.tags.filter((tag) => !isCanonicalTag(tag));
+  if (freeformTags.length > 0 && candidates.length >= MIN_CANDIDATES_FOR_TAG_CHECK) {
     const vocabulary = new Set(candidates.flatMap((entry) => parseTags(entry.tags)));
     if (vocabulary.size > 0) {
-      const novelTags = input.tags.filter((tag) => !vocabulary.has(tag));
+      const novelTags = freeformTags.filter((tag) => !vocabulary.has(tag));
       if (
         novelTags.length > 0
-        && novelTags.length / input.tags.length >= TAG_NOVELTY_THRESHOLD
+        && novelTags.length / freeformTags.length >= TAG_NOVELTY_THRESHOLD
       ) {
         flags.push({
           check: "tag_inconsistency",
