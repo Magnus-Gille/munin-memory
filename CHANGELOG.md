@@ -8,6 +8,8 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-07-25
+
 ### Changed
 
 - **`memory_orient` is bounded by default in every detail mode (#254).** It is
