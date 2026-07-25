@@ -9,6 +9,9 @@ import { fileURLToPath } from "node:url";
 import {
   initDatabase,
   parsePragmaInt,
+  logRetrievalEvent,
+  logRetrievalOutcome,
+  getRetrievalAggregates,
   writeState,
   patchState,
   readState,
@@ -2259,5 +2262,38 @@ describe("getLastSynthesisAt / getAvgConsolidationLatencyMs", () => {
   it("throws for a non-owner caller (owner-only defense-in-depth)", () => {
     expect(() => getLastSynthesisAt(db, false)).toThrow(/owner-only/);
     expect(() => getAvgConsolidationLatencyMs(db, false)).toThrow(/owner-only/);
+  });
+});
+
+describe("retrieval aggregates (#255)", () => {
+  it("reports positive_outcome_rate as a 0-1 fraction of events, not outcomes per event", () => {
+    const { id: a } = writeState(db, "projects/rate", "alpha", "Alpha entry", []);
+    const { id: b } = writeState(db, "projects/rate", "beta", "Beta entry", []);
+    const { id: c } = writeState(db, "projects/rate", "gamma", "Gamma entry", []);
+
+    // One query that the caller followed up on three times — the ordinary case
+    // of opening several results from a single search.
+    logRetrievalEvent(db, {
+      sessionId: "s-rate",
+      toolName: "memory_query",
+      queryText: "rate probe",
+      resultIds: [a, b, c],
+      resultNamespaces: ["projects/rate", "projects/rate", "projects/rate"],
+      resultRanks: [1, 2, 3],
+    });
+    for (const entryId of [a, b, c]) {
+      logRetrievalOutcome(db, "s-rate", {
+        outcomeType: "opened_result",
+        entryId,
+        namespace: "projects/rate",
+      });
+    }
+
+    const agg = getRetrievalAggregates(db);
+    const rate = agg.positive_outcome_count / agg.total_events;
+    // Pre-fix this was 3 outcomes / 1 event = 3.0 — a "rate" above 1.
+    expect(rate).toBeLessThanOrEqual(1);
+    expect(agg.positive_outcome_count).toBe(1);
+    expect(agg.total_outcomes).toBeGreaterThanOrEqual(3);
   });
 });

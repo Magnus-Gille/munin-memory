@@ -23,6 +23,22 @@ changelog is the canonical record of what moved.
   (−44% / −52%). Nothing is hidden silently: `dashboard_meta.counts` /
   `truncated_groups` and `namespaces_meta.total` / `truncated` still describe the
   full estate, and both caps remain caller-overridable.
+### Fixed
+
+- **`memory_insights.positive_outcome_rate` is a rate again (#255).** It divided
+  the *count of positive outcomes* by the *number of retrieval events*, but one
+  query routinely yields several opened results, so the value exceeded 1.0
+  (3.457 observed in production) while sibling fields were normalised 0–1. It
+  now counts events that produced at least one positive outcome. Raw outcome
+  volume remains available as `total_outcomes`.
+- **`memory_history` can filter for `patch` (#255).** Partial writes are audited
+  as `patch`, but the `action` enum offered only `update`, so filtering for a
+  just-audited patch returned zero rows and the published vocabulary was wrong.
+- **`memory_query` says when it clamps an over-limit request (#255).** A `limit`
+  above the documented maximum of 50 was silently clamped by the storage layer,
+  so a truncated page was indistinguishable from an exhausted result set. The
+  response now carries an explicit warning, and the maximum is a single exported
+  `MAX_QUERY_LIMIT` constant rather than a magic number repeated across clamps.
 
 ### Security
 
@@ -39,6 +55,25 @@ changelog is the canonical record of what moved.
   asserted coverage that never existed; it is now one table-driven case per
   vendor format, and `SECRET_PATTERNS` documents that hyphenated prefixes
   require their own entry.
+
+### Fixed
+
+- **Intake no longer reports canonical tags as inconsistent on young
+  namespaces (#255, found by multi-model user testing 2026-07-24).** Logging
+  with `milestone` — a tag published in `memory_log`'s own vocabulary —
+  produced `tag_inconsistency: "Tags [milestone] are new to namespace"` on the
+  *second* entry of a namespace created seconds earlier. Every tag is new to a
+  new namespace, so the check fired precisely where it carried no information,
+  and it was inconsistent besides: `decision`, equally new, went unflagged
+  because the ratio depended on how many other tags happened to be present.
+  Two rules now bound it. Tags in the documented vocabulary (lifecycle,
+  log, category, and type tags, plus the `client:` / `person:` / `topic:` /
+  `type:` / `source:` cross-reference prefixes) are never novel — Munin
+  instructs agents to use them, so their first use is compliance. And the
+  check is suppressed until a namespace holds at least five entries, since
+  below that there is no convention to deviate from. Canonical tags are
+  excluded from both sides of the novelty ratio, so they can no longer dilute
+  it into silence and mask freeform tags that genuinely are inconsistent.
 
 ### Added
 

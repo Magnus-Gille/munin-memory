@@ -52,6 +52,7 @@ import {
   listCommitments,
   syncCommitmentsForEntry,
   type DerivedCommitmentInput,
+  MAX_QUERY_LIMIT,
   type CommitmentRow,
   computeCommitmentConfidence,
   getOtherKeysInNamespace,
@@ -5356,8 +5357,8 @@ const TOOL_DEFINITIONS = [
         },
         action: {
           type: "string",
-          enum: ["write", "update", "supersede", "delete", "delete_namespace", "log", "cross_zone_block"],
-          description: "Optional. Filter by action type. 'cross_zone_block' surfaces containment-guard security events.",
+          enum: ["write", "update", "patch", "supersede", "delete", "delete_namespace", "log", "cross_zone_block"],
+          description: "Optional. Filter by action type. 'patch' covers partial writes (content_append/prepend, tags_add/remove), which are audited separately from full-content 'update'. 'cross_zone_block' surfaces containment-guard security events.",
         },
         cursor: {
           type: "integer",
@@ -8800,6 +8801,12 @@ export function registerTools(
               const requestedMode: SearchMode = search_mode ?? "hybrid";
               let actualMode: SearchMode = requestedMode;
               let warning: string | undefined;
+              // The storage layer clamps to MAX_QUERY_LIMIT, so an over-limit
+              // request used to return fewer rows than asked for with no signal
+              // — indistinguishable from "that is all there was". Say so.
+              if (typeof limit === "number" && Number.isFinite(limit) && limit > MAX_QUERY_LIMIT) {
+                warning = `Requested limit ${limit} exceeds the maximum of ${MAX_QUERY_LIMIT}; returning at most ${MAX_QUERY_LIMIT} results. Narrow with filters or since/until rather than paging.`;
+              }
               let fallbackReason: string | null = null;
               let relaxedLexical = false;
               let expiredFilteredCount = 0;
