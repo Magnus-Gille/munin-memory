@@ -1630,6 +1630,45 @@ function normalizeIsoTimestamp(value: unknown, fieldName: string): { ok: true; v
   return { ok: true, value: date.toISOString() };
 }
 
+function rejectUnknownArguments(args: unknown, allowed: readonly string[]): string | null {
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    return "Tool arguments must be an object.";
+  }
+  const unknown = Object.keys(args).filter((key) => !allowed.includes(key)).sort();
+  return unknown.length > 0
+    ? `Unknown argument(s): ${unknown.join(", ")}.`
+    : null;
+}
+
+function resolveBoundedPositiveInteger(
+  value: unknown,
+  fieldName: string,
+  defaultValue: number,
+  maximum: number,
+): { ok: true; requested: number; applied: number; warning?: string } | { ok: false; error: string } {
+  if (value === undefined) return { ok: true, requested: defaultValue, applied: defaultValue };
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    return { ok: false, error: `${fieldName} must be a positive integer.` };
+  }
+  if (value > maximum) {
+    return {
+      ok: true,
+      requested: value,
+      applied: maximum,
+      warning: `Requested ${fieldName} ${value} exceeds the maximum of ${maximum}; returning at most ${maximum}.`,
+    };
+  }
+  return { ok: true, requested: value, applied: value };
+}
+
+function validateNonNegativeInteger(value: unknown, fieldName: string, defaultValue: number): { ok: true; value: number } | { ok: false; error: string } {
+  if (value === undefined) return { ok: true, value: defaultValue };
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    return { ok: false, error: `${fieldName} must be a non-negative integer.` };
+  }
+  return { ok: true, value };
+}
+
 function filterExpiredEntries<T extends Entry | { entry: Entry }>(
   items: T[],
   includeExpired: boolean,
@@ -5191,7 +5230,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_get",
     description:
-      "Retrieve the full content of a single memory entry by its UUID, including an authorized correction link when present. Use this after `memory_query` returns truncated previews or to inspect a historical superseded UUID. If you already know namespace+key and want current or as-of state, use `memory_read` instead. Works for both state and log entries.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
+      "Retrieve the full content of a single memory entry by its opaque ID (normally a UUID returned by `memory_query`), including an authorized correction link when present. Any non-empty ID is accepted as a lookup and returns `found:false` when absent, preserving safe not-found semantics for stale or externally stored IDs. If you already know namespace+key and want current or as-of state, use `memory_read` instead. Works for both state and log entries.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -7941,6 +7980,14 @@ export function registerTools(
           case "memory_write": {
             // eslint-disable-next-line complexity -- one handler intentionally validates the mutually-exclusive full-write, patch, correction, and tracked-status paths before mutation.
             const handleMemoryWrite = async () => {
+              const unknownArgumentError = rejectUnknownArguments(args, [
+                "namespace", "key", "content", "tags", "valid_until", "expected_updated_at",
+                "create_if_absent", "classification", "classification_override", "supersedes",
+                "valid_from", "patch",
+              ]);
+              if (unknownArgumentError) {
+                return errResult("write", "validation_error", unknownArgumentError);
+              }
               const {
                 namespace,
                 key,
@@ -7965,6 +8012,12 @@ export function registerTools(
               const keyCheck = validateKey(key);
               if (!keyCheck.valid) {
                 return errResult("write", "validation_error", keyCheck.error!);
+              }
+              if (expected_updated_at !== undefined) {
+                const timestampCheck = normalizeIsoTimestamp(expected_updated_at, "expected_updated_at");
+                if (!timestampCheck.ok) {
+                  return errResult("write", "validation_error", timestampCheck.error);
+                }
               }
 
               // Mutually exclusive: patch and content cannot both be provided
@@ -8327,6 +8380,13 @@ export function registerTools(
 
           case "memory_update_status": {
             const handleMemoryUpdateStatus = async () => {
+              const unknownArgumentError = rejectUnknownArguments(args, [
+                "namespace", "phase", "current_work", "blockers", "next_steps", "notes",
+                "lifecycle", "valid_until", "expected_updated_at", "classification", "classification_override",
+              ]);
+              if (unknownArgumentError) {
+                return errResult("update_status", "validation_error", unknownArgumentError);
+              }
               const {
                 namespace,
                 phase,
@@ -8344,6 +8404,12 @@ export function registerTools(
               const nsCheck = validateNamespace(namespace);
               if (!nsCheck.valid) {
                 return errResult("update_status", "validation_error", nsCheck.error!);
+              }
+              if (expected_updated_at !== undefined) {
+                const timestampCheck = normalizeIsoTimestamp(expected_updated_at, "expected_updated_at");
+                if (!timestampCheck.ok) {
+                  return errResult("update_status", "validation_error", timestampCheck.error);
+                }
               }
               if (!isTrackedNamespace(namespace, resolveTrackedPatterns(db, ctx))) {
                 return errResult("update_status", "validation_error", "memory_update_status only supports the caller's configured tracked namespaces (default projects/* or clients/*).");
@@ -8736,6 +8802,10 @@ export function registerTools(
 
           case "memory_get": {
             const handleMemoryGet = async () => {
+              const unknownArgumentError = rejectUnknownArguments(args, ["id"]);
+              if (unknownArgumentError) {
+                return errResult("get", "validation_error", unknownArgumentError);
+              }
               const { id } = args as unknown as GetParams;
               if (!id || typeof id !== "string") {
                 return errResult("get", "validation_error", "ID is required.");
@@ -8776,12 +8846,38 @@ export function registerTools(
           }
 
           case "memory_query": {
+            // eslint-disable-next-line complexity -- one handler validates and executes the filter-only, lexical, semantic, and hybrid retrieval paths.
             const handleMemoryQuery = async () => {
               // Wall-clock start for the retrieval-latency metric (#161). Recorded
               // onto the retrieval_event so memory_health can report p50/p95.
               const queryStartedAt = Date.now();
+              const unknownArgumentError = rejectUnknownArguments(args, [
+                "query", "namespace", "entry_type", "tags", "limit", "search_mode",
+                "search_recency_weight", "include_expired", "explain", "since", "until",
+                "require_lexical_match", "serialization",
+              ]);
+              if (unknownArgumentError) {
+                return errResult("query", "validation_error", unknownArgumentError);
+              }
               const queryArgs = (args ?? {}) as unknown as QueryParams;
-              const { query, namespace, entry_type, tags, limit, search_mode, since, until } = queryArgs;
+              let { query, namespace, entry_type, tags, limit, search_mode, since, until } = queryArgs;
+              if (search_mode !== undefined && !["lexical", "semantic", "hybrid"].includes(search_mode)) {
+                return errResult("query", "validation_error", "search_mode must be 'lexical', 'semantic', or 'hybrid'.");
+              }
+              const normalizedSince = since === undefined ? undefined : normalizeIsoTimestamp(since, "since");
+              if (normalizedSince !== undefined && !normalizedSince.ok) {
+                return errResult("query", "validation_error", normalizedSince.error);
+              }
+              const normalizedUntil = until === undefined ? undefined : normalizeIsoTimestamp(until, "until");
+              if (normalizedUntil !== undefined && !normalizedUntil.ok) {
+                return errResult("query", "validation_error", normalizedUntil.error);
+              }
+              const limitResolution = resolveBoundedPositiveInteger(limit, "limit", 10, MAX_QUERY_LIMIT);
+              if (!limitResolution.ok) {
+                return errResult("query", "validation_error", limitResolution.error);
+              }
+              since = normalizedSince?.value;
+              until = normalizedUntil?.value;
               const explain = queryArgs.explain === true;
               const includeExpired = queryArgs.include_expired === true;
               const requireLexicalMatch = queryArgs.require_lexical_match === true;
@@ -8818,7 +8914,7 @@ export function registerTools(
                 if (!namespace && (!tags || tags.length === 0) && !since && !until && !entry_type) {
                   return errResult("query", "validation_error", "Provide either a 'query' string for search, or at least one filter (namespace, tags, entry_type, since, until) to browse.");
                 }
-                const requestedLimit = Math.min(Math.max(limit ?? 10, 1), 50);
+                const requestedLimit = limitResolution.applied;
                 const internalFilterLimit = Math.min(requestedLimit * QUERY_RERANK_OVERFETCH_MULTIPLIER, 50);
                 let filterResults = queryEntriesByFilter(db, {
                   namespace,
@@ -8870,6 +8966,11 @@ export function registerTools(
                   total: formatted.length,
                   redacted_count: redactedCount,
                   search_mode: "filter",
+                  ...(limitResolution.warning ? {
+                    requested_limit: limitResolution.requested,
+                    limit_applied: limitResolution.applied,
+                    warning: limitResolution.warning,
+                  } : {}),
                   retrieval: {
                     reranked: false,
                     relaxed_lexical: false,
@@ -8884,7 +8985,7 @@ export function registerTools(
                 });
               }
 
-              const requestedLimit = Math.min(Math.max(limit ?? 10, 1), 50);
+              const requestedLimit = limitResolution.applied;
               const internalLimit = Math.min(requestedLimit * QUERY_RERANK_OVERFETCH_MULTIPLIER, 50);
               const queryParams: QueryParams = {
                 query,
@@ -8901,13 +9002,10 @@ export function registerTools(
               };
               const requestedMode: SearchMode = search_mode ?? "hybrid";
               let actualMode: SearchMode = requestedMode;
-              let warning: string | undefined;
+              let warning: string | undefined = limitResolution.warning;
               // The storage layer clamps to MAX_QUERY_LIMIT, so an over-limit
               // request used to return fewer rows than asked for with no signal
               // — indistinguishable from "that is all there was". Say so.
-              if (typeof limit === "number" && Number.isFinite(limit) && limit > MAX_QUERY_LIMIT) {
-                warning = `Requested limit ${limit} exceeds the maximum of ${MAX_QUERY_LIMIT}; returning at most ${MAX_QUERY_LIMIT} results. Narrow with filters or since/until rather than paging.`;
-              }
               let fallbackReason: string | null = null;
               let relaxedLexical = false;
               let expiredFilteredCount = 0;
@@ -9126,12 +9224,17 @@ export function registerTools(
                 redacted_count: redactedCount,
                 query,
                 search_mode: requestedMode,
+                ...(limitResolution.warning ? {
+                  requested_limit: limitResolution.requested,
+                  limit_applied: limitResolution.applied,
+                } : {}),
               };
               if (actualMode !== requestedMode) {
                 response.search_mode_actual = actualMode;
               }
-              if (warning) {
-                response.warning = warning;
+              const responseWarnings = [...new Set([limitResolution.warning, warning].filter(Boolean))];
+              if (responseWarnings.length > 0) {
+                response.warning = responseWarnings.join(" ");
               }
               response.retrieval = {
                 reranked: true,
@@ -9492,10 +9595,24 @@ export function registerTools(
 
           case "memory_list": {
             const handleMemoryList = async () => {
+              const unknownArgumentError = rejectUnknownArguments(args, [
+                "namespace", "include_demo", "include_completed_tasks", "limit", "offset",
+              ]);
+              if (unknownArgumentError) {
+                return errResult("list", "validation_error", unknownArgumentError);
+              }
               const { namespace, include_demo, include_completed_tasks, limit: rawLimit, offset: rawOffset } = (args ?? {}) as ListParams;
+              const limitResolution = resolveBoundedPositiveInteger(rawLimit, "limit", 20, 200);
+              if (!limitResolution.ok) {
+                return errResult("list", "validation_error", limitResolution.error);
+              }
+              const offsetResolution = validateNonNegativeInteger(rawOffset, "offset", 0);
+              if (!offsetResolution.ok) {
+                return errResult("list", "validation_error", offsetResolution.error);
+              }
               if (!namespace) {
-                const resolvedLimit = Math.min(Math.max(1, typeof rawLimit === "number" ? rawLimit : 20), 200);
-                const resolvedOffset = Math.max(0, typeof rawOffset === "number" ? rawOffset : 0);
+                const resolvedLimit = limitResolution.applied;
+                const resolvedOffset = offsetResolution.value;
                 const allNamespaces = listVisibleNamespaces(db, ctx);
                 const completedTasks = include_completed_tasks ? new Set<string>() : getCompletedTaskNamespaces(db);
                 const filtered = allNamespaces.filter((ns) => {
@@ -9509,7 +9626,17 @@ export function registerTools(
                   ...ns,
                   last_activity_at_local: toLocalDisplay(ns.last_activity_at),
                 }));
-                return okResult("list", { namespaces: namespacesWithLocal, total, returned: namespacesWithLocal.length, has_more });
+                return okResult("list", {
+                  namespaces: namespacesWithLocal,
+                  total,
+                  returned: namespacesWithLocal.length,
+                  has_more,
+                  ...(limitResolution.warning ? {
+                    requested_limit: limitResolution.requested,
+                    limit_applied: limitResolution.applied,
+                    warning: limitResolution.warning,
+                  } : {}),
+                });
               }
               const nsCheck = validateNamespace(namespace);
               if (!nsCheck.valid) {
