@@ -8,6 +8,18 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Changed
+
+- **External backup requirements now have a public-safe, versioned v1 consumer
+  contract (#235).** The contract binds a stable logical near-site target,
+  owner-overlay authentication boundary, capacity/write guarantees, SQLite
+  snapshot cadence/timeout, and a measured transfer-window preflight. It fails
+  closed for offline, stale, interrupted, timed-out, or relocated targets.
+  Verified copy/integrity evidence is distinct from periodic representative
+  restore evidence, and encrypted offsite backup remains independent. The
+  published schema and fixtures contain no deployment endpoint, private path,
+  or credential.
+
 ### Fixed
 
 - **`memory_delete` preview tokens are bound to the entries they previewed

@@ -1,0 +1,9 @@
+{
+  "poor_throughput": { "throughput_mibps": 4 },
+  "timeout": { "outcome": "timed_out", "transfer_seconds": 3601 },
+  "interrupted_transfer": { "outcome": "interrupted", "copy_verification": "not_completed" },
+  "stale_target_evidence": { "valid_until": "2026-07-25T23:59:59Z" },
+  "integrity_without_restore": { "remove_restore": true },
+  "relocated_target": { "target_id": "storage-backup-b" },
+  "privacy_adversarial": { "target_id": "192.168.1.20", "authentication_boundary": "password=not-public", "private_path": "/home/private/backup" }
+}

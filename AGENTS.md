@@ -39,6 +39,7 @@ Prefer these over expanding this file:
 - `memory_health` contract: `docs/memory-health-spec.md` and `docs/memory-health.schema.json`.
 - Hardware profile evidence: `docs/appliance-profiles.md` and `benchmark/ramfit/FINDINGS.md`.
 - Offsite backup and restore: `docs/offsite-backup.md`.
+- Public-safe near-site backup dependency contract and hermetic gate: `docs/backup-dependency-contract.md`.
 - Released behavior and migration notes: `CHANGELOG.md`.
 - Historical pre-pivot specs: `docs/archive/`; do not treat them as current direction.
 
