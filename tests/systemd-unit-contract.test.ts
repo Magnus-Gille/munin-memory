@@ -13,6 +13,11 @@ const offsiteTemplate = readFileSync(join(repoRoot, "munin-offsite.service"), "u
 const opsInstaller = readFileSync(join(repoRoot, "scripts", "install-ops.sh"), "utf8");
 const fleetUnitPath = join(repoRoot, "systemd", "munin-memory.service");
 const snapshotScriptPath = join(repoRoot, "scripts", "snapshot-benchmark-db.sh");
+// Verbatim Grimnir services.json component fixture. Keep this aligned with the
+// registered deploy and persistence authorities.
+const grimnirRegistry = JSON.parse(
+  readFileSync(join(repoRoot, "tests", "fixtures", "grimnir-munin-memory-registry.json"), "utf8"),
+) as { name: string; deploy_path: string; persistent_paths: string[]; systemd_units: Array<{ name: string; type: string }> };
 
 function activeLines(unit: string): string[] {
   return unit
@@ -50,15 +55,24 @@ describe("systemd deployment-unit contract", () => {
     }
   });
 
-  it("ships an install-ready public-safe unit for the Grimnir fleet deployer", () => {
+  it("ships an install-ready unit that resolves under the registered Grimnir paths", () => {
     expect(existsSync(fleetUnitPath)).toBe(true);
     const fleetUnit = readFileSync(fleetUnitPath, "utf8");
+    const persistentPath = grimnirRegistry.persistent_paths[0];
     expect(fleetUnit).not.toMatch(/^[^#;\n]*<[A-Za-z][A-Za-z0-9_-]*>/m);
-    expect(fleetUnit).toContain("WorkingDirectory=/home/grimnir/munin-memory");
-    expect(fleetUnit).toContain("Environment=MUNIN_MEMORY_DB_PATH=/home/grimnir/.munin-memory/memory.db");
-    expect(fleetUnit).toContain("EnvironmentFile=/home/grimnir/munin-memory/.env");
-    expect(fleetUnit).toContain("ReadWritePaths=/home/grimnir/.munin-memory");
+    expect(grimnirRegistry).toMatchObject({
+      name: "munin-memory",
+      deploy_path: "/home/magnus/munin-memory",
+      persistent_paths: ["/home/magnus/.munin-memory"],
+      systemd_units: [{ name: "munin-memory", type: "service" }],
+    });
+    expect(fleetUnit).toContain("User=magnus");
+    expect(fleetUnit).toContain(`WorkingDirectory=${grimnirRegistry.deploy_path}`);
+    expect(fleetUnit).toContain(`Environment=MUNIN_MEMORY_DB_PATH=${persistentPath}/memory.db`);
+    expect(fleetUnit).toContain(`EnvironmentFile=${grimnirRegistry.deploy_path}/.env`);
+    expect(fleetUnit).toContain(`ReadWritePaths=${persistentPath}`);
     expect(fleetUnit).not.toContain("/srv/grimnir/");
+    expect(fleetUnit).not.toContain("/home/grimnir/");
   });
 
   it("enforces the shared hardening directives on both the template and the fleet unit", () => {
@@ -132,10 +146,10 @@ describe("systemd deployment-unit contract", () => {
   });
 
   it("allows only the declared fleet/template divergences", () => {
-    // The install-ready fleet unit deliberately binds the registered `grimnir`
-    // service identity to its current /home deployment layout. Any divergence
-    // NOT listed here — including a silently dropped hardening directive or a
-    // reintroduced /srv path — fails the contract.
+    // The install-ready fleet unit deliberately binds the registered `magnus`
+    // service identity to Grimnir's current deploy and persistent paths. Any
+    // divergence NOT listed here — including a silently dropped hardening
+    // directive or either rejected legacy path — fails the contract.
     const fleetUnit = readFileSync(fleetUnitPath, "utf8");
     const fleetSet = new Set(activeLines(fleetUnit));
     const templateSet = new Set(activeLines(publicTemplate));
@@ -145,11 +159,11 @@ describe("systemd deployment-unit contract", () => {
 
     expect(fleetOnly).toEqual(
       [
-        "User=grimnir",
-        "WorkingDirectory=/home/grimnir/munin-memory",
-        "Environment=MUNIN_MEMORY_DB_PATH=/home/grimnir/.munin-memory/memory.db",
-        "EnvironmentFile=/home/grimnir/munin-memory/.env",
-        "ReadWritePaths=/home/grimnir/.munin-memory",
+        "User=magnus",
+        "WorkingDirectory=/home/magnus/munin-memory",
+        "Environment=MUNIN_MEMORY_DB_PATH=/home/magnus/.munin-memory/memory.db",
+        "EnvironmentFile=/home/magnus/munin-memory/.env",
+        "ReadWritePaths=/home/magnus/.munin-memory",
       ].sort(),
     );
     expect(templateOnly).toEqual(
