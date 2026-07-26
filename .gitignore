@@ -24,6 +24,8 @@ docs/*
 !docs/claude-md-template.md
 !docs/authorization-matrix.md
 !docs/offsite-backup.md
+!docs/backup-dependency-contract.md
+!docs/backup-dependency-contract-v1.schema.json
 !docs/competitive-analysis.md
 !docs/competitive-analysis-2026-07.md
 !docs/librarian-architecture.md
