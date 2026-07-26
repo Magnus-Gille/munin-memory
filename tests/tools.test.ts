@@ -6,6 +6,7 @@ import {
   computeCommitmentConfidence,
   initDatabase,
   listCommitments,
+  supersedeState,
   upsertConsolidationMetadata,
   writeState,
 } from "../src/db.js";
@@ -1671,6 +1672,37 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
     expect(result.will_delete.keys).toBeUndefined();
     expect(result.message).toContain("visible entries on this connection");
     delete process.env.MUNIN_ALLOW_NAMESPACE_DELETE;
+  });
+
+  it("refuses a classified delete preview when it can see only part of a correction lineage", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/delete-partial-lineage",
+      key: "restricted-correction",
+      content: "initial internal revision",
+      classification: "internal",
+    });
+    const original = db.prepare(
+      "SELECT id, updated_at, valid_from FROM entries WHERE namespace = ? AND key = ? AND is_current = 1",
+    ).get("projects/delete-partial-lineage", "restricted-correction") as { id: string; updated_at: string; valid_from: string };
+    const corrected = supersedeState(
+      db, "projects/delete-partial-lineage", "restricted-correction", original.id,
+      "later client-confidential correction", [], "test-agent", original.updated_at, original.valid_from, undefined,
+      { classification: "client-confidential" },
+    );
+    expect(corrected.status).toBe("superseded");
+
+    const consumerOwnerCall = makeContextCallTool({
+      ...ownerContext(),
+      transportType: "consumer",
+      maxClassification: "internal",
+    });
+    const result = parseToolResponse(await consumerOwnerCall("memory_delete", {
+      namespace: "projects/delete-partial-lineage",
+      key: "restricted-correction",
+    })) as { error: string; message: string };
+
+    expect(result.error).toBe("partial_lineage");
+    expect(result.message).toContain("correction chain");
   });
 
   it("confirmed delete only removes entries within classification ceiling", async () => {

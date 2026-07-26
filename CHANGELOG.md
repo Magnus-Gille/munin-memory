@@ -22,6 +22,17 @@ changelog is the canonical record of what moved.
 
 ### Fixed
 
+- **`memory_delete` previews disclose and bind the full correction lineage
+  they will remove (#281).** A delete of a corrected state entry removes its
+  current revision *and* superseded revisions, but the preview previously
+  reported and fingerprinted only the current row. `state_count` now includes
+  every state revision that confirmation can delete, with
+  `current_state_count` and `historical_state_count` making that scope explicit;
+  the token fingerprint covers the same complete set. A classification- or
+  owner-scoped delete that would cut through a correction chain now fails
+  closed with `partial_lineage` before it issues a token, rather than presenting
+  a misleading partial preview and failing only at confirmation.
+
 - **`memory_delete` preview tokens are bound to the entries they previewed
   (#266).** A token carried only `{namespace, key, expiresAt}`, so a preview
   taken before an update still authorised the delete afterwards: preview an

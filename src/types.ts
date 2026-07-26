@@ -474,7 +474,10 @@ export interface DeletePreview {
   namespace: string;
   key?: string;
   will_delete: {
+    /** Includes every superseded revision that confirmation will remove. */
     state_count: number;
+    current_state_count: number;
+    historical_state_count: number;
     log_count: number;
     keys?: string[];
   };

@@ -28,6 +28,7 @@ import {
   previewDelete,
   DeletePreviewStaleError,
   executeDelete,
+  supersedeState,
   getOtherKeysInNamespace,
   getNamespaceStateEntries,
   getNamespaceTagVocabulary,
@@ -1044,6 +1045,27 @@ describe("previewDelete + executeDelete", () => {
     const preview = previewDelete(db, "projects/test");
     expect(preview.stateCount).toBe(2);
     expect(preview.logCount).toBe(1);
+  });
+
+  it("counts and fingerprints every correction revision a key delete removes (#281)", () => {
+    writeState(db, "projects/fp", "corrected", "original", []);
+    const original = readState(db, "projects/fp", "corrected")!;
+    const corrected = supersedeState(
+      db, "projects/fp", "corrected", original.id, "corrected", [], "default",
+      original.updated_at, original.valid_from, undefined,
+    );
+    expect(corrected.status).toBe("superseded");
+
+    const preview = previewDelete(db, "projects/fp", "corrected");
+    expect(preview).toMatchObject({ stateCount: 2, currentStateCount: 1, historicalStateCount: 1 });
+
+    // The historical row is just as destructive a target as current truth.
+    // Hold its timestamp fixed to prove the full-row digest, not the clock,
+    // blocks a confirmation that no longer matches the preview.
+    db.prepare("UPDATE entries SET tags = '[\"changed-history\"]' WHERE id = ?").run(original.id);
+    expect(() => executeDelete(db, "projects/fp", "corrected", "default", false, preview.fingerprint))
+      .toThrow(DeletePreviewStaleError);
+    expect(readState(db, "projects/fp", "corrected")?.content).toBe("corrected");
   });
 
   // The delete-token fingerprint must notice any caller-visible mutation, not
