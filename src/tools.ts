@@ -49,6 +49,7 @@ import {
   previewDeleteByClassification,
   type DeleteInfo,
   DeletePreviewStaleError,
+  DeletePreviewPartialLineageError,
   executeDelete,
   executeDeleteByClassification,
   listCommitments,
@@ -5399,7 +5400,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_delete",
     description:
-      "Delete a specific state entry by namespace+key, or all entries in a namespace. First call without delete_token to preview what will be deleted. Then call with the returned delete_token to execute. The token is bound to the exact entries the preview showed: if any of them is written, added, or removed before you confirm, the delete is refused with `preview_stale` and you must preview again.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
+      "Delete a specific state entry by namespace+key, or all entries in a namespace. First call without delete_token to preview what will be deleted. `state_count` includes current and superseded state revisions; `current_state_count` and `historical_state_count` make that destructive scope explicit. Then call with the returned delete_token to execute. The token is bound to the exact entries the preview showed: if any of them is written, added, or removed before you confirm, the delete is refused with `preview_stale` and you must preview again. If classification or ownership filtering would split a correction lineage, preview fails closed with `partial_lineage` and issues no token.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -9601,6 +9602,9 @@ export function registerTools(
                       { namespace, key: key ?? undefined },
                     );
                   }
+                  if (error instanceof DeletePreviewPartialLineageError) {
+                    return errResult("delete", "partial_lineage", error.message, { namespace, key: key ?? undefined });
+                  }
                   return errResult("delete", "conflict", (error as Error).message, { namespace, key });
                 }
                 const target = key ? `entry "${key}" in "${namespace}"` : `all entries in "${namespace}"`;
@@ -9614,7 +9618,15 @@ export function registerTools(
               }
 
               // Preview
-              const info = readDeleteTarget();
+              let info: DeleteInfo;
+              try {
+                info = readDeleteTarget();
+              } catch (error) {
+                if (error instanceof DeletePreviewPartialLineageError) {
+                  return errResult("delete", "partial_lineage", error.message, { namespace, key: key ?? undefined });
+                }
+                return errResult("delete", "conflict", (error as Error).message, { namespace, key: key ?? undefined });
+              }
               const token = generateDeleteToken(namespace, info, key);
               const target = key ? `entry "${key}" in "${namespace}"` : `all entries in "${namespace}"`;
               return okResult("delete", {
@@ -9623,6 +9635,8 @@ export function registerTools(
                 key: key ?? undefined,
                 will_delete: {
                   state_count: info.stateCount,
+                  current_state_count: info.currentStateCount,
+                  historical_state_count: info.historicalStateCount,
                   log_count: info.logCount,
                   keys: info.keys.length > 0 ? info.keys : undefined,
                 },

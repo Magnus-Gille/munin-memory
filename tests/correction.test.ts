@@ -238,7 +238,11 @@ describe("state correction", () => {
       namespace: "projects/corrections",
       key: "deletable",
     });
-    expect((preview.will_delete as { state_count: number }).state_count).toBe(1);
+    // A key delete removes the complete correction lineage, not only the current
+    // revision surfaced by ordinary reads. The preview must disclose that scope.
+    expect((preview.will_delete as { state_count: number; current_state_count: number; historical_state_count: number }).state_count).toBe(2);
+    expect((preview.will_delete as { current_state_count: number }).current_state_count).toBe(1);
+    expect((preview.will_delete as { historical_state_count: number }).historical_state_count).toBe(1);
     const deleted = await call("memory_delete", {
       namespace: "projects/corrections",
       key: "deletable",

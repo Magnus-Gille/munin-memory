@@ -1975,7 +1975,12 @@ export function pruneRedactionLog(
 // --- Delete operations ---
 
 export interface DeleteInfo {
+  /** Total state revisions the delete will remove, including superseded history. */
   stateCount: number;
+  /** Current state entries within stateCount. */
+  currentStateCount: number;
+  /** Superseded state revisions within stateCount. */
+  historicalStateCount: number;
   logCount: number;
   keys: string[];
   /**
@@ -1998,6 +2003,18 @@ export class DeletePreviewStaleError extends Error {
   constructor(readonly current: DeleteInfo) {
     super("Delete target changed since the preview was generated.");
     this.name = "DeletePreviewStaleError";
+  }
+}
+
+/**
+ * Raised before a classified/owner-scoped preview can mint a token when its
+ * selection cuts through a correction chain. Confirming such a preview would
+ * either fail later or, worse, conceal revisions the caller cannot review.
+ */
+export class DeletePreviewPartialLineageError extends Error {
+  constructor() {
+    super("Deletion would remove only part of a correction chain; no preview token was generated.");
+    this.name = "DeletePreviewPartialLineageError";
   }
 }
 
@@ -2055,7 +2072,7 @@ function buildOwnerClause(allowGlobal: boolean, agentId: string): { clause: stri
   return { clause: " AND COALESCE(owner_principal_id, agent_id) = ?", params: [agentId] };
 }
 
-function deleteLineageForSelection(
+function assertCompleteLineageSelection(
   db: Database.Database,
   selectionSql: string,
   params: unknown[],
@@ -2066,8 +2083,16 @@ function deleteLineageForSelection(
      LIMIT 1`,
   ).get(...params, ...params);
   if (partial) {
-    throw new Error("Deletion would remove only part of a correction chain; no entries were deleted.");
+    throw new DeletePreviewPartialLineageError();
   }
+}
+
+function deleteLineageForSelection(
+  db: Database.Database,
+  selectionSql: string,
+  params: unknown[],
+): void {
+  assertCompleteLineageSelection(db, selectionSql, params);
   db.prepare(
     `DELETE FROM entry_supersessions
      WHERE predecessor_id IN (${selectionSql}) OR successor_id IN (${selectionSql})`,
@@ -2173,34 +2198,53 @@ export function previewDelete(
 
   if (key) {
     const sql = allowGlobalNamespaceDelete
-      ? `SELECT ${DELETE_TARGET_COLUMNS} FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1`
-      : `SELECT ${DELETE_TARGET_COLUMNS} FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1 AND COALESCE(owner_principal_id, agent_id) = ?`;
+      ? `SELECT ${DELETE_TARGET_COLUMNS}, is_current FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' ORDER BY id`
+      : `SELECT ${DELETE_TARGET_COLUMNS}, is_current FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND COALESCE(owner_principal_id, agent_id) = ? ORDER BY id`;
     const params = allowGlobalNamespaceDelete ? [namespace, key] : [namespace, key, agentId];
-    const entry = db.prepare(sql).get(...params) as DeleteTargetRow | undefined;
-    if (entry) hashDeleteRow(hash, entry);
+    const selectionSql = allowGlobalNamespaceDelete
+      ? "SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'"
+      : "SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND COALESCE(owner_principal_id, agent_id) = ?";
+    assertCompleteLineageSelection(db, selectionSql, params);
+    let stateCount = 0;
+    let currentStateCount = 0;
+    for (const entry of db.prepare(sql).iterate(...params) as Iterable<DeleteTargetRow & { is_current: number }>) {
+      stateCount += 1;
+      currentStateCount += entry.is_current;
+      hashDeleteRow(hash, entry);
+    }
     return {
-      stateCount: entry ? 1 : 0,
+      stateCount,
+      currentStateCount,
+      historicalStateCount: stateCount - currentStateCount,
       logCount: 0,
-      keys: entry ? [key] : [],
+      keys: currentStateCount > 0 ? [key] : [],
       fingerprint: hash.digest("hex"),
     };
   }
 
   const stateSql = allowGlobalNamespaceDelete
-    ? `SELECT key, ${DELETE_TARGET_COLUMNS} FROM entries WHERE namespace = ? AND entry_type = 'state' AND is_current = 1 ORDER BY key, id`
-    : `SELECT key, ${DELETE_TARGET_COLUMNS} FROM entries WHERE namespace = ? AND entry_type = 'state' AND is_current = 1 AND COALESCE(owner_principal_id, agent_id) = ? ORDER BY key, id`;
+    ? `SELECT key, ${DELETE_TARGET_COLUMNS}, is_current FROM entries WHERE namespace = ? AND entry_type = 'state' ORDER BY key, id`
+    : `SELECT key, ${DELETE_TARGET_COLUMNS}, is_current FROM entries WHERE namespace = ? AND entry_type = 'state' AND COALESCE(owner_principal_id, agent_id) = ? ORDER BY key, id`;
   const stateParams = allowGlobalNamespaceDelete ? [namespace] : [namespace, agentId];
 
   const logSql = allowGlobalNamespaceDelete
-    ? `SELECT ${DELETE_TARGET_COLUMNS} FROM entries WHERE namespace = ? AND entry_type = 'log' AND is_current = 1 ORDER BY id`
-    : `SELECT ${DELETE_TARGET_COLUMNS} FROM entries WHERE namespace = ? AND entry_type = 'log' AND is_current = 1 AND COALESCE(owner_principal_id, agent_id) = ? ORDER BY id`;
+    ? `SELECT ${DELETE_TARGET_COLUMNS} FROM entries WHERE namespace = ? AND entry_type = 'log' ORDER BY id`
+    : `SELECT ${DELETE_TARGET_COLUMNS} FROM entries WHERE namespace = ? AND entry_type = 'log' AND COALESCE(owner_principal_id, agent_id) = ? ORDER BY id`;
   const logParams = allowGlobalNamespaceDelete ? [namespace] : [namespace, agentId];
 
   // Streamed, not materialised: a namespace delete may cover thousands of rows
   // and the digest needs their content, which we never want to hold at once.
+  const selectionSql = allowGlobalNamespaceDelete
+    ? "SELECT id FROM entries WHERE namespace = ?"
+    : "SELECT id FROM entries WHERE namespace = ? AND COALESCE(owner_principal_id, agent_id) = ?";
+  assertCompleteLineageSelection(db, selectionSql, stateParams);
   const keys: string[] = [];
-  for (const row of db.prepare(stateSql).iterate(...stateParams) as Iterable<{ key: string } & DeleteTargetRow>) {
-    keys.push(row.key);
+  let stateCount = 0;
+  let currentStateCount = 0;
+  for (const row of db.prepare(stateSql).iterate(...stateParams) as Iterable<{ key: string; is_current: number } & DeleteTargetRow>) {
+    stateCount += 1;
+    currentStateCount += row.is_current;
+    if (row.is_current === 1) keys.push(row.key);
     hashDeleteRow(hash, row);
   }
   let logCount = 0;
@@ -2210,7 +2254,9 @@ export function previewDelete(
   }
 
   return {
-    stateCount: keys.length,
+    stateCount,
+    currentStateCount,
+    historicalStateCount: stateCount - currentStateCount,
     logCount,
     keys,
     fingerprint: hash.digest("hex"),
@@ -2231,37 +2277,44 @@ export function previewDeleteByClassification(
 
   if (key) {
     const sql = allowGlobalNamespaceDelete
-      ? `SELECT ${DELETE_TARGET_COLUMNS} FROM entries
+      ? `SELECT ${DELETE_TARGET_COLUMNS}, is_current FROM entries
          WHERE namespace = ? AND key = ? AND entry_type = 'state'
-           AND is_current = 1
-           AND classification IN (${placeholders})`
-      : `SELECT ${DELETE_TARGET_COLUMNS} FROM entries
+           AND classification IN (${placeholders}) ORDER BY id`
+      : `SELECT ${DELETE_TARGET_COLUMNS}, is_current FROM entries
          WHERE namespace = ? AND key = ? AND entry_type = 'state'
-           AND is_current = 1
            AND COALESCE(owner_principal_id, agent_id) = ?
-           AND classification IN (${placeholders})`;
+           AND classification IN (${placeholders}) ORDER BY id`;
     const params = allowGlobalNamespaceDelete
       ? [namespace, key, ...visibleLevels]
       : [namespace, key, agentId, ...visibleLevels];
-    const entry = db.prepare(sql).get(...params) as DeleteTargetRow | undefined;
-    if (entry) hashDeleteRow(hash, entry);
+    const selectionSql = allowGlobalNamespaceDelete
+      ? `SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND classification IN (${placeholders})`
+      : `SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND COALESCE(owner_principal_id, agent_id) = ? AND classification IN (${placeholders})`;
+    assertCompleteLineageSelection(db, selectionSql, params);
+    let stateCount = 0;
+    let currentStateCount = 0;
+    for (const entry of db.prepare(sql).iterate(...params) as Iterable<DeleteTargetRow & { is_current: number }>) {
+      stateCount += 1;
+      currentStateCount += entry.is_current;
+      hashDeleteRow(hash, entry);
+    }
     return {
-      stateCount: entry ? 1 : 0,
+      stateCount,
+      currentStateCount,
+      historicalStateCount: stateCount - currentStateCount,
       logCount: 0,
-      keys: entry ? [key] : [],
+      keys: currentStateCount > 0 ? [key] : [],
       fingerprint: hash.digest("hex"),
     };
   }
 
   const stateSql = allowGlobalNamespaceDelete
-    ? `SELECT key, ${DELETE_TARGET_COLUMNS} FROM entries
+    ? `SELECT key, ${DELETE_TARGET_COLUMNS}, is_current FROM entries
        WHERE namespace = ? AND entry_type = 'state'
-         AND is_current = 1
          AND classification IN (${placeholders})
        ORDER BY key, id`
-    : `SELECT key, ${DELETE_TARGET_COLUMNS} FROM entries
+    : `SELECT key, ${DELETE_TARGET_COLUMNS}, is_current FROM entries
        WHERE namespace = ? AND entry_type = 'state'
-         AND is_current = 1
          AND COALESCE(owner_principal_id, agent_id) = ?
          AND classification IN (${placeholders})
        ORDER BY key, id`;
@@ -2272,12 +2325,10 @@ export function previewDeleteByClassification(
   const logSql = allowGlobalNamespaceDelete
     ? `SELECT ${DELETE_TARGET_COLUMNS} FROM entries
        WHERE namespace = ? AND entry_type = 'log'
-         AND is_current = 1
          AND classification IN (${placeholders})
        ORDER BY id`
     : `SELECT ${DELETE_TARGET_COLUMNS} FROM entries
        WHERE namespace = ? AND entry_type = 'log'
-         AND is_current = 1
          AND COALESCE(owner_principal_id, agent_id) = ?
          AND classification IN (${placeholders})
        ORDER BY id`;
@@ -2285,9 +2336,17 @@ export function previewDeleteByClassification(
     ? [namespace, ...visibleLevels]
     : [namespace, agentId, ...visibleLevels];
 
+  const selectionSql = allowGlobalNamespaceDelete
+    ? `SELECT id FROM entries WHERE namespace = ? AND classification IN (${placeholders})`
+    : `SELECT id FROM entries WHERE namespace = ? AND COALESCE(owner_principal_id, agent_id) = ? AND classification IN (${placeholders})`;
+  assertCompleteLineageSelection(db, selectionSql, stateParams);
   const keys: string[] = [];
-  for (const row of db.prepare(stateSql).iterate(...stateParams) as Iterable<{ key: string } & DeleteTargetRow>) {
-    keys.push(row.key);
+  let stateCount = 0;
+  let currentStateCount = 0;
+  for (const row of db.prepare(stateSql).iterate(...stateParams) as Iterable<{ key: string; is_current: number } & DeleteTargetRow>) {
+    stateCount += 1;
+    currentStateCount += row.is_current;
+    if (row.is_current === 1) keys.push(row.key);
     hashDeleteRow(hash, row);
   }
   let logCount = 0;
@@ -2297,7 +2356,9 @@ export function previewDeleteByClassification(
   }
 
   return {
-    stateCount: keys.length,
+    stateCount,
+    currentStateCount,
+    historicalStateCount: stateCount - currentStateCount,
     logCount,
     keys,
     fingerprint: hash.digest("hex"),
