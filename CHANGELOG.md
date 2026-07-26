@@ -10,6 +10,24 @@ changelog is the canonical record of what moved.
 
 ### Changed
 
+- **Manual `memory_consolidate` is now a reviewed, source-grounded flow (#270).**
+  The first targeted call returns a non-persisting preview and a short-lived,
+  one-use confirmation token; only confirmation writes that exact reviewed
+  payload. The token fingerprints the whole unincorporated log window, so a
+  newer log makes confirmation stale rather than being silently consumed.
+  Preview claims must carry source-log UUIDs and be verbatim excerpts
+  of every cited log, so unsupported teams, deadlines, risks, plans, or named
+  entities are rejected instead of becoming durable synthesis. The server
+  renders source links itself and strips model-supplied lifecycle tags, so a
+  consolidation cannot assert or overwrite human-maintained status truth.
+  Manual invocations now require an eligible `projects/*` or `clients/*`
+  namespace; `testing/*` and other ephemeral/untracked roots fail closed.
+  The preview discloses model, actual duration, completion-token count, the
+  historical duration average when available, and explicitly reports when no
+  provider-pricing estimate is configured. The prior unscoped, immediate-write
+  manual invocation is intentionally retired; the background worker remains
+  separately configured and retains its existing operational behavior.
+
 - **External backup requirements now have a public-safe, versioned v1 consumer
   contract (#235).** The contract binds a stable logical near-site target,
   owner-overlay authentication boundary, capacity/write guarantees, SQLite

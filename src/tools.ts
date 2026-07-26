@@ -76,7 +76,6 @@ import {
   insertRedactionLog,
   getOtherKeysInNamespaceByClassification,
   getNamespaceEntriesForIntake,
-  getNamespacesNeedingConsolidation,
   getCrossReferences,
   countLogsIncorporated,
   getConsolidationMetadata,
@@ -158,7 +157,8 @@ import {
   getActiveEmbeddingDtype,
 } from "./embeddings.js";
 import {
-  consolidateNamespace,
+  previewConsolidationNamespace,
+  persistGroundedPreview,
   isConsolidationAvailable,
   getConsolidationBacklog,
   getConsolidationHealth,
@@ -207,7 +207,6 @@ import type {
   HandoffResponse,
   AuditAction,
   AuditEntry,
-  ConsolidationRunResult,
   CrossReference,
   RetrievalFeedbackParams,
   RetrievalAggregates,
@@ -227,6 +226,45 @@ type DeleteTokenRecord = {
 };
 const deleteTokens = new Map<string, DeleteTokenRecord>();
 const DELETE_TOKEN_TTL_MS = 60_000; // 1 minute
+
+// Manual consolidation is deliberately a two-step, in-process review flow.
+// A token stores the exact grounded preview, never an instruction supplied by a
+// log. Restarting invalidates it safely; callers simply preview again.
+const consolidationPreviewTokens = new Map<string, {
+  namespace: string;
+  preview: import("./types.js").SynthesisResult;
+  tokenCount: number | null;
+  durationMs: number;
+  sourceFingerprint: string;
+  expiresAt: number;
+}>();
+const CONSOLIDATION_PREVIEW_TTL_MS = 10 * 60_000;
+const MAX_CONSOLIDATION_PREVIEW_TOKENS = 100;
+
+function pruneConsolidationPreviewTokens(now = Date.now()): void {
+  for (const [token, preview] of consolidationPreviewTokens) {
+    if (preview.expiresAt < now) consolidationPreviewTokens.delete(token);
+  }
+}
+
+/** Test-only bounded token fixture; never used by the runtime protocol. */
+export function _setConsolidationPreviewTokenCountForTesting(count: number): void {
+  consolidationPreviewTokens.clear();
+  for (let index = 0; index < count; index++) {
+    consolidationPreviewTokens.set(`test-preview-${index}`, {
+      namespace: "projects/test",
+      preview: { status_content: "test", tags: [], cross_references: [], claims: [{ text: "test", source_log_ids: ["test"] }] },
+      tokenCount: null,
+      durationMs: 0,
+      sourceFingerprint: "test",
+      expiresAt: Date.now() + CONSOLIDATION_PREVIEW_TTL_MS,
+    });
+  }
+}
+
+function isManualConsolidationEligibleNamespace(namespace: string): boolean {
+  return namespace.startsWith("projects/") || namespace.startsWith("clients/");
+}
 
 function generateDeleteToken(namespace: string, info: DeleteInfo, key?: string): string {
   const token = randomBytes(16).toString("hex");
@@ -5606,17 +5644,23 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_consolidate",
     description:
-      "Manually trigger memory consolidation for a specific namespace or all eligible tracked namespaces. Consolidation synthesizes unincorporated log entries into an enriched 'synthesis' status summary using an LLM, and extracts cross-namespace references. The background worker runs automatically when enabled, but this tool allows on-demand consolidation. Owner-only.",
+      "Preview a source-grounded consolidation for an eligible tracked namespace, then confirm its exact preview token to persist it. Manual calls never write on the first call. Every persisted claim is a verbatim excerpt linked to source log UUIDs; testing/ephemeral namespaces are rejected. Owner-only.",
     inputSchema: {
       type: "object" as const,
       properties: {
         namespace: {
           type: "string",
           description:
-            "Optional. Consolidate a specific namespace (e.g. 'projects/hugin'). If omitted, consolidates all eligible tracked namespaces (those with enough unincorporated log entries).",
+            "Required for manual preview. Must be an eligible tracked namespace such as 'projects/hugin' or 'clients/acme'.",
+        },
+        confirm_token: {
+          type: "string",
+          minLength: 1,
+          description: "Token returned by a reviewed preview. Supplying it persists that exact preview once; tokens expire after 10 minutes and are invalid after restart.",
         },
       },
-      required: [],
+      required: ["namespace"],
+      additionalProperties: false,
     },
   },
   {
@@ -10073,52 +10117,68 @@ export function registerTools(
                   "Consolidation is not available. Ensure the feature is enabled and an API key is configured.");
               }
 
-              const { namespace: consolidateNs } = (args ?? {}) as { namespace?: string };
+              if (!args || typeof args !== "object" || Array.isArray(args) ||
+                  Object.keys(args as Record<string, unknown>).some((key) => key !== "namespace" && key !== "confirm_token")) {
+                return errResult("consolidate", "validation_error", "only namespace and confirm_token are accepted");
+              }
 
-              if (consolidateNs) {
-                const nsCheck = validateWriteNamespace(consolidateNs);
-                if (!nsCheck.valid) {
-                  return errResult("consolidate", "validation_error", nsCheck.error!);
+              const { namespace: consolidateNs, confirm_token: confirmToken } = (args ?? {}) as {
+                namespace?: string; confirm_token?: string;
+              };
+              if (typeof consolidateNs !== "string" || consolidateNs.length === 0) {
+                return errResult("consolidate", "validation_error", "namespace is required for the safe manual preview flow");
+              }
+              if (confirmToken !== undefined && typeof confirmToken !== "string") {
+                return errResult("consolidate", "validation_error", "confirm_token must be a string");
+              }
+              if (confirmToken === "") {
+                return errResult("consolidate", "validation_error", "confirm_token must not be empty");
+              }
+              const nsCheck = validateWriteNamespace(consolidateNs);
+              if (!nsCheck.valid) return errResult("consolidate", "validation_error", nsCheck.error!);
+              if (!isManualConsolidationEligibleNamespace(consolidateNs)) {
+                return errResult("consolidate", "ineligible_namespace",
+                  "Manual consolidation is limited to tracked projects/* and clients/* namespaces; testing and ephemeral namespaces fail closed.");
+              }
+
+              if (confirmToken !== undefined) {
+                pruneConsolidationPreviewTokens();
+                const pending = consolidationPreviewTokens.get(confirmToken);
+                consolidationPreviewTokens.delete(confirmToken); // one-shot even on rejection
+                if (!pending || pending.expiresAt < Date.now() || pending.namespace !== consolidateNs) {
+                  return errResult("consolidate", "invalid_preview_token", "Preview token is invalid, expired, or for a different namespace. Preview again.");
                 }
-
-                const result = await consolidateNamespace(db, consolidateNs, undefined, ctx);
-                if (result.error) {
-                  return errResult("consolidate", "synthesis_error", result.error);
-                }
-                return okResult("consolidate", {
-                  status: "completed",
-                  results: [result],
-                });
+                const result = persistGroundedPreview(db, consolidateNs, pending.preview, pending.tokenCount, pending.durationMs, pending.sourceFingerprint, ctx);
+                if (result.error) return errResult("consolidate", "preview_stale", result.error);
+                return okResult("consolidate", { status: "persisted", result });
               }
 
-              const candidates = getNamespacesNeedingConsolidation(db);
-              if (candidates.length === 0) {
-                return okResult("consolidate", {
-                  status: "no_candidates",
-                  message: "No namespaces have enough unincorporated logs to consolidate.",
-                  results: [],
-                });
+              pruneConsolidationPreviewTokens();
+              if (consolidationPreviewTokens.size >= MAX_CONSOLIDATION_PREVIEW_TOKENS) {
+                return errResult("consolidate", "preview_capacity", "Too many active consolidation previews; wait for expiry before creating another.");
               }
-
-              const consolidateResults: ConsolidationRunResult[] = [];
-              for (const candidate of candidates) {
-                const result = await consolidateNamespace(db, candidate.namespace, undefined, ctx);
-                consolidateResults.push(result);
-              }
-
-              const succeeded = consolidateResults.filter((r) => !r.error).length;
-              const failed = consolidateResults.filter((r) => r.error).length;
-
+              const result = await previewConsolidationNamespace(db, consolidateNs, undefined, ctx);
+              if (result.error) return errResult("consolidate", "synthesis_error", result.error);
+              if (!result.preview) return okResult("consolidate", { status: "no_candidates", result });
+              const previewToken = randomBytes(16).toString("hex");
+              consolidationPreviewTokens.set(previewToken, {
+                namespace: consolidateNs, preview: result.preview, tokenCount: result.token_count,
+                durationMs: result.duration_ms, sourceFingerprint: result.source_fingerprint!, expiresAt: Date.now() + CONSOLIDATION_PREVIEW_TTL_MS,
+              });
               return okResult("consolidate", {
-                status: failed === 0 ? "completed" : "partial",
-                summary: {
-                  candidates: candidates.length,
-                  succeeded,
-                  failed,
-                  total_logs_processed: consolidateResults.reduce((sum, r) => sum + r.logs_processed, 0),
-                  total_cross_references: consolidateResults.reduce((sum, r) => sum + r.cross_references_found, 0),
+                status: "preview",
+                preview_token: previewToken,
+                expires_in_ms: CONSOLIDATION_PREVIEW_TTL_MS,
+                result,
+                disclosure: {
+                  model: result.synthesis_model,
+                  actual_duration_ms: result.duration_ms,
+                  completion_tokens: result.token_count,
+                  provider_reported_cost_usd: result.provider_cost_usd ?? null,
+                  estimated_cost_usd: null,
+                  estimated_cost_note: "Provider pricing is not configured in this server; no pre-call cost estimate is available.",
+                  historical_avg_duration_ms: getAvgConsolidationLatencyMs(db, true),
                 },
-                results: consolidateResults,
               });
             };
             return handleMemoryConsolidate();
