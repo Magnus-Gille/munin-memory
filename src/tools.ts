@@ -1153,7 +1153,7 @@ function normalizeStatusLabel(raw: string): keyof StructuredStatus | null {
 }
 
 function extractStatusSectionValue(key: keyof StructuredStatus, raw: string): string | string[] | undefined {
-  const trimmed = raw.trim();
+  const trimmed = raw.trim().replace(/^\\##(?=\s)/gm, "##");
   if (!trimmed) return undefined;
   if (key === "next_steps") {
     const bulletItems = trimmed
@@ -1166,6 +1166,46 @@ function extractStatusSectionValue(key: keyof StructuredStatus, raw: string): st
     return [trimmed];
   }
   return trimmed;
+}
+
+function escapeNestedStatusHeadings(value: string): string {
+  // Canonical status sections are delimited by level-two headings. Preserve a
+  // heading supplied as field content literally, rather than letting it become
+  // a second top-level section when this status is parsed on its next update.
+  return value.replace(/^##(?=\s)/gm, "\\##");
+}
+
+function findDuplicateStatusExtraTitles(status: StructuredStatus): string[] {
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  for (const extra of status.extras ?? []) {
+    const normalizedTitle = extra.title.trim().toLowerCase();
+    if (seen.has(normalizedTitle)) duplicates.add(extra.title);
+    seen.add(normalizedTitle);
+  }
+  return [...duplicates].sort();
+}
+
+function reconcileTrackedStatusLifecycle(
+  isTrackedStatus: boolean,
+  requestedTags: string[] | undefined,
+  effectiveTags: string[],
+  existingTags: string[],
+): { tags: string[]; error?: string } {
+  if (!isTrackedStatus) return { tags: effectiveTags };
+
+  const existingLifecycleTags = getLifecycleTags(existingTags);
+  const requestedLifecycleTags = getLifecycleTags(effectiveTags);
+  if (requestedTags !== undefined && requestedTags.length === 0 && existingLifecycleTags.length > 0) {
+    return {
+      tags: effectiveTags,
+      error: "A full write of an existing tracked status cannot remove its lifecycle with tags: []. Supply one lifecycle tag to change it, or omit lifecycle tags to preserve the existing lifecycle.",
+    };
+  }
+  if (requestedLifecycleTags.length === 0 && existingLifecycleTags.length === 1) {
+    return { tags: [...effectiveTags, existingLifecycleTags[0]] };
+  }
+  return { tags: effectiveTags };
 }
 
 function assignStructuredStatusValue(
@@ -1299,9 +1339,9 @@ function formatStructuredStatus(status: BuiltStructuredStatus): string {
     if (key === "notes" && !value) continue;
     sections.push(`## ${title}`);
     if (key === "next_steps") {
-      sections.push((value as string[]).map((item) => `- ${item}`).join("\n"));
+      sections.push((value as string[]).map((item) => `- ${escapeNestedStatusHeadings(item)}`).join("\n"));
     } else {
-      sections.push(value as string);
+      sections.push(escapeNestedStatusHeadings(value as string));
     }
     sections.push("");
   }
@@ -2882,6 +2922,16 @@ function prepareReviewStatus(
   const existingStructured = existingParsed
     ? parseStructuredStatus(existingParsed.content)
     : undefined;
+  const duplicateExtraTitles = existingStructured
+    ? findDuplicateStatusExtraTitles(existingStructured)
+    : [];
+  if (duplicateExtraTitles.length > 0) {
+    return {
+      ok: false,
+      code: "validation_error",
+      error: `Existing status has duplicate non-canonical section headings (${duplicateExtraTitles.join(", ")}), so it cannot be updated safely. Rename or consolidate those headings with memory_write before using memory_update_status.`,
+    };
+  }
   const hasRequestedStatusUpdate = [
     patch.phase,
     patch.current_work,
@@ -4957,7 +5007,7 @@ const TOOL_DEFINITIONS = [
     name: "memory_write",
     description:
       "Successful full writes return a local, bounded, authorization-filtered advisory `intake` report for duplicate keys, overlap/consolidation candidates, sparse content, tag drift, and deep namespaces. Intake never blocks the write.\n\n" +
-      "Store or update a state entry in memory. If an entry with the same namespace+key exists, it will be overwritten. Use this for mutable facts and non-tracked state. For `status` entries under `projects/*` or `clients/*`, prefer `memory_update_status`. Optional `valid_until` adds soft expiry for temporary state; direct reads still work after expiry, but broad search hides expired state by default. To preserve a wrong or outdated value as historical evidence, pass its UUID in `supersedes` together with its exact `expected_updated_at`; Munin creates a new revision and normal retrieval hides the predecessor.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.\n\nNamespace conventions: projects/<name> for project state, people/<name> for context about people, decisions/<topic> for cross-cutting decisions, meta/<topic> for system notes.\n\nKey conventions: 'status' = compact resumption summary (Phase / Current work / Blockers / Next — keep brief, move details to other keys like 'architecture', 'workflow', 'research'). 'index' = directory of important keys in this namespace and their purpose.\n\nTag vocabulary: Use canonical lifecycle tags on status entries: active, blocked, completed, stopped, maintenance, archived. Aliases are auto-normalized (done→completed, paused→stopped, inactive→archived). Category tags: decision, architecture, preference, milestone, convention. Type tags: bug, feature, research. Prefixed tags for cross-referencing: client:<name>, person:<name>, topic:<topic>, type:<artifact> (pdf, presentation, meeting-notes), source:external/internal.\n\nThe project dashboard is computed automatically from status entries with lifecycle tags. No manual workbench maintenance needed. Compare-and-swap via expected_updated_at is OPTIONAL and supported for any state write (all namespaces), not only 'status' in projects/* or clients/*; omit it for a plain write — only pass it when you want the write to fail if the entry changed since your last read. For an atomic first write, pass create_if_absent:true instead: exactly one competing writer creates the key, while losers receive error:'conflict', conflict_reason:'already_exists', and current_updated_at. Do not combine create_if_absent:true with expected_updated_at or patch.\n\nTo start a new project: (1) write projects/<name>/status with a lifecycle tag (e.g. 'active'), (2) optionally write projects/<name>/index listing the keys.",
+      "Store or update a state entry in memory. If an entry with the same namespace+key exists, it will be overwritten. Use this for mutable facts and non-tracked state. For `status` entries under `projects/*` or `clients/*`, prefer `memory_update_status`. A full write of an existing tracked status preserves its lifecycle if you omit lifecycle tags; supply one lifecycle tag to change it. `tags: []` cannot remove an existing tracked lifecycle. Optional `valid_until` adds soft expiry for temporary state; direct reads still work after expiry, but broad search hides expired state by default. To preserve a wrong or outdated value as historical evidence, pass its UUID in `supersedes` together with its exact `expected_updated_at`; Munin creates a new revision and normal retrieval hides the predecessor.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.\n\nNamespace conventions: projects/<name> for project state, people/<name> for context about people, decisions/<topic> for cross-cutting decisions, meta/<topic> for system notes.\n\nKey conventions: 'status' = compact resumption summary (Phase / Current work / Blockers / Next — keep brief, move details to other keys like 'architecture', 'workflow', 'research'). 'index' = directory of important keys in this namespace and their purpose.\n\nTag vocabulary: Use canonical lifecycle tags on status entries: active, blocked, completed, stopped, maintenance, archived. Aliases are auto-normalized (done→completed, paused→stopped, inactive→archived). Category tags: decision, architecture, preference, milestone, convention. Type tags: bug, feature, research. Prefixed tags for cross-referencing: client:<name>, person:<name>, topic:<topic>, type:<artifact> (pdf, presentation, meeting-notes), source:external/internal.\n\nThe project dashboard is computed automatically from status entries with lifecycle tags. No manual workbench maintenance needed. Compare-and-swap via expected_updated_at is OPTIONAL and supported for any state write (all namespaces), not only 'status' in projects/* or clients/*; omit it for a plain write — only pass it when you want the write to fail if the entry changed since your last read. For an atomic first write, pass create_if_absent:true instead: exactly one competing writer creates the key, while losers receive error:'conflict', conflict_reason:'already_exists', and current_updated_at. Do not combine create_if_absent:true with expected_updated_at or patch.\n\nTo start a new project: (1) write projects/<name>/status with a lifecycle tag (e.g. 'active'), (2) optionally write projects/<name>/index listing the keys.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -7889,6 +7939,7 @@ export function registerTools(
           }
 
           case "memory_write": {
+            // eslint-disable-next-line complexity -- one handler intentionally validates the mutually-exclusive full-write, patch, correction, and tracked-status paths before mutation.
             const handleMemoryWrite = async () => {
               const {
                 namespace,
@@ -8083,6 +8134,7 @@ export function registerTools(
               const correctionTarget = correction.target;
 
               const isTrackedStatus = key === "status" && isTrackedNamespace(namespace, resolveTrackedPatterns(db, ctx));
+              const existing = readState(db, namespace, key);
 
               // #167: memory_write is a documented migration path for tracked
               // status entries, so apply the same parameter-markup guard here —
@@ -8124,6 +8176,20 @@ export function registerTools(
                 effectiveTags = canonical;
               }
 
+              // A full write normally replaces tags. For an already tracked
+              // status, omission preserves one lifecycle; an explicit tag
+              // changes it, and tags: [] is rejected as removal.
+              const lifecycleResolution = reconcileTrackedStatusLifecycle(
+                isTrackedStatus,
+                tags,
+                effectiveTags,
+                existing ? parseTags(existing.tags) : [],
+              );
+              if (lifecycleResolution.error) {
+                return errResult("write", "validation_error", lifecycleResolution.error, { namespace, key });
+              }
+              effectiveTags = lifecycleResolution.tags;
+
               // Lifecycle validation for tracked status writes
               if (isTrackedStatus) {
                 const lifecycleTags = getLifecycleTags(effectiveTags);
@@ -8136,7 +8202,6 @@ export function registerTools(
 
               // Pre-flight: reject writes that would create Librarian-orphaned entries
               {
-                const existing = readState(db, namespace, key);
                 const orphanError = preflightWriteClassification(
                   db, ctx, namespace, effectiveTags,
                   classification, classification_override,
@@ -8340,6 +8405,17 @@ export function registerTools(
               const existing = readState(db, namespace, "status");
               const existingParsed = existing ? parseEntry(existing) : null;
               const existingStructured = existingParsed ? parseStructuredStatus(existingParsed.content) : undefined;
+              const duplicateExtraTitles = existingStructured
+                ? findDuplicateStatusExtraTitles(existingStructured)
+                : [];
+              if (duplicateExtraTitles.length > 0) {
+                return errResult(
+                  "update_status",
+                  "validation_error",
+                  `Existing status has duplicate non-canonical section headings (${duplicateExtraTitles.join(", ")}), so it cannot be updated safely. Rename or consolidate those headings with memory_write before using memory_update_status.`,
+                  { namespace, key: "status", duplicate_extra_sections: duplicateExtraTitles },
+                );
+              }
               // Canonical-only: an entry whose content parses into ONLY
               // non-canonical `extras` (e.g. a legacy `## Context` heading) has
               // no canonical sections to preserve, so a partial update would

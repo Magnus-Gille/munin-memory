@@ -609,6 +609,77 @@ describe("memory_update_status", () => {
     expect(entry2.content).toContain("Waiting on PR review.");
   });
 
+  it("keeps extra sections unique when notes contain a rendered status (#280)", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/status-roundtrip",
+      key: "status",
+      content: [
+        "## Phase",
+        "Active",
+        "",
+        "## Current Work",
+        "Keep status rendering stable.",
+        "",
+        "## Extra Context",
+        "This heading must remain a single preserved extra.",
+      ].join("\n"),
+      tags: ["active"],
+    });
+
+    const seed = parseToolResponse(await callTool("memory_read", {
+      namespace: "projects/status-roundtrip",
+      key: "status",
+    })) as { content: string };
+
+    const first = parseToolResponse(await callTool("memory_update_status", {
+      namespace: "projects/status-roundtrip",
+      notes: seed.content,
+    })) as { content: string; structured_status: { extras?: Array<{ title: string; body: string }> } };
+    const second = parseToolResponse(await callTool("memory_update_status", {
+      namespace: "projects/status-roundtrip",
+      notes: seed.content,
+    })) as { content: string; structured_status: { extras?: Array<{ title: string; body: string }> } };
+
+    expect(second.content).toBe(first.content);
+    expect(second.structured_status).toEqual(first.structured_status);
+    expect(second.structured_status.extras).toEqual([
+      { title: "Extra Context", body: "This heading must remain a single preserved extra." },
+    ]);
+    expect((second.content.match(/^## Extra Context$/gm) ?? [])).toHaveLength(1);
+  });
+
+  it("rejects ambiguous duplicate extra headings before changing a status (#280)", async () => {
+    const originalContent = [
+      "## Phase",
+      "Active",
+      "",
+      "## Context",
+      "First interpretation.",
+      "",
+      "## Context",
+      "Second interpretation.",
+    ].join("\n");
+    await callTool("memory_write", {
+      namespace: "projects/status-duplicate-extra",
+      key: "status",
+      content: originalContent,
+      tags: ["active"],
+    });
+
+    const rejected = parseToolResponse(await callTool("memory_update_status", {
+      namespace: "projects/status-duplicate-extra",
+      blockers: "None.",
+    })) as { ok: boolean; error: string; message: string };
+    expect(rejected).toMatchObject({ ok: false, error: "validation_error" });
+    expect(rejected.message).toContain("duplicate non-canonical section headings");
+
+    const read = parseToolResponse(await callTool("memory_read", {
+      namespace: "projects/status-duplicate-extra",
+      key: "status",
+    })) as { content: string };
+    expect(read.content).toBe(originalContent);
+  });
+
   it("rejects string fields polluted with tool-call parameter markup (#167)", async () => {
     // Reproduces the transport artifact where a string field absorbs a trailing
     // `</parameter><parameter name="...">value` block from the following param.
@@ -6524,6 +6595,88 @@ describe("tag canonicalization (memory_write)", () => {
 });
 
 describe("lifecycle validation (memory_write)", () => {
+  it("allows a new tracked status without a lifecycle but warns that it is untracked", async () => {
+    const result = parseToolResponse(await callTool("memory_write", {
+      namespace: "projects/lifecycle-new",
+      key: "status",
+      content: "New status without a lifecycle.",
+    })) as { status: string; warnings?: string[] };
+
+    expect(result.status).toBe("created");
+    expect(result.warnings).toContainEqual(expect.stringContaining("No lifecycle tag"));
+  });
+
+  it("preserves an existing tracked status lifecycle when a full write omits it (#280)", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/lifecycle-preserve",
+      key: "status",
+      content: "Initial tracked status.",
+      tags: ["active", "feature"],
+    });
+
+    const updated = parseToolResponse(await callTool("memory_write", {
+      namespace: "projects/lifecycle-preserve",
+      key: "status",
+      content: "Replacement content without a lifecycle tag.",
+      tags: ["feature"],
+    })) as { status: string };
+    expect(updated.status).toBe("updated");
+
+    const read = parseToolResponse(await callTool("memory_read", {
+      namespace: "projects/lifecycle-preserve",
+      key: "status",
+    })) as { tags: string[] };
+    expect(read.tags).toEqual(expect.arrayContaining(["active", "feature"]));
+  });
+
+  it("uses an explicit lifecycle tag to replace the existing lifecycle", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/lifecycle-change",
+      key: "status",
+      content: "Active status.",
+      tags: ["active"],
+    });
+
+    await callTool("memory_write", {
+      namespace: "projects/lifecycle-change",
+      key: "status",
+      content: "Completed status.",
+      tags: ["completed"],
+    });
+
+    const read = parseToolResponse(await callTool("memory_read", {
+      namespace: "projects/lifecycle-change",
+      key: "status",
+    })) as { tags: string[] };
+    expect(read.tags).toContain("completed");
+    expect(read.tags).not.toContain("active");
+  });
+
+  it("rejects an explicit empty tag list that would remove a tracked status lifecycle", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/lifecycle-removal",
+      key: "status",
+      content: "Active status.",
+      tags: ["active"],
+    });
+
+    const rejected = parseToolResponse(await callTool("memory_write", {
+      namespace: "projects/lifecycle-removal",
+      key: "status",
+      content: "Attempted lifecycle removal.",
+      tags: [],
+    })) as { ok: boolean; error: string; message: string };
+    expect(rejected).toMatchObject({ ok: false, error: "validation_error" });
+    expect(rejected.message).toContain("cannot remove its lifecycle");
+
+    const read = parseToolResponse(await callTool("memory_read", {
+      namespace: "projects/lifecycle-removal",
+      key: "status",
+    })) as { content: string; tags: string[] };
+    expect(read.content).toBe("Active status.");
+    expect(read.tags).toContain("active");
+  });
+
   it("warns when no lifecycle tag", async () => {
     const raw = await callTool("memory_write", {
       namespace: "projects/lc",
