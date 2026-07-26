@@ -54,9 +54,11 @@ describe("systemd deployment-unit contract", () => {
     expect(existsSync(fleetUnitPath)).toBe(true);
     const fleetUnit = readFileSync(fleetUnitPath, "utf8");
     expect(fleetUnit).not.toMatch(/^[^#;\n]*<[A-Za-z][A-Za-z0-9_-]*>/m);
-    expect(fleetUnit).toContain("WorkingDirectory=/srv/grimnir/munin-memory");
-    expect(fleetUnit).toContain("ReadWritePaths=/var/lib/grimnir/munin-memory");
-    expect(fleetUnit).not.toMatch(/\/home\/[a-z0-9._-]+\//i);
+    expect(fleetUnit).toContain("WorkingDirectory=/home/grimnir/munin-memory");
+    expect(fleetUnit).toContain("Environment=MUNIN_MEMORY_DB_PATH=/home/grimnir/.munin-memory/memory.db");
+    expect(fleetUnit).toContain("EnvironmentFile=/home/grimnir/munin-memory/.env");
+    expect(fleetUnit).toContain("ReadWritePaths=/home/grimnir/.munin-memory");
+    expect(fleetUnit).not.toContain("/srv/grimnir/");
   });
 
   it("enforces the shared hardening directives on both the template and the fleet unit", () => {
@@ -130,9 +132,10 @@ describe("systemd deployment-unit contract", () => {
   });
 
   it("allows only the declared fleet/template divergences", () => {
-    // Replaces the old exact line-equality check, which the intentional
-    // /srv/grimnir relocation broke. Any divergence NOT listed here — including a
-    // silently dropped hardening directive — fails the contract.
+    // The install-ready fleet unit deliberately binds the registered `grimnir`
+    // service identity to its current /home deployment layout. Any divergence
+    // NOT listed here — including a silently dropped hardening directive or a
+    // reintroduced /srv path — fails the contract.
     const fleetUnit = readFileSync(fleetUnitPath, "utf8");
     const fleetSet = new Set(activeLines(fleetUnit));
     const templateSet = new Set(activeLines(publicTemplate));
@@ -143,11 +146,10 @@ describe("systemd deployment-unit contract", () => {
     expect(fleetOnly).toEqual(
       [
         "User=grimnir",
-        "WorkingDirectory=/srv/grimnir/munin-memory",
-        "Environment=MUNIN_MEMORY_DB_PATH=/var/lib/grimnir/munin-memory/memory.db",
-        "EnvironmentFile=/srv/grimnir/munin-memory/.env",
-        "ProtectHome=true",
-        "ReadWritePaths=/var/lib/grimnir/munin-memory",
+        "WorkingDirectory=/home/grimnir/munin-memory",
+        "Environment=MUNIN_MEMORY_DB_PATH=/home/grimnir/.munin-memory/memory.db",
+        "EnvironmentFile=/home/grimnir/munin-memory/.env",
+        "ReadWritePaths=/home/grimnir/.munin-memory",
       ].sort(),
     );
     expect(templateOnly).toEqual(
@@ -155,7 +157,6 @@ describe("systemd deployment-unit contract", () => {
         "User=<user>",
         "WorkingDirectory=/home/<user>/<install-dir>",
         "EnvironmentFile=/home/<user>/<install-dir>/.env",
-        "ProtectHome=read-only",
         "ReadWritePaths=/home/<user>/.munin-memory",
       ].sort(),
     );
