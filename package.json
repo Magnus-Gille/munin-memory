@@ -83,9 +83,10 @@
     "body-parser": "^2.3.0",
     "fast-uri": "^3.1.4",
     "hono": "^4.12.25",
-    "@hono/node-server": "^1.19.13",
+    "@hono/node-server": "^2.0.5",
     "protobufjs": "^7.6.5",
-    "form-data": "^4.0.6"
+    "form-data": "^4.0.6",
+    "sharp": "^0.35.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
