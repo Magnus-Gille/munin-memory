@@ -921,6 +921,15 @@ export interface ConsolidationCandidate {
 export interface SynthesisResult {
   status_content: string;
   tags: string[];
+  /**
+   * Optional structured evidence emitted for a manual strict-grounding preview.
+   * `text` must be a verbatim excerpt from each cited log; this is deliberately
+   * extractive, so a model cannot promote an unsupported paraphrase into memory.
+   */
+  claims?: Array<{
+    text: string;
+    source_log_ids: string[];
+  }>;
   cross_references: Array<{
     target_namespace: string;
     reference_type: CrossReferenceType;
@@ -934,9 +943,14 @@ export interface ConsolidationRunResult {
   logs_processed: number;
   synthesis_model: string;
   token_count: number | null;
+  provider_cost_usd?: number | null;
   duration_ms: number;
   cross_references_found: number;
   orphans_discovered: number;
+  /** Present only for a non-persisting, manually reviewed consolidation. */
+  preview?: SynthesisResult;
+  /** SHA-256 binding the reviewed preview to its exact unincorporated log window. */
+  source_fingerprint?: string;
   error?: string;
 }
 
