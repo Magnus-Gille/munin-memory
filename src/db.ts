@@ -1400,6 +1400,107 @@ export interface DerivedCommitmentInput {
   confidence: number;
 }
 
+/** Minimum token overlap for two commitment texts to count as the same work. */
+const COMMITMENT_REVISION_SIMILARITY = 0.5;
+
+/** Tokens for similarity comparison: words of 3+ chars, deduplicated. */
+function commitmentTokens(text: string): Set<string> {
+  return new Set(
+    text.toLowerCase().match(/[a-z0-9#][a-z0-9#_-]{2,}/g) ?? [],
+  );
+}
+
+/** Issue-style references (`#248`) are a stable identity across rewording. */
+function issueReferences(text: string): Set<string> {
+  return new Set(text.match(/#\d+/g) ?? []);
+}
+
+function equalSets(a: Set<string>, b: Set<string>): boolean {
+  return a.size === b.size && [...a].every((value) => b.has(value));
+}
+
+function jaccard(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let shared = 0;
+  for (const token of a) if (b.has(token)) shared += 1;
+  return shared / (a.size + b.size - shared);
+}
+
+/**
+ * Pair commitments that vanished from a source with newly derived ones that are
+ * the *same work item reworded*.
+ *
+ * A commitment's fingerprint is its normalized text, so editing a next step —
+ * fixing a typo, appending an issue number — changes its identity. Without this
+ * pairing the old row is resolved `done` (with `resolved_at`) while the reworded
+ * successor is inserted `open`, so `memory_commitments` reports one live item as
+ * both open and completed in a single response, and a rewording silently reads
+ * as delivery. We only carry identity over when the texts have meaningful token
+ * overlap. Issue references constrain that match: distinct non-empty reference
+ * sets are different work, even if the prose overlaps. Ambiguous candidates are
+ * left unpaired rather than guessing, while a step that truly disappears still
+ * resolves.
+ *
+ * Exported for tests.
+ */
+export function pairRevisedCommitments(
+  orphans: Array<{ id: string; source_type: string; text: string }>,
+  fresh: DerivedCommitmentInput[],
+): Map<string, DerivedCommitmentInput> {
+  const pairs = new Map<string, DerivedCommitmentInput>();
+  const claimed = new Set<string>();
+
+  const scored: Array<{ score: number; orphanId: string; commitment: DerivedCommitmentInput }> = [];
+  for (const orphan of orphans) {
+    const orphanTokens = commitmentTokens(orphan.text);
+    const orphanIssues = issueReferences(orphan.text);
+    for (const commitment of fresh) {
+      // Never merge across derivation kinds: a tracked next step and an ad-hoc
+      // dated commitment are different objects even when worded alike.
+      if (commitment.sourceType !== orphan.source_type) continue;
+      const freshIssues = issueReferences(commitment.text);
+      // An issue reference is useful negative evidence, not a shortcut to
+      // identity: multiple sequential tasks can legitimately share one issue.
+      // If both sides name issue references, their sets must agree exactly.
+      if (orphanIssues.size > 0 && freshIssues.size > 0 && !equalSets(orphanIssues, freshIssues)) continue;
+      const score = jaccard(orphanTokens, commitmentTokens(commitment.text));
+      if (score < COMMITMENT_REVISION_SIMILARITY) continue;
+      scored.push({ score, orphanId: orphan.id, commitment });
+    }
+  }
+
+  // Only carry identity through an unambiguous best match on both sides. A
+  // deterministic but arbitrary tie would silently merge distinct next steps.
+  const bestByOrphan = new Map<string, { score: number; count: number }>();
+  const bestByFresh = new Map<string, { score: number; count: number }>();
+  for (const candidate of scored) {
+    for (const [key, scores] of [[candidate.orphanId, bestByOrphan], [candidate.commitment.fingerprint, bestByFresh]] as const) {
+      const current = scores.get(key);
+      if (!current || candidate.score > current.score) {
+        scores.set(key, { score: candidate.score, count: 1 });
+      } else if (candidate.score === current.score) {
+        current.count += 1;
+      }
+    }
+  }
+
+  scored.sort((a, b) => b.score - a.score);
+  for (const candidate of scored) {
+    const orphanBest = bestByOrphan.get(candidate.orphanId);
+    const freshBest = bestByFresh.get(candidate.commitment.fingerprint);
+    if (
+      !orphanBest || !freshBest
+      || orphanBest.score !== candidate.score || orphanBest.count !== 1
+      || freshBest.score !== candidate.score || freshBest.count !== 1
+    ) continue;
+    if (pairs.has(candidate.orphanId)) continue;
+    if (claimed.has(candidate.commitment.fingerprint)) continue;
+    pairs.set(candidate.orphanId, candidate.commitment);
+    claimed.add(candidate.commitment.fingerprint);
+  }
+  return pairs;
+}
+
 export function computeCommitmentConfidence(
   sourceType: string,
   semanticRevisionAt: string,
@@ -1537,6 +1638,24 @@ export function syncCommitmentsForEntry(
      SET status = ?, updated_at = ?, resolved_at = COALESCE(resolved_at, ?)
      WHERE id = ? AND status = 'open'`,
   );
+  // A rewording carries the row's identity forward: same id and created_at,
+  // new fingerprint/text, and a refreshed semantic-revision timestamp.
+  const reviseCommitment = db.prepare(
+    `UPDATE commitments
+     SET namespace = ?, source_fingerprint = ?, text = ?, due_at = ?, confidence = ?,
+         status = 'open', updated_at = ?, resolved_at = NULL, source_classification = ?
+     WHERE id = ?`,
+  );
+
+  // Pair vanished commitments with newly derived ones that are the same work
+  // reworded, so an edit is a revision rather than a completion plus an insert.
+  const revisionPairs = pairRevisedCommitments(
+    existingRows.filter(
+      (row) => row.status === "open" && !nextFingerprints.has(row.source_fingerprint),
+    ),
+    derivedCommitments.filter((commitment) => !existingByFingerprint.has(commitment.fingerprint)),
+  );
+  const revisedFingerprints = new Set([...revisionPairs.values()].map((c) => c.fingerprint));
 
   const txn = db.transaction(() => {
     if (sourceClassification === "client-restricted") {
@@ -1592,6 +1711,10 @@ export function syncCommitmentsForEntry(
         continue;
       }
 
+      // Reworded successors are applied through the revision pass below, which
+      // keeps the original row's id and created_at instead of inserting a twin.
+      if (revisedFingerprints.has(commitment.fingerprint)) continue;
+
       insertCommitment.run(
         randomUUID(),
         source.namespace,
@@ -1607,8 +1730,22 @@ export function syncCommitmentsForEntry(
       );
     }
 
+    for (const [orphanId, commitment] of revisionPairs) {
+      reviseCommitment.run(
+        source.namespace,
+        commitment.fingerprint,
+        commitment.text,
+        commitment.dueAt ?? null,
+        commitment.confidence,
+        now,
+        sourceClassification,
+        orphanId,
+      );
+    }
+
     for (const existing of existingRows) {
       if (nextFingerprints.has(existing.source_fingerprint)) continue;
+      if (revisionPairs.has(existing.id)) continue;
       const resolvedStatus: CommitmentStatus = existing.source_type === "tracked_next_step"
         ? "done"
         : "cancelled";
