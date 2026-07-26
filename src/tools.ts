@@ -1669,6 +1669,24 @@ function validateNonNegativeInteger(value: unknown, fieldName: string, defaultVa
   return { ok: true, value };
 }
 
+function validateOptionalBoolean(value: unknown, fieldName: string): string | null {
+  return value === undefined || typeof value === "boolean"
+    ? null
+    : `${fieldName} must be a boolean.`;
+}
+
+function validateOptionalString(value: unknown, fieldName: string): string | null {
+  return value === undefined || typeof value === "string"
+    ? null
+    : `${fieldName} must be a string.`;
+}
+
+function validateOptionalStringArray(value: unknown, fieldName: string): string | null {
+  return value === undefined || (Array.isArray(value) && value.every((item) => typeof item === "string"))
+    ? null
+    : `${fieldName} must be an array of strings.`;
+}
+
 function filterExpiredEntries<T extends Entry | { entry: Entry }>(
   items: T[],
   includeExpired: boolean,
@@ -5110,6 +5128,7 @@ const TOOL_DEFINITIONS = [
         patch: {
           type: "object",
           description: "Partial update for an existing entry. Mutually exclusive with content. Entry must already exist.",
+          additionalProperties: false,
           properties: {
             content_append: { type: "string", description: "Text to append after existing content (separated by newline)" },
             content_prepend: { type: "string", description: "Text to prepend before existing content (separated by newline)" },
@@ -5118,6 +5137,7 @@ const TOOL_DEFINITIONS = [
           },
         },
       },
+      additionalProperties: false,
       required: ["namespace", "key"],
     },
   },
@@ -5177,6 +5197,7 @@ const TOOL_DEFINITIONS = [
           description: "Optional compare-and-swap guard. Pass the updated_at from a prior read to avoid blind overwrites. OPTIONAL — omit it for an unconditional update; it is never required to create a new tracked status.",
         },
       },
+      additionalProperties: false,
       required: ["namespace"],
     },
   },
@@ -5236,9 +5257,10 @@ const TOOL_DEFINITIONS = [
       properties: {
         id: {
           type: "string",
-          description: "The UUID of the entry to retrieve",
+          description: "Opaque entry ID to retrieve (normally a UUID returned by memory_query)",
         },
       },
+      additionalProperties: false,
       required: ["id"],
     },
   },
@@ -5312,6 +5334,7 @@ const TOOL_DEFINITIONS = [
           description: "Optional (default \"linear\"). Output ordering of ranked results. \"linear\" returns strict best-first rank order. \"boundary\" places the strongest results at the two context edges (rank 1 first, rank 2 last, rank 3 second, …) to counter the \"Lost in the Middle\" attention dip when dropping a long result list straight into context. The result set and underlying ranks are unchanged — only display order — and retrieval analytics always record the true linear rank order. No effect on filter-only browse queries.",
         },
       },
+      additionalProperties: false,
       required: [],
     },
   },
@@ -5419,7 +5442,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_list",
     description:
-      "Browse memory contents. Without a namespace: shows all namespaces with entry counts and last_activity_at (demo/* and completed task-run namespaces hidden by default). With a namespace: shows all state keys, log count, and the 5 most recent log entry previews.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
+      "Browse memory contents. Without a namespace: shows all namespaces with entry counts and last_activity_at (demo/* and completed task-run namespaces hidden by default). With a namespace: shows all state keys, log count, and the 5 most recent log entry previews. `limit` and `offset` apply only to the top-level namespace listing; non-default paging values with `namespace` are rejected rather than ignored.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -5441,14 +5464,15 @@ const TOOL_DEFINITIONS = [
         limit: {
           type: "integer",
           description:
-            "Optional. Max namespaces to return in the top-level listing (default 20, max 200). Ignored when a namespace is provided.",
+            "Optional. Max namespaces to return in the top-level listing (default 20, max 200). Non-default values are rejected when a namespace is provided.",
         },
         offset: {
           type: "integer",
           description:
-            "Optional. Skip first N namespaces for pagination of the top-level listing (default 0). Ignored when a namespace is provided.",
+            "Optional. Skip first N namespaces for pagination of the top-level listing (default 0). Non-default values are rejected when a namespace is provided.",
         },
       },
+      additionalProperties: false,
       required: [],
     },
   },
@@ -8861,6 +8885,19 @@ export function registerTools(
               }
               const queryArgs = (args ?? {}) as unknown as QueryParams;
               let { query, namespace, entry_type, tags, limit, search_mode, since, until } = queryArgs;
+              for (const validationError of [
+                validateOptionalString(query, "query"),
+                validateOptionalString(namespace, "namespace"),
+                validateOptionalStringArray(tags, "tags"),
+                validateOptionalBoolean(queryArgs.include_expired, "include_expired"),
+                validateOptionalBoolean(queryArgs.explain, "explain"),
+                validateOptionalBoolean(queryArgs.require_lexical_match, "require_lexical_match"),
+              ]) {
+                if (validationError) return errResult("query", "validation_error", validationError);
+              }
+              if (entry_type !== undefined && entry_type !== "state" && entry_type !== "log") {
+                return errResult("query", "validation_error", "entry_type must be 'state' or 'log'.");
+              }
               if (search_mode !== undefined && !["lexical", "semantic", "hybrid"].includes(search_mode)) {
                 return errResult("query", "validation_error", "search_mode must be 'lexical', 'semantic', or 'hybrid'.");
               }
@@ -8878,6 +8915,9 @@ export function registerTools(
               }
               since = normalizedSince?.value;
               until = normalizedUntil?.value;
+              if (since !== undefined && until !== undefined && since > until) {
+                return errResult("query", "validation_error", "since must be earlier than or equal to until.");
+              }
               const explain = queryArgs.explain === true;
               const includeExpired = queryArgs.include_expired === true;
               const requireLexicalMatch = queryArgs.require_lexical_match === true;
@@ -8901,8 +8941,8 @@ export function registerTools(
 
               // Validate the namespace filter (parity with write/read/log paths).
               // A trailing slash is permitted for prefix filters (e.g. "projects/").
-              if (namespace !== undefined && namespace !== null) {
-                const nsCheck = validateNamespace(namespace as string);
+              if (namespace !== undefined) {
+                const nsCheck = validateNamespace(namespace);
                 if (!nsCheck.valid) {
                   return errResult("query", "validation_error", nsCheck.error!);
                 }
@@ -9602,6 +9642,13 @@ export function registerTools(
                 return errResult("list", "validation_error", unknownArgumentError);
               }
               const { namespace, include_demo, include_completed_tasks, limit: rawLimit, offset: rawOffset } = (args ?? {}) as ListParams;
+              for (const validationError of [
+                validateOptionalString(namespace, "namespace"),
+                validateOptionalBoolean(include_demo, "include_demo"),
+                validateOptionalBoolean(include_completed_tasks, "include_completed_tasks"),
+              ]) {
+                if (validationError) return errResult("list", "validation_error", validationError);
+              }
               const limitResolution = resolveBoundedPositiveInteger(rawLimit, "limit", 20, 200);
               if (!limitResolution.ok) {
                 return errResult("list", "validation_error", limitResolution.error);
@@ -9637,6 +9684,9 @@ export function registerTools(
                     warning: limitResolution.warning,
                   } : {}),
                 });
+              }
+              if ((rawLimit !== undefined && rawLimit !== 20) || (rawOffset !== undefined && rawOffset !== 0)) {
+                return errResult("list", "validation_error", "limit and offset apply only to top-level namespace listings; omit them when listing one namespace.");
               }
               const nsCheck = validateNamespace(namespace);
               if (!nsCheck.valid) {

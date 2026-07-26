@@ -2574,6 +2574,34 @@ describe("memory_query", () => {
     expect(result.message).toContain("offset");
   });
 
+  it.each([
+    [{ query: 42, namespace: "projects/alpha" }, "query"],
+    [{ query: "SQLite", namespace: 42 }, "namespace"],
+    [{ query: "SQLite", entry_type: "event" }, "entry_type"],
+    [{ query: "SQLite", tags: "active" }, "tags"],
+    [{ query: "SQLite", include_expired: "true" }, "include_expired"],
+    [{ query: "SQLite", explain: "true" }, "explain"],
+    [{ query: "SQLite", require_lexical_match: "true" }, "require_lexical_match"],
+    [{ query: "SQLite", search_recency_weight: "high" }, "search_recency_weight"],
+  ])("rejects malformed known query argument %s (#269)", async (args, field) => {
+    const raw = await callTool("memory_query", args as Record<string, unknown>);
+    const result = parseToolResponse(raw) as { ok: boolean; error: string; message: string };
+    expect(result).toMatchObject({ ok: false, error: "validation_error" });
+    expect(result.message.toLowerCase()).toContain(field.toLowerCase());
+  });
+
+  it("rejects an inverted query time range (#269)", async () => {
+    const raw = await callTool("memory_query", {
+      namespace: "projects/alpha",
+      since: "2027-01-02T00:00:00Z",
+      until: "2027-01-01T00:00:00Z",
+    });
+    const result = parseToolResponse(raw) as { ok: boolean; error: string; message: string };
+    expect(result).toMatchObject({ ok: false, error: "validation_error" });
+    expect(result.message).toContain("since");
+    expect(result.message).toContain("until");
+  });
+
   describe("boundary serialization", () => {
     async function seedBoundaryCorpus() {
       for (let i = 0; i < 5; i++) {
@@ -3395,6 +3423,24 @@ describe("memory_list", () => {
     const result = parseToolResponse(raw) as { ok: boolean; error: string; message: string };
     expect(result).toMatchObject({ ok: false, error: "validation_error" });
     expect(result.message).toContain("cursor");
+  });
+
+  it.each([
+    [{ namespace: 42 }, "namespace"],
+    [{ include_demo: "true" }, "include_demo"],
+    [{ include_completed_tasks: "true" }, "include_completed_tasks"],
+  ])("rejects malformed known list argument %s (#269)", async (args, field) => {
+    const raw = await callTool("memory_list", args as Record<string, unknown>);
+    const result = parseToolResponse(raw) as { ok: boolean; error: string; message: string };
+    expect(result).toMatchObject({ ok: false, error: "validation_error" });
+    expect(result.message.toLowerCase()).toContain(field.toLowerCase());
+  });
+
+  it("rejects top-level pagination arguments when listing one namespace (#269)", async () => {
+    const raw = await callTool("memory_list", { namespace: "projects/alpha", limit: 1 });
+    const result = parseToolResponse(raw) as { ok: boolean; error: string; message: string };
+    expect(result).toMatchObject({ ok: false, error: "validation_error" });
+    expect(result.message).toContain("top-level");
   });
 
   it("includes last_activity_at per namespace", async () => {
@@ -6443,6 +6489,26 @@ describe("compare-and-swap (memory_write)", () => {
     expect(memoryWrite?.inputSchema.properties).toMatchObject({
       create_if_absent: { type: "boolean" },
     });
+  });
+
+  it("advertises closed argument objects for the #269 validated tools", async () => {
+    const handler = (
+      server as unknown as { _requestHandlers: Map<string, Function> }
+    )._requestHandlers?.get("tools/list");
+    const toolList = await handler!({ method: "tools/list", params: {} });
+    const toolsByName = new Map(
+      (toolList as {
+        tools: Array<{
+          name: string;
+          inputSchema: { additionalProperties?: boolean; properties?: Record<string, { additionalProperties?: boolean }> };
+        }>;
+      }).tools.map((tool) => [tool.name, tool]),
+    );
+
+    for (const toolName of ["memory_query", "memory_list", "memory_get", "memory_write", "memory_update_status"]) {
+      expect(toolsByName.get(toolName)?.inputSchema.additionalProperties).toBe(false);
+    }
+    expect(toolsByName.get("memory_write")?.inputSchema.properties?.patch?.additionalProperties).toBe(false);
   });
 
   it("advertises valid_until as string-or-null for memory_write and memory_update_status", async () => {
