@@ -198,8 +198,12 @@ Corrections require read and write access, ownership of the source entry unless 
 the owner principal, an exact CAS match, the same namespace and state key, and a classification
 at least as restrictive as the predecessor. One revision can have only one successor, so stale
 or branching attempts return a conflict. Explicit backdating is owner-only, cannot precede the
-target revision's `valid_from`, and cannot be in the future. Omitting `valid_from` uses the
-server's current time. Deleting a state key removes its complete correction chain atomically.
+target revision's `valid_from`, and this write path still rejects future `valid_from` values.
+The one narrow temporal exception is `memory_read(as_of)`: the exact visible current
+`valid_from`/`updated_at` boundary can round-trip even if wall-clock comparison sees it as
+narrowly future, but arbitrary or hidden future instants remain rejected. Omitting `valid_from`
+uses the server's current time. Deleting a state key removes its complete correction chain
+atomically.
 
 `valid_until` remains independent soft expiry. An expired current successor stays current but
 is hidden from broad retrieval by default; expiry never resurrects an older revision. Retention,

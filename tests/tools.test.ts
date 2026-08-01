@@ -1459,7 +1459,7 @@ describe("memory_read", () => {
     expect(result.hint).not.toContain("status");
   });
 
-  it("returns the current revision at its updated_at boundary and rejects future as_of timestamps", async () => {
+  it("round-trips the exact visible current boundary and rejects other future as_of timestamps", async () => {
     const writeRaw = await callTool("memory_write", {
       namespace: "projects/test",
       key: "boundary",
@@ -6755,6 +6755,31 @@ describe("compare-and-swap (memory_write)", () => {
     for (const toolName of ["memory_write", "memory_update_status"]) {
       expect(toolsByName.get(toolName)?.inputSchema.properties?.valid_until?.type)
         .toEqual(expect.arrayContaining(["string", "null"]));
+    }
+  });
+
+  it("documents the exact visible boundary exception for temporal parameters", async () => {
+    const handler = (
+      server as unknown as { _requestHandlers: Map<string, Function> }
+    )._requestHandlers?.get("tools/list");
+    const toolList = await handler!({ method: "tools/list", params: {} });
+    const toolsByName = new Map(
+      (toolList as {
+        tools: Array<{
+          name: string;
+          inputSchema: { properties?: Record<string, { description?: string }> };
+        }>;
+      }).tools.map((tool) => [tool.name, tool]),
+    );
+
+    const asOfDescription = toolsByName.get("memory_read")?.inputSchema.properties?.as_of?.description ?? "";
+    expect(asOfDescription).toContain("exact visible current valid_from/updated_at boundary");
+    expect(asOfDescription).toContain("hidden boundaries");
+
+    for (const toolName of ["memory_write", "memory_log"]) {
+      const validFromDescription = toolsByName.get(toolName)?.inputSchema.properties?.valid_from?.description ?? "";
+      expect(validFromDescription).toContain("This write path rejects future timestamps");
+      expect(validFromDescription).toContain("memory_read(as_of)");
     }
   });
 

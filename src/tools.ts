@@ -5163,7 +5163,7 @@ const TOOL_DEFINITIONS = [
         valid_from: {
           type: "string",
           description:
-            "Optional ISO 8601 time at which a correction becomes valid. Only accepted with supersedes; future timestamps are rejected.",
+            "Optional ISO 8601 time at which a correction becomes valid. Only accepted with supersedes. This write path rejects future timestamps; the only narrow temporal exception is `memory_read(as_of)` at the exact visible current row boundary, which may round-trip a just-returned timestamp.",
         },
         create_if_absent: {
           type: "boolean",
@@ -5249,7 +5249,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_read",
     description:
-      "Retrieve a specific state entry by namespace and key. By default this returns the current revision; pass `as_of` to select the authorized recorded revision valid at a past instant. As-of reconstruction is guaranteed only across explicit correction lineage created with `supersedes`; ordinary overwrites, patches, and legacy backfilled rows may instead return `found:false` with `history_available:false` for uncovered times that the caller is authorized to know were recorded. If instead you have an entry UUID from `memory_query` results, use `memory_get` (which also works for log entries and historical revisions). Returns the full content, tags, and timestamps. Returns a clear 'not found' message if the entry doesn't exist (not an error). Note: results carry a system-injected `classification:internal` (or higher) tag marking the entry's classification floor — it is set by the server, not by you.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
+      "Retrieve a specific state entry by namespace and key. By default this returns the current revision; pass `as_of` to select the authorized recorded revision valid at a past instant. As-of reconstruction is guaranteed only across explicit correction lineage created with `supersedes`; ordinary overwrites, patches, and legacy backfilled rows may instead return `found:false` with `history_available:false` for uncovered times that the caller is authorized to know were recorded. Arbitrary future `as_of` values are rejected, except the exact visible current row boundary (`updated_at`/`valid_from`) can round-trip when you echo back a timestamp the server just returned; hidden future boundaries still fail. If instead you have an entry UUID from `memory_query` results, use `memory_get` (which also works for log entries and historical revisions). Returns the full content, tags, and timestamps. Returns a clear 'not found' message if the entry doesn't exist (not an error). Note: results carry a system-injected `classification:internal` (or higher) tag marking the entry's classification floor — it is set by the server, not by you.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -5264,7 +5264,7 @@ const TOOL_DEFINITIONS = [
         as_of: {
           type: "string",
           description:
-            "Optional ISO 8601 timestamp. Returns the recorded state revision valid at that instant. Only explicit correction lineage created with supersedes is fully rewindable; ordinary overwrites or patches may return found:false with history_available:false for authorized uncovered times instead. Future timestamps are rejected.",
+            "Optional ISO 8601 timestamp. Returns the recorded state revision valid at that instant. Only explicit correction lineage created with supersedes is fully rewindable; ordinary overwrites or patches may return found:false with history_available:false for authorized uncovered times instead. The exact visible current valid_from/updated_at boundary may be round-tripped even if it is narrowly ahead of the server clock; all other future timestamps, including hidden boundaries, are rejected.",
         },
       },
       required: ["namespace", "key"],
@@ -5478,7 +5478,7 @@ const TOOL_DEFINITIONS = [
         valid_from: {
           type: "string",
           description:
-            "Optional ISO 8601 time at which a correction becomes valid. Only accepted with supersedes; future timestamps are rejected.",
+            "Optional ISO 8601 time at which a correction becomes valid. Only accepted with supersedes. This write path rejects future timestamps; the only narrow temporal exception is `memory_read(as_of)` at the exact visible current row boundary, which may round-trip a just-returned timestamp.",
         },
       },
       required: ["namespace", "content"],
