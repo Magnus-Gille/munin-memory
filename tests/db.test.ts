@@ -721,6 +721,15 @@ describe("queryEntries (FTS5)", () => {
     expect(results.every((r) => r.namespace === "projects/hugin-munin")).toBe(true);
   });
 
+  it("treats a bare namespace as a subtree filter", () => {
+    writeState(db, "projects/hugin-munin/sub", "child-note", "Child namespace decision", ["decision"]);
+
+    const results = queryEntries(db, { query: "Child", namespace: "projects/hugin-munin" });
+
+    expect(results.map((r) => r.namespace)).toContain("projects/hugin-munin/sub");
+    expect(results.every((r) => r.namespace === "projects/hugin-munin" || r.namespace.startsWith("projects/hugin-munin/"))).toBe(true);
+  });
+
   it("filters by namespace prefix", () => {
     const results = queryEntries(db, { query: "decision", namespace: "projects/" });
     expect(results.length).toBeGreaterThanOrEqual(1);
@@ -1463,6 +1472,15 @@ describe("queryEntriesByFilter (no FTS)", () => {
     expect(results.length).toBe(3); // status, notes, log
   });
 
+  it("treats a bare namespace as a subtree filter", () => {
+    writeState(db, "projects/a/sub", "status", "nested child", ["active"]);
+
+    const results = queryEntriesByFilter(db, { namespace: "projects/a" });
+
+    expect(results.map((r) => r.namespace)).toContain("projects/a/sub");
+    expect(results.every((r) => r.namespace === "projects/a" || r.namespace.startsWith("projects/a/"))).toBe(true);
+  });
+
   it("filters by namespace prefix (trailing slash)", () => {
     const results = queryEntriesByFilter(db, { namespace: "projects/" });
     expect(results.every((r) => r.namespace.startsWith("projects/"))).toBe(true);
@@ -1718,6 +1736,25 @@ describe.skipIf(!vecAvailableForDbTest)(
       // modelA entries must NOT appear (different embedding space)
       expect(returnedIds).not.toContain(aId1);
       expect(returnedIds).not.toContain(aId2);
+    });
+
+    it("treats a bare namespace as a subtree filter when queryEmbeddingModel is set", () => {
+      const { id: childId } = writeState(db, "test/tree/sub", "child", "subtree child", []);
+      const { id: otherId } = writeState(db, "test/elsewhere", "other", "other branch", []);
+
+      storeEmbedding(db, childId, embeddingToBuffer(makeTestEmbedding(7)), "activeModel");
+      storeEmbedding(db, otherId, embeddingToBuffer(makeTestEmbedding(8)), "activeModel");
+
+      const results = queryEntriesSemanticScored(db, {
+        queryEmbedding: embeddingToBuffer(makeTestEmbedding(7)),
+        queryEmbeddingModel: "activeModel",
+        namespace: "test/tree",
+        limit: 10,
+        includeExpired: true,
+      });
+
+      expect(results.map((r) => r.entry.namespace)).toContain("test/tree/sub");
+      expect(results.every((r) => r.entry.namespace === "test/tree" || r.entry.namespace.startsWith("test/tree/"))).toBe(true);
     });
 
     it("returns all entries when queryEmbeddingModel is not provided (backward compat)", () => {

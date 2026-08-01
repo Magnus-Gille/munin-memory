@@ -2817,13 +2817,21 @@ describe("memory_query", () => {
     }
   });
 
-  it("filters by namespace", async () => {
+  it("treats a bare namespace filter as a subtree match", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/alpha/sub",
+      key: "child-note",
+      content: "SQLite child namespace note",
+      tags: ["active"],
+    });
+
     const raw = await callTool("memory_query", {
       query: "SQLite",
       namespace: "projects/alpha",
     });
     const result = parseToolResponse(raw) as { results: Array<{ namespace: string }> };
-    expect(result.results.every((r) => r.namespace === "projects/alpha")).toBe(true);
+    expect(result.results.map((r) => r.namespace)).toContain("projects/alpha/sub");
+    expect(result.results.every((r) => r.namespace === "projects/alpha" || r.namespace.startsWith("projects/alpha/"))).toBe(true);
   });
 
   it("filters by entry type", async () => {

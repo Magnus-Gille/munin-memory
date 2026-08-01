@@ -344,6 +344,21 @@ describe("semantic search (vec integration)", () => {
     expect(results.every((r) => r.namespace === "ns-a")).toBe(true);
   });
 
+  it.skipIf(!vecAvailable)("treats a bare namespace as a subtree filter", () => {
+    const { id: childId } = writeState(db, "ns-a/sub", "child", "subtree content", []);
+    const { id: otherId } = writeState(db, "ns-b", "other", "other branch", []);
+
+    storeEmbedding(db, childId, embeddingToBuffer(makeEmbedding(1)), "test");
+    storeEmbedding(db, otherId, embeddingToBuffer(makeEmbedding(2)), "test");
+    db.prepare("UPDATE entries SET embedding_status = 'generated' WHERE id IN (?, ?)").run(childId, otherId);
+
+    const queryEmb = embeddingToBuffer(makeEmbedding(1));
+    const results = queryEntriesSemantic(db, { queryEmbedding: queryEmb, namespace: "ns-a" });
+
+    expect(results.map((r) => r.namespace)).toContain("ns-a/sub");
+    expect(results.every((r) => r.namespace === "ns-a" || r.namespace.startsWith("ns-a/"))).toBe(true);
+  });
+
   it.skipIf(!vecAvailable)("filters by entry type", () => {
     const { id: stateId } = writeState(db, "test/ns", "key1", "cat state", []);
     const { id: logId } = appendLog(db, "test/ns", "cat log", []);
@@ -435,6 +450,26 @@ describe("semantic search (vec integration)", () => {
     });
     expect(exactResults.length).toBe(1);
     expect(exactResults[0].entry.id).toBe(nsaId);
+  });
+
+  it.skipIf(!vecAvailable)("exactNamespaceScan treats a bare namespace as a subtree filter", () => {
+    const { id: childId } = writeState(db, "ns-parent/sub", "child", "subtree child", []);
+    const { id: otherId } = writeState(db, "ns-other", "other", "other branch", []);
+
+    storeEmbedding(db, childId, embeddingToBuffer(makeEmbedding(11)), "test");
+    storeEmbedding(db, otherId, embeddingToBuffer(makeEmbedding(12)), "test");
+    db.prepare("UPDATE entries SET embedding_status = 'generated' WHERE id IN (?, ?)").run(childId, otherId);
+
+    const results = queryEntriesSemanticScored(db, {
+      queryEmbedding: embeddingToBuffer(makeEmbedding(11)),
+      namespace: "ns-parent",
+      exactNamespaceScan: true,
+      limit: 10,
+      includeExpired: true,
+    });
+
+    expect(results.map((r) => r.entry.namespace)).toContain("ns-parent/sub");
+    expect(results.every((r) => r.entry.namespace === "ns-parent" || r.entry.namespace.startsWith("ns-parent/"))).toBe(true);
   });
 });
 
