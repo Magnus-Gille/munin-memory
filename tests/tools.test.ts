@@ -1333,6 +1333,92 @@ describe("memory_read", () => {
     expect(result.valid_until).toBe("2020-01-01T00:00:00.000Z");
     expect(result.expired).toBe(true);
   });
+
+  it("treats pre-creation as an ordinary as-of miss", async () => {
+    const writeRaw = await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "status",
+      content: "All good",
+      tags: ["active"],
+    });
+    const writeResult = parseToolResponse(writeRaw) as { id: string };
+    const createdAt = "2026-07-20T10:00:00.000Z";
+    db.prepare("UPDATE entries SET created_at = ?, updated_at = ?, valid_from = ? WHERE id = ?")
+      .run(createdAt, createdAt, createdAt, writeResult.id);
+
+    const raw = await callTool("memory_read", {
+      namespace: "projects/test",
+      key: "status",
+      as_of: "2026-07-20T09:59:00.000Z",
+    });
+    const result = parseToolResponse(raw) as {
+      found: boolean;
+      history_available?: boolean;
+      hint: string;
+      message: string;
+    };
+    expect(result.found).toBe(false);
+    expect(result.history_available).toBeUndefined();
+    expect(result.message).toContain("2026-07-20T09:59:00.000Z");
+    expect(result.hint).not.toContain("status");
+  });
+
+  it("returns the current revision at its updated_at boundary and rejects future as_of timestamps", async () => {
+    const writeRaw = await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "boundary",
+      content: "Boundary state",
+    });
+    const writeResult = parseToolResponse(writeRaw) as { updated_at: string };
+
+    const atBoundaryRaw = await callTool("memory_read", {
+      namespace: "projects/test",
+      key: "boundary",
+      as_of: writeResult.updated_at,
+    });
+    const atBoundary = parseToolResponse(atBoundaryRaw) as { found: boolean; content: string };
+    expect(atBoundary.found).toBe(true);
+    expect(atBoundary.content).toBe("Boundary state");
+
+    const futureRaw = await callTool("memory_read", {
+      namespace: "projects/test",
+      key: "boundary",
+      as_of: "2999-01-01T00:00:00.000Z",
+    });
+    const future = parseToolResponse(futureRaw) as { ok: boolean; error: string };
+    expect(future.ok).toBe(false);
+    expect(future.error).toBe("validation_error");
+  });
+
+  it("reports history_available false for legacy backfilled rows whose earlier wording is unrecoverable", async () => {
+    const writeRaw = await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "legacy",
+      content: "current wording",
+    });
+    const writeResult = parseToolResponse(writeRaw) as { id: string };
+    const createdAt = "2026-07-20T10:00:00.000Z";
+    const validFrom = "2026-07-21T10:00:00.000Z";
+    db.prepare("UPDATE entries SET created_at = ?, updated_at = ?, valid_from = ? WHERE id = ?")
+      .run(createdAt, validFrom, validFrom, writeResult.id);
+
+    const raw = await callTool("memory_read", {
+      namespace: "projects/test",
+      key: "legacy",
+      as_of: "2026-07-20T12:00:00.000Z",
+    });
+    const result = parseToolResponse(raw) as {
+      found: boolean;
+      history_available?: boolean;
+      hint: string;
+    };
+    expect(result).toMatchObject({
+      found: false,
+      history_available: false,
+    });
+    expect(result.hint).toContain("supersedes");
+    expect(result.hint).not.toContain("legacy");
+  });
 });
 
 describe("memory_get", () => {

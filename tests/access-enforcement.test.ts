@@ -410,6 +410,18 @@ describe("memory_read — access enforcement", () => {
     expect(result.hint).toBeUndefined();
   });
 
+  it("family as-of reads from projects/foo remain invisible denials", async () => {
+    const raw = await familyCall("memory_read", {
+      namespace: "projects/foo",
+      key: "status",
+      as_of: "2026-07-20T10:00:00.000Z",
+    });
+    const result = parse(raw) as { found: boolean; hint?: string; history_available?: boolean };
+    expect(result.found).toBe(false);
+    expect(result.hint).toBeUndefined();
+    expect(result.history_available).toBeUndefined();
+  });
+
   it("agent reads from unauthorized namespace → { found: false }", async () => {
     const raw = await agentCall("memory_read", {
       namespace: "projects/foo",

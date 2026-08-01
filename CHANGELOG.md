@@ -40,6 +40,8 @@ changelog is the canonical record of what moved.
 
 ### Fixed
 
+- **`memory_read(as_of)` now narrows to recorded correction history (#273).** The tool description promised the state revision valid at any past instant, but ordinary overwrites and patches mutate the current row in place and migration v20 backfilled legacy state `valid_from` from the last `updated_at`, so uncovered times could return `found:false` with a contradictory hint listing the same key. `memory_read(as_of)` now treats explicit correction lineage as the only rewindable history: timestamps covered by `supersedes` chains still resolve exactly, but unreconstructible gaps return `found:false` with `history_available:false` and a non-contradictory explanatory hint. Pre-creation timestamps remain ordinary misses, future timestamps are still rejected, and authorization gates are unchanged.
+
 - **`memory_delete` previews disclose and bind the full correction lineage
   they will remove (#281).** A delete of a corrected state entry removes its
   current revision *and* superseded revisions, but the preview previously

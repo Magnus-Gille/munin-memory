@@ -660,6 +660,41 @@ export function readState(
   ) ?? null;
 }
 
+export interface StateAsOfCoverage {
+  historyAvailable: boolean;
+  currentExists: boolean;
+}
+
+export function getStateAsOfCoverage(
+  db: Database.Database,
+  namespace: string,
+  key: string,
+  asOf: string,
+): StateAsOfCoverage {
+  const rows = db.prepare(
+    `SELECT created_at, valid_from, is_current
+       FROM entries
+      WHERE namespace = ? AND key = ? AND entry_type = 'state'
+      ORDER BY valid_from ASC, rowid ASC`,
+  ).all(namespace, key) as Array<{
+    created_at: string;
+    valid_from: string;
+    is_current: number;
+  }>;
+
+  if (rows.length === 0) {
+    return {
+      historyAvailable: true,
+      currentExists: false,
+    };
+  }
+
+  return {
+    historyAvailable: !rows.some((row) => row.created_at <= asOf && row.valid_from > asOf),
+    currentExists: rows.some((row) => row.is_current === 1),
+  };
+}
+
 export function getById(db: Database.Database, id: string): Entry | null {
   return (
     db.prepare("SELECT * FROM entries WHERE id = ?").get(id) as Entry | undefined

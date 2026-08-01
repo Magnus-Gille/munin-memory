@@ -192,8 +192,7 @@ timestamps.
 Default query, list, dashboard, consolidation, commitment, and derived-memory paths expose
 only current revisions. `include_expired` changes soft-expiry filtering only—it never brings
 superseded revisions back. Historical evidence remains available through `memory_get(id)`.
-For state, `memory_read(namespace, key, as_of)` returns the revision valid at that instant;
-validity intervals are half-open, so the successor wins exactly at its `valid_from` boundary.
+For state, `memory_read(namespace, key, as_of)` returns the recorded revision valid at that instant when explicit correction lineage covers that time; validity intervals are half-open, so the successor wins exactly at its `valid_from` boundary. Ordinary overwrites and patches update the current row in place, and legacy rows were backfilled from their last update, so uncovered timestamps return `found:false` with `history_available:false` instead of inventing history.
 
 Corrections require read and write access, ownership of the source entry unless the caller is
 the owner principal, an exact CAS match, the same namespace and state key, and a classification
