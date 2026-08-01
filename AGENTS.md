@@ -97,7 +97,7 @@ All 24 names registered in `TOOL_DEFINITIONS` must appear exactly once in this t
 | `memory_orient` | Broad session handshake: dashboard, conventions, maintenance, namespace overview. |
 | `memory_resume` | Targeted continuation pack for a namespace or opener. |
 | `memory_extract` | Propose operations and optionally persist them to the principal-scoped review inbox; never approves them. |
-| `memory_review` | List, inspect, or pure-read preview durable proposals; `approve` is the only memory-truth mutation and preview exposes `preview_wrote_memory` plus `approval_would_write_memory`. |
+| `memory_review` | List, inspect, preview, edit, decline, approve, or prepare reviewed undo for durable proposals. Successful preview responses expose optional `persisted_status`, `preview_wrote_memory:false`, `approval_would_write_memory`, `approval_status` (`would_write`/`would_conflict`/`duplicate_noop`/`not_approvable`), and optional `approval_error`; request-level preview errors such as `validation_error`, `not_found`, or `payload_expired` omit those effect fields. `approve` is the only memory-truth mutation. |
 | `memory_narrative` | Source-backed narrative and momentum view. |
 | `memory_commitments` | Surface open, at-risk, overdue, and completed commitments. |
 | `memory_patterns` | Derive reviewable patterns from decisions and outcomes. |

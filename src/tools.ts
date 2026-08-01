@@ -3140,6 +3140,8 @@ function prepareReviewOperation(
     allowCorrection?: boolean;
   },
 ): PreparedReviewOperation {
+  // Pure validation/read-only preparation shared by preview and approve rechecks.
+  // Durable side effects only happen after this returns in applyPreparedReviewOperation.
   const operation = parseReviewOperation(rawOperation);
   if (!operation) {
     return {
@@ -3531,13 +3533,15 @@ function reviewPreviewApprovalEffect(
   approvalStatus: "would_write" | "would_conflict" | "duplicate_noop" | "not_approvable";
   approvalError?: { code: string; message: string };
 } {
-  if (proposal.status === "approved") {
+  const effectiveStatus = deriveReviewProposalStatus(proposal, now);
+
+  if (effectiveStatus === "approved") {
     return {
       approvalWouldWriteMemory: false,
       approvalStatus: "duplicate_noop",
     };
   }
-  if (proposal.status === "expired" || proposal.expires_at <= now) {
+  if (effectiveStatus === "expired") {
     return {
       approvalWouldWriteMemory: false,
       approvalStatus: "not_approvable",
@@ -3547,13 +3551,13 @@ function reviewPreviewApprovalEffect(
       },
     };
   }
-  if (proposal.status !== "pending" && proposal.status !== "edited") {
+  if (effectiveStatus !== "pending" && effectiveStatus !== "edited") {
     return {
       approvalWouldWriteMemory: false,
       approvalStatus: "not_approvable",
       approvalError: {
         code: "invalid_transition",
-        message: `A ${proposal.status} proposal cannot be approved.`,
+        message: `A ${effectiveStatus} proposal cannot be approved.`,
       },
     };
   }
@@ -3601,6 +3605,16 @@ function reviewPreviewApprovalEffect(
     approvalWouldWriteMemory: true,
     approvalStatus: "would_write",
   };
+}
+
+function shouldSkipToolCallTelemetry(name: string | undefined, args: unknown): boolean {
+  if (name !== "memory_review") return false;
+  const action = typeof args === "object" && args !== null
+    ? (args as Record<string, unknown>).action
+    : undefined;
+  // Preview is intentionally telemetry-free on both success and error paths so
+  // dry-run review stays durably side-effect free.
+  return action === "preview";
 }
 
 function snapshotReviewEntry(entry: Entry | null): Record<string, unknown> | null {
@@ -5084,7 +5098,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_review",
     description:
-      "Review durable proposals created by `memory_extract persist:true`. The queue is strictly scoped to the creating principal. Use `list` or `get` to inspect, `preview` for the exact operation, freshness preconditions, and pure-read write-effect fields (`preview_wrote_memory:false` for the preview call itself plus `approval_would_write_memory:true|false` for the current approval outcome), `edit` or `decline` to review, `approve` to apply through the normal authorization/classification/secret/CAS gates, and `prepare_undo` to create a second review proposal that corrects an approved state or log while preserving history. Preview is metering-free and returns no legacy `writes_memory` field. No action except `approve` changes memory truth.",
+      "Review durable proposals created by `memory_extract persist:true`. The queue is strictly scoped to the creating principal. Use `list` or `get` to inspect, `preview` for the exact operation, freshness preconditions, and pure-read approval-effect fields, `edit` or `decline` while reviewing, `approve` to apply through the normal authorization/classification/secret/CAS gates, and `prepare_undo` to create a second review proposal that corrects an approved state or log while preserving history. Successful preview responses include `preview_wrote_memory:false`, `approval_would_write_memory:true|false`, `approval_status` in `would_write|would_conflict|duplicate_noop|not_approvable`, optional `approval_error { code, message }`, and optional `persisted_status` when Munin is showing a derived effective status such as `expired` without mutating the stored row. Request-level preview errors such as `validation_error`, `not_found`, or `payload_expired` omit those effect fields because no preview payload is available to describe. Preview is metering-free and returns no legacy `writes_memory` field. No action except `approve` changes memory truth.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -10649,8 +10663,7 @@ export function registerTools(
             errorType = parsed.error ?? "unknown";
           }
         } catch { /* not JSON — treat as success */ }
-        const skipToolCallTelemetry = name === "memory_review"
-          && ((args ?? {}) as Record<string, unknown>).action === "preview";
+        const skipToolCallTelemetry = shouldSkipToolCallTelemetry(name, args);
         if (!skipToolCallTelemetry) {
           logToolCall(db, {
             sessionId,
@@ -10673,8 +10686,7 @@ export function registerTools(
           }],
           isError: true,
         };
-        const skipToolCallTelemetry = name === "memory_review"
-          && ((args ?? {}) as Record<string, unknown>).action === "preview";
+        const skipToolCallTelemetry = shouldSkipToolCallTelemetry(name, args);
         if (!skipToolCallTelemetry) {
           logToolCall(db, {
             sessionId,

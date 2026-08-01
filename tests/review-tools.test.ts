@@ -60,7 +60,10 @@ function snapshotReviewDurability(
   proposalEvents: number;
   entries: number;
   auditLog: number;
+  redactionLog: number;
   retrievalEvents: number;
+  retrievalOutcomes: number;
+  retrievalFeedback: number;
   toolCalls: number;
 } {
   return {
@@ -80,8 +83,17 @@ function snapshotReviewDurability(
     auditLog: (db.prepare(
       "SELECT COUNT(*) AS count FROM audit_log",
     ).get() as { count: number }).count,
+    redactionLog: (db.prepare(
+      "SELECT COUNT(*) AS count FROM redaction_log",
+    ).get() as { count: number }).count,
     retrievalEvents: (db.prepare(
       "SELECT COUNT(*) AS count FROM retrieval_events",
+    ).get() as { count: number }).count,
+    retrievalOutcomes: (db.prepare(
+      "SELECT COUNT(*) AS count FROM retrieval_outcomes",
+    ).get() as { count: number }).count,
+    retrievalFeedback: (db.prepare(
+      "SELECT COUNT(*) AS count FROM retrieval_feedback",
     ).get() as { count: number }).count,
     toolCalls: (db.prepare(
       "SELECT COUNT(*) AS count FROM tool_calls",
@@ -379,6 +391,10 @@ describe("memory_extract durable review proposals", () => {
         error: "payload_expired",
         message: "The proposal payload has been purged under the retention policy.",
       });
+      expect(preview).not.toHaveProperty("preview_wrote_memory");
+      expect(preview).not.toHaveProperty("approval_would_write_memory");
+      expect(preview).not.toHaveProperty("approval_status");
+      expect(preview).not.toHaveProperty("approval_error");
       expect(JSON.stringify(preview)).not.toContain(operationContent);
       expect(JSON.stringify(preview)).not.toContain(sourceExcerpt);
       expect(afterPreview).toEqual(beforePreview);
@@ -1087,6 +1103,79 @@ describe("memory_review lifecycle and isolation", () => {
     db.close();
   });
 
+  it("keeps declined-after-expiry previews aligned with approve invalid_transition", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-01T12:00:00.000Z"));
+    const db = initDatabase(":memory:");
+    try {
+      const created = createReviewProposal(db, {
+        creatorPrincipalId: "owner",
+        operation: {
+          action: "memory_log",
+          namespace: "projects/munin-memory",
+          content: "Declined proposals stay declined after their review deadline passes.",
+        },
+        classification: "internal",
+        confidence: 1,
+        reasons: ["terminal preview alignment"],
+        sourceRefs: [],
+        sourceExcerpt: "terminal preview alignment",
+        sourceHash: "terminal-preview-alignment",
+        createdAt: "2026-07-20T10:00:00.000Z",
+        expiresAt: "2026-07-31T10:00:00.000Z",
+      });
+      declineReviewProposal(
+        db,
+        created.id,
+        "owner",
+        "declined before the expiry cutoff passed",
+        "2026-07-26T10:00:00.000Z",
+      );
+      const beforePreview = snapshotReviewDurability(db, created.id);
+
+      const preview = await makeCall(db)("memory_review", {
+        action: "preview",
+        proposal_id: created.id,
+      }) as {
+        status: string;
+        persisted_status?: string;
+        preview_wrote_memory: boolean;
+        approval_would_write_memory: boolean;
+        approval_status: string;
+        approval_error?: { code: string; message: string };
+      };
+      const afterPreview = snapshotReviewDurability(db, created.id);
+
+      expect(preview).toMatchObject({
+        status: "declined",
+        preview_wrote_memory: false,
+        approval_would_write_memory: false,
+        approval_status: "not_approvable",
+        approval_error: {
+          code: "invalid_transition",
+          message: "A declined proposal cannot be approved.",
+        },
+      });
+      expect(preview.persisted_status).toBeUndefined();
+      expect(afterPreview).toEqual(beforePreview);
+
+      const rejected = await makeCall(db)("memory_review", {
+        action: "approve",
+        proposal_id: created.id,
+      }) as { error: string; message: string };
+
+      expect(rejected).toMatchObject({
+        error: "invalid_transition",
+        message: "A declined proposal cannot be approved.",
+      });
+      expect(preview.approval_error?.code).toBe(rejected.error);
+      expect(preview.approval_error?.message).toBe(rejected.message);
+    } finally {
+      db.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("reports invalid-transition previews as not approvable", async () => {
     const db = initDatabase(":memory:");
     const call = makeCall(db);
@@ -1123,6 +1212,129 @@ describe("memory_review lifecycle and isolation", () => {
       },
     });
     db.close();
+  });
+
+  it("keeps rejection-path previews durably side-effect free", async () => {
+    const secret = `ghp_${"e".repeat(36)}`;
+    const internalWriterContext: AccessContext = {
+      principalId: "classifier",
+      principalType: "family",
+      accessibleNamespaces: [{ pattern: "projects/munin-memory", permissions: "rw" }],
+      maxClassification: "internal",
+      transportType: "consumer",
+    };
+    const readOnlyContext: AccessContext = {
+      principalId: "reviewer",
+      principalType: "family",
+      accessibleNamespaces: [{ pattern: "projects/munin-memory", permissions: "read" }],
+      maxClassification: "internal",
+      transportType: "consumer",
+    };
+    const cases: Array<{
+      label: string;
+      ctx: AccessContext;
+      creatorPrincipalId: string;
+      operation: {
+        action: "memory_log";
+        namespace: string;
+        content: string;
+        classification?: "internal" | "client-confidential";
+      };
+      proposalClassification: "internal";
+      expectedCode: "validation_error" | "classification_error" | "access_denied";
+      expectedMessage: string;
+    }> = [
+      {
+        label: "secret scan rejection",
+        ctx: ownerContext(),
+        creatorPrincipalId: "owner",
+        operation: {
+          action: "memory_log",
+          namespace: "projects/munin-memory",
+          content: `Store ${secret}`,
+        },
+        proposalClassification: "internal",
+        expectedCode: "validation_error",
+        expectedMessage: "Content appears to contain a secret or credential",
+      },
+      {
+        label: "classification rejection",
+        ctx: internalWriterContext,
+        creatorPrincipalId: "classifier",
+        operation: {
+          action: "memory_log",
+          namespace: "projects/munin-memory",
+          content: "Reviewed note that should now classify too high.",
+          classification: "client-confidential",
+        },
+        proposalClassification: "internal",
+        expectedCode: "classification_error",
+        expectedMessage: "exceeds the caller or transport visibility ceiling",
+      },
+      {
+        label: "authorization rejection",
+        ctx: readOnlyContext,
+        creatorPrincipalId: "reviewer",
+        operation: {
+          action: "memory_log",
+          namespace: "projects/munin-memory",
+          content: "Reviewed note visible to a read-only reviewer.",
+        },
+        proposalClassification: "internal",
+        expectedCode: "access_denied",
+        expectedMessage: "Access denied.",
+      },
+    ];
+
+    for (const testCase of cases) {
+      const db = initDatabase(":memory:");
+      try {
+        const created = createReviewProposal(db, {
+          creatorPrincipalId: testCase.creatorPrincipalId,
+          operation: testCase.operation,
+          classification: testCase.proposalClassification,
+          confidence: 1,
+          reasons: [testCase.label],
+          sourceRefs: [],
+          sourceExcerpt: testCase.label,
+          sourceHash: createHash("sha256").update(testCase.label).digest("hex"),
+          createdAt: "2026-07-23T10:00:00.000Z",
+          expiresAt: "2026-08-22T10:00:00.000Z",
+        });
+        const beforePreview = snapshotReviewDurability(db, created.id);
+
+        const preview = await makeCall(db, testCase.ctx)("memory_review", {
+          action: "preview",
+          proposal_id: created.id,
+        }) as {
+          status: string;
+          preview_wrote_memory: boolean;
+          approval_would_write_memory: boolean;
+          approval_status: string;
+          approval_error?: { code: string; message: string };
+          source_freshness: { status: string };
+        };
+        const afterPreview = snapshotReviewDurability(db, created.id);
+
+        expect(preview.status).toBe("pending");
+        expect(preview.preview_wrote_memory).toBe(false);
+        expect(preview.approval_would_write_memory).toBe(false);
+        expect(preview.approval_status).toBe("not_approvable");
+        expect(preview.approval_error?.code).toBe(testCase.expectedCode);
+        expect(preview.approval_error?.message).toContain(testCase.expectedMessage);
+        expect(preview.source_freshness.status).toBe("fresh");
+        expect(afterPreview).toEqual(beforePreview);
+        expect(db.prepare(
+          "SELECT status, terminal_code, terminal_at FROM review_proposals WHERE id = ?",
+        ).get(created.id)).toEqual({
+          status: "pending",
+          terminal_code: null,
+          terminal_at: null,
+        });
+      } finally {
+        db.close();
+      }
+    }
   });
 
   it("returns instruction-shaped review reasons only through an untrusted envelope", async () => {

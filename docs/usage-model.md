@@ -120,14 +120,21 @@ memory:
    proposal IDs, but does not change state or append logs.
 2. Call `memory_review` with `action:"preview"` for the exact operation, source
    references, freshness/CAS preconditions, and separate preview-vs-approval
-   write effects. Preview is a metering-free pure read: it always returns
-   `preview_wrote_memory:false`, it reports the current approval outcome with
-   `approval_would_write_memory:true|false`, and it no longer returns the old
-   ambiguous `writes_memory` field. Use `edit` or `decline` as needed.
+   write effects. Successful preview responses are metering-free pure reads:
+   they return `preview_wrote_memory:false`, `approval_would_write_memory:true|false`,
+   `approval_status` in `would_write | would_conflict | duplicate_noop | not_approvable`,
+   optional `approval_error { code, message }`, and optional `persisted_status`
+   when Munin is showing a derived effective status such as `expired` without
+   mutating the stored row. Request-level preview errors such as
+   `validation_error`, `not_found`, and `payload_expired` omit those effect
+   fields because no preview payload is available. Preview no longer returns the
+   old ambiguous `writes_memory` field. Use `edit` or `decline` while reviewing.
 3. Call `memory_review` with `action:"approve"` only after review. Approval
    re-runs the ordinary write gates and applies the operation atomically with the
    proposal transition. Approval remains the only step that can change memory
-   truth.
+   truth. After an approval, `prepare_undo` can create a second review proposal
+   that restores prior state or withdraws a reviewed log without mutating memory
+   until that new proposal is approved.
 4. Call `memory_resume` or `memory_read` to verify the accepted memory in normal
    retrieval.
 
