@@ -4192,6 +4192,9 @@ function isTrackedStatusEntry(
 }
 
 function countLegacyPlainStatusNextStepsSections(content: string): number {
+  // Legacy plain status blobs do not mark where an ad-hoc `Next Steps:` block
+  // ends, so we conservatively treat it as running until the next markdown
+  // heading or EOF.
   const lines = content.split("\n");
   let count = 0;
   for (let i = 0; i < lines.length; i++) {
@@ -4338,7 +4341,9 @@ function extractCommitmentsFromEntry(
 ): DerivedCommitmentInput[] {
   const commitments: DerivedCommitmentInput[] = [];
   const seenNormalized = new Set<string>();
-  const matchedUnitCount = countEntryCommitmentLikeUnits(entry, trackedPatterns);
+  const matchedUnitCount = diagnostics
+    ? countEntryCommitmentLikeUnits(entry, trackedPatterns)
+    : 0;
 
   // Suppression rules: entries from resolved sources are historical records,
   // not open commitments. Skip them entirely so existing commitments derived
@@ -4487,7 +4492,6 @@ function syncCommitmentsForScope(
   sessionId?: string,
   loggedEntryIds?: Set<string>,
   diagnostics?: CommitmentExclusionDiagnostics,
-  diagnosticEntryIds?: Set<string>,
 ): { redacted: RedactableEntryMetadata[]; visibleEntryCount: number } {
   const entries = listEntriesForDerivation(db, { namespace, since })
     .filter((entry) => canRead(ctx, entry.namespace));
@@ -4503,6 +4507,7 @@ function syncCommitmentsForScope(
 
   const resolvedNamespaces = getResolvedNamespaces(db);
   const trackedPatterns = resolveTrackedPatterns(db, ctx);
+  let visibleEntryCount = 0;
   for (const entry of filtered.allowed) {
     // Only reconcile commitments for namespaces the caller actually tracks.
     // If the caller doesn't track the namespace, extractCommitmentsFromEntry
@@ -4510,16 +4515,19 @@ function syncCommitmentsForScope(
     // then mark another principal's open commitment as done — silently corrupting
     // cross-principal commitment state. (#164 Codex Finding 1)
     if (!isTrackedNamespace(entry.namespace, trackedPatterns)) continue;
-    const entryDiagnostics = diagnostics && diagnosticEntryIds && !diagnosticEntryIds.has(entry.id)
-      ? diagnostics
-      : undefined;
-    if (entryDiagnostics && diagnosticEntryIds) diagnosticEntryIds.add(entry.id);
-    syncCommitmentsForEntry(db, entry.id, extractCommitmentsFromEntry(entry, resolvedNamespaces, trackedPatterns, entryDiagnostics));
+    if (entry.key !== "synthesis") {
+      visibleEntryCount += 1;
+    }
+    syncCommitmentsForEntry(
+      db,
+      entry.id,
+      extractCommitmentsFromEntry(entry, resolvedNamespaces, trackedPatterns, diagnostics),
+    );
   }
 
   return {
     redacted: filtered.redacted,
-    visibleEntryCount: filtered.allowed.length,
+    visibleEntryCount,
   };
 }
 
@@ -4543,7 +4551,6 @@ function listFreshCommitmentRows(
   const { namespace, since, limit, includeResolved = true } = options;
   const loggedEntryIds = new Set<string>();
   const diagnostics = createCommitmentExclusionDiagnostics();
-  const diagnosticEntryIds = new Set<string>();
   const syncResult = syncCommitmentsForScope(
     db,
     ctx,
@@ -4553,11 +4560,10 @@ function listFreshCommitmentRows(
     sessionId,
     loggedEntryIds,
     diagnostics,
-    diagnosticEntryIds,
   );
-  const redactedSources = [...syncResult.redacted];
   const resolvedNamespaces = getResolvedNamespaces(db);
   const trackedPatterns = resolveTrackedPatterns(db, ctx);
+  const refreshSourceRedacted: RedactableEntryMetadata[] = [];
 
   const refreshCandidates = listCommitments(db, {
     namespace,
@@ -4597,16 +4603,18 @@ function listFreshCommitmentRows(
       loggedEntryIds,
     );
     if (entryFilter.allowed.length === 0) {
-      redactedSources.push(...entryFilter.redacted);
+      refreshSourceRedacted.push(...entryFilter.redacted);
       continue;
     }
     // Same guard as syncCommitmentsForScope: skip entries the caller doesn't
     // track to avoid marking another principal's commitments as done.
     // (#164 Codex Finding 1)
     if (!isTrackedNamespace(entry.namespace, trackedPatterns)) continue;
-    const entryDiagnostics = !diagnosticEntryIds.has(entry.id) ? diagnostics : undefined;
-    if (entryDiagnostics) diagnosticEntryIds.add(entry.id);
-    syncCommitmentsForEntry(db, entry.id, extractCommitmentsFromEntry(entry, resolvedNamespaces, trackedPatterns, entryDiagnostics));
+    syncCommitmentsForEntry(
+      db,
+      entry.id,
+      extractCommitmentsFromEntry(entry, resolvedNamespaces, trackedPatterns),
+    );
   }
 
   const rows = listCommitments(db, {
@@ -4636,6 +4644,7 @@ function listFreshCommitmentRows(
     redacted: combineRedactedSources(
       syncResult.redacted,
       allowedRefreshCandidates.redacted,
+      refreshSourceRedacted,
       visibleRows.redacted,
     ),
     diagnostics,

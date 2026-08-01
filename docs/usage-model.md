@@ -67,7 +67,10 @@ by default.
 structure that Munin understands today (for example the markdown emitted by
 `memory_update_status`). Legacy free-form status blobs with ad-hoc `Next Steps:`
 headings remain readable, but they do not become commitment rows until they are
-migrated to the canonical structure.
+migrated to the canonical structure. Compatibility note: older derived rows from
+those legacy plain-status blocks are retired as non-completions during refresh,
+and older whole-segment dated rows are revised to the surviving future clause
+when that obligation is still present in the source.
 
 ---
 

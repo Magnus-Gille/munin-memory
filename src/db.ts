@@ -1402,12 +1402,76 @@ export interface DerivedCommitmentInput {
 
 /** Minimum token overlap for two commitment texts to count as the same work. */
 const COMMITMENT_REVISION_SIMILARITY = 0.5;
+const LEGACY_STATUS_NEXT_STEPS_HEADER = /^next steps:\s*$/i;
+const COMMITMENT_SUBJECT_PREFIX = /^(?:i|we|they|it|this|that)\s+/i;
 
 /** Tokens for similarity comparison: words of 3+ chars, deduplicated. */
 function commitmentTokens(text: string): Set<string> {
   return new Set(
     text.toLowerCase().match(/[a-z0-9#][a-z0-9#_-]{2,}/g) ?? [],
   );
+}
+
+function normalizeCommitmentComparisonText(text: string): string {
+  return text.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function legacyWholeSegmentRevisionScore(
+  orphan: { source_type: string; text: string; due_at?: string | null },
+  commitment: DerivedCommitmentInput,
+): number {
+  if (orphan.source_type !== "explicit_dated_commitment" || commitment.sourceType !== "explicit_dated_commitment") {
+    return 0;
+  }
+  if (orphan.due_at && commitment.dueAt && orphan.due_at !== commitment.dueAt) {
+    return 0;
+  }
+
+  const normalizedOrphan = normalizeCommitmentComparisonText(orphan.text);
+  const normalizedFresh = normalizeCommitmentComparisonText(commitment.text);
+  if (normalizedOrphan.includes(normalizedFresh)) return 1;
+
+  const withoutSubject = normalizedFresh.replace(COMMITMENT_SUBJECT_PREFIX, "");
+  return withoutSubject.length >= 12 && normalizedOrphan.includes(withoutSubject)
+    ? 1
+    : 0;
+}
+
+/**
+ * Legacy plain status blobs have no machine-readable section terminator. For
+ * compatibility cleanup we therefore treat `Next Steps:` as an ad-hoc block
+ * that runs until the next markdown heading or EOF.
+ */
+function hasLegacyPlainStatusNextSteps(content: string): boolean {
+  const lines = content.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (!trimmed || !LEGACY_STATUS_NEXT_STEPS_HEADER.test(trimmed)) continue;
+    for (let j = i + 1; j < lines.length; j++) {
+      const next = lines[j].trim();
+      if (!next) continue;
+      if (/^#{1,6}\s+/.test(next)) break;
+      return true;
+    }
+  }
+  return false;
+}
+
+function resolvedStatusForMissingCommitment(
+  source: { entry_type: EntryType; key: string | null; content: string },
+  existing: { source_type: string },
+): CommitmentStatus {
+  if (
+    existing.source_type === "tracked_next_step"
+    && source.entry_type === "state"
+    && source.key === "status"
+    && hasLegacyPlainStatusNextSteps(source.content)
+  ) {
+    return "cancelled";
+  }
+  return existing.source_type === "tracked_next_step"
+    ? "done"
+    : "cancelled";
 }
 
 /** Issue-style references (`#248`) are a stable identity across rewording. */
@@ -1444,7 +1508,7 @@ function jaccard(a: Set<string>, b: Set<string>): number {
  * Exported for tests.
  */
 export function pairRevisedCommitments(
-  orphans: Array<{ id: string; source_type: string; text: string }>,
+  orphans: Array<{ id: string; source_type: string; text: string; due_at?: string | null }>,
   fresh: DerivedCommitmentInput[],
 ): Map<string, DerivedCommitmentInput> {
   const pairs = new Map<string, DerivedCommitmentInput>();
@@ -1463,7 +1527,10 @@ export function pairRevisedCommitments(
       // identity: multiple sequential tasks can legitimately share one issue.
       // If both sides name issue references, their sets must agree exactly.
       if (orphanIssues.size > 0 && freshIssues.size > 0 && !equalSets(orphanIssues, freshIssues)) continue;
-      const score = jaccard(orphanTokens, commitmentTokens(commitment.text));
+      const score = Math.max(
+        jaccard(orphanTokens, commitmentTokens(commitment.text)),
+        legacyWholeSegmentRevisionScore(orphan, commitment),
+      );
       if (score < COMMITMENT_REVISION_SIMILARITY) continue;
       scored.push({ score, orphanId: orphan.id, commitment });
     }
@@ -1584,12 +1651,13 @@ export function syncCommitmentsForEntry(
   derivedCommitments: DerivedCommitmentInput[],
 ): void {
   const source = db
-    .prepare("SELECT id, namespace, key, entry_type, classification, updated_at FROM entries WHERE id = ?")
+    .prepare("SELECT id, namespace, key, entry_type, content, classification, updated_at FROM entries WHERE id = ?")
     .get(entryId) as {
       id: string;
       namespace: string;
       key: string | null;
       entry_type: EntryType;
+      content: string;
       classification: string | null;
       updated_at: string;
     } | undefined;
@@ -1746,9 +1814,7 @@ export function syncCommitmentsForEntry(
     for (const existing of existingRows) {
       if (nextFingerprints.has(existing.source_fingerprint)) continue;
       if (revisionPairs.has(existing.id)) continue;
-      const resolvedStatus: CommitmentStatus = existing.source_type === "tracked_next_step"
-        ? "done"
-        : "cancelled";
+      const resolvedStatus = resolvedStatusForMissingCommitment(source, existing);
       resolveCommitment.run(resolvedStatus, now, now, existing.id);
     }
   });

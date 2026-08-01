@@ -5885,6 +5885,141 @@ describe("memory_commitments", () => {
     expect(JSON.stringify(result.exclusion_diagnostics)).not.toContain("Run the canary");
   });
 
+  it("retires legacy plain-status commitment rows without surfacing them as completed", async () => {
+    const restoreDate = commitmentTestDate(24);
+    const nextStep = `Verify the restore path by ${restoreDate}`;
+    await callTool("memory_write", {
+      namespace: "projects/legacy-plain-status-upgrade",
+      key: "status",
+      content: [
+        "Phase: Build",
+        "Current Work: Stabilizing the rollout",
+        "Blockers: None.",
+        "Next Steps:",
+        `- ${nextStep}`,
+      ].join("\n"),
+      tags: ["active"],
+    });
+
+    const source = db.prepare(
+      "SELECT id FROM entries WHERE namespace = ? AND key = 'status' AND is_current = 1",
+    ).get("projects/legacy-plain-status-upgrade") as { id: string };
+
+    db.prepare(
+      `INSERT INTO commitments
+         (id, namespace, source_entry_id, source_type, source_fingerprint, text, due_at, status, confidence, created_at, updated_at, resolved_at)
+       VALUES (?, ?, ?, 'tracked_next_step', ?, ?, ?, 'open', ?, ?, ?, NULL)`,
+    ).run(
+      "legacy-plain-status-row",
+      "projects/legacy-plain-status-upgrade",
+      source.id,
+      `tracked_next_step:${nextStep.toLowerCase()}`,
+      nextStep,
+      `${restoreDate}T23:59:59.000Z`,
+      0.9,
+      "2026-07-15T12:00:00.000Z",
+      "2026-07-15T12:00:00.000Z",
+    );
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/legacy-plain-status-upgrade",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<unknown>;
+      completed_recently: Array<{ id: string }>;
+      exclusion_diagnostics?: {
+        matched_but_excluded: number;
+        reason_counts?: Record<string, number>;
+      };
+    };
+
+    expect(result.open).toHaveLength(0);
+    expect(result.completed_recently).toHaveLength(0);
+    expect(result.exclusion_diagnostics).toEqual(expect.objectContaining({
+      matched_but_excluded: 1,
+      reason_counts: expect.objectContaining({
+        legacy_plain_status_next_steps: 1,
+      }),
+    }));
+
+    const row = db.prepare(
+      "SELECT status, resolved_at FROM commitments WHERE id = ?",
+    ).get("legacy-plain-status-row") as { status: string; resolved_at: string | null };
+    expect(row.status).toBe("cancelled");
+    expect(row.resolved_at).not.toBeNull();
+  });
+
+  it("revises legacy whole-segment dated rows in place when the future clause still survives", async () => {
+    const retrospectiveDate = commitmentTestDate(-3);
+    const followupDate = commitmentTestDate(18);
+    const legacyText =
+      `We verified the backup restore on ${retrospectiveDate}, confirmed the incident timeline, captured operator notes, and will publish the follow-up memo by ${followupDate} after legal review.`;
+    const revisedText = `We will publish the follow-up memo by ${followupDate} after legal review.`;
+    db.prepare(
+      `INSERT INTO entries
+         (id, namespace, key, entry_type, content, tags, agent_id, owner_principal_id, created_at, updated_at, classification)
+       VALUES (?, ?, NULL, 'log', ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      "legacy-whole-segment-entry",
+      "projects/legacy-whole-segment-upgrade",
+      legacyText,
+      JSON.stringify(["decision"]),
+      "owner",
+      "owner",
+      "2026-08-01T12:00:00.000Z",
+      "2026-08-01T12:00:00.000Z",
+      "internal",
+    );
+
+    db.prepare(
+      `INSERT INTO commitments
+         (id, namespace, source_entry_id, source_type, source_fingerprint, text, due_at, status, confidence, created_at, updated_at, resolved_at)
+       VALUES (?, ?, ?, 'explicit_dated_commitment', ?, ?, ?, 'open', ?, ?, ?, NULL)`,
+    ).run(
+      "legacy-whole-segment-row",
+      "projects/legacy-whole-segment-upgrade",
+      "legacy-whole-segment-entry",
+      `explicit_dated_commitment:${legacyText.toLowerCase().replace(/\s+/g, " ").trim()}`,
+      legacyText,
+      `${followupDate}T23:59:59.000Z`,
+      0.7,
+      "2026-07-15T12:00:00.000Z",
+      "2026-07-15T12:00:00.000Z",
+    );
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/legacy-whole-segment-upgrade",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ id: string; text: string; source_type: string }>;
+      completed_recently: Array<{ id: string }>;
+    };
+
+    expect(result.open).toContainEqual(expect.objectContaining({
+      id: "legacy-whole-segment-row",
+      text: revisedText,
+      source_type: "explicit_dated_commitment",
+    }));
+    expect(result.completed_recently).toHaveLength(0);
+
+    const rows = db.prepare(
+      "SELECT id, status, text, source_fingerprint FROM commitments WHERE namespace = ? ORDER BY id",
+    ).all("projects/legacy-whole-segment-upgrade") as Array<{
+      id: string;
+      status: string;
+      text: string;
+      source_fingerprint: string;
+    }>;
+    expect(rows).toEqual([
+      expect.objectContaining({
+        id: "legacy-whole-segment-row",
+        status: "open",
+        text: revisedText,
+      }),
+    ]);
+    expect(rows[0].source_fingerprint).toContain("we will publish the follow-up memo");
+  });
+
   it("does not extract commitments from synthesis entries (#26)", async () => {
     // Synthesis entries are computed distillations of underlying logs/status.
     // Milestone labels like "Genesis (MVP Complete - 2026-03-21)" contain an
@@ -6130,6 +6265,70 @@ describe("memory_commitments", () => {
     expect(nonEmptyResult.open.length).toBeGreaterThan(0);
     expect(nonEmptyResult.data_requirements).toBeUndefined();
     expect(nonEmptyResult.suggestion).toBeUndefined();
+  });
+
+  it("omits refresh-only exclusions from since-scoped empty diagnostics", async () => {
+    const restoreDate = commitmentTestDate(27);
+    const since = "2026-07-31T00:00:00.000Z";
+    await callTool("memory_write", {
+      namespace: "projects/commitment-since-refresh-scope",
+      key: "status",
+      content: [
+        "Phase: Build",
+        "Current Work: Stabilizing the rollout",
+        "Blockers: None.",
+        "Next Steps:",
+        `- Verify the restore path by ${restoreDate}`,
+      ].join("\n"),
+      tags: ["active"],
+    });
+
+    const source = db.prepare(
+      "SELECT id FROM entries WHERE namespace = ? AND key = 'status' AND is_current = 1",
+    ).get("projects/commitment-since-refresh-scope") as { id: string };
+    db.prepare("UPDATE entries SET created_at = ?, updated_at = ? WHERE id = ?").run(
+      "2026-07-01T12:00:00.000Z",
+      "2026-07-01T12:00:00.000Z",
+      source.id,
+    );
+    db.prepare(
+      `INSERT INTO commitments
+         (id, namespace, source_entry_id, source_type, source_fingerprint, text, due_at, status, confidence, created_at, updated_at, resolved_at)
+       VALUES (?, ?, ?, 'tracked_next_step', ?, ?, ?, 'open', ?, ?, ?, NULL)`,
+    ).run(
+      "older-refresh-only-row",
+      "projects/commitment-since-refresh-scope",
+      source.id,
+      `tracked_next_step:verify the restore path by ${restoreDate}`,
+      `Verify the restore path by ${restoreDate}`,
+      `${restoreDate}T23:59:59.000Z`,
+      0.9,
+      "2026-07-15T12:00:00.000Z",
+      "2026-07-31T12:00:00.000Z",
+    );
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/commitment-since-refresh-scope",
+      since,
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<unknown>;
+      at_risk: Array<unknown>;
+      overdue: Array<unknown>;
+      completed_recently: Array<unknown>;
+      reason?: string;
+      exclusion_diagnostics?: {
+        matched_but_excluded: number;
+        reason_counts?: Record<string, number>;
+      };
+    };
+
+    expect(result.open).toHaveLength(0);
+    expect(result.at_risk).toHaveLength(0);
+    expect(result.overdue).toHaveLength(0);
+    expect(result.completed_recently).toHaveLength(0);
+    expect(result.reason).toMatch(/no status or log entries to scan/i);
+    expect(result.exclusion_diagnostics).toBeUndefined();
   });
 
   it("omits exclusion diagnostics when no matched candidates were dropped", async () => {

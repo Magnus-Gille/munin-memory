@@ -51,7 +51,11 @@ changelog is the canonical record of what moved.
   blobs that use an ad-hoc `Next Steps:` heading. Public wording is narrowed to
   the real contract: tracked-status commitments come from the canonical Next
   Steps structure (for example via `memory_update_status`), not from arbitrary
-  status markdown.
+  status markdown. Refresh now keeps the compatibility boundary honest too:
+  legacy rows from those plain-status `Next Steps:` blocks retire through a
+  non-completion path, and older whole-segment dated rows revise in place to a
+  surviving future clause instead of reading as completed just because the
+  derived fingerprint changed.
 
 - **`memory_delete` previews disclose and bind the full correction lineage
   they will remove (#281).** A delete of a corrected state entry removes its
