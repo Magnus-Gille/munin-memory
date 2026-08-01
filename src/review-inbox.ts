@@ -5,6 +5,7 @@ import type { ClassificationLevel, EntryType } from "./types.js";
 export const REVIEW_PROPOSAL_TTL_DAYS = 30;
 export const REVIEW_TERMINAL_PAYLOAD_RETENTION_DAYS = 7;
 export const REVIEW_APPROVED_UNDO_RETENTION_DAYS = 30;
+export const REVIEW_PROPOSAL_EXPIRY_DETAIL = "Proposal expired before review.";
 export const REVIEW_SOURCE_EXCERPT_MAX_CHARS = 500;
 export const REVIEW_SOURCE_REF_MAX_COUNT = 10;
 export const REVIEW_REASON_MAX_COUNT = 10;
@@ -151,6 +152,11 @@ export interface CreateReviewProposalInput {
   undoOfProposalId?: string;
 }
 
+export interface ReviewProposalRetentionPolicy {
+  terminalPayloadDays?: number;
+  approvedUndoDays?: number;
+}
+
 export type ReviewApplyResult =
   | {
       outcome: "applied";
@@ -193,6 +199,17 @@ type ReviewTransitionResult =
 
 function parseJson<T>(value: string): T {
   return JSON.parse(value) as T;
+}
+
+function resolveReviewProposalRetentionPolicy(
+  retention: ReviewProposalRetentionPolicy = {},
+): { terminalPayloadDays: number; approvedUndoDays: number } {
+  return {
+    terminalPayloadDays:
+      retention.terminalPayloadDays ?? REVIEW_TERMINAL_PAYLOAD_RETENTION_DAYS,
+    approvedUndoDays:
+      retention.approvedUndoDays ?? REVIEW_APPROVED_UNDO_RETENTION_DAYS,
+  };
 }
 
 function parseProposal(row: ReviewProposalRow): ReviewProposal {
@@ -609,9 +626,9 @@ function expireProposal(
   db.prepare(
     `UPDATE review_proposals
      SET status = 'expired', updated_at = ?, terminal_at = ?,
-         terminal_code = 'review_expired', terminal_detail = 'Proposal expired before review.'
+         terminal_code = 'review_expired', terminal_detail = ?
      WHERE id = ?`,
-  ).run(now, now, row.id);
+  ).run(now, now, REVIEW_PROPOSAL_EXPIRY_DETAIL, row.id);
   insertEvent(
     db,
     row.id,
@@ -729,20 +746,54 @@ function subtractDays(iso: string, days: number): string {
   return new Date(new Date(iso).getTime() - days * 24 * 60 * 60 * 1000).toISOString();
 }
 
+export function deriveReviewProposalStatus(
+  proposal: Pick<ReviewProposalRow | ReviewProposal, "status" | "expires_at">,
+  now: string,
+): ReviewProposalStatus {
+  if (
+    (proposal.status === "pending" || proposal.status === "edited")
+    && proposal.expires_at <= now
+  ) {
+    return "expired";
+  }
+  return proposal.status;
+}
+
+export function reviewProposalPayloadPurgedOrDue(
+  proposal: Pick<ReviewProposalRow | ReviewProposal, "status" | "terminal_at" | "payload_purged_at">,
+  now: string,
+  retention: ReviewProposalRetentionPolicy = {},
+): boolean {
+  if (proposal.payload_purged_at !== null) return true;
+  if (proposal.terminal_at === null) return false;
+
+  const policy = resolveReviewProposalRetentionPolicy(retention);
+  const terminalCutoff = subtractDays(now, policy.terminalPayloadDays);
+  const undoCutoff = subtractDays(now, policy.approvedUndoDays);
+
+  if (
+    (proposal.status === "declined" || proposal.status === "expired" || proposal.status === "failed")
+    && proposal.terminal_at <= terminalCutoff
+  ) {
+    return true;
+  }
+  if (
+    (proposal.status === "approved" || proposal.status === "superseded")
+    && proposal.terminal_at <= undoCutoff
+  ) {
+    return true;
+  }
+  return false;
+}
+
 export function pruneReviewProposals(
   db: Database.Database,
   now: string,
-  retention: {
-    terminalPayloadDays?: number;
-    approvedUndoDays?: number;
-  } = {},
+  retention: ReviewProposalRetentionPolicy = {},
 ): { expired: number; payloads_purged: number; undo_snapshots_purged: number } {
-  const terminalPayloadDays =
-    retention.terminalPayloadDays ?? REVIEW_TERMINAL_PAYLOAD_RETENTION_DAYS;
-  const approvedUndoDays =
-    retention.approvedUndoDays ?? REVIEW_APPROVED_UNDO_RETENTION_DAYS;
-  const terminalCutoff = subtractDays(now, terminalPayloadDays);
-  const undoCutoff = subtractDays(now, approvedUndoDays);
+  const policy = resolveReviewProposalRetentionPolicy(retention);
+  const terminalCutoff = subtractDays(now, policy.terminalPayloadDays);
+  const undoCutoff = subtractDays(now, policy.approvedUndoDays);
 
   const txn = db.transaction(() => {
     const expiring = db.prepare(

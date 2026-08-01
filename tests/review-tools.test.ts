@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { initDatabase, readState, writeState } from "../src/db.js";
 import { ownerContext, type AccessContext } from "../src/access.js";
@@ -7,6 +7,8 @@ import { registerTools } from "../src/tools.js";
 import {
   approveReviewProposal,
   createReviewProposal,
+  declineReviewProposal,
+  listReviewProposalEvents,
 } from "../src/review-inbox.js";
 
 function makeCall(
@@ -280,6 +282,7 @@ describe("memory_extract durable review proposals", () => {
       proposal_id: created.id,
     }) as {
       status: string;
+      persisted_status?: string;
       preview_wrote_memory: boolean;
       approval_would_write_memory: boolean;
       approval_status: string;
@@ -288,7 +291,8 @@ describe("memory_extract durable review proposals", () => {
     const afterPreview = snapshotReviewDurability(db, created.id);
 
     expect(preview).toMatchObject({
-      status: "pending",
+      status: "expired",
+      persisted_status: "pending",
       preview_wrote_memory: false,
       approval_would_write_memory: false,
       approval_status: "not_approvable",
@@ -310,6 +314,171 @@ describe("memory_extract durable review proposals", () => {
     expect(db.prepare("SELECT status, terminal_code FROM review_proposals WHERE id = ?").get(created.id))
       .toEqual({ status: "expired", terminal_code: "review_expired" });
     expect(db.prepare("SELECT COUNT(*) AS count FROM entries").get()).toEqual({ count: 0 });
+    db.close();
+  });
+
+  it("keeps retention-deadline preview pure while withholding purged payloads", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-01T12:00:00.000Z"));
+    const db = initDatabase(":memory:");
+    try {
+      const operationContent = "Purged review operation content";
+      const sourceExcerpt = "Purged review source excerpt";
+      const created = createReviewProposal(db, {
+        creatorPrincipalId: "owner",
+        operation: {
+          action: "memory_log",
+          namespace: "projects/munin-memory",
+          content: operationContent,
+        },
+        classification: "internal",
+        confidence: 1,
+        reasons: ["preview retention coverage"],
+        sourceRefs: [],
+        sourceExcerpt,
+        sourceHash: "hash",
+        createdAt: "2026-06-01T10:00:00.000Z",
+        expiresAt: "2026-07-01T10:00:00.000Z",
+      });
+      declineReviewProposal(
+        db,
+        created.id,
+        "owner",
+        "declined long before retention elapsed",
+        "2026-06-02T10:00:00.000Z",
+      );
+      const beforePreview = snapshotReviewDurability(db, created.id);
+
+      const preview = await makeCall(db)("memory_review", {
+        action: "preview",
+        proposal_id: created.id,
+      }) as { error: string; message: string };
+      const afterPreview = snapshotReviewDurability(db, created.id);
+
+      expect(preview).toMatchObject({
+        error: "payload_expired",
+        message: "The proposal payload has been purged under the retention policy.",
+      });
+      expect(JSON.stringify(preview)).not.toContain(operationContent);
+      expect(JSON.stringify(preview)).not.toContain(sourceExcerpt);
+      expect(afterPreview).toEqual(beforePreview);
+      expect(db.prepare(
+        "SELECT status, payload_purged_at, current_operation, source_excerpt FROM review_proposals WHERE id = ?",
+      ).get(created.id)).toEqual({
+        status: "declined",
+        payload_purged_at: null,
+        current_operation: expect.any(String),
+        source_excerpt: sourceExcerpt,
+      });
+    } finally {
+      db.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("prunes stale review payloads before approve and still records approve telemetry", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-01T12:00:00.000Z"));
+    const db = initDatabase(":memory:");
+    try {
+      const stale = createReviewProposal(db, {
+        creatorPrincipalId: "owner",
+        operation: {
+          action: "memory_log",
+          namespace: "projects/munin-memory",
+          content: "Declined payload that should be pruned on approve",
+        },
+        classification: "internal",
+        confidence: 1,
+        reasons: ["approve prune coverage"],
+        sourceRefs: [],
+        sourceExcerpt: "stale preview payload",
+        sourceHash: "stale-hash",
+        createdAt: "2026-06-01T10:00:00.000Z",
+        expiresAt: "2026-07-01T10:00:00.000Z",
+      });
+      declineReviewProposal(
+        db,
+        stale.id,
+        "owner",
+        "stale decline",
+        "2026-06-02T10:00:00.000Z",
+      );
+      const fresh = createReviewProposal(db, {
+        creatorPrincipalId: "owner",
+        operation: {
+          action: "memory_log",
+          namespace: "projects/munin-memory",
+          content: "Fresh approval still applies",
+        },
+        classification: "internal",
+        confidence: 1,
+        reasons: ["approve application coverage"],
+        sourceRefs: [],
+        sourceExcerpt: "fresh approval",
+        sourceHash: "fresh-hash",
+        createdAt: "2026-07-31T10:00:00.000Z",
+        expiresAt: "2026-08-31T10:00:00.000Z",
+      });
+
+      const approved = await makeCall(db)("memory_review", {
+        action: "approve",
+        proposal_id: fresh.id,
+      }) as { status: string; duplicate: boolean };
+
+      expect(approved).toMatchObject({ status: "approved", duplicate: false });
+      expect(db.prepare(
+        "SELECT status, payload_purged_at, current_operation, source_excerpt FROM review_proposals WHERE id = ?",
+      ).get(stale.id)).toEqual({
+        status: "declined",
+        payload_purged_at: expect.any(String),
+        current_operation: null,
+        source_excerpt: null,
+      });
+      expect(listReviewProposalEvents(db, stale.id, "owner").at(-1))
+        .toMatchObject({ event_type: "payload_purged", actor_principal_id: "system:maintenance" });
+      expect(db.prepare(
+        "SELECT COUNT(*) AS count FROM entries WHERE namespace = ? AND entry_type = 'log'",
+      ).get("projects/munin-memory")).toEqual({ count: 1 });
+      expect(db.prepare(
+        "SELECT COUNT(*) AS count FROM tool_calls WHERE tool_name = 'memory_review'",
+      ).get()).toEqual({ count: 1 });
+    } finally {
+      db.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("emits telemetry for non-preview review actions", async () => {
+    const db = initDatabase(":memory:");
+    const created = createReviewProposal(db, {
+      creatorPrincipalId: "owner",
+      operation: {
+        action: "memory_log",
+        namespace: "projects/munin-memory",
+        content: "Telemetry should be recorded for get.",
+      },
+      classification: "internal",
+      confidence: 1,
+      reasons: ["telemetry coverage"],
+      sourceRefs: [],
+      sourceExcerpt: "telemetry coverage",
+      sourceHash: "hash",
+      createdAt: "2026-07-23T10:00:00.000Z",
+      expiresAt: "2026-08-22T10:00:00.000Z",
+    });
+
+    const result = await makeCall(db)("memory_review", {
+      action: "get",
+      proposal_id: created.id,
+    }) as { id: string };
+
+    expect(result.id).toBe(created.id);
+    expect(db.prepare(
+      "SELECT tool_name, success FROM tool_calls ORDER BY timestamp, id",
+    ).all()).toEqual([
+      { tool_name: "memory_review", success: 1 },
+    ]);
     db.close();
   });
 
