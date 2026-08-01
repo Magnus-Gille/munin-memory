@@ -3,6 +3,7 @@ import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
+  appendLog,
   computeCommitmentConfidence,
   initDatabase,
   listCommitments,
@@ -111,6 +112,53 @@ async function seedRetrospectiveCommitmentRow(namespace: string, content: string
   );
 
   return { entryId: logResult.id, commitmentId: `stale-${suffix}` };
+}
+
+async function seedLegacyPlainStatusCommitment(
+  namespace: string,
+  header: string,
+  nextStep: string,
+  commitmentId = `${namespace.replace(/[^a-z0-9]+/gi, "-")}-legacy-row`,
+) {
+  await callTool("memory_write", {
+    namespace,
+    key: "status",
+    content: [
+      "Phase: Build",
+      "Current Work: Stabilizing the rollout",
+      "Blockers: None.",
+      header,
+      `- ${nextStep}`,
+    ].join("\n"),
+    tags: ["active"],
+  });
+
+  const source = db.prepare(
+    "SELECT id FROM entries WHERE namespace = ? AND key = 'status' AND is_current = 1",
+  ).get(namespace) as { id: string };
+  const normalized = nextStep.toLowerCase().replace(/\s+/g, " ").trim();
+  const dueDate = nextStep.match(/\d{4}-\d{2}-\d{2}/)?.[0];
+  if (!dueDate) {
+    throw new Error(`Missing due date in next step: ${nextStep}`);
+  }
+
+  db.prepare(
+    `INSERT INTO commitments
+       (id, namespace, source_entry_id, source_type, source_fingerprint, text, due_at, status, confidence, created_at, updated_at, resolved_at)
+     VALUES (?, ?, ?, 'tracked_next_step', ?, ?, ?, 'open', ?, ?, ?, NULL)`,
+  ).run(
+    commitmentId,
+    namespace,
+    source.id,
+    `tracked_next_step:${normalized}`,
+    nextStep,
+    `${dueDate}T23:59:59.000Z`,
+    0.9,
+    "2026-07-15T12:00:00.000Z",
+    "2026-07-15T12:00:00.000Z",
+  );
+
+  return { sourceId: source.id, commitmentId };
 }
 
 beforeEach(() => {
@@ -5727,13 +5775,10 @@ describe("memory_commitments", () => {
   it("keeps persisted status-prose commitments open when the source status still contains the dated clause", async () => {
     const proseDueDate = commitmentTestDate(9);
     const proseText = `We will publish the migration notes by ${proseDueDate}.`;
-    db.prepare(
-      `INSERT INTO entries
-         (id, namespace, key, entry_type, content, tags, agent_id, owner_principal_id, created_at, updated_at, classification)
-       VALUES (?, ?, 'status', 'state', ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      "status-prose-resync-entry",
+    const { id: sourceId } = writeState(
+      db,
       "projects/status-prose-resync",
+      "status",
       [
         "## Phase",
         "Active",
@@ -5747,12 +5792,12 @@ describe("memory_commitments", () => {
         "## Next Steps",
         "- Keep shipping",
       ].join("\n"),
-      JSON.stringify(["active"]),
-      "owner",
-      "owner",
+      ["active"],
+    );
+    db.prepare("UPDATE entries SET created_at = ?, updated_at = ? WHERE id = ?").run(
       "2026-08-01T12:00:00.000Z",
       "2026-08-01T12:00:00.000Z",
-      "internal",
+      sourceId,
     );
 
     const normalized = proseText.toLowerCase().replace(/\s+/g, " ").trim();
@@ -5763,7 +5808,7 @@ describe("memory_commitments", () => {
     ).run(
       "persisted-status-prose",
       "projects/status-prose-resync",
-      "status-prose-resync-entry",
+      sourceId,
       `explicit_dated_commitment:${normalized}`,
       proseText,
       `${proseDueDate}T23:59:59.000Z`,
@@ -5815,6 +5860,47 @@ describe("memory_commitments", () => {
       source_type: "explicit_dated_commitment",
     }));
     expect(result.exclusion_diagnostics).toBeUndefined();
+  });
+
+  it.each([
+    {
+      name: "comma + repeated-subject omission",
+      namespace: "projects/mixed-tense-boundary-comma",
+      content: (retrospectiveDate: string, followupDate: string) =>
+        `Yesterday we verified the backup restore on ${retrospectiveDate}, and will publish the follow-up by ${followupDate}.`,
+    },
+    {
+      name: "semicolon boundary",
+      namespace: "projects/mixed-tense-boundary-semicolon",
+      content: (retrospectiveDate: string, followupDate: string) =>
+        `Yesterday we verified the backup restore on ${retrospectiveDate}; we will publish the follow-up by ${followupDate}.`,
+    },
+    {
+      name: "then boundary",
+      namespace: "projects/mixed-tense-boundary-then",
+      content: (retrospectiveDate: string, followupDate: string) =>
+        `Yesterday we verified the backup restore on ${retrospectiveDate}, then we will publish the follow-up by ${followupDate}.`,
+    },
+  ])("binds the future due date across a $name", async ({ namespace, content }) => {
+    const retrospectiveDate = commitmentTestDate(-4);
+    const followupDate = commitmentTestDate(12);
+    await callTool("memory_log", {
+      namespace,
+      content: content(retrospectiveDate, followupDate),
+      tags: ["decision"],
+    });
+
+    const raw = await callTool("memory_commitments", { namespace });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ text: string; due_at: string | null }>;
+      overdue: Array<unknown>;
+    };
+
+    expect(result.open).toContainEqual(expect.objectContaining({
+      text: `We will publish the follow-up by ${followupDate}.`,
+      due_at: `${followupDate}T23:59:59.000Z`,
+    }));
+    expect(result.overdue).toHaveLength(0);
   });
 
   it("extracts passive future commitments from dated clauses", async () => {
@@ -5885,45 +5971,21 @@ describe("memory_commitments", () => {
     expect(JSON.stringify(result.exclusion_diagnostics)).not.toContain("Run the canary");
   });
 
-  it("retires legacy plain-status commitment rows without surfacing them as completed", async () => {
+  it.each([
+    "Next Steps:",
+    "Next Steps",
+    "## Action Items",
+    "Action Items:",
+    "Action Item",
+    "TODO",
+    "Next",
+  ])("retires legacy plain-status commitment rows with a %s header without surfacing them as completed", async (header) => {
     const restoreDate = commitmentTestDate(24);
     const nextStep = `Verify the restore path by ${restoreDate}`;
-    await callTool("memory_write", {
-      namespace: "projects/legacy-plain-status-upgrade",
-      key: "status",
-      content: [
-        "Phase: Build",
-        "Current Work: Stabilizing the rollout",
-        "Blockers: None.",
-        "Next Steps:",
-        `- ${nextStep}`,
-      ].join("\n"),
-      tags: ["active"],
-    });
+    const namespace = `projects/legacy-plain-status-${header.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+    const { commitmentId } = await seedLegacyPlainStatusCommitment(namespace, header, nextStep, `${namespace}-row`);
 
-    const source = db.prepare(
-      "SELECT id FROM entries WHERE namespace = ? AND key = 'status' AND is_current = 1",
-    ).get("projects/legacy-plain-status-upgrade") as { id: string };
-
-    db.prepare(
-      `INSERT INTO commitments
-         (id, namespace, source_entry_id, source_type, source_fingerprint, text, due_at, status, confidence, created_at, updated_at, resolved_at)
-       VALUES (?, ?, ?, 'tracked_next_step', ?, ?, ?, 'open', ?, ?, ?, NULL)`,
-    ).run(
-      "legacy-plain-status-row",
-      "projects/legacy-plain-status-upgrade",
-      source.id,
-      `tracked_next_step:${nextStep.toLowerCase()}`,
-      nextStep,
-      `${restoreDate}T23:59:59.000Z`,
-      0.9,
-      "2026-07-15T12:00:00.000Z",
-      "2026-07-15T12:00:00.000Z",
-    );
-
-    const raw = await callTool("memory_commitments", {
-      namespace: "projects/legacy-plain-status-upgrade",
-    });
+    const raw = await callTool("memory_commitments", { namespace });
     const result = parseToolResponse(raw) as {
       open: Array<unknown>;
       completed_recently: Array<{ id: string }>;
@@ -5944,9 +6006,107 @@ describe("memory_commitments", () => {
 
     const row = db.prepare(
       "SELECT status, resolved_at FROM commitments WHERE id = ?",
-    ).get("legacy-plain-status-row") as { status: string; resolved_at: string | null };
+    ).get(commitmentId) as { status: string; resolved_at: string | null };
     expect(row.status).toBe("cancelled");
     expect(row.resolved_at).not.toBeNull();
+  });
+
+  it("reopens the same tracked next-step row when a legacy plain status is rewritten canonically", async () => {
+    const restoreDate = commitmentTestDate(25);
+    const nextStep = `Verify the restore path by ${restoreDate}`;
+    const namespace = "projects/legacy-plain-status-reopen";
+    const { commitmentId } = await seedLegacyPlainStatusCommitment(
+      namespace,
+      "Action Items",
+      nextStep,
+      "legacy-plain-status-reopen-row",
+    );
+
+    await callTool("memory_commitments", { namespace });
+    let row = db.prepare(
+      "SELECT status, resolved_at FROM commitments WHERE id = ?",
+    ).get(commitmentId) as { status: string; resolved_at: string | null };
+    expect(row.status).toBe("cancelled");
+    expect(row.resolved_at).not.toBeNull();
+
+    await callTool("memory_update_status", {
+      namespace,
+      phase: "Build",
+      current_work: "Stabilizing the rollout",
+      blockers: "None.",
+      next_steps: [nextStep],
+      lifecycle: "active",
+    });
+
+    const raw = await callTool("memory_commitments", { namespace });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ id: string; text: string }>;
+      completed_recently: Array<{ id: string }>;
+    };
+
+    expect(result.open).toContainEqual(expect.objectContaining({
+      id: commitmentId,
+      text: nextStep,
+    }));
+    expect(result.completed_recently).toHaveLength(0);
+
+    row = db.prepare(
+      "SELECT status, resolved_at FROM commitments WHERE id = ?",
+    ).get(commitmentId) as { status: string; resolved_at: string | null };
+    expect(row).toEqual({ status: "open", resolved_at: null });
+  });
+
+  it("does not let a literal Next Steps line in canonical notes cancel a completed canonical next step", async () => {
+    const nextStepDueDate = commitmentTestDate(29);
+    const namespace = "projects/canonical-next-steps-note-literal";
+    await callTool("memory_write", {
+      namespace,
+      key: "status",
+      content: [
+        "## Phase",
+        "Active",
+        "",
+        "## Current Work",
+        "Wrapping up the rollout",
+        "",
+        "## Blockers",
+        "None.",
+        "",
+        "## Next Steps",
+        `- Ship the importer by ${nextStepDueDate}`,
+        "",
+        "## Notes",
+        "Copied transcript marker:",
+        "Next Steps:",
+        "- legacy pasted bullet",
+      ].join("\n"),
+      tags: ["active"],
+    });
+
+    await callTool("memory_commitments", { namespace });
+    await callTool("memory_update_status", {
+      namespace,
+      phase: "Active",
+      current_work: "Wrapping up the rollout",
+      blockers: "None.",
+      next_steps: [],
+      notes: "Copied transcript marker:\nNext Steps:\n- legacy pasted bullet",
+      lifecycle: "active",
+    });
+
+    const raw = await callTool("memory_commitments", { namespace });
+    const result = parseToolResponse(raw) as {
+      completed_recently: Array<{ text: string }>;
+    };
+
+    expect(result.completed_recently).toContainEqual(expect.objectContaining({
+      text: `Ship the importer by ${nextStepDueDate}`,
+    }));
+
+    const row = db.prepare(
+      "SELECT status FROM commitments WHERE namespace = ? ORDER BY created_at DESC LIMIT 1",
+    ).get(namespace) as { status: string };
+    expect(row.status).toBe("done");
   });
 
   it("revises legacy whole-segment dated rows in place when the future clause still survives", async () => {
@@ -5955,20 +6115,16 @@ describe("memory_commitments", () => {
     const legacyText =
       `We verified the backup restore on ${retrospectiveDate}, confirmed the incident timeline, captured operator notes, and will publish the follow-up memo by ${followupDate} after legal review.`;
     const revisedText = `We will publish the follow-up memo by ${followupDate} after legal review.`;
-    db.prepare(
-      `INSERT INTO entries
-         (id, namespace, key, entry_type, content, tags, agent_id, owner_principal_id, created_at, updated_at, classification)
-       VALUES (?, ?, NULL, 'log', ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      "legacy-whole-segment-entry",
+    const { id: logId } = appendLog(
+      db,
       "projects/legacy-whole-segment-upgrade",
       legacyText,
-      JSON.stringify(["decision"]),
-      "owner",
-      "owner",
+      ["decision"],
+    );
+    db.prepare("UPDATE entries SET created_at = ?, updated_at = ? WHERE id = ?").run(
       "2026-08-01T12:00:00.000Z",
       "2026-08-01T12:00:00.000Z",
-      "internal",
+      logId,
     );
 
     db.prepare(
@@ -5978,7 +6134,7 @@ describe("memory_commitments", () => {
     ).run(
       "legacy-whole-segment-row",
       "projects/legacy-whole-segment-upgrade",
-      "legacy-whole-segment-entry",
+      logId,
       `explicit_dated_commitment:${legacyText.toLowerCase().replace(/\s+/g, " ").trim()}`,
       legacyText,
       `${followupDate}T23:59:59.000Z`,
@@ -6219,6 +6375,34 @@ describe("memory_commitments", () => {
 
     expect(nonEmptyResult.open.length).toBeGreaterThan(0);
     expect(nonEmptyResult.reason).toBeUndefined();
+  });
+
+  it("uses a tracked-pattern reason for readable but untracked namespaces", async () => {
+    await callTool("memory_write", {
+      namespace: "tasks/untracked-readable-commitments",
+      key: "status",
+      content: "Still working through the imported result notes.",
+      tags: ["active"],
+    });
+    await callTool("memory_log", {
+      namespace: "tasks/untracked-readable-commitments",
+      content: "Will archive the result after the postmortem on 2026-08-10.",
+      tags: ["decision"],
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "tasks/untracked-readable-commitments",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<unknown>;
+      reason?: string;
+      data_requirements?: string;
+    };
+
+    expect(result.open).toHaveLength(0);
+    expect(result.reason).toMatch(/tracked/i);
+    expect(result.reason).not.toMatch(/no status or log entries to scan/i);
+    expect(result.data_requirements).toBeDefined();
   });
 
   it("includes data_requirements and suggestion in empty results, omits them in non-empty results", async () => {

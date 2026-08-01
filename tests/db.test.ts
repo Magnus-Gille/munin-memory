@@ -20,6 +20,7 @@ import {
   computeCommitmentConfidence,
   syncCommitmentsForEntry,
   listCommitments,
+  pairRevisedCommitments,
   queryEntries,
   queryEntriesByFilter,
   filterIdsMatchingFts,
@@ -569,6 +570,59 @@ describe("commitment revision identity (#253)", () => {
     const rows = listCommitments(db, { namespace: "projects/different-issues" });
     expect(rows.filter((row) => row.status === "done")).toHaveLength(1);
     expect(rows.filter((row) => row.status === "open")).toHaveLength(1);
+  });
+
+  it("does not pair explicit dated revisions when the orphan and fresh due dates conflict", () => {
+    const pairs = pairRevisedCommitments(
+      [{
+        id: "orphan",
+        source_type: "explicit_dated_commitment",
+        text: "We will publish the follow-up memo by 2026-09-20.",
+        due_at: "2026-09-20T23:59:59.000Z",
+      }],
+      [{
+        sourceType: "explicit_dated_commitment",
+        fingerprint: "explicit_dated_commitment:publish-follow-up-memo",
+        text: "We will publish the follow-up memo by 2026-09-21.",
+        dueAt: "2026-09-21T23:59:59.000Z",
+        confidence: 0.7,
+      }],
+    );
+
+    expect(pairs.size).toBe(0);
+  });
+
+  it("uses the orphan due date to disambiguate contained future clauses in a legacy whole-segment row", () => {
+    const publishDue = "2026-09-20T23:59:59.000Z";
+    const closureDue = "2026-09-21T23:59:59.000Z";
+    const orphanText =
+      "Yesterday we verified the backup restore on 2026-08-01, and will publish the follow-up memo by 2026-09-20, then we will file the closure summary by 2026-09-21.";
+    const pairs = pairRevisedCommitments(
+      [{
+        id: "orphan",
+        source_type: "explicit_dated_commitment",
+        text: orphanText,
+        due_at: publishDue,
+      }],
+      [
+        {
+          sourceType: "explicit_dated_commitment",
+          fingerprint: "explicit_dated_commitment:publish-follow-up-memo",
+          text: "We will publish the follow-up memo by 2026-09-20.",
+          dueAt: publishDue,
+          confidence: 0.7,
+        },
+        {
+          sourceType: "explicit_dated_commitment",
+          fingerprint: "explicit_dated_commitment:file-closure-summary",
+          text: "We will file the closure summary by 2026-09-21.",
+          dueAt: closureDue,
+          confidence: 0.7,
+        },
+      ],
+    );
+
+    expect(pairs.get("orphan")?.text).toBe("We will publish the follow-up memo by 2026-09-20.");
   });
 });
 

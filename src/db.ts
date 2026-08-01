@@ -20,6 +20,10 @@ import {
   DEFAULT_TRACKED_PATTERNS,
   trackedPatternsToSqlLike,
 } from "./internal/retrieval-shared.js";
+import {
+  hasStructuredStatusNextStepsSection,
+  hasLegacyPlainStatusNextSteps,
+} from "./commitment-status.js";
 import { runMigrations } from "./migrations.js";
 import { resolveKnob } from "./profiles.js";
 import { scanForSecrets, validateWriteNamespace } from "./security.js";
@@ -1402,7 +1406,6 @@ export interface DerivedCommitmentInput {
 
 /** Minimum token overlap for two commitment texts to count as the same work. */
 const COMMITMENT_REVISION_SIMILARITY = 0.5;
-const LEGACY_STATUS_NEXT_STEPS_HEADER = /^next steps:\s*$/i;
 const COMMITMENT_SUBJECT_PREFIX = /^(?:i|we|they|it|this|that)\s+/i;
 
 /** Tokens for similarity comparison: words of 3+ chars, deduplicated. */
@@ -1414,6 +1417,10 @@ function commitmentTokens(text: string): Set<string> {
 
 function normalizeCommitmentComparisonText(text: string): string {
   return text.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function stripTrailingClausePunctuation(text: string): string {
+  return text.replace(/[.,;:!?]+$/, "");
 }
 
 function legacyWholeSegmentRevisionScore(
@@ -1428,33 +1435,13 @@ function legacyWholeSegmentRevisionScore(
   }
 
   const normalizedOrphan = normalizeCommitmentComparisonText(orphan.text);
-  const normalizedFresh = normalizeCommitmentComparisonText(commitment.text);
-  if (normalizedOrphan.includes(normalizedFresh)) return 1;
+  const normalizedFresh = stripTrailingClausePunctuation(normalizeCommitmentComparisonText(commitment.text));
+  if (normalizedFresh.length >= 12 && normalizedOrphan.includes(normalizedFresh)) return 1;
 
-  const withoutSubject = normalizedFresh.replace(COMMITMENT_SUBJECT_PREFIX, "");
+  const withoutSubject = stripTrailingClausePunctuation(normalizedFresh.replace(COMMITMENT_SUBJECT_PREFIX, ""));
   return withoutSubject.length >= 12 && normalizedOrphan.includes(withoutSubject)
     ? 1
     : 0;
-}
-
-/**
- * Legacy plain status blobs have no machine-readable section terminator. For
- * compatibility cleanup we therefore treat `Next Steps:` as an ad-hoc block
- * that runs until the next markdown heading or EOF.
- */
-function hasLegacyPlainStatusNextSteps(content: string): boolean {
-  const lines = content.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    const trimmed = lines[i].trim();
-    if (!trimmed || !LEGACY_STATUS_NEXT_STEPS_HEADER.test(trimmed)) continue;
-    for (let j = i + 1; j < lines.length; j++) {
-      const next = lines[j].trim();
-      if (!next) continue;
-      if (/^#{1,6}\s+/.test(next)) break;
-      return true;
-    }
-  }
-  return false;
 }
 
 function resolvedStatusForMissingCommitment(
@@ -1465,6 +1452,7 @@ function resolvedStatusForMissingCommitment(
     existing.source_type === "tracked_next_step"
     && source.entry_type === "state"
     && source.key === "status"
+    && !hasStructuredStatusNextStepsSection(source.content)
     && hasLegacyPlainStatusNextSteps(source.content)
   ) {
     return "cancelled";
@@ -1522,6 +1510,12 @@ export function pairRevisedCommitments(
       // Never merge across derivation kinds: a tracked next step and an ad-hoc
       // dated commitment are different objects even when worded alike.
       if (commitment.sourceType !== orphan.source_type) continue;
+      if (
+        orphan.source_type === "explicit_dated_commitment"
+        && orphan.due_at
+        && commitment.dueAt
+        && orphan.due_at !== commitment.dueAt
+      ) continue;
       const freshIssues = issueReferences(commitment.text);
       // An issue reference is useful negative evidence, not a shortcut to
       // identity: multiple sequential tasks can legitimately share one issue.

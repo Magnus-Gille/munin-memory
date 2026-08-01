@@ -1475,6 +1475,11 @@ import {
   getLifecycleTags,
   boundarySerialize,
 } from "./internal/retrieval-shared.js";
+import {
+  LEGACY_STATUS_NEXT_STEPS_HEADER,
+  countLegacyPlainStatusNextStepsSections,
+  hasStructuredStatusNextStepsSection,
+} from "./commitment-status.js";
 // The reranker pipeline lives in ./internal/reranker.js (issue #59).
 // tools.ts imports only the names it uses internally; the dedicated module
 // is the explicit public surface (benchmark/ imports from there directly).
@@ -4073,11 +4078,11 @@ const COMMITMENT_PASSIVE_FUTURE_ACTION =
   /\b(?:will|must|need to|needs to|plan to|planned to|should|target(?:ing)? to|aim to)\s+(?:be\s+)?(?:sent|shipped|delivered|finished|completed|published|deployed|updated|written|called|reviewed|rerun|checked|prepared|created|built|submitted|investigated|resolved|scheduled|organized|migrated|refactored|tested|validated|verified|researched|drafted|designed|implemented|configured|set up|run|filed|fixed|addressed|handled|ensured|confirmed)\b/i;
 const COMMITMENT_EXPLICIT_PREFIX =
   /^(?:commitment|i commit to|we (?:agreed|commit) to):\s*/i;
-const LEGACY_STATUS_NEXT_STEPS_HEADER =
-  /^(?:#{1,6}\s+)?(?:next steps?|next|action items?|todo):?\s*$/i;
 const COMMITMENT_FUTURE_CLAUSE_BOUNDARY =
-  /\s+(?:and|but)\s+(?=(?:(?:i|we|they|it|this|that)\s+)?(?:will|must|need to|needs to|plan to|planned to|should|target(?:ing)?(?: to)?|aim to)\b)/i;
+  /\s*(?:,|;|\band\b|\bbut\b|\bthen\b)\s+(?=(?:(?:i|we|they|it|this|that)\s+)?(?:will|must|need to|needs to|plan to|planned to|should|target(?:ing)?(?: to)?|aim to)\b)/i;
 const COMMITMENT_SUBJECT_PREFIX = /^(I|We|They|It|This|That)\b/i;
+const COMMITMENT_CONTEXTUAL_SUBJECT_PREFIX =
+  /^(?:(?:yesterday|today|tomorrow|earlier|later|afterward|afterwards)\b[\s,:;-]*)+(I|We|They|It|This|That)\b/i;
 
 type CommitmentExclusionReason =
   | "duplicate_within_entry"
@@ -4127,7 +4132,7 @@ const COMMITMENT_REASON_SUMMARY =
   "Commitments are derived from canonical tracked-status content (including Next Steps and dated future clauses in visible status prose) and from visible log phrases like 'I will...', 'We agreed to: ...', 'We will verify ... by YYYY-MM-DD', or 'I will run ... on YYYY-MM-DD'.";
 
 const COMMITMENT_DATA_REQUIREMENTS =
-  "Commitments are extracted from canonical tracked status entries (for example via memory_update_status) and from visible status/log prose containing explicit commitment phrases or future-dated action lines such as 'I will ... by YYYY-MM-DD' or 'I will ... on YYYY-MM-DD' (including verify/run/validate/check/test). Plain markdown status blobs with ad-hoc 'Next Steps:' headings are not parsed here; migrate them to the canonical structure if you want them to surface. When visible matches are dropped, the response may include content-blind exclusion_diagnostics counts.";
+  "Commitments are extracted from canonical tracked status entries (for example via memory_update_status) and from visible status/log prose containing explicit commitment phrases or future-dated action lines such as 'I will ... by YYYY-MM-DD' or 'I will ... on YYYY-MM-DD' (including verify/run/validate/check/test). Plain markdown status blobs with ad-hoc 'Next Steps:' headings are not parsed here; migrate them to the canonical structure if you want them to surface. When visible matches are dropped, the response may include content-blind exclusion_diagnostics counts of matched candidate units (for example a legacy Next Steps block or a dated clause), not full entry bodies.";
 
 function buildEmptyCommitmentsReason(
   visibleEntryCount: number,
@@ -4191,27 +4196,6 @@ function isTrackedStatusEntry(
   return entry.entry_type === "state" && entry.key === "status" && isTrackedNamespace(entry.namespace, trackedPatterns);
 }
 
-function countLegacyPlainStatusNextStepsSections(content: string): number {
-  // Legacy plain status blobs do not mark where an ad-hoc `Next Steps:` block
-  // ends, so we conservatively treat it as running until the next markdown
-  // heading or EOF.
-  const lines = content.split("\n");
-  let count = 0;
-  for (let i = 0; i < lines.length; i++) {
-    const trimmed = lines[i].trim();
-    if (!trimmed) continue;
-    if (!LEGACY_STATUS_NEXT_STEPS_HEADER.test(trimmed)) continue;
-    for (let j = i + 1; j < lines.length; j++) {
-      const next = lines[j].trim();
-      if (!next) continue;
-      if (/^#{1,6}\s+/.test(next)) break;
-      count += 1;
-      break;
-    }
-  }
-  return count;
-}
-
 function extractStatusContentOutsideNextSteps(content: string): string {
   const headingMatches = [...content.matchAll(/^##\s+(.+)$/gm)];
   if (headingMatches.length > 0) {
@@ -4223,7 +4207,7 @@ function extractStatusContentOutsideNextSteps(content: string): string {
       const match = headingMatches[i];
       const rawTitle = match[1].trim();
       const label = normalizeStatusLabel(rawTitle);
-      if (label === "next_steps") continue;
+      if (label === "next_steps" || LEGACY_STATUS_NEXT_STEPS_HEADER.test(rawTitle)) continue;
       const sectionStart = match.index! + match[0].length;
       const sectionEnd = i + 1 < headingMatches.length ? headingMatches[i + 1].index! : content.length;
       const raw = content.slice(sectionStart, sectionEnd).trim();
@@ -4273,8 +4257,9 @@ function countEntryCommitmentLikeUnits(
   if (isTrackedStatusEntry(entry, trackedPatterns)) {
     const structured = parseStructuredStatus(entry.content);
     const visibleSteps = (structured.next_steps ?? []).filter((step) => !isNoneLikeStatusText(step));
+    const hasStructuredNextStepsSection = hasStructuredStatusNextStepsSection(entry.content);
     count += visibleSteps.length;
-    if (visibleSteps.length === 0 && (structured.next_steps?.length ?? 0) === 0) {
+    if (visibleSteps.length === 0 && !hasStructuredNextStepsSection) {
       count += countLegacyPlainStatusNextStepsSections(entry.content);
     }
   }
@@ -4299,12 +4284,34 @@ function looksLikeRetrospectiveCompletion(segment: string): boolean {
     && !COMMITMENT_PASSIVE_FUTURE_ACTION.test(segment);
 }
 
+function extractCommitmentSubject(segment: string): string | null {
+  const subject = segment.match(COMMITMENT_SUBJECT_PREFIX)?.[1]
+    ?? segment.match(COMMITMENT_CONTEXTUAL_SUBJECT_PREFIX)?.[1]
+    ?? null;
+  return subject
+    ? subject.charAt(0).toUpperCase() + subject.slice(1).toLowerCase()
+    : null;
+}
+
 function normalizeClauseText(segment: string, clause: string): string {
   const trimmed = clause.trim().replace(/^[,;:\-)\]]+\s*/, "");
   if (!COMMITMENT_MODAL_FUTURE_CUE.test(trimmed)) return trimmed;
-  if (COMMITMENT_SUBJECT_PREFIX.test(trimmed)) return trimmed;
-  const subject = segment.match(COMMITMENT_SUBJECT_PREFIX)?.[1];
+  if (COMMITMENT_SUBJECT_PREFIX.test(trimmed)) {
+    return trimmed.replace(COMMITMENT_SUBJECT_PREFIX, (subject) =>
+      subject.charAt(0).toUpperCase() + subject.slice(1).toLowerCase(),
+    );
+  }
+  const subject = extractCommitmentSubject(segment);
   return subject ? `${subject} ${trimmed}` : trimmed;
+}
+
+function extractDueAtFromFutureClause(clause: string): string | null {
+  const futureCue = clause.match(COMMITMENT_MODAL_FUTURE_CUE);
+  if (futureCue?.index !== undefined) {
+    const futureDate = clause.slice(futureCue.index).match(DATE_PATTERN)?.[0];
+    if (futureDate) return buildDueAtFromDateString(futureDate);
+  }
+  return extractDueAtFromText(clause);
 }
 
 function extractForwardLookingClauses(segment: string): string[] {
@@ -4317,7 +4324,7 @@ function extractForwardLookingClauses(segment: string): string[] {
     : rawClauses;
 
   return futureClauses.filter((clause) => {
-    if (!extractDueAtFromText(clause)) return false;
+    if (!extractDueAtFromFutureClause(clause)) return false;
     if (COMMITMENT_PASSIVE_FUTURE_ACTION.test(clause)) return true;
     if (!COMMITMENT_ACTION_VERB.test(clause)) return false;
     if (looksLikeRetrospectiveCompletion(clause)) return false;
@@ -4341,9 +4348,12 @@ function extractCommitmentsFromEntry(
 ): DerivedCommitmentInput[] {
   const commitments: DerivedCommitmentInput[] = [];
   const seenNormalized = new Set<string>();
-  const matchedUnitCount = diagnostics
-    ? countEntryCommitmentLikeUnits(entry, trackedPatterns)
-    : 0;
+  let matchedUnitCount: number | undefined;
+  const getMatchedUnitCount = () => {
+    if (!diagnostics) return 0;
+    matchedUnitCount ??= countEntryCommitmentLikeUnits(entry, trackedPatterns);
+    return matchedUnitCount;
+  };
 
   // Suppression rules: entries from resolved sources are historical records,
   // not open commitments. Skip them entirely so existing commitments derived
@@ -4359,11 +4369,11 @@ function extractCommitmentsFromEntry(
   //    their own but live in a done namespace.
   if (entry.key === "synthesis") return commitments;
   if (entryHasTerminalLifecycle(entry)) {
-    noteCommitmentExclusion(diagnostics, "terminal_lifecycle", matchedUnitCount);
+    noteCommitmentExclusion(diagnostics, "terminal_lifecycle", getMatchedUnitCount());
     return commitments;
   }
   if (resolvedNamespaces?.has(entry.namespace)) {
-    noteCommitmentExclusion(diagnostics, "resolved_namespace", matchedUnitCount);
+    noteCommitmentExclusion(diagnostics, "resolved_namespace", getMatchedUnitCount());
     return commitments;
   }
 
@@ -4402,7 +4412,7 @@ function pushTrackedNextStepCommitments(
   if (isTrackedStatusEntry(entry, trackedPatterns)) {
     const structured = parseStructuredStatus(entry.content);
     const visibleSteps = (structured.next_steps ?? []).filter((step) => !isNoneLikeStatusText(step));
-    const legacySections = visibleSteps.length === 0 && (structured.next_steps?.length ?? 0) === 0
+    const legacySections = visibleSteps.length === 0 && !hasStructuredStatusNextStepsSection(entry.content)
       ? countLegacyPlainStatusNextStepsSections(entry.content)
       : 0;
     if (legacySections > 0) {
@@ -4446,7 +4456,7 @@ function buildSegmentCommitments(
   }
 
   return extractForwardLookingClauses(segment).flatMap((clause) => {
-    const dueAt = extractDueAtFromText(clause);
+    const dueAt = extractDueAtFromFutureClause(clause);
     if (!dueAt) return [];
     const normalized = normalizeCommitmentText(clause);
     if (!normalized) return [];
@@ -4492,7 +4502,7 @@ function syncCommitmentsForScope(
   sessionId?: string,
   loggedEntryIds?: Set<string>,
   diagnostics?: CommitmentExclusionDiagnostics,
-): { redacted: RedactableEntryMetadata[]; visibleEntryCount: number } {
+): { redacted: RedactableEntryMetadata[]; visibleEntryCount: number; readableEntryCount: number } {
   const entries = listEntriesForDerivation(db, { namespace, since })
     .filter((entry) => canRead(ctx, entry.namespace));
   const filtered = filterDerivedSources(
@@ -4508,7 +4518,11 @@ function syncCommitmentsForScope(
   const resolvedNamespaces = getResolvedNamespaces(db);
   const trackedPatterns = resolveTrackedPatterns(db, ctx);
   let visibleEntryCount = 0;
+  let readableEntryCount = 0;
   for (const entry of filtered.allowed) {
+    if (entry.key !== "synthesis") {
+      readableEntryCount += 1;
+    }
     // Only reconcile commitments for namespaces the caller actually tracks.
     // If the caller doesn't track the namespace, extractCommitmentsFromEntry
     // returns [] for tracked_next_step items, and syncCommitmentsForEntry would
@@ -4528,6 +4542,7 @@ function syncCommitmentsForScope(
   return {
     redacted: filtered.redacted,
     visibleEntryCount,
+    readableEntryCount,
   };
 }
 
@@ -4547,6 +4562,7 @@ function listFreshCommitmentRows(
   redacted: RedactableEntryMetadata[];
   diagnostics: CommitmentExclusionDiagnostics;
   visibleEntryCount: number;
+  readableEntryCount: number;
 } {
   const { namespace, since, limit, includeResolved = true } = options;
   const loggedEntryIds = new Set<string>();
@@ -4649,6 +4665,7 @@ function listFreshCommitmentRows(
     ),
     diagnostics,
     visibleEntryCount: syncResult.visibleEntryCount,
+    readableEntryCount: syncResult.readableEntryCount,
   };
 }
 
@@ -5299,7 +5316,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_commitments",
     description:
-      "Surface explicit commitments derived from canonical tracked-status content and dated, attributable source text. Use this when you want to review open, at-risk, overdue, or recently completed follow-through items rather than rely on fuzzy prose search.\n\nThis tool derives and reports commitments from existing entries; callers cannot write commitments directly. Canonical tracked-status Next Steps (for example via `memory_update_status`), dated future clauses in visible tracked-status prose, and future-dated log phrases such as `I will ... by YYYY-MM-DD`, `I will ... on YYYY-MM-DD`, or `We agreed to: ...` can surface here. Legacy plain markdown status blobs with ad-hoc `Next Steps:` headings remain readable but are not commitment-eligible until migrated to the canonical structure. When visible matches are dropped, the response may include content-blind `exclusion_diagnostics` counts.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
+      "Surface explicit commitments derived from canonical tracked-status content and dated, attributable source text. Use this when you want to review open, at-risk, overdue, or recently completed follow-through items rather than rely on fuzzy prose search.\n\nThis tool derives and reports commitments from existing entries; callers cannot write commitments directly. Canonical tracked-status Next Steps (for example via `memory_update_status`), dated future clauses in visible tracked-status prose, and future-dated log phrases such as `I will ... by YYYY-MM-DD`, `I will ... on YYYY-MM-DD`, or `We agreed to: ...` can surface here. Legacy plain markdown status blobs with ad-hoc `Next Steps:` headings remain readable but are not commitment-eligible until migrated to the canonical structure. When visible matches are dropped, the response may include content-blind `exclusion_diagnostics` counts of matched candidate units (for example a legacy Next Steps block or a dated clause), not full entry bodies.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -7825,7 +7842,7 @@ export function registerTools(
 
               const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_commitments", sessionId);
               const trackedStatusByNamespace = mapTrackedStatusAssessmentsByNamespace(visibleTrackedStatuses.allowed);
-              const { rows, redacted, diagnostics, visibleEntryCount } = listFreshCommitmentRows(db, ctx, "memory_commitments", {
+              const { rows, redacted, diagnostics, visibleEntryCount, readableEntryCount } = listFreshCommitmentRows(db, ctx, "memory_commitments", {
                 namespace,
                 since: normalizedSince,
                 limit: Math.max(limit * 8, 80),
@@ -7846,8 +7863,12 @@ export function registerTools(
               if (allBucketsEmpty) {
                 const statusEntryCount = visibleTrackedStatuses.allowed.length;
                 if (statusEntryCount === 0) {
-                  if (visibleEntryCount === 0) {
-                    response.reason = `Namespace has no status or log entries to scan`;
+                  if (visibleEntryCount === 0 && readableEntryCount > 0) {
+                    response.reason = "Namespace has readable entries, but none are tracked for commitment scanning under your tracked patterns.";
+                    response.data_requirements = COMMITMENT_DATA_REQUIREMENTS;
+                    response.suggestion = "Use memory_read to check the status entry's next steps directly.";
+                  } else if (visibleEntryCount === 0) {
+                    response.reason = "Namespace has no status or log entries to scan";
                     response.data_requirements = COMMITMENT_DATA_REQUIREMENTS;
                     response.suggestion = "Use memory_read to check the status entry's next steps directly.";
                   } else {
