@@ -46,11 +46,14 @@ changelog is the canonical record of what moved.
   write state. That field only meant the preview call itself was read-only, but
   it sat next to the durable operation and understated the consequence of
   approval. Preview now splits those meanings: `preview_wrote_memory:false`
-  reports the call's own side effects, while `approval_would_write_memory`
-  reports whether approving the proposal in its current state would write
-  memory. The preview also dry-runs the same approval preconditions used by the
-  real approve path, so stale/conflicting proposals and duplicate approvals are
-  reported as non-writing without performing the write.
+  reports the call's own side effects, `approval_would_write_memory` reports
+  whether approving the proposal in its current state would write memory, and
+  the old ambiguous `writes_memory` field is gone. Preview stays metering-free
+  and pure-read, including when a proposal has already expired. The preview now
+  dry-runs the same approval preconditions used by the real approve path, so
+  source conflicts, target conflicts, duplicate approvals, invalid transitions,
+  and expiry are reported with truthful current outcomes without mutating review
+  state or memory truth.
 
 - **`memory_delete` previews disclose and bind the full correction lineage
   they will remove (#281).** A delete of a corrected state entry removes its

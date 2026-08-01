@@ -40,6 +40,53 @@ function familyContext(): AccessContext {
   };
 }
 
+function getTotalChanges(db: ReturnType<typeof initDatabase>): number {
+  return (db.prepare("SELECT total_changes() AS count").get() as { count: number }).count;
+}
+
+function snapshotReviewDurability(
+  db: ReturnType<typeof initDatabase>,
+  proposalId: string,
+): {
+  totalChanges: number;
+  proposal: {
+    status: string;
+    updated_at: string;
+    terminal_code: string | null;
+    terminal_at: string | null;
+  };
+  proposalEvents: number;
+  entries: number;
+  auditLog: number;
+  retrievalEvents: number;
+  toolCalls: number;
+} {
+  return {
+    totalChanges: getTotalChanges(db),
+    proposal: db.prepare(
+      "SELECT status, updated_at, terminal_code, terminal_at FROM review_proposals WHERE id = ?",
+    ).get(proposalId) as {
+      status: string;
+      updated_at: string;
+      terminal_code: string | null;
+      terminal_at: string | null;
+    },
+    proposalEvents: (db.prepare(
+      "SELECT COUNT(*) AS count FROM review_proposal_events WHERE proposal_id = ?",
+    ).get(proposalId) as { count: number }).count,
+    entries: (db.prepare("SELECT COUNT(*) AS count FROM entries").get() as { count: number }).count,
+    auditLog: (db.prepare(
+      "SELECT COUNT(*) AS count FROM audit_log",
+    ).get() as { count: number }).count,
+    retrievalEvents: (db.prepare(
+      "SELECT COUNT(*) AS count FROM retrieval_events",
+    ).get() as { count: number }).count,
+    toolCalls: (db.prepare(
+      "SELECT COUNT(*) AS count FROM tool_calls",
+    ).get() as { count: number }).count,
+  };
+}
+
 describe("memory_extract durable review proposals", () => {
   it("persists proposals without writing memory and exposes an exact preview", async () => {
     const db = initDatabase(":memory:");
@@ -159,6 +206,110 @@ describe("memory_extract durable review proposals", () => {
       expect(preview.approval_would_write_memory).toBe(true);
       expect(preview.source_freshness.status).toBe("fresh");
     }
+    db.close();
+  });
+
+  it("keeps preview metering-free and predicts a write that approval then performs", async () => {
+    const db = initDatabase(":memory:");
+    const call = makeCall(db);
+    const extracted = await call("memory_extract", {
+      conversation_text: "We decided to prove preview is pure read.",
+      namespace_hint: "projects/munin-memory",
+      persist: true,
+    }) as { proposals: Array<{ id: string }> };
+    const proposalId = extracted.proposals[0].id;
+    const beforePreview = snapshotReviewDurability(db, proposalId);
+
+    const preview = await call("memory_review", {
+      action: "preview",
+      proposal_id: proposalId,
+    }) as {
+      status: string;
+      preview_wrote_memory: boolean;
+      approval_would_write_memory: boolean;
+      approval_status: string;
+      approval_error?: { code: string; message: string };
+    };
+    const afterPreview = snapshotReviewDurability(db, proposalId);
+
+    expect(preview).toMatchObject({
+      status: "pending",
+      preview_wrote_memory: false,
+      approval_would_write_memory: true,
+      approval_status: "would_write",
+    });
+    expect(preview.approval_error).toBeUndefined();
+    expect(afterPreview).toEqual(beforePreview);
+
+    const approved = await call("memory_review", {
+      action: "approve",
+      proposal_id: proposalId,
+    }) as { status: string; duplicate: boolean };
+    const afterApprove = snapshotReviewDurability(db, proposalId);
+
+    expect(approved).toMatchObject({ status: "approved", duplicate: false });
+    expect(afterApprove.totalChanges).toBeGreaterThan(beforePreview.totalChanges);
+    expect(afterApprove.entries).toBe(beforePreview.entries + 1);
+    expect(afterApprove.proposalEvents).toBe(beforePreview.proposalEvents + 1);
+    db.close();
+  });
+
+  it("reports expired preview approval as non-writing without expiring the proposal", async () => {
+    const db = initDatabase(":memory:");
+    const call = makeCall(db);
+    const created = createReviewProposal(db, {
+      creatorPrincipalId: "owner",
+      operation: {
+        action: "memory_log",
+        namespace: "projects/munin-memory",
+        content: "Expired before preview coverage.",
+      },
+      classification: "internal",
+      confidence: 1,
+      reasons: ["expired preview coverage"],
+      sourceRefs: [],
+      sourceExcerpt: "expired before preview coverage",
+      sourceHash: "hash",
+      createdAt: "2026-06-01T10:00:00.000Z",
+      expiresAt: "2026-06-02T10:00:00.000Z",
+    });
+    const beforePreview = snapshotReviewDurability(db, created.id);
+
+    const preview = await call("memory_review", {
+      action: "preview",
+      proposal_id: created.id,
+    }) as {
+      status: string;
+      preview_wrote_memory: boolean;
+      approval_would_write_memory: boolean;
+      approval_status: string;
+      approval_error?: { code: string; message: string };
+    };
+    const afterPreview = snapshotReviewDurability(db, created.id);
+
+    expect(preview).toMatchObject({
+      status: "pending",
+      preview_wrote_memory: false,
+      approval_would_write_memory: false,
+      approval_status: "not_approvable",
+      approval_error: {
+        code: "review_expired",
+        message: "Proposal expired before review.",
+      },
+    });
+    expect(afterPreview).toEqual(beforePreview);
+    expect(db.prepare("SELECT status FROM review_proposals WHERE id = ?").get(created.id))
+      .toEqual({ status: "pending" });
+
+    const expired = await call("memory_review", {
+      action: "approve",
+      proposal_id: created.id,
+    }) as { status: string };
+
+    expect(expired).toMatchObject({ status: "expired", proposal_id: created.id });
+    expect(db.prepare("SELECT status, terminal_code FROM review_proposals WHERE id = ?").get(created.id))
+      .toEqual({ status: "expired", terminal_code: "review_expired" });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM entries").get()).toEqual({ count: 0 });
     db.close();
   });
 
@@ -437,7 +588,7 @@ describe("memory_review lifecycle and isolation", () => {
     db.close();
   });
 
-  it("reports preview approval as non-writing when the proposal would currently conflict", async () => {
+  it("reports preview source conflicts with a truthful approval code and matches approval", async () => {
     const db = initDatabase(":memory:");
     const call = makeCall(db);
     const seeded = writeState(
@@ -469,13 +620,95 @@ describe("memory_review lifecycle and isolation", () => {
     }) as {
       preview_wrote_memory: boolean;
       approval_would_write_memory: boolean;
+      approval_status: string;
+      approval_error?: { code: string; message: string };
       source_freshness: { status: string; conflicts: Array<{ reason: string }> };
     };
 
     expect(preview.preview_wrote_memory).toBe(false);
     expect(preview.approval_would_write_memory).toBe(false);
+    expect(preview.approval_status).toBe("would_conflict");
+    expect(preview.approval_error).toEqual({
+      code: "source_changed",
+      message: "One or more referenced sources changed or are no longer readable.",
+    });
     expect(preview.source_freshness.status).toBe("conflict");
     expect(preview.source_freshness.conflicts.length).toBeGreaterThan(0);
+    expect(preview.source_freshness.conflicts[0].reason).toBe("source_changed");
+
+    const rejected = await call("memory_review", {
+      action: "approve",
+      proposal_id: extracted.proposals[0].id,
+    }) as { code: string; status: string };
+
+    expect(rejected).toMatchObject({ code: "source_changed" });
+    expect(["pending", "edited"]).toContain(rejected.status);
+    expect(readState(db, "projects/munin-memory", "status")?.content)
+      .toContain("Changed elsewhere");
+    db.close();
+  });
+
+  it("reports preview target conflicts with a truthful approval code and matches approval", async () => {
+    const db = initDatabase(":memory:");
+    const call = makeCall(db);
+    writeState(
+      db,
+      "projects/munin-memory",
+      "architecture",
+      "Existing architecture",
+      ["architecture"],
+      "owner",
+    );
+    const created = createReviewProposal(db, {
+      creatorPrincipalId: "owner",
+      operation: {
+        action: "memory_write",
+        namespace: "projects/munin-memory",
+        key: "architecture",
+        content: "Reviewed replacement architecture",
+        tags: ["architecture"],
+        create_if_absent: true,
+      },
+      classification: "internal",
+      confidence: 1,
+      reasons: ["target conflict coverage"],
+      sourceRefs: [],
+      sourceExcerpt: "target conflict coverage",
+      sourceHash: "hash",
+      createdAt: "2026-07-23T10:00:00.000Z",
+      expiresAt: "2026-08-22T10:00:00.000Z",
+    });
+
+    const preview = await call("memory_review", {
+      action: "preview",
+      proposal_id: created.id,
+    }) as {
+      preview_wrote_memory: boolean;
+      approval_would_write_memory: boolean;
+      approval_status: string;
+      approval_error?: { code: string; message: string };
+      source_freshness: { status: string; conflicts: Array<{ reason: string }> };
+    };
+
+    expect(preview).toMatchObject({
+      preview_wrote_memory: false,
+      approval_would_write_memory: false,
+      approval_status: "would_conflict",
+      approval_error: {
+        code: "target_conflict",
+      },
+      source_freshness: { status: "conflict" },
+    });
+    expect(preview.source_freshness.conflicts[0].reason).toBe("target_now_exists");
+
+    const rejected = await call("memory_review", {
+      action: "approve",
+      proposal_id: created.id,
+    }) as { code: string; status: string };
+
+    expect(rejected).toMatchObject({ code: "target_conflict", status: "pending" });
+    expect(readState(db, "projects/munin-memory", "architecture")?.content)
+      .toBe("Existing architecture");
     db.close();
   });
 
@@ -662,6 +895,44 @@ describe("memory_review lifecycle and isolation", () => {
     expect(list.counts.declined).toBe(1);
     expect(list.failed_count).toBe(0);
     expect(list.stale_count).toBe(0);
+    db.close();
+  });
+
+  it("reports invalid-transition previews as not approvable", async () => {
+    const db = initDatabase(":memory:");
+    const call = makeCall(db);
+    const extracted = await call("memory_extract", {
+      conversation_text: "We decided to cover invalid preview transitions.",
+      namespace_hint: "projects/munin-memory",
+      persist: true,
+    }) as { proposals: Array<{ id: string }> };
+
+    await call("memory_review", {
+      action: "decline",
+      proposal_id: extracted.proposals[0].id,
+      reason: "decline before previewing approval",
+    });
+    const preview = await call("memory_review", {
+      action: "preview",
+      proposal_id: extracted.proposals[0].id,
+    }) as {
+      status: string;
+      preview_wrote_memory: boolean;
+      approval_would_write_memory: boolean;
+      approval_status: string;
+      approval_error?: { code: string; message: string };
+    };
+
+    expect(preview).toMatchObject({
+      status: "declined",
+      preview_wrote_memory: false,
+      approval_would_write_memory: false,
+      approval_status: "not_approvable",
+      approval_error: {
+        code: "invalid_transition",
+        message: "A declined proposal cannot be approved.",
+      },
+    });
     db.close();
   });
 
@@ -897,11 +1168,15 @@ describe("reviewed undo", () => {
       status: string;
       preview_wrote_memory: boolean;
       approval_would_write_memory: boolean;
+      approval_status: string;
+      approval_error?: { code: string; message: string };
     };
 
     expect(preview.status).toBe("approved");
     expect(preview.preview_wrote_memory).toBe(false);
     expect(preview.approval_would_write_memory).toBe(false);
+    expect(preview.approval_status).toBe("duplicate_noop");
+    expect(preview.approval_error).toBeUndefined();
     db.close();
   });
 });

@@ -3520,7 +3520,9 @@ function reviewPreviewApprovalEffect(
   ctx: AccessContext,
   proposal: ReviewProposal,
   maxContentSize: number,
-  conflicts: Array<{ id?: string; reason: string }>,
+  now: string,
+  sourceConflicts: Array<{ id?: string; reason: string }>,
+  targetConflicts: Array<{ id?: string; reason: string }>,
 ): {
   approvalWouldWriteMemory: boolean;
   approvalStatus: "would_write" | "would_conflict" | "duplicate_noop" | "not_approvable";
@@ -3539,6 +3541,16 @@ function reviewPreviewApprovalEffect(
       approvalError: {
         code: "invalid_transition",
         message: `A ${proposal.status} proposal cannot be approved.`,
+      },
+    };
+  }
+  if (proposal.expires_at <= now) {
+    return {
+      approvalWouldWriteMemory: false,
+      approvalStatus: "not_approvable",
+      approvalError: {
+        code: "review_expired",
+        message: "Proposal expired before review.",
       },
     };
   }
@@ -3563,13 +3575,23 @@ function reviewPreviewApprovalEffect(
       },
     };
   }
-  if (conflicts.length > 0) {
+  if (sourceConflicts.length > 0) {
     return {
       approvalWouldWriteMemory: false,
       approvalStatus: "would_conflict",
       approvalError: {
-        code: "stale_preview",
-        message: "One or more referenced sources or targets changed before approval.",
+        code: "source_changed",
+        message: "One or more referenced sources changed or are no longer readable.",
+      },
+    };
+  }
+  if (targetConflicts.length > 0) {
+    return {
+      approvalWouldWriteMemory: false,
+      approvalStatus: "would_conflict",
+      approvalError: {
+        code: "target_conflict",
+        message: "The proposal target changed before approval.",
       },
     };
   }
@@ -5014,7 +5036,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_review",
     description:
-      "Review durable proposals created by `memory_extract persist:true`. The queue is strictly scoped to the creating principal. Use `list` or `get` to inspect, `preview` for the exact operation and freshness preconditions, `edit` or `decline` to review, `approve` to apply through the normal authorization/classification/secret/CAS gates, and `prepare_undo` to create a second review proposal that corrects an approved state or log while preserving history. No action except `approve` changes memory truth.",
+      "Review durable proposals created by `memory_extract persist:true`. The queue is strictly scoped to the creating principal. Use `list` or `get` to inspect, `preview` for the exact operation, freshness preconditions, and pure-read write-effect fields (`preview_wrote_memory:false` for the preview call itself plus `approval_would_write_memory:true|false` for the current approval outcome), `edit` or `decline` to review, `approve` to apply through the normal authorization/classification/secret/CAS gates, and `prepare_undo` to create a second review proposal that corrects an approved state or log while preserving history. Preview is metering-free and returns no legacy `writes_memory` field. No action except `approve` changes memory truth.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -6997,7 +7019,9 @@ export function registerTools(
                 );
               }
               const now = nowUTC();
-              pruneReviewProposals(db, now);
+              if (action !== "preview" && action !== "approve") {
+                pruneReviewProposals(db, now);
+              }
 
               if (action === "list") {
                 const status = reviewArgs.status;
@@ -7109,16 +7133,17 @@ export function registerTools(
                     "The proposal payload has been purged under the retention policy.",
                   );
                 }
-                const conflicts = [
-                  ...reviewSourceConflicts(db, ctx, proposal),
-                  ...reviewTargetConflicts(db, proposal.current_operation),
-                ];
+                const sourceConflicts = reviewSourceConflicts(db, ctx, proposal);
+                const targetConflicts = reviewTargetConflicts(db, proposal.current_operation);
+                const conflicts = [...sourceConflicts, ...targetConflicts];
                 const approvalEffect = reviewPreviewApprovalEffect(
                   db,
                   ctx,
                   proposal,
                   maxContentSize,
-                  conflicts,
+                  now,
+                  sourceConflicts,
+                  targetConflicts,
                 );
                 return okResult("review", {
                   proposal_id: proposal.id,
@@ -10559,15 +10584,19 @@ export function registerTools(
             errorType = parsed.error ?? "unknown";
           }
         } catch { /* not JSON — treat as success */ }
-        logToolCall(db, {
-          sessionId,
-          principalId: ctx.principalId,
-          toolName: name ?? "unknown",
-          success: !isErr,
-          errorType,
-          responseSizeBytes: responseText.length,
-          durationMs,
-        });
+        const skipToolCallTelemetry = name === "memory_review"
+          && ((args ?? {}) as Record<string, unknown>).action === "preview";
+        if (!skipToolCallTelemetry) {
+          logToolCall(db, {
+            sessionId,
+            principalId: ctx.principalId,
+            toolName: name ?? "unknown",
+            success: !isErr,
+            errorType,
+            responseSizeBytes: responseText.length,
+            durationMs,
+          });
+        }
         return result;
       } catch (err) {
         const durationMs = performance.now() - telemetryStart;
@@ -10579,15 +10608,19 @@ export function registerTools(
           }],
           isError: true,
         };
-        logToolCall(db, {
-          sessionId,
-          principalId: ctx.principalId,
-          toolName: name ?? "unknown",
-          success: false,
-          errorType: "internal_error",
-          responseSizeBytes: errorResponse.content[0].text.length,
-          durationMs,
-        });
+        const skipToolCallTelemetry = name === "memory_review"
+          && ((args ?? {}) as Record<string, unknown>).action === "preview";
+        if (!skipToolCallTelemetry) {
+          logToolCall(db, {
+            sessionId,
+            principalId: ctx.principalId,
+            toolName: name ?? "unknown",
+            success: false,
+            errorType: "internal_error",
+            responseSizeBytes: errorResponse.content[0].text.length,
+            durationMs,
+          });
+        }
         return errorResponse;
       }
     },

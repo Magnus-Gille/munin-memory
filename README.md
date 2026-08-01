@@ -52,11 +52,13 @@ These features exist to solve specific friction points that appear once you actu
 - **Handoff between agents.** When one agent (or one environment) hands work to another, `memory_handoff` assembles a source-backed pack: current state, recent decisions, open loops, recent actors, and recommended next actions. Tuned for multi-agent setups where context transfer matters.
 - **Durable review before capture.** `memory_extract persist:true` saves bounded,
   principal-scoped proposals without changing memory truth. `memory_review`
-  provides exact preview, edit, approve, decline, and reviewed undo. Preview
-  now separates `preview_wrote_memory:false` from a dry-run
-  `approval_would_write_memory:true|false`, so the review step states plainly
-  whether approving the current proposal would write memory. Approval itself
-  re-runs authorization, classification, secret, source-freshness, and CAS gates.
+  provides exact preview, edit, approve, decline, and reviewed undo. Preview is
+  a metering-free pure read: it always reports `preview_wrote_memory:false`,
+  separately reports the current approval outcome with
+  `approval_would_write_memory:true|false`, and no longer returns the old
+  ambiguous `writes_memory` field. Approval itself re-runs authorization,
+  classification, secret, source-freshness, and CAS gates, and it remains the
+  only step that can change memory truth.
 
 ## Architecture
 
