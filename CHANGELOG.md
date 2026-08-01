@@ -53,7 +53,8 @@ changelog is the canonical record of what moved.
   dry-runs the same approval preconditions used by the real approve path, so
   source conflicts, target conflicts, duplicate approvals, invalid transitions,
   and expiry are reported with truthful current outcomes without mutating review
-  state or memory truth.
+  state or memory truth. A real approval attempted after expiry now returns the
+  same machine-readable `review_expired` code and message advertised by preview.
 
 - **`memory_delete` previews disclose and bind the full correction lineage
   they will remove (#281).** A delete of a corrected state entry removes its

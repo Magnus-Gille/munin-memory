@@ -7437,6 +7437,8 @@ export function registerTools(
                 return okResult("review", {
                   status: "expired",
                   proposal_id: proposal.id,
+                  code: "review_expired",
+                  message: "Proposal expired before review.",
                 });
               }
 
