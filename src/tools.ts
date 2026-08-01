@@ -3537,6 +3537,16 @@ function reviewPreviewApprovalEffect(
       approvalStatus: "duplicate_noop",
     };
   }
+  if (proposal.status === "expired" || proposal.expires_at <= now) {
+    return {
+      approvalWouldWriteMemory: false,
+      approvalStatus: "not_approvable",
+      approvalError: {
+        code: "review_expired",
+        message: REVIEW_PROPOSAL_EXPIRY_DETAIL,
+      },
+    };
+  }
   if (proposal.status !== "pending" && proposal.status !== "edited") {
     return {
       approvalWouldWriteMemory: false,
@@ -3547,17 +3557,6 @@ function reviewPreviewApprovalEffect(
       },
     };
   }
-  if (proposal.expires_at <= now) {
-    return {
-      approvalWouldWriteMemory: false,
-      approvalStatus: "not_approvable",
-      approvalError: {
-        code: "review_expired",
-        message: "Proposal expired before review.",
-      },
-    };
-  }
-
   const prepared = prepareReviewOperation(
     db,
     ctx,
@@ -7438,7 +7437,7 @@ export function registerTools(
                   status: "expired",
                   proposal_id: proposal.id,
                   code: "review_expired",
-                  message: "Proposal expired before review.",
+                  message: REVIEW_PROPOSAL_EXPIRY_DETAIL,
                 });
               }
 

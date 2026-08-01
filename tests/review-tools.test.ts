@@ -319,6 +319,21 @@ describe("memory_extract durable review proposals", () => {
     expect(db.prepare("SELECT status, terminal_code FROM review_proposals WHERE id = ?").get(created.id))
       .toEqual({ status: "expired", terminal_code: "review_expired" });
     expect(db.prepare("SELECT COUNT(*) AS count FROM entries").get()).toEqual({ count: 0 });
+
+    const previewAfterPrune = await call("memory_review", {
+      action: "preview",
+      proposal_id: created.id,
+    }) as {
+      status: string;
+      approval_error?: { code: string; message: string };
+    };
+    expect(previewAfterPrune).toMatchObject({
+      status: "expired",
+      approval_error: {
+        code: "review_expired",
+        message: "Proposal expired before review.",
+      },
+    });
     db.close();
   });
 
