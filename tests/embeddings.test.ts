@@ -452,7 +452,7 @@ describe("semantic search (vec integration)", () => {
     expect(exactResults[0].entry.id).toBe(nsaId);
   });
 
-  it.skipIf(!vecAvailable)("exactNamespaceScan treats a bare namespace as a subtree filter", () => {
+  it.skipIf(!vecAvailable)("exactNamespaceScan preserves exact bare-namespace semantics by default", () => {
     const { id: childId } = writeState(db, "ns-parent/sub", "child", "subtree child", []);
     const { id: otherId } = writeState(db, "ns-other", "other", "other branch", []);
 
@@ -463,6 +463,26 @@ describe("semantic search (vec integration)", () => {
     const results = queryEntriesSemanticScored(db, {
       queryEmbedding: embeddingToBuffer(makeEmbedding(11)),
       namespace: "ns-parent",
+      exactNamespaceScan: true,
+      limit: 10,
+      includeExpired: true,
+    });
+
+    expect(results).toEqual([]);
+  });
+
+  it.skipIf(!vecAvailable)("exactNamespaceScan can explicitly opt into subtree matching", () => {
+    const { id: childId } = writeState(db, "ns-parent/sub", "child", "subtree child", []);
+    const { id: otherId } = writeState(db, "ns-other", "other", "other branch", []);
+
+    storeEmbedding(db, childId, embeddingToBuffer(makeEmbedding(11)), "test");
+    storeEmbedding(db, otherId, embeddingToBuffer(makeEmbedding(12)), "test");
+    db.prepare("UPDATE entries SET embedding_status = 'generated' WHERE id IN (?, ?)").run(childId, otherId);
+
+    const results = queryEntriesSemanticScored(db, {
+      queryEmbedding: embeddingToBuffer(makeEmbedding(11)),
+      namespace: "ns-parent",
+      namespaceMode: "subtree",
       exactNamespaceScan: true,
       limit: 10,
       includeExpired: true,

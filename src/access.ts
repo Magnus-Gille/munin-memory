@@ -12,6 +12,8 @@ import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import { nowUTC } from "./db.js";
 import {
+  intersectNamespaceSelectors,
+  namespaceFilterToSelectors,
   type NamespaceSelector,
   normalizeNamespaceSelectors,
 } from "./internal/namespace-filter.js";
@@ -373,16 +375,6 @@ function readableNamespaceRules(ctx: AccessContext): NamespaceRule[] {
   );
 }
 
-function selectorsForNamespaceFilter(namespace?: string): NamespaceSelector[] | null {
-  if (!namespace) return null;
-  return namespace.endsWith("/")
-    ? [{ kind: "prefix", value: namespace }]
-    : normalizeNamespaceSelectors([
-      { kind: "exact", value: namespace },
-      { kind: "prefix", value: `${namespace}/` },
-    ]);
-}
-
 /**
  * Translate a readable namespace rule into the exact SQL-selector shape we can
  * prove is equivalent to canonical namespaceMatchesPattern/canRead semantics:
@@ -418,24 +410,6 @@ function resolveRepresentableReadableNamespaceSelectors(
   return normalizeNamespaceSelectors(selectors);
 }
 
-function intersectNamespaceSelectors(
-  left: NamespaceSelector,
-  right: NamespaceSelector,
-): NamespaceSelector | null {
-  if (left.kind === "exact" && right.kind === "exact") {
-    return left.value === right.value ? left : null;
-  }
-  if (left.kind === "exact" && right.kind === "prefix") {
-    return left.value.startsWith(right.value) ? left : null;
-  }
-  if (left.kind === "prefix" && right.kind === "exact") {
-    return right.value.startsWith(left.value) ? right : null;
-  }
-  if (left.value.startsWith(right.value)) return left;
-  if (right.value.startsWith(left.value)) return right;
-  return null;
-}
-
 /**
  * Resolve the literal namespace selectors a query-like read should search
  * after applying the caller's readable namespace rules. `null` means
@@ -449,10 +423,10 @@ export function resolveReadableNamespaceSelectors(
   ctx: AccessContext,
   requestedNamespace?: string,
 ): NamespaceSelector[] | null {
-  const requestedSelectors = selectorsForNamespaceFilter(requestedNamespace);
+  const requestedSelectors = namespaceFilterToSelectors(requestedNamespace, "subtree");
 
   if (ctx.principalType === "owner") {
-    return requestedSelectors;
+    return requestedSelectors ?? null;
   }
 
   const readableRules = readableNamespaceRules(ctx);
@@ -460,25 +434,17 @@ export function resolveReadableNamespaceSelectors(
 
   const readableSelectors = resolveRepresentableReadableNamespaceSelectors(readableRules);
   if (readableSelectors === undefined) {
-    return requestedSelectors;
+    return requestedSelectors ?? null;
   }
   if (readableSelectors === null) {
-    return requestedSelectors;
+    return requestedSelectors ?? null;
   }
 
-  if (requestedSelectors === null) {
+  if (requestedSelectors === undefined) {
     return readableSelectors;
   }
 
-  const intersections: NamespaceSelector[] = [];
-  for (const readableSelector of readableSelectors) {
-    for (const requestedSelector of requestedSelectors) {
-      const intersection = intersectNamespaceSelectors(readableSelector, requestedSelector);
-      if (intersection) intersections.push(intersection);
-    }
-  }
-
-  return normalizeNamespaceSelectors(intersections);
+  return intersectNamespaceSelectors(readableSelectors, requestedSelectors);
 }
 
 // ---------------------------------------------------------------------------

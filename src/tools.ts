@@ -2576,6 +2576,7 @@ function buildExtractRelatedEntries(
 
   for (const entry of queryEntriesByFilter(db, {
     namespace,
+    namespaceMode: "exact",
     entryType: "log",
     limit: 2,
   })) {
@@ -2584,6 +2585,7 @@ function buildExtractRelatedEntries(
 
   for (const entry of queryEntriesByFilter(db, {
     namespace,
+    namespaceMode: "exact",
     entryType: "state",
     includeExpired: true,
     limit: 3,
@@ -6575,6 +6577,7 @@ export function registerTools(
 
               const rawLogPool = queryEntriesByFilter(db, {
                 namespace: scope,
+                namespaceMode: "exact",
                 entryType: "log",
                 limit: scope ? Math.max(limit, 4) : Math.max(limit * 2, 8),
               }).filter((entry) => canRead(ctx, entry.namespace));
@@ -6600,6 +6603,7 @@ export function registerTools(
               if (scope) {
                 const rawScopedStateEntries = queryEntriesByFilter(db, {
                   namespace: scope,
+                  namespaceMode: "exact",
                   entryType: "state",
                   includeExpired: true,
                   limit: 4,
@@ -6622,7 +6626,11 @@ export function registerTools(
               }
 
               if (includeHistory && scope) {
-                const historyPage = getAuditHistoryPage(db, { namespace: scope, limit: 3 });
+                const historyPage = getAuditHistoryPage(db, {
+                  namespace: scope,
+                  namespaceMode: "exact",
+                  limit: 3,
+                });
                 const filteredHistory = filterDerivedSources(
                   db,
                   ctx,
@@ -7431,6 +7439,7 @@ export function registerTools(
                 : { allowed: [] as Entry[], redacted: [] as RedactableEntryMetadata[] };
               const rawLogs = queryEntriesByFilter(db, {
                 namespace: narrativeArgs.namespace,
+                namespaceMode: "exact",
                 entryType: "log",
                 limit: Math.max(limit, 12),
                 since: normalizedSince,
@@ -7445,6 +7454,7 @@ export function registerTools(
               );
               const rawHistory = getAuditHistoryPage(db, {
                 namespace: narrativeArgs.namespace,
+                namespaceMode: "exact",
                 since: normalizedSince,
                 limit: Math.max(limit * 2, 12),
               }).entries.filter((entry) => canRead(ctx, entry.namespace));
@@ -7947,6 +7957,7 @@ export function registerTools(
                 ctx,
                 getAuditHistoryPage(db, {
                   namespace,
+                  namespaceMode: "exact",
                   since: normalizedSince,
                   limit: Math.max(limit * 4, 20),
                 }).entries.filter((entry) => canRead(ctx, entry.namespace)),

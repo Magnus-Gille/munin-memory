@@ -706,6 +706,7 @@ describe("memory_query — access enforcement", () => {
   });
 
   it("does not leak unreadable children when a caller can read only the exact parent namespace", async () => {
+    const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
     process.env.MUNIN_LIBRARIAN_ENABLED = "true";
     try {
       await ownerCall("memory_write", {
@@ -740,7 +741,8 @@ describe("memory_query — access enforcement", () => {
       expect(result.results[0].namespace).toBe("projects/reports");
       expect(result.results[0].redacted).toBe(true);
     } finally {
-      delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      if (previousLibrarian === undefined) delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      else process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
     }
   });
 });
@@ -1923,6 +1925,30 @@ describe("memory_orient — configurable tracked patterns (#157)", () => {
     const ns = dashboardNamespaces(parse(await ownerCall("memory_orient")));
     expect(ns).toContain("papers/p1");
     expect(ns).not.toContain("projects/foo");
+  });
+
+  it("owner tracked-pattern matching is ASCII case-sensitive like namespace queries", async () => {
+    await ownerCall("memory_write", {
+      namespace: "meta/config",
+      key: "config",
+      content: JSON.stringify({ tracked_patterns: ["Projects/*"] }),
+    });
+    await ownerCall("memory_write", {
+      namespace: "Projects/Case",
+      key: "status",
+      content: "Uppercase project",
+      tags: ["active"],
+    });
+    await ownerCall("memory_write", {
+      namespace: "projects/case",
+      key: "status",
+      content: "Lowercase project",
+      tags: ["active"],
+    });
+
+    const ns = dashboardNamespaces(parse(await ownerCall("memory_orient")));
+    expect(ns).toContain("Projects/Case");
+    expect(ns).not.toContain("projects/case");
   });
 
   it("family with personal config sees their own tracked namespaces in the dashboard", async () => {

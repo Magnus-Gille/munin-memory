@@ -18,8 +18,12 @@ import {
   type NamespaceRule,
 } from "../src/access.js";
 import {
+  intersectNamespaceSelectors,
   matchesNamespaceSelectors,
   matchesNamespaceSubtree,
+  namespaceFilterToSelectors,
+  normalizeNamespaceSelectors,
+  resolveNamespaceSelectorScope,
   type NamespaceSelector,
 } from "../src/internal/namespace-filter.js";
 
@@ -341,7 +345,61 @@ describe("filterByAccess", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 6. resolveReadableNamespaceSelectors
+// 6. namespace selector helpers
+// ---------------------------------------------------------------------------
+
+describe("namespace selector helpers", () => {
+  it("normalizes duplicates and exact selectors already covered by a prefix", () => {
+    expect(normalizeNamespaceSelectors([
+      { kind: "prefix", value: "projects/reports/" },
+      { kind: "exact", value: "projects/reports/child" },
+      { kind: "exact", value: "projects/reports" },
+      { kind: "exact", value: "projects/reports" },
+    ])).toEqual([
+      { kind: "prefix", value: "projects/reports/" },
+      { kind: "exact", value: "projects/reports" },
+    ]);
+  });
+
+  it("intersects exact, prefix, unrestricted, and empty selector sets deterministically", () => {
+    expect(intersectNamespaceSelectors(
+      [{ kind: "exact", value: "users/alice/meta" }],
+      [{ kind: "prefix", value: "users/alice/" }],
+    )).toEqual([{ kind: "exact", value: "users/alice/meta" }]);
+    expect(intersectNamespaceSelectors(
+      [{ kind: "prefix", value: "projects/reports/" }],
+      [{ kind: "exact", value: "projects/secret" }],
+    )).toEqual([]);
+    expect(intersectNamespaceSelectors(
+      null,
+      [{ kind: "exact", value: "users/alice/meta" }],
+    )).toEqual([{ kind: "exact", value: "users/alice/meta" }]);
+  });
+
+  it("resolves namespace and selector inputs by explicit intersection", () => {
+    expect(resolveNamespaceSelectorScope(
+      "projects/reports",
+      "subtree",
+      [{ kind: "prefix", value: "projects/" }],
+    )).toEqual([
+      { kind: "prefix", value: "projects/reports/" },
+      { kind: "exact", value: "projects/reports" },
+    ]);
+    expect(resolveNamespaceSelectorScope(
+      "projects/reports",
+      "exact",
+      null,
+    )).toEqual([{ kind: "exact", value: "projects/reports" }]);
+    expect(resolveNamespaceSelectorScope(
+      undefined,
+      "subtree",
+      [],
+    )).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. resolveReadableNamespaceSelectors
 // ---------------------------------------------------------------------------
 
 describe("resolveReadableNamespaceSelectors", () => {
@@ -381,10 +439,9 @@ describe("resolveReadableNamespaceSelectors", () => {
   }
 
   it("owner resolves a bare namespace to exact-plus-descendants selectors", () => {
-    expect(resolveReadableNamespaceSelectors(ownerContext(), "projects/reports")).toEqual([
-      { kind: "prefix", value: "projects/reports/" },
-      { kind: "exact", value: "projects/reports" },
-    ]);
+    expect(resolveReadableNamespaceSelectors(ownerContext(), "projects/reports")).toEqual(
+      namespaceFilterToSelectors("projects/reports", "subtree"),
+    );
   });
 
   it.each([
@@ -468,6 +525,16 @@ describe("resolveReadableNamespaceSelectors", () => {
         { kind: "exact", value: "users/alice" },
       ] satisfies NamespaceSelector[],
     },
+    {
+      name: "write-only rules do not contribute readable selectors",
+      ctx: {
+        principalId: "writer",
+        principalType: "agent",
+        accessibleNamespaces: [{ pattern: "users/alice/*", permissions: "write" }],
+      } satisfies AccessContext,
+      requestedNamespace: "users/alice",
+      expectedSelectors: [] satisfies NamespaceSelector[],
+    },
   ])("$name", ({ ctx, requestedNamespace, expectedSelectors }) => {
     const selectors = resolveReadableNamespaceSelectors(ctx, requestedNamespace);
     const prefiltered = applySelectorPrefilter(selectors, namespaceUniverse);
@@ -490,6 +557,29 @@ describe("resolveReadableNamespaceSelectors", () => {
     expect(applySelectorPrefilter(selectors, namespaceUniverse)).toEqual(namespaceUniverse);
   });
 
+  it("preserves representable home/meta grants on an unscoped read", () => {
+    const ctx: AccessContext = {
+      principalId: "alice",
+      principalType: "family",
+      accessibleNamespaces: [
+        { pattern: "users/alice", permissions: "read" },
+        { pattern: "users/alice/meta", permissions: "read" },
+        { pattern: "users/alice/home/*", permissions: "rw" },
+      ],
+    };
+
+    const selectors = resolveReadableNamespaceSelectors(ctx);
+    const prefiltered = applySelectorPrefilter(selectors, namespaceUniverse);
+    const canonical = canonicalRequestedMatches(ctx, undefined, namespaceUniverse);
+
+    expect(selectors).toEqual([
+      { kind: "prefix", value: "users/alice/home/" },
+      { kind: "exact", value: "users/alice" },
+      { kind: "exact", value: "users/alice/meta" },
+    ]);
+    expect(prefiltered).toEqual(expect.arrayContaining(canonical));
+  });
+
   it("returns an empty selector set when there is no readable overlap", () => {
     const ctx: AccessContext = {
       principalId: "nobody",
@@ -502,7 +592,7 @@ describe("resolveReadableNamespaceSelectors", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 7. resolveAccessContext (DB fixture)
+// 8. resolveAccessContext (DB fixture)
 // ---------------------------------------------------------------------------
 
 describe("resolveAccessContext", () => {

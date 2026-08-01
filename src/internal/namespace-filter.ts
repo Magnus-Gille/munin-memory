@@ -1,4 +1,5 @@
 export type NamespaceFilterScope = "prefix" | "subtree";
+export type BareNamespaceMode = "exact" | "subtree";
 
 export interface NamespaceSelector {
   kind: "exact" | "prefix";
@@ -34,6 +35,19 @@ export function namespacePrefixSuccessor(prefix: string): string | null {
 export function namespaceFilterScope(namespace: string | null | undefined): NamespaceFilterScope | undefined {
   if (typeof namespace !== "string" || namespace.length === 0) return undefined;
   return namespace.endsWith("/") ? "prefix" : "subtree";
+}
+
+export function namespaceFilterToSelectors(
+  namespace: string | null | undefined,
+  bareMode: BareNamespaceMode = "subtree",
+): NamespaceSelector[] | undefined {
+  if (typeof namespace !== "string" || namespace.length === 0) return undefined;
+  if (namespace.endsWith("/")) return [{ kind: "prefix", value: namespace }];
+  if (bareMode === "exact") return [{ kind: "exact", value: namespace }];
+  return normalizeNamespaceSelectors([
+    { kind: "exact", value: namespace },
+    { kind: "prefix", value: `${namespace}/` },
+  ]);
 }
 
 export function buildNamespacePrefixRangeFilter(
@@ -131,6 +145,53 @@ export function normalizeNamespaceSelectors(
   return [...keptPrefixes, ...exacts];
 }
 
+function intersectNamespaceSelector(
+  left: NamespaceSelector,
+  right: NamespaceSelector,
+): NamespaceSelector | null {
+  if (left.kind === "exact" && right.kind === "exact") {
+    return left.value === right.value ? left : null;
+  }
+  if (left.kind === "exact" && right.kind === "prefix") {
+    return left.value.startsWith(right.value) ? left : null;
+  }
+  if (left.kind === "prefix" && right.kind === "exact") {
+    return right.value.startsWith(left.value) ? right : null;
+  }
+  if (left.value.startsWith(right.value)) return left;
+  if (right.value.startsWith(left.value)) return right;
+  return null;
+}
+
+export function intersectNamespaceSelectors(
+  left: readonly NamespaceSelector[] | null,
+  right: readonly NamespaceSelector[] | null,
+): NamespaceSelector[] | null {
+  if (left === null) return right === null ? null : normalizeNamespaceSelectors(right);
+  if (right === null) return normalizeNamespaceSelectors(left);
+
+  const intersections: NamespaceSelector[] = [];
+  for (const leftSelector of left) {
+    for (const rightSelector of right) {
+      const intersection = intersectNamespaceSelector(leftSelector, rightSelector);
+      if (intersection) intersections.push(intersection);
+    }
+  }
+  return normalizeNamespaceSelectors(intersections);
+}
+
+export function resolveNamespaceSelectorScope(
+  namespace: string | null | undefined,
+  bareMode: BareNamespaceMode,
+  namespaceSelectors?: readonly NamespaceSelector[] | null,
+): readonly NamespaceSelector[] | null | undefined {
+  const requestedSelectors = namespaceFilterToSelectors(namespace, bareMode);
+  if (namespaceSelectors === undefined) return requestedSelectors;
+  if (requestedSelectors === undefined) return namespaceSelectors;
+  if (namespaceSelectors === null) return requestedSelectors;
+  return intersectNamespaceSelectors(namespaceSelectors, requestedSelectors);
+}
+
 export function buildNamespaceSelectorFilter(
   column: string,
   selectors: readonly NamespaceSelector[],
@@ -154,7 +215,7 @@ export function buildNamespaceSelectorFilter(
   }
 
   return {
-    clause: clauses.length === 1 ? clauses[0] : `(${clauses.join(" OR ")})`,
+    clause: `(${clauses.join(" OR ")})`,
     params,
   };
 }

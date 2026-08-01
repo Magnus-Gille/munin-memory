@@ -19,7 +19,10 @@ import {
   appendLog,
   computeCommitmentConfidence,
   syncCommitmentsForEntry,
+  buildQueryEntriesByFilterStatement,
+  buildQueryEntriesLexicalStatement,
   listCommitments,
+  listEntriesForDerivation,
   queryEntries,
   queryEntriesByFilter,
   filterIdsMatchingFts,
@@ -239,12 +242,12 @@ describe("getTrackedStatuses ordering (#74)", () => {
     expect(third).toEqual(expected);
   });
 
-  it("preserves the historical ASCII-case-insensitive tracked namespace SQL", () => {
+  it("matches tracked namespace prefixes case-sensitively", () => {
     writeState(db, "Projects/MixedCase", "status", "Upper-case project root.", ["active"]);
 
     const namespaces = getTrackedStatuses(db).map((row) => row.namespace);
 
-    expect(namespaces).toContain("Projects/MixedCase");
+    expect(namespaces).not.toContain("Projects/MixedCase");
   });
 });
 
@@ -1568,6 +1571,18 @@ describe("queryEntriesByFilter (no FTS)", () => {
     expect(empty.map((r) => r.id).sort()).toEqual(unfiltered.map((r) => r.id).sort());
   });
 
+  it("supports explicit exact bare-namespace filters", () => {
+    writeState(db, "projects/a/sub", "status", "nested child", ["active"]);
+
+    const results = queryEntriesByFilter(db, {
+      namespace: "projects/a",
+      namespaceMode: "exact",
+    });
+
+    expect(results.every((r) => r.namespace === "projects/a")).toBe(true);
+    expect(results.map((r) => r.namespace)).not.toContain("projects/a/sub");
+  });
+
   it("keeps supplementary-plane descendants inside a bare subtree filter", () => {
     writeState(db, "projects/emoji", "status", "emoji parent", ["active"]);
     writeState(db, "projects/emoji-child-temp", "status", "emoji child", ["active"]);
@@ -1661,21 +1676,9 @@ describe("queryEntriesByFilter (no FTS)", () => {
   });
 
   it("uses namespace equality-plus-range predicates for bare-subtree browse queries", () => {
-    const filter = "projects/a";
-    const sql = `
-      EXPLAIN QUERY PLAN
-      SELECT * FROM entries
-      WHERE is_current = 1
-        AND (namespace = ? OR (namespace >= ? AND namespace < ?))
-      ORDER BY updated_at DESC
-      LIMIT ?
-    `;
-    const plan = db.prepare(sql).all(
-      filter,
-      `${filter}/`,
-      namespacePrefixSuccessor(`${filter}/`)!,
-      10,
-    ) as Array<{ detail: string }>;
+    const statement = buildQueryEntriesByFilterStatement({ namespace: "projects/a" });
+    const plan = db.prepare(`EXPLAIN QUERY PLAN ${statement.sql}`)
+      .all(...statement.params) as Array<{ detail: string }>;
 
     expect(plan.map((row) => row.detail)).toEqual(expect.arrayContaining([
       "SEARCH entries USING INDEX idx_entries_temporal (namespace=?)",
@@ -1684,24 +1687,12 @@ describe("queryEntriesByFilter (no FTS)", () => {
   });
 
   it("keeps lexical subtree queries on the FTS-plus-rowid plan", () => {
-    const filter = "projects/a";
-    const sql = `
-      EXPLAIN QUERY PLAN
-      SELECT e.*, bm25(entries_fts) as lexical_score FROM entries e
-      JOIN entries_fts fts ON e.rowid = fts.rowid
-      WHERE entries_fts MATCH ?
-        AND e.is_current = 1
-        AND (e.namespace = ? OR (e.namespace >= ? AND e.namespace < ?))
-      ORDER BY lexical_score, e.rowid
-      LIMIT ?
-    `;
-    const plan = db.prepare(sql).all(
-      "project",
-      filter,
-      `${filter}/`,
-      namespacePrefixSuccessor(`${filter}/`)!,
-      10,
-    ) as Array<{ detail: string }>;
+    const statement = buildQueryEntriesLexicalStatement({
+      query: "project",
+      namespace: "projects/a",
+    });
+    const plan = db.prepare(`EXPLAIN QUERY PLAN ${statement.sql}`)
+      .all(...statement.params) as Array<{ detail: string }>;
 
     expect(plan.map((row) => row.detail)).toEqual(expect.arrayContaining([
       expect.stringContaining("SCAN fts VIRTUAL TABLE INDEX"),
@@ -1813,6 +1804,16 @@ describe("getAuditHistoryPage", () => {
     expect(page.entries.length).toBeGreaterThan(0);
   });
 
+  it("supports explicit exact namespace mode without widening to child namespaces", () => {
+    writeState(db, "projects/test/sub", "notes", "subproject notes", []);
+    const page = getAuditHistoryPage(db, {
+      namespace: "projects/test",
+      namespaceMode: "exact",
+    });
+
+    expect(page.entries.every((e) => e.namespace === "projects/test")).toBe(true);
+  });
+
   it("filters by since timestamp", () => {
     const since = new Date(Date.now() - 1000).toISOString();
     const page = getAuditHistoryPage(db, { since });
@@ -1859,6 +1860,17 @@ describe("getAuditHistoryPage", () => {
     }
     const page = getAuditHistoryPage(db, { limit: 2 });
     expect(page.hasMore).toBe(true);
+  });
+});
+
+describe("listEntriesForDerivation", () => {
+  it("treats a bare namespace as exact by default", () => {
+    writeState(db, "projects/derive", "status", "root", []);
+    writeState(db, "projects/derive/sub", "status", "child", []);
+
+    const entries = listEntriesForDerivation(db, { namespace: "projects/derive" });
+
+    expect(entries.every((entry) => entry.namespace === "projects/derive")).toBe(true);
   });
 });
 
