@@ -68,6 +68,15 @@ export function hasStructuredStatusNextStepsSection(content: string): boolean {
 export const LEGACY_STATUS_NEXT_STEPS_HEADER =
   /^(?:#{1,6}\s+)?(?:next steps?|next|action items?|todo):?\s*$/i;
 
+const LEGACY_STATUS_CONTEXT_LINE =
+  /^(?:phase|current work|blockers|status|lifecycle)\s*:\s*\S/i;
+
+function hasLegacyStatusContextBefore(lines: string[], headerIndex: number): boolean {
+  return lines
+    .slice(0, headerIndex)
+    .some((line) => LEGACY_STATUS_CONTEXT_LINE.test(line.trim()));
+}
+
 /**
  * Legacy plain status blobs have no machine-readable section terminator, so we
  * conservatively treat a supported header as running until the next markdown
@@ -80,6 +89,7 @@ export function countLegacyPlainStatusNextStepsSections(content: string): number
   for (let i = 0; i < lines.length; i++) {
     const trimmed = lines[i].trim();
     if (!trimmed || !LEGACY_STATUS_NEXT_STEPS_HEADER.test(trimmed)) continue;
+    if (!hasLegacyStatusContextBefore(lines, i)) continue;
     for (let j = i + 1; j < lines.length; j++) {
       const next = lines[j].trim();
       if (!next) continue;

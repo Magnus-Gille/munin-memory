@@ -1478,6 +1478,7 @@ import {
 import {
   LEGACY_STATUS_NEXT_STEPS_HEADER,
   countLegacyPlainStatusNextStepsSections,
+  hasLegacyPlainStatusNextSteps,
   hasStructuredStatusNextStepsSection,
 } from "./commitment-status.js";
 // The reranker pipeline lives in ./internal/reranker.js (issue #59).
@@ -4197,6 +4198,7 @@ function isTrackedStatusEntry(
 }
 
 function extractStatusContentOutsideNextSteps(content: string): string {
+  const hasLegacyBlock = hasLegacyPlainStatusNextSteps(content);
   const headingMatches = [...content.matchAll(/^##\s+(.+)$/gm)];
   if (headingMatches.length > 0) {
     const sections: string[] = [];
@@ -4207,7 +4209,7 @@ function extractStatusContentOutsideNextSteps(content: string): string {
       const match = headingMatches[i];
       const rawTitle = match[1].trim();
       const label = normalizeStatusLabel(rawTitle);
-      if (label === "next_steps" || LEGACY_STATUS_NEXT_STEPS_HEADER.test(rawTitle)) continue;
+      if (label === "next_steps" || (hasLegacyBlock && LEGACY_STATUS_NEXT_STEPS_HEADER.test(rawTitle))) continue;
       const sectionStart = match.index! + match[0].length;
       const sectionEnd = i + 1 < headingMatches.length ? headingMatches[i + 1].index! : content.length;
       const raw = content.slice(sectionStart, sectionEnd).trim();
@@ -4222,7 +4224,7 @@ function extractStatusContentOutsideNextSteps(content: string): string {
   let skippingLegacy = false;
   for (const line of lines) {
     const trimmed = line.trim();
-    if (!skippingLegacy && LEGACY_STATUS_NEXT_STEPS_HEADER.test(trimmed)) {
+    if (!skippingLegacy && hasLegacyBlock && LEGACY_STATUS_NEXT_STEPS_HEADER.test(trimmed)) {
       skippingLegacy = true;
       continue;
     }
@@ -7861,7 +7863,9 @@ export function registerTools(
                 classified.completed_recently.length === 0;
 
               if (allBucketsEmpty) {
-                const statusEntryCount = visibleTrackedStatuses.allowed.length;
+                const statusEntryCount = visibleTrackedStatuses.allowed.filter(
+                  (assessment) => matchesNamespacePrefix(assessment.row.namespace, namespace),
+                ).length;
                 if (statusEntryCount === 0) {
                   if (visibleEntryCount === 0 && readableEntryCount > 0) {
                     response.reason = "Namespace has readable entries, but none are tracked for commitment scanning under your tracked patterns.";

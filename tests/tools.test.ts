@@ -6109,6 +6109,41 @@ describe("memory_commitments", () => {
     expect(row.status).toBe("done");
   });
 
+  it("does not treat a quoted Next Steps marker in free-form status prose as a legacy block", async () => {
+    const nextStepDueDate = commitmentTestDate(30);
+    const nextStep = `Verify the restore path by ${nextStepDueDate}`;
+    const namespace = "projects/free-form-quoted-next-steps";
+    const { commitmentId } = await seedLegacyPlainStatusCommitment(
+      namespace,
+      "Next Steps:",
+      nextStep,
+      "free-form-quoted-next-steps-row",
+    );
+
+    await callTool("memory_write", {
+      namespace,
+      key: "status",
+      content: [
+        "Copied transcript excerpt for the incident record:",
+        "Next Steps:",
+        "- this pasted line is historical context, not the live status contract",
+      ].join("\n"),
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_commitments", { namespace });
+    const result = parseToolResponse(raw) as {
+      completed_recently: Array<{ id: string; status: string }>;
+      exclusion_diagnostics?: { reason_counts?: Record<string, number> };
+    };
+
+    expect(result.completed_recently).toContainEqual(expect.objectContaining({
+      id: commitmentId,
+      status: "done",
+    }));
+    expect(result.exclusion_diagnostics?.reason_counts?.legacy_plain_status_next_steps ?? 0).toBe(0);
+  });
+
   it("revises legacy whole-segment dated rows in place when the future clause still survives", async () => {
     const retrospectiveDate = commitmentTestDate(-3);
     const followupDate = commitmentTestDate(18);
@@ -6378,6 +6413,14 @@ describe("memory_commitments", () => {
   });
 
   it("uses a tracked-pattern reason for readable but untracked namespaces", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/another-visible-tracked-status",
+      phase: "Active",
+      current_work: "Keep this unrelated tracked status visible",
+      blockers: "None.",
+      next_steps: [],
+      lifecycle: "active",
+    });
     await callTool("memory_write", {
       namespace: "tasks/untracked-readable-commitments",
       key: "status",
