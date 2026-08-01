@@ -3545,6 +3545,23 @@ function presentReviewApprovalError(
   };
 }
 
+function reviewApprovalRejectionResult(
+  code: string,
+  message: string,
+  status: ReviewProposalStatus,
+  sourceConflicts: Array<{ id?: string; reason: string }>,
+) {
+  const approvalError = presentReviewApprovalError({ code, message });
+  return errResult("review", code, approvalError?.message ?? message, {
+    code,
+    status,
+    source_conflicts: sourceConflicts,
+    ...(approvalError?.untrusted_content === true
+      ? { untrusted_content: true }
+      : {}),
+  });
+}
+
 function reviewPreviewApprovalEffect(
   db: Database.Database,
   ctx: AccessContext,
@@ -7573,16 +7590,12 @@ export function registerTools(
                 );
               }
               if (approvalEffect.approvalStatus !== "would_write") {
-                return errResult(
-                  "review",
+                return reviewApprovalRejectionResult(
                   approvalEffect.approvalError?.code ?? "invalid_transition",
                   approvalEffect.approvalError?.message
                     ?? `A ${approvalEffect.effectiveStatus} proposal cannot be approved.`,
-                  {
-                    code: approvalEffect.approvalError?.code ?? "invalid_transition",
-                    status: approvalEffect.effectiveStatus,
-                    source_conflicts: approvalEffect.sourceConflicts,
-                  },
+                  approvalEffect.effectiveStatus,
+                  approvalEffect.sourceConflicts,
                 );
               }
               let result;
@@ -7646,11 +7659,12 @@ export function registerTools(
                 );
               }
               if ("conflict" in result && result.conflict) {
-                return errResult("review", result.code, result.detail, {
-                  code: result.code,
-                  status: result.status,
-                  source_conflicts: approvalEffect.sourceConflicts,
-                });
+                return reviewApprovalRejectionResult(
+                  result.code,
+                  result.detail,
+                  result.status,
+                  approvalEffect.sourceConflicts,
+                );
               }
               if (result.status === "invalid_transition") {
                 return errResult(

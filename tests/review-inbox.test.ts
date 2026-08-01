@@ -644,4 +644,132 @@ describe("review proposal retention", () => {
       .toMatchObject({ event_type: "payload_purged", to_status: "approved" });
     db.close();
   });
+
+  it("counts only the stale proposals that actually expire or purge in mixed-age sets", () => {
+    const db = initDatabase(":memory:");
+    const expiring = createPending(db);
+    const freshPending = createReviewProposal(db, {
+      creatorPrincipalId: "owner",
+      operation: writeOperation("fresh pending"),
+      classification: "internal",
+      confidence: 0.92,
+      reasons: ["still reviewable"],
+      sourceRefs: [],
+      sourceExcerpt: "still reviewable",
+      sourceHash: "sha256:fresh-pending",
+      createdAt: "2026-07-31T10:00:00.000Z",
+      expiresAt: "2026-08-31T10:00:00.000Z",
+    });
+
+    const purgeDeclined = createPending(db);
+    declineReviewProposal(
+      db,
+      purgeDeclined.id,
+      "owner",
+      "old decline",
+      "2026-07-23T10:05:00.000Z",
+    );
+    const freshDeclined = createReviewProposal(db, {
+      creatorPrincipalId: "owner",
+      operation: writeOperation("fresh declined"),
+      classification: "internal",
+      confidence: 0.92,
+      reasons: ["recent decline"],
+      sourceRefs: [],
+      sourceExcerpt: "recent decline",
+      sourceHash: "sha256:fresh-declined",
+      createdAt: "2026-07-31T10:00:00.000Z",
+      expiresAt: "2026-08-31T10:00:00.000Z",
+    });
+    declineReviewProposal(
+      db,
+      freshDeclined.id,
+      "owner",
+      "recent decline",
+      "2026-08-20T10:05:00.000Z",
+    );
+
+    const purgeApproved = createPending(db);
+    approveReviewProposal(
+      db,
+      purgeApproved.id,
+      "owner",
+      () => ({
+        outcome: "applied",
+        entryId: "entry-old",
+        entryUpdatedAt: "2026-07-23T10:05:00.000Z",
+        priorEntrySnapshot: {
+          content: "sensitive prior truth",
+          tags: ["active"],
+          classification: "internal",
+        },
+      }),
+      "2026-07-23T10:05:00.000Z",
+    );
+    const freshApproved = createReviewProposal(db, {
+      creatorPrincipalId: "owner",
+      operation: writeOperation("fresh approved"),
+      classification: "internal",
+      confidence: 0.92,
+      reasons: ["recent approval"],
+      sourceRefs: [],
+      sourceExcerpt: "recent approval",
+      sourceHash: "sha256:fresh-approved",
+      createdAt: "2026-07-31T10:00:00.000Z",
+      expiresAt: "2026-08-31T10:00:00.000Z",
+    });
+    approveReviewProposal(
+      db,
+      freshApproved.id,
+      "owner",
+      () => ({
+        outcome: "applied",
+        entryId: "entry-fresh",
+        entryUpdatedAt: "2026-07-31T10:05:00.000Z",
+        priorEntrySnapshot: {
+          content: "recent prior truth",
+          tags: ["active"],
+          classification: "internal",
+        },
+      }),
+      "2026-07-31T10:05:00.000Z",
+    );
+
+    const pruned = pruneReviewProposals(
+      db,
+      "2026-08-23T10:06:00.000Z",
+      { terminalPayloadDays: 7, approvedUndoDays: 30 },
+    );
+
+    expect(pruned).toEqual({
+      expired: 1,
+      payloads_purged: 2,
+      undo_snapshots_purged: 1,
+    });
+    expect(getReviewProposal(db, expiring.id, "owner")?.status).toBe("expired");
+    expect(getReviewProposal(db, freshPending.id, "owner")?.status).toBe("pending");
+    expect(getReviewProposal(db, purgeDeclined.id, "owner")).toMatchObject({
+      status: "declined",
+      current_operation: null,
+      payload_purged_at: expect.any(String),
+    });
+    expect(getReviewProposal(db, freshDeclined.id, "owner")).toMatchObject({
+      status: "declined",
+      payload_purged_at: null,
+    });
+    expect(getReviewProposal(db, purgeApproved.id, "owner")).toMatchObject({
+      status: "approved",
+      current_operation: null,
+      prior_entry_snapshot: null,
+      payload_purged_at: expect.any(String),
+    });
+    expect(getReviewProposal(db, freshApproved.id, "owner")).toMatchObject({
+      status: "approved",
+      payload_purged_at: null,
+      prior_entry_snapshot: expect.objectContaining({
+        content: "recent prior truth",
+      }),
+    });
+    db.close();
+  });
 });

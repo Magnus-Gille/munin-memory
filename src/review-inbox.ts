@@ -642,13 +642,14 @@ function expireProposal(
   row: ReviewProposalRow,
   now: string,
   actorPrincipalId: string,
-): void {
-  db.prepare(
+): boolean {
+  const updated = db.prepare(
     `UPDATE review_proposals
      SET status = 'expired', updated_at = ?, terminal_at = ?,
          terminal_code = 'review_expired', terminal_detail = ?
      WHERE id = ?`,
   ).run(now, now, REVIEW_PROPOSAL_EXPIRY_DETAIL, row.id);
+  if (updated.changes === 0) return false;
   insertEvent(
     db,
     row.id,
@@ -659,6 +660,7 @@ function expireProposal(
     {},
     now,
   );
+  return true;
 }
 
 export function approveReviewProposal(
@@ -864,9 +866,10 @@ export function pruneReviewProposals(
        WHERE status IN ('pending', 'edited')
        ORDER BY expires_at, id`,
     ).all() as ReviewProposalRow[];
+    let expired = 0;
     for (const row of expiring) {
       if (!reviewProposalExpiredAtOrBefore(row, now)) continue;
-      expireProposal(db, row, now, "system:maintenance");
+      if (expireProposal(db, row, now, "system:maintenance")) expired += 1;
     }
 
     const purgeable = db.prepare(
@@ -875,11 +878,11 @@ export function pruneReviewProposals(
          AND status IN ('declined', 'expired', 'failed', 'approved', 'superseded')
        ORDER BY terminal_at, id`,
     ).all() as ReviewProposalRow[];
+    let payloadsPurged = 0;
     let undoSnapshotsPurged = 0;
     for (const row of purgeable) {
       if (!reviewProposalPayloadPurgedOrDue(row, now, retention)) continue;
-      if (row.prior_entry_snapshot !== null) undoSnapshotsPurged += 1;
-      db.prepare(
+      const updated = db.prepare(
         `UPDATE review_proposals
          SET reasons = '[]', source_refs = '[]', source_excerpt = NULL,
              source_hash = NULL, source_untrusted = 0, original_operation = NULL,
@@ -888,6 +891,9 @@ export function pruneReviewProposals(
              terminal_detail = NULL, payload_purged_at = ?, updated_at = ?
          WHERE id = ?`,
       ).run(now, now, row.id);
+      if (updated.changes === 0) continue;
+      payloadsPurged += 1;
+      if (row.prior_entry_snapshot !== null) undoSnapshotsPurged += 1;
       insertEvent(
         db,
         row.id,
@@ -901,8 +907,8 @@ export function pruneReviewProposals(
     }
 
     return {
-      expired: expiring.length,
-      payloads_purged: purgeable.length,
+      expired,
+      payloads_purged: payloadsPurged,
       undo_snapshots_purged: undoSnapshotsPurged,
     };
   });
