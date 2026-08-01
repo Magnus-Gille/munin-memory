@@ -1085,6 +1085,7 @@ describe("memory_update_status valid_until (#217)", () => {
       });
       expect(gap.hint).toContain("supersedes");
 
+      vi.setSystemTime(new Date("2026-07-20T10:00:00.001Z"));
       const currentRaw = await callTool("memory_read", {
         namespace: "projects/status-same-ms",
         key: "status",
