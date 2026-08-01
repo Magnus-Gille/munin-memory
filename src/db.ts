@@ -559,71 +559,69 @@ export function patchState(
     throw new Error(namespaceCheck.error);
   }
 
-  const existing = db.prepare(
-    "SELECT id, content, tags, updated_at, valid_from, classification FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1",
-  ).get(namespace, key) as {
-    id: string;
-    content: string;
-    tags: string;
-    updated_at: string;
-    valid_from: string;
-    classification: string | null;
-  } | undefined;
+  const txn = db.transaction((): PatchStateResult => {
+    const existing = db.prepare(
+      "SELECT id, content, tags, updated_at, valid_from, classification FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1",
+    ).get(namespace, key) as {
+      id: string;
+      content: string;
+      tags: string;
+      updated_at: string;
+      valid_from: string;
+      classification: string | null;
+    } | undefined;
 
-  if (!existing) {
-    return { status: "not_found" };
-  }
+    if (!existing) {
+      return { status: "not_found" };
+    }
 
-  // Compare-and-swap: reject if entry was modified since caller last read it
-  if (expectedUpdatedAt && existing.updated_at !== expectedUpdatedAt) {
-    return {
-      status: "conflict",
-      message: `Entry was updated at ${existing.updated_at}, expected ${expectedUpdatedAt}. Read the current version before overwriting.`,
-      current_updated_at: existing.updated_at,
-    };
-  }
+    // Compare-and-swap: reject if entry was modified since caller last read it.
+    // The read, CAS decision, and mutation boundary derivation must share one
+    // IMMEDIATE transaction so concurrent patches cannot branch from a stale row.
+    if (expectedUpdatedAt && existing.updated_at !== expectedUpdatedAt) {
+      return {
+        status: "conflict",
+        message: `Entry was updated at ${existing.updated_at}, expected ${expectedUpdatedAt}. Read the current version before overwriting.`,
+        current_updated_at: existing.updated_at,
+      };
+    }
 
-  // Apply content patches
-  let content = existing.content;
-  if (patch.content_prepend !== undefined) {
-    content = patch.content_prepend + "\n" + content;
-  }
-  if (patch.content_append !== undefined) {
-    content = content + "\n" + patch.content_append;
-  }
+    let content = existing.content;
+    if (patch.content_prepend !== undefined) {
+      content = patch.content_prepend + "\n" + content;
+    }
+    if (patch.content_append !== undefined) {
+      content = content + "\n" + patch.content_append;
+    }
 
-  // Apply tag patches
-  let tags: string[] = JSON.parse(existing.tags) as string[];
-  if (patch.tags_add && patch.tags_add.length > 0) {
-    const existing_set = new Set(tags);
-    for (const t of patch.tags_add) {
-      if (!existing_set.has(t)) {
-        tags.push(t);
+    let tags: string[] = JSON.parse(existing.tags) as string[];
+    if (patch.tags_add && patch.tags_add.length > 0) {
+      const existing_set = new Set(tags);
+      for (const t of patch.tags_add) {
+        if (!existing_set.has(t)) {
+          tags.push(t);
+        }
       }
     }
-  }
-  if (patch.tags_remove && patch.tags_remove.length > 0) {
-    const remove_set = new Set(patch.tags_remove);
-    tags = tags.filter((t) => !remove_set.has(t));
-  }
+    if (patch.tags_remove && patch.tags_remove.length > 0) {
+      const remove_set = new Set(patch.tags_remove);
+      tags = tags.filter((t) => !remove_set.has(t));
+    }
 
-  // Security check on final content
-  const secCheck = scanForSecrets(content);
-  if (!secCheck.valid) {
-    return { status: "secret_detected", error: secCheck.error! };
-  }
+    const secCheck = scanForSecrets(content);
+    if (!secCheck.valid) {
+      return { status: "secret_detected", error: secCheck.error! };
+    }
 
-  const now = nowUTC();
-  const resolvedClassification = resolveWriteClassification(
-    db,
-    namespace,
-    tags,
-    classificationOptions,
-    existing.classification,
-  );
-  const tagsJson = JSON.stringify(resolvedClassification.tags);
-
-  const txn = db.transaction(() => {
+    const now = nowUTC();
+    const resolvedClassification = resolveWriteClassification(
+      db,
+      namespace,
+      tags,
+      classificationOptions,
+      existing.classification,
+    );
+    const tagsJson = JSON.stringify(resolvedClassification.tags);
     const mutationTime = nextStateMutationTimestamp(existing, now);
     db.prepare(
       `UPDATE entries SET content = ?, tags = ?, updated_at = ?, valid_from = ?, classification = ?, agent_id = ?,
@@ -652,7 +650,7 @@ export function patchState(
     return { status: "patched" as const, id: existing.id };
   });
 
-  return txn();
+  return txn.immediate();
 }
 
 export function readState(
@@ -729,6 +727,33 @@ export function getStateAsOfCoverage(
     historyAvailable: !visibleRows.some((row) => row.created_at <= asOf && row.valid_from > asOf),
     currentExists: visibleRows.some((row) => row.is_current === 1),
   };
+}
+
+export function isExactCurrentStateBoundaryVisible(
+  db: Database.Database,
+  namespace: string,
+  key: string,
+  asOf: string,
+  options: {
+    visible?: (row: {
+      valid_from: string;
+      classification: ClassificationLevel;
+    }) => boolean;
+  } = {},
+): boolean {
+  const row = db.prepare(
+    `SELECT valid_from, classification
+       FROM entries
+      WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1`,
+  ).get(namespace, key) as {
+    valid_from: string;
+    classification: ClassificationLevel;
+  } | undefined;
+  if (!row || row.valid_from !== asOf) {
+    return false;
+  }
+  const { visible } = options;
+  return visible ? visible(row) : true;
 }
 
 export function getById(db: Database.Database, id: string): Entry | null {

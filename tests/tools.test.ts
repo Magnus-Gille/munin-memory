@@ -1085,15 +1085,23 @@ describe("memory_update_status valid_until (#217)", () => {
       });
       expect(gap.hint).toContain("supersedes");
 
-      vi.setSystemTime(new Date("2026-07-20T10:00:00.001Z"));
       const currentRaw = await callTool("memory_read", {
         namespace: "projects/status-same-ms",
         key: "status",
-        as_of: "2026-07-20T10:00:00.001Z",
+        as_of: updated.updated_at,
       });
       const current = parseToolResponse(currentRaw) as { found: boolean; content: string };
       expect(current.found).toBe(true);
       expect(current.content).toContain("Version 2");
+
+      const arbitraryFutureRaw = await callTool("memory_read", {
+        namespace: "projects/status-same-ms",
+        key: "status",
+        as_of: "2026-07-20T10:00:00.002Z",
+      });
+      const arbitraryFuture = parseToolResponse(arbitraryFutureRaw) as { ok: boolean; error: string };
+      expect(arbitraryFuture.ok).toBe(false);
+      expect(arbitraryFuture.error).toBe("validation_error");
     } finally {
       vi.useRealTimers();
     }
@@ -1476,6 +1484,51 @@ describe("memory_read", () => {
     const future = parseToolResponse(futureRaw) as { ok: boolean; error: string };
     expect(future.ok).toBe(false);
     expect(future.error).toBe("validation_error");
+  });
+
+  it("rejects hidden future boundaries even when they match the current row's exact stored timestamp", async () => {
+    const boundary = "2026-07-20T10:00:00.000Z";
+    const restrictedCallTool = makeContextCallTool({
+      ...ownerContext(),
+      maxClassification: "internal",
+      transportType: "consumer",
+    });
+
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(boundary));
+      const createdRaw = await callTool("memory_write", {
+        namespace: "projects/hidden-boundary",
+        key: "status",
+        content: "Secret version 1",
+        classification: "client-confidential",
+      });
+      const created = parseToolResponse(createdRaw) as { updated_at: string };
+      expect(created.updated_at).toBe(boundary);
+
+      vi.setSystemTime(new Date(boundary));
+      const updatedRaw = await callTool("memory_write", {
+        namespace: "projects/hidden-boundary",
+        key: "status",
+        content: "Secret version 2",
+        classification: "client-confidential",
+      });
+      const updated = parseToolResponse(updatedRaw) as { updated_at: string };
+      expect(updated.updated_at).toBe("2026-07-20T10:00:00.001Z");
+
+      const raw = await restrictedCallTool("memory_read", {
+        namespace: "projects/hidden-boundary",
+        key: "status",
+        as_of: updated.updated_at,
+      });
+      const result = parseToolResponse(raw) as { ok: boolean; error: string; found?: boolean; hint?: string };
+      expect(result.ok).toBe(false);
+      expect(result.error).toBe("validation_error");
+      expect(result.found).toBeUndefined();
+      expect(result.hint).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reports history_available false for legacy backfilled rows whose earlier wording is unrecoverable", async () => {

@@ -60,6 +60,7 @@ import {
   computeCommitmentConfidence,
   getOtherKeysInNamespace,
   getStateAsOfCoverage,
+  isExactCurrentStateBoundaryVisible,
   getCompletedTaskNamespaces,
   getResolvedNamespaces,
   isEntryExpired,
@@ -8774,7 +8775,15 @@ export function registerTools(
                 if (!timestampCheck.ok) {
                   return errResult("read", "validation_error", timestampCheck.error);
                 }
-                if (timestampCheck.value > nowUTC()) {
+                const currentTime = nowUTC();
+                const allowExactVisibleBoundary = timestampCheck.value > currentTime
+                  && isExactCurrentStateBoundaryVisible(db, namespace, key, timestampCheck.value, {
+                    visible: (row) => classificationAllowed(
+                      row.classification,
+                      getContextMaxClassification(ctx),
+                    ),
+                  });
+                if (timestampCheck.value > currentTime && !allowExactVisibleBoundary) {
                   return errResult("read", "validation_error", "as_of cannot be in the future.");
                 }
                 normalizedAsOf = timestampCheck.value;
