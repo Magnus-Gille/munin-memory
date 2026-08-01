@@ -40,6 +40,19 @@ changelog is the canonical record of what moved.
 
 ### Fixed
 
+- **`memory_commitments` now recognizes future-dated verify/run forms and
+  explains conservative exclusions (#274).** The dated-action vocabulary now
+  includes `verify`, so future phrases such as `We will verify ... by
+  YYYY-MM-DD` and `I will run ... on YYYY-MM-DD` surface alongside existing
+  `validate`/`check`/`test` forms. The tool now also returns bounded,
+  content-blind `exclusion_diagnostics` when commitment-like syntax is matched
+  but deliberately dropped — for example retrospective dated logs, duplicates
+  inside one entry, terminal/resolved sources, or legacy plain-markdown status
+  blobs that use an ad-hoc `Next Steps:` heading. Public wording is narrowed to
+  the real contract: tracked-status commitments come from the canonical Next
+  Steps structure (for example via `memory_update_status`), not from arbitrary
+  status markdown.
+
 - **`memory_delete` previews disclose and bind the full correction lineage
   they will remove (#281).** A delete of a corrected state entry removes its
   current revision *and* superseded revisions, but the preview previously

@@ -5531,6 +5531,111 @@ describe("memory_commitments", () => {
     }));
   });
 
+  it("detects future-dated verify/run/validate/check/test commitments in log entries", async () => {
+    const entries = [
+      "We will verify the backup restore by 2026-08-10.",
+      "I will run the rollback drill on 2026-08-11.",
+      "We will validate the schema by 2026-08-12.",
+      "I will check the migration on 2026-08-13.",
+      "We will test the failover by 2026-08-14.",
+    ];
+
+    for (const content of entries) {
+      await callTool("memory_log", {
+        namespace: "projects/dated-action-verbs",
+        content,
+        tags: ["decision"],
+      });
+    }
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/dated-action-verbs",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ text: string; source_type: string }>;
+      overdue: Array<{ text: string; source_type: string }>;
+    };
+
+    const allCommitments = [...result.open, ...result.overdue];
+    for (const text of entries) {
+      expect(allCommitments).toContainEqual(expect.objectContaining({
+        text,
+        source_type: "explicit_dated_commitment",
+      }));
+    }
+  });
+
+  it("deduplicates repeated commitment sentences within one entry and reports the dropped duplicate", async () => {
+    await callTool("memory_log", {
+      namespace: "projects/duplicate-commitment-sentence",
+      content: "We will verify the restore by 2026-08-20. We will verify the restore by 2026-08-20.",
+      tags: ["decision"],
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/duplicate-commitment-sentence",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ text: string }>;
+      exclusion_diagnostics?: {
+        matched_but_excluded: number;
+        reason_counts?: Record<string, number>;
+      };
+    };
+
+    expect(result.open).toHaveLength(1);
+    expect(result.open[0].text).toBe("We will verify the restore by 2026-08-20.");
+    expect(result.exclusion_diagnostics).toEqual(expect.objectContaining({
+      matched_but_excluded: 1,
+      reason_counts: expect.objectContaining({
+        duplicate_within_entry: 1,
+      }),
+    }));
+  });
+
+  it("drops retrospective verify/run/validate/check/test logs and reports content-blind exclusions", async () => {
+    const retrospectiveEntries = [
+      "We verified the backup restore on 2026-07-27.",
+      "I ran the rollback drill on 2026-07-28.",
+      "We validated the schema on 2026-07-29.",
+      "I checked the migration on 2026-07-30.",
+      "We tested the failover on 2026-07-31.",
+    ];
+
+    for (const content of retrospectiveEntries) {
+      await callTool("memory_log", {
+        namespace: "projects/retrospective-action-verbs",
+        content,
+        tags: ["milestone"],
+      });
+    }
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/retrospective-action-verbs",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<unknown>;
+      at_risk: Array<unknown>;
+      overdue: Array<unknown>;
+      completed_recently: Array<unknown>;
+      exclusion_diagnostics?: {
+        matched_but_excluded: number;
+        reason_counts?: Record<string, number>;
+      };
+    };
+
+    expect(result.open).toHaveLength(0);
+    expect(result.at_risk).toHaveLength(0);
+    expect(result.overdue).toHaveLength(0);
+    expect(result.completed_recently).toHaveLength(0);
+    expect(result.exclusion_diagnostics).toEqual(expect.objectContaining({
+      matched_but_excluded: retrospectiveEntries.length,
+      reason_counts: expect.objectContaining({
+        retrospective_completion: retrospectiveEntries.length,
+      }),
+    }));
+  });
+
   it("still extracts commitments from status next-steps (regression)", async () => {
     await callTool("memory_update_status", {
       namespace: "projects/regression-next-steps",
@@ -5552,6 +5657,51 @@ describe("memory_commitments", () => {
       text: "Ship feature X by 2027-08-01",
       source_type: "tracked_next_step",
     }));
+  });
+
+  it("reports plain markdown status next steps as unsupported rather than silently treating them as eligible", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/plain-status-next-steps",
+      key: "status",
+      content: [
+        "Phase: Build",
+        "Current Work: Stabilizing the rollout",
+        "Blockers: None.",
+        "Next Steps:",
+        "- Verify the restore path by 2026-08-15",
+        "- Run the canary on 2026-08-16",
+      ].join("\n"),
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/plain-status-next-steps",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<unknown>;
+      at_risk: Array<unknown>;
+      overdue: Array<unknown>;
+      completed_recently: Array<unknown>;
+      data_requirements?: string;
+      exclusion_diagnostics?: {
+        matched_but_excluded: number;
+        reason_counts?: Record<string, number>;
+      };
+    };
+
+    expect(result.open).toHaveLength(0);
+    expect(result.at_risk).toHaveLength(0);
+    expect(result.overdue).toHaveLength(0);
+    expect(result.completed_recently).toHaveLength(0);
+    expect(result.data_requirements).toContain("memory_update_status");
+    expect(result.exclusion_diagnostics).toEqual(expect.objectContaining({
+      matched_but_excluded: 1,
+      reason_counts: expect.objectContaining({
+        legacy_plain_status_next_steps: 1,
+      }),
+    }));
+    expect(JSON.stringify(result.exclusion_diagnostics)).not.toContain("Verify the restore path");
+    expect(JSON.stringify(result.exclusion_diagnostics)).not.toContain("Run the canary");
   });
 
   it("does not extract commitments from synthesis entries (#26)", async () => {

@@ -1353,7 +1353,7 @@ describe("memory_commitments edges", () => {
     }));
     expect(res.ok).toBe(true);
     expect(res.reason).toContain("No commitment-like phrases detected");
-    expect(res.data_requirements).toContain("status entries with a non-empty next_steps");
+    expect(res.data_requirements).toContain("memory_update_status");
     expect(res.suggestion).toContain("memory_read");
   });
 
