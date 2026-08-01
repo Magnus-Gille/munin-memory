@@ -422,6 +422,60 @@ describe("memory_read — access enforcement", () => {
     expect(result.history_available).toBeUndefined();
   });
 
+  it("classification-hidden as-of gaps stay indistinguishable while visible sibling hints remain useful", async () => {
+    const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+    try {
+      await ownerCall("memory_write", {
+        namespace: "projects/classified-gap",
+        key: "status",
+        content: "Confidential current wording",
+        classification: "client-confidential",
+      });
+      await ownerCall("memory_write", {
+        namespace: "projects/classified-gap",
+        key: "notes",
+        content: "Visible sibling note",
+      });
+      db.prepare(
+        "UPDATE entries SET created_at = ?, updated_at = ?, valid_from = ? WHERE namespace = ? AND key = 'status'",
+      ).run(
+        "2026-07-20T10:00:00.000Z",
+        "2026-07-21T10:00:00.000Z",
+        "2026-07-21T10:00:00.000Z",
+        "projects/classified-gap",
+      );
+
+      const downgradedOwnerCall = makeServer(db, {
+        ...ownerContext(),
+        transportType: "consumer",
+        maxClassification: "internal",
+      });
+
+      const raw = await downgradedOwnerCall("memory_read", {
+        namespace: "projects/classified-gap",
+        key: "status",
+        as_of: "2026-07-20T12:00:00.000Z",
+      });
+      const result = parse(raw) as {
+        found: boolean;
+        hint?: string;
+        history_available?: boolean;
+        message?: string;
+      };
+
+      expect(result.found).toBe(false);
+      expect(result.history_available).toBeUndefined();
+      expect(result.hint).toContain("notes");
+      expect(result.hint).not.toContain("status");
+      expect(result.message).toContain("No state entry found");
+      expect(result.message).not.toContain("No recorded state revision");
+    } finally {
+      if (previousLibrarian === undefined) delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      else process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
+    }
+  });
+
   it("agent reads from unauthorized namespace → { found: false }", async () => {
     const raw = await agentCall("memory_read", {
       namespace: "projects/foo",

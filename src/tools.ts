@@ -5248,7 +5248,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_read",
     description:
-      "Retrieve a specific state entry by namespace and key. By default this returns the current revision; pass `as_of` to select the authorized recorded revision valid at a past instant. As-of reconstruction is guaranteed only across explicit correction lineage created with `supersedes`; ordinary overwrites, patches, and legacy backfilled rows may instead return `found:false` with `history_available:false` for uncovered times. If instead you have an entry UUID from `memory_query` results, use `memory_get` (which also works for log entries and historical revisions). Returns the full content, tags, and timestamps. Returns a clear 'not found' message if the entry doesn't exist (not an error). Note: results carry a system-injected `classification:internal` (or higher) tag marking the entry's classification floor — it is set by the server, not by you.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
+      "Retrieve a specific state entry by namespace and key. By default this returns the current revision; pass `as_of` to select the authorized recorded revision valid at a past instant. As-of reconstruction is guaranteed only across explicit correction lineage created with `supersedes`; ordinary overwrites, patches, and legacy backfilled rows may instead return `found:false` with `history_available:false` for uncovered times that the caller is authorized to know were recorded. If instead you have an entry UUID from `memory_query` results, use `memory_get` (which also works for log entries and historical revisions). Returns the full content, tags, and timestamps. Returns a clear 'not found' message if the entry doesn't exist (not an error). Note: results carry a system-injected `classification:internal` (or higher) tag marking the entry's classification floor — it is set by the server, not by you.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -5263,7 +5263,7 @@ const TOOL_DEFINITIONS = [
         as_of: {
           type: "string",
           description:
-            "Optional ISO 8601 timestamp. Returns the recorded state revision valid at that instant. Only explicit correction lineage created with supersedes is fully rewindable; ordinary overwrites or patches may return found:false with history_available:false instead. Future timestamps are rejected.",
+            "Optional ISO 8601 timestamp. Returns the recorded state revision valid at that instant. Only explicit correction lineage created with supersedes is fully rewindable; ordinary overwrites or patches may return found:false with history_available:false for authorized uncovered times instead. Future timestamps are rejected.",
         },
       },
       required: ["namespace", "key"],
@@ -8814,7 +8814,12 @@ export function registerTools(
                 return okResult("read", response);
               }
               if (normalizedAsOf !== undefined) {
-                const coverage = getStateAsOfCoverage(db, namespace, key, normalizedAsOf);
+                const coverage = getStateAsOfCoverage(db, namespace, key, normalizedAsOf, {
+                  visible: (row) => classificationAllowed(
+                    row.classification,
+                    getContextMaxClassification(ctx),
+                  ),
+                });
                 if (!coverage.historyAvailable) {
                   return okResult("read", {
                     found: false,

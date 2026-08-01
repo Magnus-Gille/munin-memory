@@ -1044,6 +1044,60 @@ describe("memory_update_status valid_until (#217)", () => {
     expect(after.valid_until).toBe("2027-08-01T00:00:00.000Z");
   });
 
+  it("advances tracked-status validity past the prior boundary when updated in the same millisecond", async () => {
+    const boundary = "2026-07-20T10:00:00.000Z";
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(boundary));
+      const createdRaw = await callTool("memory_update_status", {
+        namespace: "projects/status-same-ms",
+        phase: "Active",
+        current_work: "Version 1",
+        blockers: "None.",
+        next_steps: ["Keep going"],
+        lifecycle: "active",
+      });
+      const created = parseToolResponse(createdRaw) as { updated_at: string };
+      expect(created.updated_at).toBe(boundary);
+
+      vi.setSystemTime(new Date(boundary));
+      const updatedRaw = await callTool("memory_update_status", {
+        namespace: "projects/status-same-ms",
+        current_work: "Version 2",
+      });
+      const updated = parseToolResponse(updatedRaw) as { status: string; updated_at: string };
+      expect(updated.status).toBe("updated");
+      expect(updated.updated_at).toBe("2026-07-20T10:00:00.001Z");
+
+      const gapRaw = await callTool("memory_read", {
+        namespace: "projects/status-same-ms",
+        key: "status",
+        as_of: boundary,
+      });
+      const gap = parseToolResponse(gapRaw) as {
+        found: boolean;
+        history_available?: boolean;
+        hint?: string;
+      };
+      expect(gap).toMatchObject({
+        found: false,
+        history_available: false,
+      });
+      expect(gap.hint).toContain("supersedes");
+
+      const currentRaw = await callTool("memory_read", {
+        namespace: "projects/status-same-ms",
+        key: "status",
+        as_of: "2026-07-20T10:00:00.001Z",
+      });
+      const current = parseToolResponse(currentRaw) as { found: boolean; content: string };
+      expect(current.found).toBe(true);
+      expect(current.content).toContain("Version 2");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("recomputes an eager derivative into at_risk after its semantic revision becomes stale", async () => {
     const written = parseToolResponse(await callTool("memory_log", {
       namespace: "projects/eager-stale-commitment",
@@ -1360,6 +1414,39 @@ describe("memory_read", () => {
     expect(result.found).toBe(false);
     expect(result.history_available).toBeUndefined();
     expect(result.message).toContain("2026-07-20T09:59:00.000Z");
+    expect(result.hint).not.toContain("status");
+  });
+
+  it("lists visible sibling keys while excluding the requested key on an as-of miss", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "architecture",
+      content: "Monolith",
+    });
+    const writeRaw = await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "status",
+      content: "All good",
+      tags: ["active"],
+    });
+    const writeResult = parseToolResponse(writeRaw) as { id: string };
+    const createdAt = "2026-07-20T10:00:00.000Z";
+    db.prepare("UPDATE entries SET created_at = ?, updated_at = ?, valid_from = ? WHERE id = ?")
+      .run(createdAt, createdAt, createdAt, writeResult.id);
+
+    const raw = await callTool("memory_read", {
+      namespace: "projects/test",
+      key: "status",
+      as_of: "2026-07-20T09:59:00.000Z",
+    });
+    const result = parseToolResponse(raw) as {
+      found: boolean;
+      history_available?: boolean;
+      hint: string;
+    };
+    expect(result.found).toBe(false);
+    expect(result.history_available).toBeUndefined();
+    expect(result.hint).toContain("architecture");
     expect(result.hint).not.toContain("status");
   });
 

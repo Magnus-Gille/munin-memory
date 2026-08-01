@@ -320,7 +320,7 @@ export interface ReadResponse {
   redaction_reason?: string;
   message?: string;
   hint?: string;
-  /** False when an as_of read falls into time that ordinary overwrites, patches, or legacy backfill did not preserve as rewindable revision history. */
+  /** False when an as_of read falls into an authorized time gap that ordinary overwrites, patches, or legacy backfill did not preserve as rewindable revision history. Omitted for ordinary misses and when the caller is not authorized to know the gap exists. */
   history_available?: boolean;
   supersedes?: string;
   superseded?: boolean;

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Database from "better-sqlite3";
 import { spawn } from "node:child_process";
 import { unlinkSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -255,6 +255,48 @@ describe("writeState + readState", () => {
     expect(JSON.parse(entry!.tags)).toEqual(["updated", "classification:internal"]);
     expect(entry!.classification).toBe("internal");
     expect(entry!.id).toBe(first.id);
+  });
+
+  it("advances the current-row validity boundary on same-millisecond overwrites", () => {
+    const boundary = "2026-07-20T10:00:00.000Z";
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(boundary));
+      writeState(db, "projects/test", "status", "Version 1", []);
+
+      vi.setSystemTime(new Date(boundary));
+      const updated = writeState(db, "projects/test", "status", "Version 2", []);
+      expect(updated.status).toBe("updated");
+      expect(updated.updated_at).toBe("2026-07-20T10:00:00.001Z");
+
+      expect(readState(db, "projects/test", "status", boundary)).toBeNull();
+      const current = readState(db, "projects/test", "status", "2026-07-20T10:00:00.001Z");
+      expect(current?.content).toBe("Version 2");
+      expect(current?.valid_from).toBe("2026-07-20T10:00:00.001Z");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("advances the current-row validity boundary on same-millisecond patches", () => {
+    const boundary = "2026-07-20T10:00:00.000Z";
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(boundary));
+      writeState(db, "projects/test", "notes", "line one", []);
+
+      vi.setSystemTime(new Date(boundary));
+      const patched = patchState(db, "projects/test", "notes", { content_append: "line two" });
+      expect(patched.status).toBe("patched");
+
+      expect(readState(db, "projects/test", "notes", boundary)).toBeNull();
+      const current = readState(db, "projects/test", "notes", "2026-07-20T10:00:00.001Z");
+      expect(current?.content).toContain("line two");
+      expect(current?.updated_at).toBe("2026-07-20T10:00:00.001Z");
+      expect(current?.valid_from).toBe("2026-07-20T10:00:00.001Z");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("creates only once when two independent writers race with create-if-absent", async () => {

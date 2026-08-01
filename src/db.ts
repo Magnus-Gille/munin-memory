@@ -74,6 +74,27 @@ export function nowUTC(): string {
   return new Date().toISOString();
 }
 
+function nextStateMutationTimestamp(
+  existing: { updated_at: string; valid_from: string },
+  candidate = nowUTC(),
+): string {
+  const candidateMs = Date.parse(candidate);
+  const floorMs = Math.max(
+    Date.parse(existing.updated_at),
+    Date.parse(existing.valid_from),
+  );
+
+  if (!Number.isFinite(candidateMs) || !Number.isFinite(floorMs) || candidateMs > floorMs) {
+    return candidate;
+  }
+
+  // In-place state rewrites are not rewindable, so the replacement row must
+  // start strictly after the previous row's recorded boundary. Otherwise an
+  // as_of read at the prior millisecond can incorrectly return rewritten
+  // current content instead of an uncovered miss.
+  return new Date(floorMs + 1).toISOString();
+}
+
 export function resolveDbPath(configuredPath?: string): string {
   // Precedence: explicit path (e.g. admin CLI --db) > MUNIN_MEMORY_DB_PATH
   // env var > default. The env fallback keeps the admin CLI and the server
@@ -399,11 +420,12 @@ export function writeState(
     // transaction. In WAL mode this serializes competing writers before either
     // can observe absence, so create-if-absent has one unambiguous winner.
     const existing = db.prepare(
-      "SELECT id, content, updated_at, valid_until, classification FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1",
+      "SELECT id, content, updated_at, valid_from, valid_until, classification FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1",
     ).get(namespace, key) as {
       id: string;
       content: string;
       updated_at: string;
+      valid_from: string;
       valid_until: string | null;
       classification: string | null;
     } | undefined;
@@ -441,6 +463,7 @@ export function writeState(
 
     if (existing) {
       const nextValidUntil = validUntil === undefined ? existing.valid_until : validUntil;
+      const mutationTime = nextStateMutationTimestamp(existing, now);
       db.prepare(
         `UPDATE entries SET content = ?, tags = ?, updated_at = ?, valid_from = ?, valid_until = ?, classification = ?, agent_id = ?,
          embedding_status = 'pending', embedding_model = NULL
@@ -448,8 +471,8 @@ export function writeState(
       ).run(
         content,
         tagsJson,
-        now,
-        now,
+        mutationTime,
+        mutationTime,
         nextValidUntil ?? null,
         resolvedClassification.classification,
         agentId,
@@ -466,7 +489,7 @@ export function writeState(
       return {
         status: "updated" as const,
         id: existing.id,
-        updated_at: now,
+        updated_at: mutationTime,
         classification: resolvedClassification.classification,
         tags: resolvedClassification.tags,
       };
@@ -537,12 +560,13 @@ export function patchState(
   }
 
   const existing = db.prepare(
-    "SELECT id, content, tags, updated_at, classification FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1",
+    "SELECT id, content, tags, updated_at, valid_from, classification FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1",
   ).get(namespace, key) as {
     id: string;
     content: string;
     tags: string;
     updated_at: string;
+    valid_from: string;
     classification: string | null;
   } | undefined;
 
@@ -600,6 +624,7 @@ export function patchState(
   const tagsJson = JSON.stringify(resolvedClassification.tags);
 
   const txn = db.transaction(() => {
+    const mutationTime = nextStateMutationTimestamp(existing, now);
     db.prepare(
       `UPDATE entries SET content = ?, tags = ?, updated_at = ?, valid_from = ?, classification = ?, agent_id = ?,
        embedding_status = 'pending', embedding_model = NULL
@@ -607,8 +632,8 @@ export function patchState(
     ).run(
       content,
       tagsJson,
-      now,
-      now,
+      mutationTime,
+      mutationTime,
       resolvedClassification.classification,
       agentId,
       namespace,
@@ -670,9 +695,17 @@ export function getStateAsOfCoverage(
   namespace: string,
   key: string,
   asOf: string,
+  options: {
+    visible?: (row: {
+      created_at: string;
+      valid_from: string;
+      is_current: number;
+      classification: ClassificationLevel;
+    }) => boolean;
+  } = {},
 ): StateAsOfCoverage {
   const rows = db.prepare(
-    `SELECT created_at, valid_from, is_current
+    `SELECT created_at, valid_from, is_current, classification
        FROM entries
       WHERE namespace = ? AND key = ? AND entry_type = 'state'
       ORDER BY valid_from ASC, rowid ASC`,
@@ -680,9 +713,12 @@ export function getStateAsOfCoverage(
     created_at: string;
     valid_from: string;
     is_current: number;
+    classification: ClassificationLevel;
   }>;
+  const { visible } = options;
+  const visibleRows = visible ? rows.filter((row) => visible(row)) : rows;
 
-  if (rows.length === 0) {
+  if (visibleRows.length === 0) {
     return {
       historyAvailable: true,
       currentExists: false,
@@ -690,8 +726,8 @@ export function getStateAsOfCoverage(
   }
 
   return {
-    historyAvailable: !rows.some((row) => row.created_at <= asOf && row.valid_from > asOf),
-    currentExists: rows.some((row) => row.is_current === 1),
+    historyAvailable: !visibleRows.some((row) => row.created_at <= asOf && row.valid_from > asOf),
+    currentExists: visibleRows.some((row) => row.is_current === 1),
   };
 }
 
