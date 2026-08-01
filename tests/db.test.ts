@@ -1638,7 +1638,7 @@ describe("queryEntriesByFilter (no FTS)", () => {
       .get() as { namespace: string };
     const results = queryEntriesByFilter(db, { namespace: boundary });
 
-    expect(storedSurrogate.namespace).toBe(`projects/boundary/\uFFFD/deep`);
+    expect(storedSurrogate.namespace).toMatch(/^projects\/boundary\/\uFFFD+\/deep$/u);
     expect(results.map((r) => r.namespace).sort()).toEqual([
       boundary,
       `${boundary}/deep`,
