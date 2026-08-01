@@ -9050,6 +9050,7 @@ export function registerTools(
                   total: formatted.length,
                   redacted_count: redactedCount,
                   search_mode: "filter",
+                  ...(namespace !== undefined ? { namespace_scope: "subtree" } : {}),
                   ...(limitResolution.warning ? {
                     requested_limit: limitResolution.requested,
                     limit_applied: limitResolution.applied,
@@ -9308,6 +9309,7 @@ export function registerTools(
                 redacted_count: redactedCount,
                 query,
                 search_mode: requestedMode,
+                ...(namespace !== undefined ? { namespace_scope: "subtree" } : {}),
                 ...(limitResolution.warning ? {
                   requested_limit: limitResolution.requested,
                   limit_applied: limitResolution.applied,

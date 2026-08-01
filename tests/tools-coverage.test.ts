@@ -711,6 +711,13 @@ describe("memory_query validation and filter-only", () => {
     expect(res.message).toContain("Provide either a 'query' string");
   });
 
+  it("returns namespace_scope for zero-result namespace-filtered browse responses", async () => {
+    const res = parseToolResponse(await callTool("memory_query", { namespace: "projects/no-match" }));
+    expect(res.ok).toBe(true);
+    expect(res.total).toBe(0);
+    expect(res.namespace_scope).toBe("subtree");
+  });
+
   it("records analytics for filter-only browsing when a session id is present", async () => {
     await callTool("memory_write", { namespace: "projects/browse", key: "notes", content: "hello browse" });
     const call = makeContextCallTool(ownerContext(), "session-filter-analytics");

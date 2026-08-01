@@ -2516,11 +2516,13 @@ describe("memory_query", () => {
     const result = parseToolResponse(raw) as {
       results: Array<{ id: string; provenance: { principal_id: string } }>;
       total: number;
+      namespace_scope?: string;
       search_mode: string;
     };
     expect(result.total).toBeGreaterThanOrEqual(2);
     expect(result.results[0].id).toBeTruthy();
     expect(result.results[0].provenance.principal_id).toBe("owner");
+    expect(result.namespace_scope).toBeUndefined();
   });
 
   it.each(["yesterday", "not-a-date"])("rejects malformed since timestamps (%s) (#269)", async (since) => {
@@ -2831,6 +2833,21 @@ describe("memory_query", () => {
     });
     const result = parseToolResponse(raw) as { results: Array<{ namespace: string }> };
     expect(result.results.map((r) => r.namespace)).toContain("projects/alpha/sub");
+    expect(result.results.every((r) => r.namespace === "projects/alpha" || r.namespace.startsWith("projects/alpha/"))).toBe(true);
+  });
+
+  it("returns namespace_scope for successful namespace-filtered ranked queries", async () => {
+    const raw = await callTool("memory_query", {
+      query: "SQLite",
+      namespace: "projects/alpha",
+    });
+    const result = parseToolResponse(raw) as {
+      total: number;
+      namespace_scope?: string;
+      results: Array<{ namespace: string }>;
+    };
+    expect(result.total).toBeGreaterThanOrEqual(1);
+    expect(result.namespace_scope).toBe("subtree");
     expect(result.results.every((r) => r.namespace === "projects/alpha" || r.namespace.startsWith("projects/alpha/"))).toBe(true);
   });
 
