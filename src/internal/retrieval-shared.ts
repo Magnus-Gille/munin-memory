@@ -127,8 +127,6 @@ export function findPassedForwardDate(content: string): string | null {
 
 // --- Tracked-namespace patterns (dashboard taxonomy) ---
 
-import { buildNamespacePrefixRangeFilter } from "./namespace-filter.js";
-
 /**
  * Default tracked-namespace patterns: the namespaces whose `status` entries
  * feed the computed dashboard. Historically hardcoded as projects/* | clients/*
@@ -156,12 +154,16 @@ export function namespaceMatchesAnyPattern(ns: string, patterns: readonly string
   return false;
 }
 
+function escapeLikePattern(s: string): string {
+  return s.replace(/[\\%_]/g, (c) => "\\" + c);
+}
+
 /**
  * Translate tracked-namespace glob patterns into a parameterized SQL boolean
  * clause over `column`:
  *   - empty patterns → "0" (matches nothing)
  *   - a "*" pattern  → "1" (matches everything)
- *   - "prefix/*"     → literal case-sensitive range on `prefix/`
+ *   - "prefix/*"     → `column LIKE 'prefix/%' ESCAPE '\\'`
  *   - exact          → `column = ?`
  * Returns the clause text and ordered bind params. `column` MUST be a trusted
  * literal (caller-supplied, never user input); only the pattern VALUES are
@@ -177,9 +179,8 @@ export function trackedPatternsToSqlLike(
   for (const p of patterns) {
     if (p === "*") return { clause: "1", params: [] };
     if (p.endsWith("/*")) {
-      const range = buildNamespacePrefixRangeFilter(column, p.slice(0, -1));
-      ors.push(range.clause);
-      params.push(...range.params);
+      ors.push(`${column} LIKE ? ESCAPE '\\'`);
+      params.push(escapeLikePattern(p.slice(0, -1)) + "%");
     } else {
       ors.push(`${column} = ?`);
       params.push(p);

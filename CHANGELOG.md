@@ -40,22 +40,22 @@ changelog is the canonical record of what moved.
 
 ### Fixed
 
-- **Namespace subtree filters are now literal, case-sensitive, and index-friendly across query paths (#267).**
+- **Namespace subtree filters are now literal and case-sensitive across query paths (#267).**
   The shared SQL matcher behind `memory_query`, semantic exact-namespace scans,
   audit history, commitments, and adjacent namespace-filtered reads previously
   used SQLite `LIKE`, which is ASCII case-insensitive by default and could drift
-  from the server's case-sensitive `startsWith` checks while also giving the
-  planner weaker prefix-index opportunities. Namespace subtree filters now use
-  exact equality plus a UTF-8-safe literal descendant range, so supplementary
-  Unicode descendants stay inside scope, `Projects/Foo` no longer matches
-  `projects/foo/...`, trailing-slash filters remain descendant-only, and
-  wildcard-looking bytes such as `_` and legacy `%` stay literal. `memory_query`
-  now scopes non-owner candidate sets to readable namespaces before `LIMIT`, so
-  lexical/semantic/hybrid totals, explain metadata, and hybrid search stats are
-  derived from authorized rows only. `memory_query` now reports `namespace_scope:
-  "subtree"` for bare namespace filters, `namespace_scope: "prefix"` for
-  trailing-slash filters, and omits the field when no real namespace filter was
-  applied.
+  from the server's case-sensitive `startsWith` checks. Namespace subtree
+  filters now use exact equality plus a UTF-8-safe literal descendant range, so
+  supplementary Unicode descendants stay inside scope, `Projects/Foo` no longer
+  matches `projects/foo/...`, trailing-slash filters remain descendant-only, and
+  wildcard-looking bytes such as `_` and legacy `%` stay literal. For
+  `memory_query`, non-owner reads now apply readable-namespace SQL selectors
+  before `LIMIT` only when the caller's read rules are exactly representable;
+  legacy or unsupported rule shapes fail open to broader SQL scanning while
+  canonical post-query authorization remains authoritative. `memory_query` now
+  reports `namespace_scope: "subtree"` for bare namespace filters,
+  `namespace_scope: "prefix"` for trailing-slash filters, and omits the field
+  when no real namespace filter was applied.
 
 - **`memory_delete` previews disclose and bind the full correction lineage
   they will remove (#281).** A delete of a corrected state entry removes its

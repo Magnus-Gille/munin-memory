@@ -383,11 +383,39 @@ function selectorsForNamespaceFilter(namespace?: string): NamespaceSelector[] | 
     ]);
 }
 
-function selectorForRule(rule: NamespaceRule): NamespaceSelector | null {
+/**
+ * Translate a readable namespace rule into the exact SQL-selector shape we can
+ * prove is equivalent to canonical namespaceMatchesPattern/canRead semantics:
+ *   - "*"      → unrestricted
+ *   - "x/*"    → descendants under "x/" only
+ *   - "x"      → exact namespace only
+ *
+ * Any other wildcard-bearing pattern is intentionally treated as
+ * unrepresentable. Canonical read authorization remains authoritative after the
+ * DB read, so widening the SQL prefilter is safe; narrowing on guessed rule
+ * semantics is not.
+ */
+function selectorsForReadableRule(rule: NamespaceRule): NamespaceSelector[] | null | undefined {
   if (rule.pattern === "*") return null;
-  return rule.pattern.endsWith("/*")
-    ? { kind: "prefix", value: rule.pattern.slice(0, -1) }
-    : { kind: "exact", value: rule.pattern };
+  const firstWildcard = rule.pattern.indexOf("*");
+  if (firstWildcard === rule.pattern.length - 1 && rule.pattern.endsWith("/*")) {
+    return [{ kind: "prefix", value: rule.pattern.slice(0, -1) }];
+  }
+  if (firstWildcard !== -1) return undefined;
+  return [{ kind: "exact", value: rule.pattern }];
+}
+
+function resolveRepresentableReadableNamespaceSelectors(
+  readableRules: NamespaceRule[],
+): NamespaceSelector[] | null | undefined {
+  const selectors: NamespaceSelector[] = [];
+  for (const rule of readableRules) {
+    const ruleSelectors = selectorsForReadableRule(rule);
+    if (ruleSelectors === undefined) return undefined;
+    if (ruleSelectors === null) return null;
+    selectors.push(...ruleSelectors);
+  }
+  return normalizeNamespaceSelectors(selectors);
 }
 
 function intersectNamespaceSelectors(
@@ -411,8 +439,11 @@ function intersectNamespaceSelectors(
 /**
  * Resolve the literal namespace selectors a query-like read should search
  * after applying the caller's readable namespace rules. `null` means
- * unrestricted (owner or readable wildcard with no requested namespace);
- * `[]` means the caller has no readable overlap at all.
+ * unrestricted (owner, readable wildcard, or deliberately widened fallback
+ * with no requested namespace); `[]` means the caller has no readable overlap
+ * at all. When a readable rule shape cannot be translated to provably
+ * equivalent selectors, the helper fails open to requested-namespace-only SQL
+ * filtering and leaves canonical canRead post-filtering authoritative.
  */
 export function resolveReadableNamespaceSelectors(
   ctx: AccessContext,
@@ -427,15 +458,13 @@ export function resolveReadableNamespaceSelectors(
   const readableRules = readableNamespaceRules(ctx);
   if (readableRules.length === 0) return [];
 
-  if (readableRules.some((rule) => rule.pattern === "*")) {
+  const readableSelectors = resolveRepresentableReadableNamespaceSelectors(readableRules);
+  if (readableSelectors === undefined) {
     return requestedSelectors;
   }
-
-  const readableSelectors = normalizeNamespaceSelectors(
-    readableRules
-      .map(selectorForRule)
-      .filter((selector): selector is NamespaceSelector => selector !== null),
-  );
+  if (readableSelectors === null) {
+    return requestedSelectors;
+  }
 
   if (requestedSelectors === null) {
     return readableSelectors;

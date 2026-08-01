@@ -99,7 +99,7 @@ Invisible denial is critical: non-owner principals must not be able to distingui
 | Field | Rule |
 |-------|------|
 | **Who can call** | All principals |
-| **Result filtering** | Results filtered post-query to caller's accessible namespaces |
+| **Result filtering** | Results are always post-filtered with canonical `canRead`. When the caller's readable rules map cleanly to exact/prefix SQL selectors, `memory_query` may also intersect the request with a safe prefilter before retrieval to avoid hidden rows consuming candidate slots. Unsupported or legacy rule shapes deliberately fail open to broader SQL scanning rather than narrowing incorrectly. |
 | **namespace param** | Literal and case-sensitive. Bare `projects/foo` means that namespace plus descendants; trailing-slash `projects/` means descendants under that prefix only. If caller specifies an inaccessible namespace, return empty results (not an error) |
 | **namespace_scope** | Returned only when a real namespace filter was applied: `subtree` for bare namespaces, `prefix` for trailing-slash filters |
 | **Result count** | `total` reflects only accessible results (don't leak hidden count) |
@@ -153,6 +153,7 @@ Invisible denial is critical: non-owner principals must not be able to distingui
 | Field | Rule |
 |-------|------|
 | **Who can call** | Owner only |
+| **namespace param** | Literal and case-sensitive. A bare namespace is exact-only here; a trailing-slash prefix such as `projects/` matches descendants under that literal prefix. |
 | **Non-owner** | Return empty results (not an error). Insights expose retrieval patterns that could leak information about hidden namespaces. |
 
 ### memory_consolidate

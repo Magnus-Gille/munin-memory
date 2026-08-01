@@ -238,6 +238,22 @@ describe("getTrackedStatuses ordering (#74)", () => {
     expect(second).toEqual(expected);
     expect(third).toEqual(expected);
   });
+
+  it("preserves the historical ASCII-case-insensitive tracked namespace SQL", () => {
+    writeState(db, "Projects/MixedCase", "status", "Upper-case project root.", ["active"]);
+
+    const namespaces = getTrackedStatuses(db).map((row) => row.namespace);
+
+    expect(namespaces).toContain("Projects/MixedCase");
+  });
+});
+
+describe("namespacePrefixSuccessor", () => {
+  it("steps from U+D7FF to U+E000 without entering the surrogate block", () => {
+    const boundary = `projects/boundary/${String.fromCodePoint(0xD7FF)}`;
+
+    expect(namespacePrefixSuccessor(boundary)).toBe(`projects/boundary/${String.fromCodePoint(0xE000)}`);
+  });
 });
 
 describe("writeState + readState", () => {
@@ -1589,6 +1605,31 @@ describe("queryEntriesByFilter (no FTS)", () => {
     ]);
   });
 
+  it("does not widen a U+D7FF subtree range when SQLite replaces a lone surrogate", () => {
+    const boundary = `projects/boundary/${String.fromCodePoint(0xD7FF)}`;
+    const afterBoundary = `projects/boundary/${String.fromCodePoint(0xE000)}`;
+    const loneSurrogateChild = `projects/boundary/${String.fromCharCode(0xD800)}/deep`;
+    writeState(db, "projects/boundary-parent-temp", "status", "boundary parent", ["active"]);
+    writeState(db, "projects/boundary-child-temp", "status", "boundary child", ["active"]);
+    writeState(db, "projects/boundary-after-temp", "status", "after boundary", ["active"]);
+    writeState(db, "projects/boundary-surrogate-temp", "surrogate", "surrogate child", ["active"]);
+    rewriteNamespace("projects/boundary-parent-temp", "status", boundary);
+    rewriteNamespace("projects/boundary-child-temp", "status", `${boundary}/deep`);
+    rewriteNamespace("projects/boundary-after-temp", "status", `${afterBoundary}/deep`);
+    rewriteNamespace("projects/boundary-surrogate-temp", "surrogate", loneSurrogateChild);
+
+    const storedSurrogate = db
+      .prepare("SELECT namespace FROM entries WHERE key = 'surrogate'")
+      .get() as { namespace: string };
+    const results = queryEntriesByFilter(db, { namespace: boundary });
+
+    expect(storedSurrogate.namespace).toBe(`projects/boundary/\uFFFD/deep`);
+    expect(results.map((r) => r.namespace).sort()).toEqual([
+      boundary,
+      `${boundary}/deep`,
+    ]);
+  });
+
   it("treats slash-root-like namespace filters literally", () => {
     writeState(db, "legacy/rooted", "status", "legacy rooted row", ["active"]);
     rewriteNamespace("legacy/rooted", "status", "/legacy/rooted");
@@ -1617,6 +1658,55 @@ describe("queryEntriesByFilter (no FTS)", () => {
 
     expect(percentResults.map((r) => r.namespace).sort()).toEqual(["legacy/p%ct", "legacy/p%ct/sub"]);
     expect(underscoreResults.map((r) => r.namespace).sort()).toEqual(["legacy/u_score", "legacy/u_score/sub"]);
+  });
+
+  it("uses namespace equality-plus-range predicates for bare-subtree browse queries", () => {
+    const filter = "projects/a";
+    const sql = `
+      EXPLAIN QUERY PLAN
+      SELECT * FROM entries
+      WHERE is_current = 1
+        AND (namespace = ? OR (namespace >= ? AND namespace < ?))
+      ORDER BY updated_at DESC
+      LIMIT ?
+    `;
+    const plan = db.prepare(sql).all(
+      filter,
+      `${filter}/`,
+      namespacePrefixSuccessor(`${filter}/`)!,
+      10,
+    ) as Array<{ detail: string }>;
+
+    expect(plan.map((row) => row.detail)).toEqual(expect.arrayContaining([
+      "SEARCH entries USING INDEX idx_entries_temporal (namespace=?)",
+      "SEARCH entries USING INDEX idx_entries_temporal (namespace>? AND namespace<?)",
+    ]));
+  });
+
+  it("keeps lexical subtree queries on the FTS-plus-rowid plan", () => {
+    const filter = "projects/a";
+    const sql = `
+      EXPLAIN QUERY PLAN
+      SELECT e.*, bm25(entries_fts) as lexical_score FROM entries e
+      JOIN entries_fts fts ON e.rowid = fts.rowid
+      WHERE entries_fts MATCH ?
+        AND e.is_current = 1
+        AND (e.namespace = ? OR (e.namespace >= ? AND e.namespace < ?))
+      ORDER BY lexical_score, e.rowid
+      LIMIT ?
+    `;
+    const plan = db.prepare(sql).all(
+      "project",
+      filter,
+      `${filter}/`,
+      namespacePrefixSuccessor(`${filter}/`)!,
+      10,
+    ) as Array<{ detail: string }>;
+
+    expect(plan.map((row) => row.detail)).toEqual(expect.arrayContaining([
+      expect.stringContaining("SCAN fts VIRTUAL TABLE INDEX"),
+      "SEARCH e USING INTEGER PRIMARY KEY (rowid=?)",
+    ]));
   });
 
   it("filters by entry type", () => {
