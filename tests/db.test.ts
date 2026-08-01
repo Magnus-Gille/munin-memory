@@ -1453,6 +1453,10 @@ describe("getToolCallAggregates p95_response_size_bytes", () => {
 });
 
 describe("queryEntriesByFilter (no FTS)", () => {
+  function rewriteNamespace(oldNamespace: string, key: string, nextNamespace: string) {
+    db.prepare("UPDATE entries SET namespace = ? WHERE namespace = ? AND key = ?").run(nextNamespace, oldNamespace, key);
+  }
+
   beforeEach(() => {
     writeState(db, "projects/a", "status", "active project alpha", ["active"]);
     writeState(db, "projects/a", "notes", "some notes", ["decision"]);
@@ -1485,6 +1489,61 @@ describe("queryEntriesByFilter (no FTS)", () => {
     const results = queryEntriesByFilter(db, { namespace: "projects/" });
     expect(results.every((r) => r.namespace.startsWith("projects/"))).toBe(true);
     expect(results.length).toBe(4); // projects/a and projects/b entries
+  });
+
+  it("treats a trailing slash as descendant-only, excluding the exact namespace", () => {
+    writeState(db, "projects/a/sub", "status", "nested child", ["active"]);
+
+    const results = queryEntriesByFilter(db, { namespace: "projects/a/" });
+
+    expect(results.map((r) => r.namespace)).toEqual(["projects/a/sub"]);
+  });
+
+  it("matches bare subtree filters case-sensitively", () => {
+    writeState(db, "Projects/Case", "status", "mixed case parent", ["active"]);
+    writeState(db, "Projects/Case/Sub", "status", "mixed case child", ["active"]);
+    writeState(db, "projects/case/sub", "status", "lower case child", ["active"]);
+
+    const results = queryEntriesByFilter(db, { namespace: "Projects/Case" });
+
+    expect(results.map((r) => r.namespace).sort()).toEqual(["Projects/Case", "Projects/Case/Sub"]);
+  });
+
+  it("treats an empty namespace filter as no filter", () => {
+    const unfiltered = queryEntriesByFilter(db, {});
+    const empty = queryEntriesByFilter(db, { namespace: "" });
+
+    expect(empty.map((r) => r.id).sort()).toEqual(unfiltered.map((r) => r.id).sort());
+  });
+
+  it("treats slash-root-like namespace filters literally", () => {
+    writeState(db, "legacy/rooted", "status", "legacy rooted row", ["active"]);
+    rewriteNamespace("legacy/rooted", "status", "/legacy/rooted");
+
+    const results = queryEntriesByFilter(db, { namespace: "/" });
+
+    expect(results.map((r) => r.namespace)).toEqual(["/legacy/rooted"]);
+  });
+
+  it("treats percent and underscore as literal namespace characters", () => {
+    writeState(db, "legacy/pct-temp", "status", "legacy percent parent", ["active"]);
+    writeState(db, "legacy/pct-temp/sub", "status", "legacy percent child", ["active"]);
+    writeState(db, "legacy/us-temp", "status", "legacy underscore parent", ["active"]);
+    writeState(db, "legacy/us-temp/sub", "status", "legacy underscore child", ["active"]);
+    writeState(db, "legacy/pctXtemp/sub", "status", "wrong percent sibling", ["active"]);
+    writeState(db, "legacy/usXtemp/sub", "status", "wrong underscore sibling", ["active"]);
+    rewriteNamespace("legacy/pct-temp", "status", "legacy/p%ct");
+    rewriteNamespace("legacy/pct-temp/sub", "status", "legacy/p%ct/sub");
+    rewriteNamespace("legacy/us-temp", "status", "legacy/u_score");
+    rewriteNamespace("legacy/us-temp/sub", "status", "legacy/u_score/sub");
+    rewriteNamespace("legacy/pctXtemp/sub", "status", "legacy/pXct/sub");
+    rewriteNamespace("legacy/usXtemp/sub", "status", "legacy/uXscore/sub");
+
+    const percentResults = queryEntriesByFilter(db, { namespace: "legacy/p%ct" });
+    const underscoreResults = queryEntriesByFilter(db, { namespace: "legacy/u_score" });
+
+    expect(percentResults.map((r) => r.namespace).sort()).toEqual(["legacy/p%ct", "legacy/p%ct/sub"]);
+    expect(underscoreResults.map((r) => r.namespace).sort()).toEqual(["legacy/u_score", "legacy/u_score/sub"]);
   });
 
   it("filters by entry type", () => {

@@ -63,6 +63,13 @@ status should next be reviewed. Expired statuses remain directly readable, are s
 by `memory_attention` when `include_expiring` is enabled, and are hidden from broad search
 by default.
 
+Namespace-scoped retrieval is literal and case-sensitive. In `memory_query`, a bare
+namespace such as `projects/munin-memory` matches that namespace and its descendants,
+while a trailing-slash filter such as `projects/` matches only descendants under that
+literal prefix. Successful query responses echo this as `namespace_scope: "subtree"` or
+`namespace_scope: "prefix"`; responses omit `namespace_scope` when no namespace filter
+was applied.
+
 ---
 
 ## Broad handshake vs. targeted resume

@@ -20,6 +20,11 @@ import {
   DEFAULT_TRACKED_PATTERNS,
   trackedPatternsToSqlLike,
 } from "./internal/retrieval-shared.js";
+import {
+  buildNamespacePrefixRangeFilter,
+  buildNamespaceSubtreeFilter,
+  matchesNamespaceSubtree,
+} from "./internal/namespace-filter.js";
 import { runMigrations } from "./migrations.js";
 import { resolveKnob } from "./profiles.js";
 import { scanForSecrets, validateWriteNamespace } from "./security.js";
@@ -976,25 +981,6 @@ function escapeFtsQuery(query: string): string {
   return tokens.join(" AND ");
 }
 
-function escapeForLike(s: string): string {
-  // Debate resolution #10: escape LIKE wildcards
-  return s.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
-}
-
-function buildNamespaceSubtreeFilter(column: string, namespace: string): { clause: string; params: string[] } {
-  if (namespace.endsWith("/")) {
-    return {
-      clause: `${column} LIKE ? ESCAPE '\\'`,
-      params: [escapeForLike(namespace) + "%"],
-    };
-  }
-
-  return {
-    clause: `(${column} = ? OR ${column} LIKE ? ESCAPE '\\')`,
-    params: [namespace, `${escapeForLike(namespace)}/%`],
-  };
-}
-
 export interface QueryOptions {
   query: string;
   namespace?: string;
@@ -1372,14 +1358,9 @@ export function listEntriesForDerivation(
   const params: unknown[] = [];
 
   if (namespace) {
-    if (namespace.endsWith("/")) {
-      sql += " AND namespace LIKE ? ESCAPE '\\'";
-      params.push(escapeForLike(namespace) + "%");
-    } else {
-      sql += " AND (namespace = ? OR namespace LIKE ? ESCAPE '\\')";
-      params.push(namespace);
-      params.push(escapeForLike(namespace) + "/%");
-    }
+    const filter = buildNamespaceSubtreeFilter("namespace", namespace);
+    sql += ` AND ${filter.clause}`;
+    params.push(...filter.params);
   }
 
   if (since) {
@@ -1781,14 +1762,9 @@ export function listCommitments(
   const params: unknown[] = [];
 
   if (namespace) {
-    if (namespace.endsWith("/")) {
-      sql += " AND c.namespace LIKE ? ESCAPE '\\'";
-      params.push(escapeForLike(namespace) + "%");
-    } else {
-      sql += " AND (c.namespace = ? OR c.namespace LIKE ? ESCAPE '\\')";
-      params.push(namespace);
-      params.push(escapeForLike(namespace) + "/%");
-    }
+    const filter = buildNamespaceSubtreeFilter("c.namespace", namespace);
+    sql += ` AND ${filter.clause}`;
+    params.push(...filter.params);
   }
 
   if (since) {
@@ -1908,14 +1884,9 @@ export function listEntriesBelowNamespaceFloor(
   const params: unknown[] = [];
 
   if (namespace) {
-    if (namespace.endsWith("/")) {
-      sql += " AND namespace LIKE ? ESCAPE '\\'";
-      params.push(escapeForLike(namespace) + "%");
-    } else {
-      sql += " AND (namespace = ? OR namespace LIKE ? ESCAPE '\\')";
-      params.push(namespace);
-      params.push(escapeForLike(namespace) + "/%");
-    }
+    const filter = buildNamespaceSubtreeFilter("namespace", namespace);
+    sql += ` AND ${filter.clause}`;
+    params.push(...filter.params);
   }
 
   sql += " ORDER BY namespace ASC, key ASC, id ASC";
@@ -2509,8 +2480,7 @@ interface SemanticFilterOptions {
 }
 
 function entryMatchesNamespace(entryNamespace: string, filter: string): boolean {
-  if (filter.endsWith("/")) return entryNamespace.startsWith(filter);
-  return entryNamespace === filter || entryNamespace.startsWith(`${filter}/`);
+  return matchesNamespaceSubtree(entryNamespace, filter);
 }
 
 function passesSemanticFilters(entry: Entry, opts: SemanticFilterOptions): boolean {
@@ -3084,8 +3054,9 @@ export function getInsightsByEntry(
   const nsParams: unknown[] = [];
   if (namespace) {
     if (namespace.endsWith("/")) {
-      nsFilter = "AND e.namespace LIKE ? ESCAPE '\\'";
-      nsParams.push(namespace.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_") + "%");
+      const filter = buildNamespacePrefixRangeFilter("e.namespace", namespace);
+      nsFilter = `AND ${filter.clause}`;
+      nsParams.push(...filter.params);
     } else {
       nsFilter = "AND e.namespace = ?";
       nsParams.push(namespace);
@@ -3650,16 +3621,9 @@ export function getAuditHistory(
   const params: unknown[] = [];
 
   if (namespace !== undefined) {
-    if (namespace.endsWith("/")) {
-      // Prefix match: e.g. "projects/" → namespace LIKE 'projects/%'
-      sql += " AND (namespace LIKE ? ESCAPE '\\')";
-      params.push(escapeForLike(namespace) + "%");
-    } else {
-      // Exact OR prefix match: e.g. "projects/foo" → exact OR starts with 'projects/foo/'
-      sql += " AND (namespace = ? OR namespace LIKE ? ESCAPE '\\')";
-      params.push(namespace);
-      params.push(escapeForLike(namespace) + "/%");
-    }
+    const filter = buildNamespaceSubtreeFilter("namespace", namespace);
+    sql += ` AND ${filter.clause}`;
+    params.push(...filter.params);
   }
 
   if (since !== undefined) {
@@ -3705,14 +3669,9 @@ export function getAuditHistoryPage(
   const params: unknown[] = [];
 
   if (namespace !== undefined) {
-    if (namespace.endsWith("/")) {
-      sql += " AND (namespace LIKE ? ESCAPE '\\')";
-      params.push(escapeForLike(namespace) + "%");
-    } else {
-      sql += " AND (namespace = ? OR namespace LIKE ? ESCAPE '\\')";
-      params.push(namespace);
-      params.push(escapeForLike(namespace) + "/%");
-    }
+    const filter = buildNamespaceSubtreeFilter("namespace", namespace);
+    sql += ` AND ${filter.clause}`;
+    params.push(...filter.params);
   }
 
   if (since !== undefined) {

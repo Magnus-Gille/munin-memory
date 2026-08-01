@@ -142,6 +142,16 @@ describe("getAuditHistory — namespace filter", () => {
     expect(namespaces).toContain("projects/alpha/subns");
   });
 
+  it("matches namespace filters case-sensitively", () => {
+    writeState(db, "Projects/Alpha", "status", "upper status", []);
+    writeState(db, "Projects/Alpha/Sub", "status", "upper child", []);
+    writeState(db, "projects/alpha/sub-lower", "status", "lower child", []);
+
+    const result = getAuditHistory(db, { namespace: "Projects/Alpha" });
+
+    expect(result.map((e) => e.namespace).sort()).toEqual(["Projects/Alpha", "Projects/Alpha/Sub"]);
+  });
+
   it("namespace filter excludes other namespaces", () => {
     const result = getAuditHistory(db, { namespace: "people/owner" });
     expect(result.length).toBe(1);

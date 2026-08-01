@@ -2795,9 +2795,24 @@ describe("memory_query", () => {
 
   it("accepts a valid namespace prefix filter (trailing slash)", async () => {
     const raw = await callTool("memory_query", { query: "SQLite", namespace: "projects/" });
-    const result = parseToolResponse(raw) as { error?: string; total?: number };
+    const result = parseToolResponse(raw) as { error?: string; total?: number; namespace_scope?: string };
     expect(result.error).toBeUndefined();
     expect(result.total).toBeGreaterThanOrEqual(1);
+    expect(result.namespace_scope).toBe("prefix");
+  });
+
+  it("rejects an empty namespace filter", async () => {
+    const raw = await callTool("memory_query", { query: "SQLite", namespace: "" });
+    const result = parseToolResponse(raw) as { ok: boolean; error?: string };
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("validation_error");
+  });
+
+  it("rejects slash-root-like namespace filters", async () => {
+    const raw = await callTool("memory_query", { query: "SQLite", namespace: "/" });
+    const result = parseToolResponse(raw) as { ok: boolean; error?: string };
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("validation_error");
   });
 
   it("defaults search_mode to hybrid (degrades to lexical in test env)", async () => {
@@ -2849,6 +2864,29 @@ describe("memory_query", () => {
     expect(result.total).toBeGreaterThanOrEqual(1);
     expect(result.namespace_scope).toBe("subtree");
     expect(result.results.every((r) => r.namespace === "projects/alpha" || r.namespace.startsWith("projects/alpha/"))).toBe(true);
+  });
+
+  it("returns namespace_scope for zero-result ranked subtree queries", async () => {
+    const raw = await callTool("memory_query", {
+      query: "xyznonexistent",
+      namespace: "projects/alpha",
+    });
+    const result = parseToolResponse(raw) as {
+      total: number;
+      namespace_scope?: string;
+    };
+    expect(result.total).toBe(0);
+    expect(result.namespace_scope).toBe("subtree");
+  });
+
+  it("labels filter-only trailing-slash namespace filters as prefix", async () => {
+    const raw = await callTool("memory_query", { namespace: "projects/" });
+    const result = parseToolResponse(raw) as {
+      total: number;
+      namespace_scope?: string;
+    };
+    expect(result.total).toBeGreaterThanOrEqual(1);
+    expect(result.namespace_scope).toBe("prefix");
   });
 
   it("filters by entry type", async () => {

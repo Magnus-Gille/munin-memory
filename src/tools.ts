@@ -22,6 +22,7 @@ import {
   getContextTransportType,
 } from "./access.js";
 import { createHash, randomBytes } from "node:crypto";
+import { namespaceFilterScope } from "./internal/namespace-filter.js";
 import {
   writeState,
   patchState,
@@ -5305,7 +5306,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_query",
     description:
-      "Search and filter memories. Supports lexical (keyword), semantic (vector similarity), and hybrid (RRF fusion of both) search modes, selected with the `search_mode` parameter (`\"lexical\"` | `\"semantic\"` | `\"hybrid\"`; default `\"hybrid\"`). Note it is `search_mode: \"semantic\"`, not a `semantic: true` flag. Filters by namespace subtree, entry type, tags, time range (since/until), and optional expiry handling. A bare namespace such as `projects/munin-memory` matches that namespace and its descendants; a trailing-slash prefix such as `projects/` matches all project namespaces. Can be used without a query to browse by filters alone (e.g. all entries with a specific tag, or all entries updated today). `limit` caps results (default 10, max 50); narrow with filters or `since`/`until` rather than paging if 50 is not enough. Broad retrieval hides expired state entries by default; use `include_expired: true` to include them. Pass `explain: true` to include retrieval metadata and per-result match explanations.\n\nRetrieval tips (the most common formulation failures):\n- **If you get zero results, widen before giving up.** Drop the `namespace` filter first, then drop `tags`, then try different phrasing. Tight namespace filters pointed at the wrong tier (e.g. `meta/` when the entry is in `decisions/`) are the #1 cause of false-negative searches.\n- **Prefer natural-language phrasing.** Default `search_mode` is hybrid, so semantic recall bridges vocabulary gaps — you do not need to guess exact tokens.\n- **Lexical queries are tokenized, not raw FTS5.** The server splits your query into terms, preserves quoted phrases, and requires all terms to match (implicit AND). Boolean operators like `AND`, `OR`, `NOT`, and `NEAR` are not supported in user queries — write term lists or natural language, not FTS5 expressions.\n- **Use concrete tokens likely present in the entry**, not abstract paraphrase (\"explored\", \"examined\") — lexical still wins on structured-vocabulary content like research notes.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
+      "Search and filter memories. Supports lexical (keyword), semantic (vector similarity), and hybrid (RRF fusion of both) search modes, selected with the `search_mode` parameter (`\"lexical\"` | `\"semantic\"` | `\"hybrid\"`; default `\"hybrid\"`). Note it is `search_mode: \"semantic\"`, not a `semantic: true` flag. Filters by namespace subtree, entry type, tags, time range (since/until), and optional expiry handling. Namespace filters are literal and case-sensitive: a bare namespace such as `projects/munin-memory` matches that namespace and its descendants and reports `namespace_scope: \"subtree\"`; a trailing-slash prefix such as `projects/` matches only descendants under that literal prefix and reports `namespace_scope: \"prefix\"`. Responses omit `namespace_scope` when no namespace filter is applied. Can be used without a query to browse by filters alone (e.g. all entries with a specific tag, or all entries updated today). `limit` caps results (default 10, max 50); narrow with filters or `since`/`until` rather than paging if 50 is not enough. Broad retrieval hides expired state entries by default; use `include_expired: true` to include them. Pass `explain: true` to include retrieval metadata and per-result match explanations.\n\nRetrieval tips (the most common formulation failures):\n- **If you get zero results, widen before giving up.** Drop the `namespace` filter first, then drop `tags`, then try different phrasing. Tight namespace filters pointed at the wrong tier (e.g. `meta/` when the entry is in `decisions/`) are the #1 cause of false-negative searches.\n- **Prefer natural-language phrasing.** Default `search_mode` is hybrid, so semantic recall bridges vocabulary gaps — you do not need to guess exact tokens.\n- **Lexical queries are tokenized, not raw FTS5.** The server splits your query into terms, preserves quoted phrases, and requires all terms to match (implicit AND). Boolean operators like `AND`, `OR`, `NOT`, and `NEAR` are not supported in user queries — write term lists or natural language, not FTS5 expressions.\n- **Use concrete tokens likely present in the entry**, not abstract paraphrase (\"explored\", \"examined\") — lexical still wins on structured-vocabulary content like research notes.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -5317,7 +5318,7 @@ const TOOL_DEFINITIONS = [
         namespace: {
           type: "string",
           description:
-            "Optional. Filter to a namespace subtree. `projects/munin-memory` matches that namespace and its descendants; `projects/` matches all project namespaces. Use sparingly — a wrong-tier filter (e.g. `meta/` when the entry is in `decisions/`) silently returns zero results. If a query with a namespace filter yields nothing, retry without it before reformulating.",
+            "Optional. Filter to a literal, case-sensitive namespace scope. `projects/munin-memory` matches that namespace and its descendants and yields `namespace_scope: \"subtree\"`; `projects/` matches only descendants under that literal prefix and yields `namespace_scope: \"prefix\"`. Responses omit `namespace_scope` when no namespace filter is applied. Use sparingly — a wrong-tier filter (e.g. `meta/` when the entry is in `decisions/`) silently returns zero results. If a query with a namespace filter yields nothing, retry without it before reformulating.",
         },
         entry_type: {
           type: "string",
@@ -5583,7 +5584,7 @@ const TOOL_DEFINITIONS = [
         namespace: {
           type: "string",
           description:
-            "Optional. Restrict results to a specific namespace or namespace prefix (e.g. 'projects/' for all project namespaces).",
+            "Optional. Restrict results to a literal, case-sensitive namespace scope. A bare namespace is exact-only here; a trailing-slash prefix such as `projects/` matches descendants under that literal prefix.",
         },
         min_impressions: {
           type: "integer",
@@ -8991,6 +8992,7 @@ export function registerTools(
                   return errResult("query", "validation_error", nsCheck.error!);
                 }
               }
+              const appliedNamespaceScope = namespaceFilterScope(namespace);
 
               // Filter-only mode: no query text, just browse by filters
               if (!query || typeof query !== "string") {
@@ -9050,7 +9052,7 @@ export function registerTools(
                   total: formatted.length,
                   redacted_count: redactedCount,
                   search_mode: "filter",
-                  ...(namespace !== undefined ? { namespace_scope: "subtree" } : {}),
+                  ...(appliedNamespaceScope ? { namespace_scope: appliedNamespaceScope } : {}),
                   ...(limitResolution.warning ? {
                     requested_limit: limitResolution.requested,
                     limit_applied: limitResolution.applied,
@@ -9309,7 +9311,7 @@ export function registerTools(
                 redacted_count: redactedCount,
                 query,
                 search_mode: requestedMode,
-                ...(namespace !== undefined ? { namespace_scope: "subtree" } : {}),
+                ...(appliedNamespaceScope ? { namespace_scope: appliedNamespaceScope } : {}),
                 ...(limitResolution.warning ? {
                   requested_limit: limitResolution.requested,
                   limit_applied: limitResolution.applied,

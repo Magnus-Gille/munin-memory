@@ -49,6 +49,18 @@ function zeroAccessContext(): AccessContext {
   };
 }
 
+function exactParentReadableConsumerContext(): AccessContext {
+  return {
+    principalId: "auditor",
+    principalType: "family",
+    accessibleNamespaces: [
+      { pattern: "projects/reports", permissions: "read" },
+    ],
+    maxClassification: "internal",
+    transportType: "consumer",
+  };
+}
+
 /**
  * Creates a server+callTool pair bound to the given access context.
  * Uses an in-memory DB passed in from the test.
@@ -86,6 +98,7 @@ let ownerCall: (name: string, args?: Record<string, unknown>) => Promise<unknown
 let familyCall: (name: string, args?: Record<string, unknown>) => Promise<unknown>;
 let agentCall: (name: string, args?: Record<string, unknown>) => Promise<unknown>;
 let zeroCall: (name: string, args?: Record<string, unknown>) => Promise<unknown>;
+let exactParentConsumerCall: (name: string, args?: Record<string, unknown>) => Promise<unknown>;
 
 beforeEach(() => {
   db = initDatabase(":memory:");
@@ -93,6 +106,7 @@ beforeEach(() => {
   familyCall = makeServer(db, familyContext());
   agentCall = makeServer(db, agentContext());
   zeroCall = makeServer(db, zeroAccessContext());
+  exactParentConsumerCall = makeServer(db, exactParentReadableConsumerContext());
 });
 
 afterEach(() => {
@@ -597,6 +611,45 @@ describe("memory_query — access enforcement", () => {
     const result = parse(raw) as { results: Array<{ namespace: string }> };
     const namespaces = result.results.map((r) => r.namespace);
     expect(namespaces).toContain("projects/foo");
+  });
+
+  it("does not leak unreadable children when a caller can read only the exact parent namespace", async () => {
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+    try {
+      await ownerCall("memory_write", {
+        namespace: "projects/reports",
+        key: "status",
+        content: "Quarterly rollup marker for exact parent",
+        classification: "client-confidential",
+      });
+      await ownerCall("memory_write", {
+        namespace: "projects/reports/private",
+        key: "status",
+        content: "Quarterly rollup marker for unreadable child",
+        classification: "client-confidential",
+      });
+
+      const raw = await exactParentConsumerCall("memory_query", {
+        query: "Quarterly rollup marker",
+        namespace: "projects/reports",
+        search_mode: "lexical",
+      });
+      const result = parse(raw) as {
+        total: number;
+        redacted_count: number;
+        namespace_scope?: string;
+        results: Array<{ namespace: string; redacted?: boolean }>;
+      };
+
+      expect(result.namespace_scope).toBe("subtree");
+      expect(result.total).toBe(1);
+      expect(result.redacted_count).toBe(1);
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0].namespace).toBe("projects/reports");
+      expect(result.results[0].redacted).toBe(true);
+    } finally {
+      delete process.env.MUNIN_LIBRARIAN_ENABLED;
+    }
   });
 });
 

@@ -100,7 +100,8 @@ Invisible denial is critical: non-owner principals must not be able to distingui
 |-------|------|
 | **Who can call** | All principals |
 | **Result filtering** | Results filtered post-query to caller's accessible namespaces |
-| **namespace param** | If caller specifies a namespace they can't access, return empty results (not an error) |
+| **namespace param** | Literal and case-sensitive. Bare `projects/foo` means that namespace plus descendants; trailing-slash `projects/` means descendants under that prefix only. If caller specifies an inaccessible namespace, return empty results (not an error) |
+| **namespace_scope** | Returned only when a real namespace filter was applied: `subtree` for bare namespaces, `prefix` for trailing-slash filters |
 | **Result count** | `total` reflects only accessible results (don't leak hidden count) |
 
 ### memory_attention

@@ -40,6 +40,21 @@ changelog is the canonical record of what moved.
 
 ### Fixed
 
+- **Namespace subtree filters are now literal, case-sensitive, and index-friendly across query paths (#267).**
+  The shared SQL matcher behind `memory_query`, semantic exact-namespace scans,
+  audit history, commitments, and adjacent namespace-filtered reads previously
+  used SQLite `LIKE`, which is ASCII case-insensitive by default and could drift
+  from the server's case-sensitive `startsWith` checks while also giving the
+  planner weaker prefix-index opportunities. Namespace subtree filters now use
+  exact equality plus a literal descendant range, so `Projects/Foo` no longer
+  matches `projects/foo/...`, trailing-slash filters remain descendant-only,
+  wildcard-looking bytes such as `_` and legacy `%` stay literal, and every row
+  returned after a broadened subtree selection is still authorization-filtered
+  before totals are computed. `memory_query` now reports `namespace_scope:
+  "subtree"` for bare namespace filters, `namespace_scope: "prefix"` for
+  trailing-slash filters, and omits the field when no real namespace filter was
+  applied.
+
 - **`memory_delete` previews disclose and bind the full correction lineage
   they will remove (#281).** A delete of a corrected state entry removes its
   current revision *and* superseded revisions, but the preview previously
