@@ -20,6 +20,7 @@ import {
   homePrefixFromRules,
   getContextMaxClassification,
   getContextTransportType,
+  resolveReadableNamespaceSelectors,
 } from "./access.js";
 import { createHash, randomBytes } from "node:crypto";
 import { namespaceFilterScope } from "./internal/namespace-filter.js";
@@ -8993,6 +8994,7 @@ export function registerTools(
                 }
               }
               const appliedNamespaceScope = namespaceFilterScope(namespace);
+              const readableNamespaceSelectors = resolveReadableNamespaceSelectors(ctx, namespace);
 
               // Filter-only mode: no query text, just browse by filters
               if (!query || typeof query !== "string") {
@@ -9003,7 +9005,7 @@ export function registerTools(
                 const requestedLimit = limitResolution.applied;
                 const internalFilterLimit = Math.min(requestedLimit * QUERY_RERANK_OVERFETCH_MULTIPLIER, 50);
                 let filterResults = queryEntriesByFilter(db, {
-                  namespace,
+                  namespaceSelectors: readableNamespaceSelectors,
                   entryType: entry_type,
                   tags,
                   limit: internalFilterLimit,
@@ -9126,7 +9128,7 @@ export function registerTools(
                   semanticResults = queryEntriesSemanticScored(db, {
                     queryEmbedding: buf,
                     queryEmbeddingModel: getActiveEmbeddingModel(),
-                    namespace,
+                    namespaceSelectors: readableNamespaceSelectors,
                     entryType: entry_type,
                     tags,
                     limit: internalLimit,
@@ -9152,10 +9154,40 @@ export function registerTools(
                   const buf = embeddingToBuffer(queryEmb);
                   const relaxedQuery = buildRelaxedLexicalQuery(query);
                   const hybridScored = queryEntriesHybridScored(db, {
-                    ftsOptions: { query, namespace, entryType: entry_type, tags, limit: internalLimit, includeExpired: true, since, until },
-                    semanticOptions: { queryEmbedding: buf, queryEmbeddingModel: getActiveEmbeddingModel(), namespace, entryType: entry_type, tags, limit: internalLimit, includeExpired: true, since, until, maxDistance: getSemanticMaxDistance() },
+                    ftsOptions: {
+                      query,
+                      namespaceSelectors: readableNamespaceSelectors,
+                      entryType: entry_type,
+                      tags,
+                      limit: internalLimit,
+                      includeExpired: true,
+                      since,
+                      until,
+                    },
+                    semanticOptions: {
+                      queryEmbedding: buf,
+                      queryEmbeddingModel: getActiveEmbeddingModel(),
+                      namespaceSelectors: readableNamespaceSelectors,
+                      entryType: entry_type,
+                      tags,
+                      limit: internalLimit,
+                      includeExpired: true,
+                      since,
+                      until,
+                      maxDistance: getSemanticMaxDistance(),
+                    },
                     ftsFallbackOptions: relaxedQuery
-                      ? { query: relaxedQuery, namespace, entryType: entry_type, tags, limit: internalLimit, includeExpired: true, since, until, rawFts5: true }
+                      ? {
+                        query: relaxedQuery,
+                        namespaceSelectors: readableNamespaceSelectors,
+                        entryType: entry_type,
+                        tags,
+                        limit: internalLimit,
+                        includeExpired: true,
+                        since,
+                        until,
+                        rawFts5: true,
+                      }
                       : undefined,
                   });
                   hybridResults = hybridScored.results;
@@ -9176,7 +9208,7 @@ export function registerTools(
               if (actualMode === "lexical") {
                 lexicalResults = queryEntriesLexicalScored(db, {
                   query,
-                  namespace,
+                  namespaceSelectors: readableNamespaceSelectors,
                   entryType: entry_type,
                   tags,
                   limit: internalLimit,
@@ -9194,7 +9226,7 @@ export function registerTools(
                   if (relaxedQuery) {
                     lexicalResults = queryEntriesLexicalScored(db, {
                       query: relaxedQuery,
-                      namespace,
+                      namespaceSelectors: readableNamespaceSelectors,
                       entryType: entry_type,
                       tags,
                       limit: internalLimit,

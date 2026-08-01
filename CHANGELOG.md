@@ -46,11 +46,13 @@ changelog is the canonical record of what moved.
   used SQLite `LIKE`, which is ASCII case-insensitive by default and could drift
   from the server's case-sensitive `startsWith` checks while also giving the
   planner weaker prefix-index opportunities. Namespace subtree filters now use
-  exact equality plus a literal descendant range, so `Projects/Foo` no longer
-  matches `projects/foo/...`, trailing-slash filters remain descendant-only,
-  wildcard-looking bytes such as `_` and legacy `%` stay literal, and every row
-  returned after a broadened subtree selection is still authorization-filtered
-  before totals are computed. `memory_query` now reports `namespace_scope:
+  exact equality plus a UTF-8-safe literal descendant range, so supplementary
+  Unicode descendants stay inside scope, `Projects/Foo` no longer matches
+  `projects/foo/...`, trailing-slash filters remain descendant-only, and
+  wildcard-looking bytes such as `_` and legacy `%` stay literal. `memory_query`
+  now scopes non-owner candidate sets to readable namespaces before `LIMIT`, so
+  lexical/semantic/hybrid totals, explain metadata, and hybrid search stats are
+  derived from authorized rows only. `memory_query` now reports `namespace_scope:
   "subtree"` for bare namespace filters, `namespace_scope: "prefix"` for
   trailing-slash filters, and omits the field when no real namespace filter was
   applied.

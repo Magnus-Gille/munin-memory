@@ -21,8 +21,11 @@ import {
   trackedPatternsToSqlLike,
 } from "./internal/retrieval-shared.js";
 import {
+  type NamespaceSelector,
   buildNamespacePrefixRangeFilter,
+  buildNamespaceSelectorFilter,
   buildNamespaceSubtreeFilter,
+  matchesNamespaceSelectors,
   matchesNamespaceSubtree,
 } from "./internal/namespace-filter.js";
 import { runMigrations } from "./migrations.js";
@@ -984,6 +987,8 @@ function escapeFtsQuery(query: string): string {
 export interface QueryOptions {
   query: string;
   namespace?: string;
+  /** Internal-only namespace prefilter, already intersected with access rules. */
+  namespaceSelectors?: readonly NamespaceSelector[] | null;
   entryType?: EntryType;
   tags?: string[];
   limit?: number;
@@ -1030,7 +1035,18 @@ export function queryEntriesLexicalScored(
   db: Database.Database,
   options: QueryOptions,
 ): LexicalQueryResult[] {
-  const { query, namespace, entryType, tags, limit = 10, includeExpired = false, since, until, rawFts5 = false } = options;
+  const {
+    query,
+    namespace,
+    namespaceSelectors,
+    entryType,
+    tags,
+    limit = 10,
+    includeExpired = false,
+    since,
+    until,
+    rawFts5 = false,
+  } = options;
   const clampedLimit = Math.min(Math.max(limit, 1), MAX_QUERY_LIMIT);
   const now = nowUTC();
 
@@ -1041,11 +1057,7 @@ export function queryEntriesLexicalScored(
   `;
   const params: unknown[] = [rawFts5 ? query : escapeFtsQuery(query)];
 
-  if (namespace) {
-    const filter = buildNamespaceSubtreeFilter("e.namespace", namespace);
-    sql += ` AND ${filter.clause}`;
-    params.push(...filter.params);
-  }
+  sql = appendNamespaceSqlFilter(sql, params, "e.namespace", namespace, namespaceSelectors);
 
   if (entryType) {
     sql += " AND e.entry_type = ?";
@@ -1131,12 +1143,39 @@ export function filterIdsMatchingFts(
 
 export interface FilterOptions {
   namespace?: string;
+  /** Internal-only namespace prefilter, already intersected with access rules. */
+  namespaceSelectors?: readonly NamespaceSelector[] | null;
   entryType?: EntryType;
   tags?: string[];
   limit?: number;
   includeExpired?: boolean;
   since?: string;
   until?: string;
+}
+
+function appendNamespaceSqlFilter(
+  sql: string,
+  params: unknown[],
+  column: string,
+  namespace?: string,
+  namespaceSelectors?: readonly NamespaceSelector[] | null,
+): string {
+  if (namespaceSelectors !== undefined) {
+    if (namespaceSelectors !== null) {
+      const filter = buildNamespaceSelectorFilter(column, namespaceSelectors);
+      sql += ` AND ${filter.clause}`;
+      params.push(...filter.params);
+    }
+    return sql;
+  }
+
+  if (namespace) {
+    const filter = buildNamespaceSubtreeFilter(column, namespace);
+    sql += ` AND ${filter.clause}`;
+    params.push(...filter.params);
+  }
+
+  return sql;
 }
 
 /**
@@ -1147,18 +1186,14 @@ export function queryEntriesByFilter(
   db: Database.Database,
   options: FilterOptions,
 ): Entry[] {
-  const { namespace, entryType, tags, limit = 10, includeExpired = false, since, until } = options;
+  const { namespace, namespaceSelectors, entryType, tags, limit = 10, includeExpired = false, since, until } = options;
   const clampedLimit = Math.min(Math.max(limit, 1), MAX_QUERY_LIMIT);
   const now = nowUTC();
 
   let sql = "SELECT * FROM entries WHERE is_current = 1";
   const params: unknown[] = [];
 
-  if (namespace) {
-    const filter = buildNamespaceSubtreeFilter("namespace", namespace);
-    sql += ` AND ${filter.clause}`;
-    params.push(...filter.params);
-  }
+  sql = appendNamespaceSqlFilter(sql, params, "namespace", namespace, namespaceSelectors);
 
   if (entryType) {
     sql += " AND entry_type = ?";
@@ -2422,6 +2457,8 @@ export function executeDelete(
 export interface SemanticQueryOptions {
   queryEmbedding: Buffer;
   namespace?: string;
+  /** Internal-only namespace prefilter, already intersected with access rules. */
+  namespaceSelectors?: readonly NamespaceSelector[] | null;
   entryType?: EntryType;
   tags?: string[];
   limit?: number;
@@ -2471,6 +2508,7 @@ export function queryEntriesSemantic(
 
 interface SemanticFilterOptions {
   namespace?: string;
+  namespaceSelectors?: readonly NamespaceSelector[] | null;
   entryType?: EntryType;
   tags?: string[];
   includeExpired: boolean;
@@ -2485,7 +2523,13 @@ function entryMatchesNamespace(entryNamespace: string, filter: string): boolean 
 
 function passesSemanticFilters(entry: Entry, opts: SemanticFilterOptions): boolean {
   if (entry.is_current !== 1) return false;
-  if (opts.namespace && !entryMatchesNamespace(entry.namespace, opts.namespace)) return false;
+  if (opts.namespaceSelectors !== undefined) {
+    if (opts.namespaceSelectors !== null && !matchesNamespaceSelectors(entry.namespace, opts.namespaceSelectors)) {
+      return false;
+    }
+  } else if (opts.namespace && !entryMatchesNamespace(entry.namespace, opts.namespace)) {
+    return false;
+  }
   if (opts.entryType && entry.entry_type !== opts.entryType) return false;
   if (!opts.includeExpired && isEntryExpired(entry, opts.now)) return false;
   if (opts.tags && opts.tags.length > 0) {
@@ -2501,7 +2545,19 @@ export function queryEntriesSemanticScored(
   db: Database.Database,
   options: SemanticQueryOptions,
 ): SemanticQueryResult[] {
-  const { queryEmbedding, namespace, entryType, tags, limit = 10, includeExpired = false, since, until, maxDistance, queryEmbeddingModel } = options;
+  const {
+    queryEmbedding,
+    namespace,
+    namespaceSelectors,
+    entryType,
+    tags,
+    limit = 10,
+    includeExpired = false,
+    since,
+    until,
+    maxDistance,
+    queryEmbeddingModel,
+  } = options;
   const clampedLimit = Math.min(Math.max(limit, 1), MAX_QUERY_LIMIT);
   const now = nowUTC();
 
@@ -2536,7 +2592,16 @@ export function queryEntriesSemanticScored(
 
     const rows = db.prepare(sql).all(...params) as Array<Entry & { distance: number }>;
 
-    const filterOpts: SemanticFilterOptions = { namespace, entryType, tags, includeExpired, since, until, now };
+    const filterOpts: SemanticFilterOptions = {
+      namespace,
+      namespaceSelectors,
+      entryType,
+      tags,
+      includeExpired,
+      since,
+      until,
+      now,
+    };
     const results: SemanticQueryResult[] = [];
 
     for (const row of rows) {
@@ -2571,17 +2636,21 @@ export function queryEntriesSemanticScored(
       WHERE e.embedding_model = ? AND e.is_current = 1`;
     const params: unknown[] = [queryEmbedding, queryEmbeddingModel];
 
-    // Inline namespace pre-filter to reduce scan rows when namespace is given.
-    if (namespace) {
-      const filter = buildNamespaceSubtreeFilter("e.namespace", namespace);
-      sql += ` AND ${filter.clause}`;
-      params.push(...filter.params);
-    }
+    sql = appendNamespaceSqlFilter(sql, params, "e.namespace", namespace, namespaceSelectors);
 
     sql += " ORDER BY distance";
 
     const rows = db.prepare(sql).all(...params) as Array<Entry & { distance: number }>;
-    const filterOpts: SemanticFilterOptions = { namespace, entryType, tags, includeExpired, since, until, now };
+    const filterOpts: SemanticFilterOptions = {
+      namespace,
+      namespaceSelectors,
+      entryType,
+      tags,
+      includeExpired,
+      since,
+      until,
+      now,
+    };
     const results: SemanticQueryResult[] = [];
 
     for (const row of rows) {
@@ -2618,7 +2687,16 @@ export function queryEntriesSemanticScored(
   // Fetch full entries and apply ALL filters (namespace, type, tags).
   const getEntry = db.prepare("SELECT * FROM entries WHERE id = ? AND is_current = 1");
   const results: SemanticQueryResult[] = [];
-  const filterOpts: SemanticFilterOptions = { namespace, entryType, tags, includeExpired, since, until, now };
+  const filterOpts: SemanticFilterOptions = {
+    namespace,
+    namespaceSelectors,
+    entryType,
+    tags,
+    includeExpired,
+    since,
+    until,
+    now,
+  };
 
   for (const { entry_id, distance } of vecResults) {
     if (results.length >= clampedLimit) break;

@@ -11,6 +11,10 @@
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import { nowUTC } from "./db.js";
+import {
+  type NamespaceSelector,
+  normalizeNamespaceSelectors,
+} from "./internal/namespace-filter.js";
 import type { AuthMethod, ClassificationLevel, TransportType } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -361,6 +365,91 @@ export function filterByAccess<T extends { namespace: string }>(
     return entries;
   }
   return entries.filter((entry) => canRead(ctx, entry.namespace));
+}
+
+function readableNamespaceRules(ctx: AccessContext): NamespaceRule[] {
+  return ctx.accessibleNamespaces.filter(
+    (rule) => rule.permissions === "read" || rule.permissions === "rw",
+  );
+}
+
+function selectorsForNamespaceFilter(namespace?: string): NamespaceSelector[] | null {
+  if (!namespace) return null;
+  return namespace.endsWith("/")
+    ? [{ kind: "prefix", value: namespace }]
+    : normalizeNamespaceSelectors([
+      { kind: "exact", value: namespace },
+      { kind: "prefix", value: `${namespace}/` },
+    ]);
+}
+
+function selectorForRule(rule: NamespaceRule): NamespaceSelector | null {
+  if (rule.pattern === "*") return null;
+  return rule.pattern.endsWith("/*")
+    ? { kind: "prefix", value: rule.pattern.slice(0, -1) }
+    : { kind: "exact", value: rule.pattern };
+}
+
+function intersectNamespaceSelectors(
+  left: NamespaceSelector,
+  right: NamespaceSelector,
+): NamespaceSelector | null {
+  if (left.kind === "exact" && right.kind === "exact") {
+    return left.value === right.value ? left : null;
+  }
+  if (left.kind === "exact" && right.kind === "prefix") {
+    return left.value.startsWith(right.value) ? left : null;
+  }
+  if (left.kind === "prefix" && right.kind === "exact") {
+    return right.value.startsWith(left.value) ? right : null;
+  }
+  if (left.value.startsWith(right.value)) return left;
+  if (right.value.startsWith(left.value)) return right;
+  return null;
+}
+
+/**
+ * Resolve the literal namespace selectors a query-like read should search
+ * after applying the caller's readable namespace rules. `null` means
+ * unrestricted (owner or readable wildcard with no requested namespace);
+ * `[]` means the caller has no readable overlap at all.
+ */
+export function resolveReadableNamespaceSelectors(
+  ctx: AccessContext,
+  requestedNamespace?: string,
+): NamespaceSelector[] | null {
+  const requestedSelectors = selectorsForNamespaceFilter(requestedNamespace);
+
+  if (ctx.principalType === "owner") {
+    return requestedSelectors;
+  }
+
+  const readableRules = readableNamespaceRules(ctx);
+  if (readableRules.length === 0) return [];
+
+  if (readableRules.some((rule) => rule.pattern === "*")) {
+    return requestedSelectors;
+  }
+
+  const readableSelectors = normalizeNamespaceSelectors(
+    readableRules
+      .map(selectorForRule)
+      .filter((selector): selector is NamespaceSelector => selector !== null),
+  );
+
+  if (requestedSelectors === null) {
+    return readableSelectors;
+  }
+
+  const intersections: NamespaceSelector[] = [];
+  for (const readableSelector of readableSelectors) {
+    for (const requestedSelector of requestedSelectors) {
+      const intersection = intersectNamespaceSelectors(readableSelector, requestedSelector);
+      if (intersection) intersections.push(intersection);
+    }
+  }
+
+  return normalizeNamespaceSelectors(intersections);
 }
 
 // ---------------------------------------------------------------------------

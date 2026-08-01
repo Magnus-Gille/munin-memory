@@ -10,11 +10,17 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { initDatabase, writeState, replaceCrossReferences, listCommitments } from "../src/db.js";
+import { initDatabase, writeState, replaceCrossReferences, listCommitments, storeEmbedding, vecLoaded } from "../src/db.js";
 import { registerTools } from "../src/tools.js";
 import type { AccessContext } from "../src/access.js";
 import { ownerContext } from "../src/access.js";
 import { addPrincipal } from "../src/admin-cli.js";
+import {
+  _setExtractorForTesting,
+  resetCircuitBreaker,
+  embeddingToBuffer,
+  getActiveEmbeddingModel,
+} from "../src/embeddings.js";
 
 // ---------------------------------------------------------------------------
 // Infrastructure
@@ -59,6 +65,31 @@ function exactParentReadableConsumerContext(): AccessContext {
     maxClassification: "internal",
     transportType: "consumer",
   };
+}
+
+const EMBEDDING_DIM = 384;
+const vecProbeDb = initDatabase(":memory:");
+const vecAvailable = vecLoaded();
+vecProbeDb.close();
+
+function makeEmbedding(seed: number): Float32Array {
+  const arr = new Float32Array(EMBEDDING_DIM);
+  for (let i = 0; i < EMBEDDING_DIM; i += 1) {
+    arr[i] = Math.sin(seed * (i + 1) * 0.1) * 0.1;
+  }
+  let norm = 0;
+  for (let i = 0; i < EMBEDDING_DIM; i += 1) norm += arr[i] * arr[i];
+  norm = Math.sqrt(norm);
+  if (norm > 0) {
+    for (let i = 0; i < EMBEDDING_DIM; i += 1) arr[i] /= norm;
+  }
+  return arr;
+}
+
+function mockExtractor(text: string, _options: { pooling: string; normalize: boolean }) {
+  return text.toLowerCase().includes("moonbeam")
+    ? Promise.resolve({ data: makeEmbedding(1) })
+    : Promise.resolve({ data: makeEmbedding(42) });
 }
 
 /**
@@ -110,6 +141,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  _setExtractorForTesting(null);
+  resetCircuitBreaker();
   db.close();
 });
 
@@ -606,6 +639,65 @@ describe("memory_query — access enforcement", () => {
     ).toBe(true);
   });
 
+  it("fills lexical results from an exact readable parent even when unreadable subtree hits exceed the internal window", async () => {
+    for (let index = 0; index < 6; index += 1) {
+      await ownerCall("memory_write", {
+        namespace: `projects/reports/private-${index}`,
+        key: "status",
+        content: "Quarterly exact-parent lexical regression",
+      });
+    }
+    await ownerCall("memory_write", {
+      namespace: "projects/reports",
+      key: "status",
+      content: "Quarterly exact-parent lexical regression",
+    });
+
+    const raw = await exactParentConsumerCall("memory_query", {
+      query: "Quarterly",
+      namespace: "projects/reports",
+      search_mode: "lexical",
+      limit: 1,
+    });
+    const result = parse(raw) as { total: number; results: Array<{ namespace: string }> };
+
+    expect(result.total).toBe(1);
+    expect(result.results).toHaveLength(1);
+    expect(result.results[0].namespace).toBe("projects/reports");
+  });
+
+  it("fills filter-only results from an exact readable parent even when unreadable descendants exceed the internal window", async () => {
+    await ownerCall("memory_write", {
+      namespace: "projects/reports",
+      key: "status",
+      content: "Exact parent browse regression",
+    });
+    db.prepare("UPDATE entries SET updated_at = ? WHERE namespace = 'projects/reports'").run("2026-03-01T00:00:00.000Z");
+
+    for (let index = 0; index < 6; index += 1) {
+      await ownerCall("memory_write", {
+        namespace: `projects/reports/private-${index}`,
+        key: "status",
+        content: `Unreadable browse child ${index}`,
+      });
+      db.prepare("UPDATE entries SET updated_at = ? WHERE namespace = ?").run(
+        `2026-03-${String(index + 10).padStart(2, "0")}T00:00:00.000Z`,
+        `projects/reports/private-${index}`,
+      );
+    }
+
+    const raw = await exactParentConsumerCall("memory_query", {
+      namespace: "projects/reports",
+      entry_type: "state",
+      limit: 1,
+    });
+    const result = parse(raw) as { total: number; results: Array<{ namespace: string }> };
+
+    expect(result.total).toBe(1);
+    expect(result.results).toHaveLength(1);
+    expect(result.results[0].namespace).toBe("projects/reports");
+  });
+
   it("owner queries → sees all results including restricted namespaces", async () => {
     const raw = await ownerCall("memory_query", { query: "moonbeam" });
     const result = parse(raw) as { results: Array<{ namespace: string }> };
@@ -650,6 +742,80 @@ describe("memory_query — access enforcement", () => {
     } finally {
       delete process.env.MUNIN_LIBRARIAN_ENABLED;
     }
+  });
+});
+
+describe.skipIf(!vecAvailable)("memory_query — access enforcement semantic/hybrid namespace prefilter", () => {
+  it("derives semantic and hybrid results from authorized rows only", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    _setExtractorForTesting(mockExtractor as any);
+    resetCircuitBreaker();
+
+    for (let index = 0; index < 6; index += 1) {
+      await ownerCall("memory_write", {
+        namespace: `projects/reports/private-${index}`,
+        key: "status",
+        content: "Moonbeam exact-parent vector regression",
+      });
+      const childId = (
+        db.prepare("SELECT id FROM entries WHERE namespace = ? AND key = 'status' AND is_current = 1")
+          .get(`projects/reports/private-${index}`) as { id: string }
+      ).id;
+      storeEmbedding(db, childId, embeddingToBuffer(makeEmbedding(1)), getActiveEmbeddingModel());
+    }
+
+    await ownerCall("memory_write", {
+      namespace: "projects/reports",
+      key: "status",
+      content: "Moonbeam exact-parent vector regression",
+    });
+    const parentId = (
+      db.prepare("SELECT id FROM entries WHERE namespace = 'projects/reports' AND key = 'status' AND is_current = 1")
+        .get() as { id: string }
+    ).id;
+    storeEmbedding(db, parentId, embeddingToBuffer(makeEmbedding(1)), getActiveEmbeddingModel());
+
+    const semanticRaw = await exactParentConsumerCall("memory_query", {
+      query: "moonbeam",
+      namespace: "projects/reports",
+      search_mode: "semantic",
+      limit: 1,
+      explain: true,
+    });
+    const semantic = parse(semanticRaw) as {
+      total: number;
+      results: Array<{ namespace: string; match?: { semantic_rank?: number } }>;
+    };
+    expect(semantic.total).toBe(1);
+    expect(semantic.results[0].namespace).toBe("projects/reports");
+    expect(semantic.results[0].match?.semantic_rank).toBe(1);
+
+    const hybridRaw = await exactParentConsumerCall("memory_query", {
+      query: "moonbeam",
+      namespace: "projects/reports",
+      search_mode: "hybrid",
+      limit: 1,
+      explain: true,
+    });
+    const hybrid = parse(hybridRaw) as {
+      total: number;
+      search_meta?: {
+        fts5_matches: number;
+        semantic_matches: number;
+        both_matches: number;
+      };
+      results: Array<{ namespace: string; match?: { lexical_rank?: number; semantic_rank?: number } }>;
+    };
+    expect(hybrid.total).toBe(1);
+    expect(hybrid.results[0].namespace).toBe("projects/reports");
+    expect(hybrid.results[0].match?.lexical_rank).toBe(1);
+    expect(hybrid.results[0].match?.semantic_rank).toBe(1);
+    expect(hybrid.search_meta).toEqual({
+      fts5_matches: 1,
+      semantic_matches: 1,
+      both_matches: 1,
+      mode_effective: "hybrid",
+    });
   });
 });
 

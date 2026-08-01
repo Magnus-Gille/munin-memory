@@ -11,6 +11,7 @@ import {
   filterByAccess,
   principalHomePrefix,
   principalMetaNamespace,
+  resolveReadableNamespaceSelectors,
   resolveAccessContext,
   ownerContext,
   type AccessContext,
@@ -335,7 +336,54 @@ describe("filterByAccess", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 6. resolveAccessContext (DB fixture)
+// 6. resolveReadableNamespaceSelectors
+// ---------------------------------------------------------------------------
+
+describe("resolveReadableNamespaceSelectors", () => {
+  it("owner resolves a bare namespace to exact-plus-descendants selectors", () => {
+    expect(resolveReadableNamespaceSelectors(ownerContext(), "projects/reports")).toEqual([
+      { kind: "prefix", value: "projects/reports/" },
+      { kind: "exact", value: "projects/reports" },
+    ]);
+  });
+
+  it("drops unreadable descendants when a caller can read only the exact parent", () => {
+    const ctx: AccessContext = {
+      principalId: "auditor",
+      principalType: "family",
+      accessibleNamespaces: [{ pattern: "projects/reports", permissions: "read" }],
+    };
+
+    expect(resolveReadableNamespaceSelectors(ctx, "projects/reports")).toEqual([
+      { kind: "exact", value: "projects/reports" },
+    ]);
+  });
+
+  it("intersects a broad requested subtree with the caller's readable prefix", () => {
+    const ctx: AccessContext = {
+      principalId: "alice",
+      principalType: "family",
+      accessibleNamespaces: [{ pattern: "users/alice/*", permissions: "rw" }],
+    };
+
+    expect(resolveReadableNamespaceSelectors(ctx, "users/")).toEqual([
+      { kind: "prefix", value: "users/alice/" },
+    ]);
+  });
+
+  it("returns an empty selector set when there is no readable overlap", () => {
+    const ctx: AccessContext = {
+      principalId: "nobody",
+      principalType: "external",
+      accessibleNamespaces: [{ pattern: "users/alice/*", permissions: "read" }],
+    };
+
+    expect(resolveReadableNamespaceSelectors(ctx, "projects/secret")).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. resolveAccessContext (DB fixture)
 // ---------------------------------------------------------------------------
 
 describe("resolveAccessContext", () => {

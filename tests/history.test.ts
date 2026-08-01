@@ -378,6 +378,58 @@ describe("memory_history tool handler", () => {
     expect(result.entries[0].namespace).toBe("projects/alpha");
   });
 
+  it("bare namespace filters keep emoji descendants through the tool handler", async () => {
+    writeState(db, "projects/emoji", "status", "parent", []);
+    writeState(db, "projects/emoji-child-temp", "status", "child", []);
+    writeState(db, "projects/emoji-grandchild-temp", "status", "grandchild", []);
+    writeState(db, "projects/emoji-outside-temp", "status", "outside", []);
+    db.prepare("UPDATE entries SET namespace = ? WHERE namespace = ? AND key = ?").run(
+      "projects/emoji/😀",
+      "projects/emoji-child-temp",
+      "status",
+    );
+    db.prepare("UPDATE entries SET namespace = ? WHERE namespace = ? AND key = ?").run(
+      "projects/emoji/😀/deep",
+      "projects/emoji-grandchild-temp",
+      "status",
+    );
+    db.prepare("UPDATE entries SET namespace = ? WHERE namespace = ? AND key = ?").run(
+      "projects/emojiish/😀",
+      "projects/emoji-outside-temp",
+      "status",
+    );
+    db.prepare("UPDATE audit_log SET namespace = ? WHERE namespace = ? AND key = ?").run(
+      "projects/emoji/😀",
+      "projects/emoji-child-temp",
+      "status",
+    );
+    db.prepare("UPDATE audit_log SET namespace = ? WHERE namespace = ? AND key = ?").run(
+      "projects/emoji/😀/deep",
+      "projects/emoji-grandchild-temp",
+      "status",
+    );
+    db.prepare("UPDATE audit_log SET namespace = ? WHERE namespace = ? AND key = ?").run(
+      "projects/emojiish/😀",
+      "projects/emoji-outside-temp",
+      "status",
+    );
+
+    const raw = await callTool(server, "memory_history", {
+      namespace: "projects/emoji",
+    });
+    const result = parseToolResponse(raw) as {
+      count: number;
+      entries: Array<{ namespace: string }>;
+    };
+
+    expect(result.count).toBe(3);
+    expect(result.entries.map((entry) => entry.namespace).sort()).toEqual([
+      "projects/emoji",
+      "projects/emoji/😀",
+      "projects/emoji/😀/deep",
+    ]);
+  });
+
   it("action filter works through tool handler", async () => {
     writeState(db, "projects/alpha", "status", "v1", []);
     writeState(db, "projects/alpha", "status", "v2", []);

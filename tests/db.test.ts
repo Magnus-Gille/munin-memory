@@ -56,6 +56,7 @@ import {
   countUnusedSurfaces,
 } from "../src/db.js";
 import { embeddingToBuffer } from "../src/embeddings.js";
+import { namespacePrefixSuccessor } from "../src/internal/namespace-filter.js";
 
 const TEST_DB_PATH = "/tmp/munin-memory-test.db";
 const VEC_PROBE_PATH = "/tmp/munin-memory-test-vec-probe.db";
@@ -87,6 +88,17 @@ beforeEach(() => {
 afterEach(() => {
   db.close();
   cleanupTestDb();
+});
+
+describe("namespacePrefixSuccessor", () => {
+  it("advances supplementary-plane code points without using U+FFFF sentinels", () => {
+    expect(namespacePrefixSuccessor("projects/emoji/😀")).toBe("projects/emoji/😁");
+  });
+
+  it("returns null when every code point is already maximal", () => {
+    const max = String.fromCodePoint(0x10FFFF);
+    expect(namespacePrefixSuccessor(max.repeat(2))).toBeNull();
+  });
 });
 
 describe("initDatabase", () => {
@@ -728,6 +740,30 @@ describe("queryEntries (FTS5)", () => {
 
     expect(results.map((r) => r.namespace)).toContain("projects/hugin-munin/sub");
     expect(results.every((r) => r.namespace === "projects/hugin-munin" || r.namespace.startsWith("projects/hugin-munin/"))).toBe(true);
+  });
+
+  it("finds emoji descendants under a bare subtree namespace filter", () => {
+    writeState(db, "projects/emoji", "status", "emoji search parent", ["active"]);
+    writeState(db, "projects/emoji-child-temp", "status", "emoji search child", ["active"]);
+    writeState(db, "projects/emoji-grandchild-temp", "status", "emoji search grandchild", ["active"]);
+    db.prepare("UPDATE entries SET namespace = ? WHERE namespace = ? AND key = ?").run(
+      "projects/emoji/😀",
+      "projects/emoji-child-temp",
+      "status",
+    );
+    db.prepare("UPDATE entries SET namespace = ? WHERE namespace = ? AND key = ?").run(
+      "projects/emoji/😀/deep",
+      "projects/emoji-grandchild-temp",
+      "status",
+    );
+
+    const results = queryEntries(db, { query: "emoji", namespace: "projects/emoji" });
+
+    expect(results.map((r) => r.namespace).sort()).toEqual([
+      "projects/emoji",
+      "projects/emoji/😀",
+      "projects/emoji/😀/deep",
+    ]);
   });
 
   it("filters by namespace prefix", () => {
@@ -1514,6 +1550,43 @@ describe("queryEntriesByFilter (no FTS)", () => {
     const empty = queryEntriesByFilter(db, { namespace: "" });
 
     expect(empty.map((r) => r.id).sort()).toEqual(unfiltered.map((r) => r.id).sort());
+  });
+
+  it("keeps supplementary-plane descendants inside a bare subtree filter", () => {
+    writeState(db, "projects/emoji", "status", "emoji parent", ["active"]);
+    writeState(db, "projects/emoji-child-temp", "status", "emoji child", ["active"]);
+    writeState(db, "projects/emoji-grandchild-temp", "status", "emoji grandchild", ["active"]);
+    writeState(db, "projects/emoji-sibling-temp", "status", "other emoji sibling", ["active"]);
+    writeState(db, "projects/emoji-outside-temp", "status", "outside subtree", ["active"]);
+    rewriteNamespace("projects/emoji-child-temp", "status", "projects/emoji/😀");
+    rewriteNamespace("projects/emoji-grandchild-temp", "status", "projects/emoji/😀/deep");
+    rewriteNamespace("projects/emoji-sibling-temp", "status", "projects/emoji/😁");
+    rewriteNamespace("projects/emoji-outside-temp", "status", "projects/emojiish/😀");
+
+    const results = queryEntriesByFilter(db, { namespace: "projects/emoji" });
+
+    expect(results.map((r) => r.namespace).sort()).toEqual([
+      "projects/emoji",
+      "projects/emoji/😀",
+      "projects/emoji/😀/deep",
+      "projects/emoji/😁",
+    ]);
+  });
+
+  it("keeps supplementary-plane descendants inside a trailing-slash prefix filter", () => {
+    writeState(db, "projects/emoji-child-temp", "status", "emoji child", ["active"]);
+    writeState(db, "projects/emoji-grandchild-temp", "status", "emoji grandchild", ["active"]);
+    writeState(db, "projects/emoji-outside-temp", "status", "outside subtree", ["active"]);
+    rewriteNamespace("projects/emoji-child-temp", "status", "projects/emoji/😀");
+    rewriteNamespace("projects/emoji-grandchild-temp", "status", "projects/emoji/😀/deep");
+    rewriteNamespace("projects/emoji-outside-temp", "status", "projects/emojiish/😀");
+
+    const results = queryEntriesByFilter(db, { namespace: "projects/emoji/" });
+
+    expect(results.map((r) => r.namespace).sort()).toEqual([
+      "projects/emoji/😀",
+      "projects/emoji/😀/deep",
+    ]);
   });
 
   it("treats slash-root-like namespace filters literally", () => {

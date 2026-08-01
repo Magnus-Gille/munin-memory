@@ -17,7 +17,7 @@ describe("trackedPatternsToSqlLike", () => {
   it("default patterns reproduce the historical projects/clients filter", () => {
     const { clause, params } = trackedPatternsToSqlLike(DEFAULT_TRACKED_PATTERNS, "namespace");
     expect(clause).toBe("((namespace >= ? AND namespace < ?) OR (namespace >= ? AND namespace < ?))");
-    expect(params).toEqual(["projects/", "projects/\uffff", "clients/", "clients/\uffff"]);
+    expect(params).toEqual(["projects/", "projects0", "clients/", "clients0"]);
   });
 
   it("empty patterns match nothing", () => {
@@ -36,7 +36,7 @@ describe("trackedPatternsToSqlLike", () => {
 
   it("treats wildcard-like characters as literal prefix bytes", () => {
     const { params } = trackedPatternsToSqlLike(["a_b/*"], "namespace");
-    expect(params).toEqual(["a_b/", "a_b/\uffff"]);
+    expect(params).toEqual(["a_b/", "a_b0"]);
   });
 
   it("interpolates the caller-supplied column verbatim", () => {
