@@ -119,7 +119,9 @@ memory:
 1. Call `memory_extract` with `persist:true`. It returns suggestions and durable
    proposal IDs, but does not change state or append logs.
 2. Call `memory_review` with `action:"preview"` for the exact operation, source
-   references, and freshness/CAS preconditions. Use `edit` or `decline` as needed.
+   references, freshness/CAS preconditions, and separate preview-vs-approval
+   write effects (`preview_wrote_memory:false` plus a dry-run
+   `approval_would_write_memory:true|false`). Use `edit` or `decline` as needed.
 3. Call `memory_review` with `action:"approve"` only after review. Approval
    re-runs the ordinary write gates and applies the operation atomically with the
    proposal transition.

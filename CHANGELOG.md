@@ -40,6 +40,18 @@ changelog is the canonical record of what moved.
 
 ### Fixed
 
+- **`memory_review` preview now reports approval write effects truthfully (#272).**
+  Preview previously returned `writes_memory:false` beside the exact operation
+  for every proposal, including proposals whose approval would append a log or
+  write state. That field only meant the preview call itself was read-only, but
+  it sat next to the durable operation and understated the consequence of
+  approval. Preview now splits those meanings: `preview_wrote_memory:false`
+  reports the call's own side effects, while `approval_would_write_memory`
+  reports whether approving the proposal in its current state would write
+  memory. The preview also dry-runs the same approval preconditions used by the
+  real approve path, so stale/conflicting proposals and duplicate approvals are
+  reported as non-writing without performing the write.
+
 - **`memory_delete` previews disclose and bind the full correction lineage
   they will remove (#281).** A delete of a corrected state entry removes its
   current revision *and* superseded revisions, but the preview previously

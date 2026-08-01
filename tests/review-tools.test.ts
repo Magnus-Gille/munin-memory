@@ -76,7 +76,8 @@ describe("memory_extract durable review proposals", () => {
         content: string;
       };
       source_freshness: { status: string };
-      writes_memory: boolean;
+      preview_wrote_memory: boolean;
+      approval_would_write_memory: boolean;
     };
     expect(preview).toMatchObject({
       status: "pending",
@@ -86,8 +87,78 @@ describe("memory_extract durable review proposals", () => {
         content: "We decided to keep review approval explicit.",
       },
       source_freshness: { status: "fresh" },
-      writes_memory: false,
+      preview_wrote_memory: false,
+      approval_would_write_memory: true,
     });
+    db.close();
+  });
+
+  it("reports preview and approval write effects for every proposal action", async () => {
+    const db = initDatabase(":memory:");
+    const call = makeCall(db);
+    const cases = [
+      {
+        action: "memory_log",
+        operation: {
+          action: "memory_log" as const,
+          namespace: "projects/munin-memory",
+          content: "Reviewed log proposal",
+          classification: "internal" as const,
+        },
+      },
+      {
+        action: "memory_write",
+        operation: {
+          action: "memory_write" as const,
+          namespace: "projects/munin-memory",
+          key: "architecture",
+          content: "Reviewed state proposal",
+          classification: "internal" as const,
+        },
+      },
+      {
+        action: "memory_update_status",
+        operation: {
+          action: "memory_update_status" as const,
+          namespace: "projects/munin-memory",
+          status_patch: {
+            current_work: "Verify preview write effects",
+            next_steps: ["Ship the review preview contract"],
+          },
+          classification: "internal" as const,
+        },
+      },
+    ];
+
+    for (const [index, testCase] of cases.entries()) {
+      const created = createReviewProposal(db, {
+        creatorPrincipalId: "owner",
+        operation: testCase.operation,
+        classification: "internal",
+        confidence: 0.9,
+        reasons: ["preview effect coverage"],
+        sourceRefs: [],
+        sourceExcerpt: `case ${index}`,
+        sourceHash: `hash-${index}`,
+        createdAt: "2026-07-23T10:00:00.000Z",
+        expiresAt: "2026-08-22T10:00:00.000Z",
+      });
+
+      const preview = await call("memory_review", {
+        action: "preview",
+        proposal_id: created.id,
+      }) as {
+        exact_operation: { action: string };
+        preview_wrote_memory: boolean;
+        approval_would_write_memory: boolean;
+        source_freshness: { status: string };
+      };
+
+      expect(preview.exact_operation.action).toBe(testCase.action);
+      expect(preview.preview_wrote_memory).toBe(false);
+      expect(preview.approval_would_write_memory).toBe(true);
+      expect(preview.source_freshness.status).toBe("fresh");
+    }
     db.close();
   });
 
@@ -363,6 +434,48 @@ describe("memory_review lifecycle and isolation", () => {
     expect(result.source_conflicts.length).toBeGreaterThan(0);
     expect(readState(db, "projects/munin-memory", "status")?.content)
       .toContain("Changed elsewhere");
+    db.close();
+  });
+
+  it("reports preview approval as non-writing when the proposal would currently conflict", async () => {
+    const db = initDatabase(":memory:");
+    const call = makeCall(db);
+    const seeded = writeState(
+      db,
+      "projects/munin-memory",
+      "status",
+      "## Phase\nActive\n\n## Current Work\nOld work\n\n## Blockers\nNone\n\n## Next Steps\n- Review",
+      ["active"],
+      "owner",
+    );
+    const extracted = await call("memory_extract", {
+      conversation_text: "Current work: verify preview conflict effects.",
+      namespace_hint: "projects/munin-memory",
+      persist: true,
+    }) as { proposals: Array<{ id: string }> };
+    writeState(
+      db,
+      "projects/munin-memory",
+      "status",
+      "## Phase\nActive\n\n## Current Work\nChanged elsewhere\n\n## Blockers\nNone\n\n## Next Steps\n- Re-plan",
+      ["active"],
+      "owner",
+      seeded.updated_at,
+    );
+
+    const preview = await call("memory_review", {
+      action: "preview",
+      proposal_id: extracted.proposals[0].id,
+    }) as {
+      preview_wrote_memory: boolean;
+      approval_would_write_memory: boolean;
+      source_freshness: { status: string; conflicts: Array<{ reason: string }> };
+    };
+
+    expect(preview.preview_wrote_memory).toBe(false);
+    expect(preview.approval_would_write_memory).toBe(false);
+    expect(preview.source_freshness.status).toBe("conflict");
+    expect(preview.source_freshness.conflicts.length).toBeGreaterThan(0);
     db.close();
   });
 
@@ -761,6 +874,34 @@ describe("reviewed undo", () => {
       content: "Restricted prior truth",
       classification: "client-restricted",
     });
+    db.close();
+  });
+
+  it("reports duplicate approval previews as non-writing", async () => {
+    const db = initDatabase(":memory:");
+    const call = makeCall(db);
+    const extracted = await call("memory_extract", {
+      conversation_text: "We decided to verify duplicate approval preview effects.",
+      namespace_hint: "projects/munin-memory",
+      persist: true,
+    }) as { proposals: Array<{ id: string }> };
+
+    await call("memory_review", {
+      action: "approve",
+      proposal_id: extracted.proposals[0].id,
+    });
+    const preview = await call("memory_review", {
+      action: "preview",
+      proposal_id: extracted.proposals[0].id,
+    }) as {
+      status: string;
+      preview_wrote_memory: boolean;
+      approval_would_write_memory: boolean;
+    };
+
+    expect(preview.status).toBe("approved");
+    expect(preview.preview_wrote_memory).toBe(false);
+    expect(preview.approval_would_write_memory).toBe(false);
     db.close();
   });
 });
