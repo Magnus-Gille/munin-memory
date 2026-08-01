@@ -38,23 +38,30 @@ changelog is the canonical record of what moved.
   published schema and fixtures contain no deployment endpoint, private path,
   or credential.
 
+- **`memory_review` preview response shape changed (#272).** The legacy
+  `writes_memory` field is removed. Preview now reports its own side effects
+  with `preview_wrote_memory:false` and the current approval consequence with
+  `approval_would_write_memory:true|false`. When retention has already purged a
+  terminal proposal payload, preview still returns the truthful non-writing
+  terminal outcome but omits `exact_operation` because no retained payload
+  remains to display.
+
 ### Fixed
 
 - **`memory_review` preview now reports approval write effects truthfully (#272).**
-  Preview previously returned `writes_memory:false` beside the exact operation
-  for every proposal, including proposals whose approval would append a log or
-  write state. That field only meant the preview call itself was read-only, but
-  it sat next to the durable operation and understated the consequence of
-  approval. Preview now splits those meanings: `preview_wrote_memory:false`
-  reports the call's own side effects, `approval_would_write_memory` reports
-  whether approving the proposal in its current state would write memory, and
-  the old ambiguous `writes_memory` field is gone. Preview stays metering-free
-  and pure-read, including when a proposal has already expired. The preview now
-  dry-runs the same approval preconditions used by the real approve path, so
-  source conflicts, target conflicts, duplicate approvals, invalid transitions,
-  and expiry are reported with truthful current outcomes without mutating review
-  state or memory truth. A real approval attempted after expiry now returns the
-  same machine-readable `review_expired` code and message advertised by preview.
+  Preview previously dry-ran terminal status, validation, source freshness, and
+  target freshness through separate logic from the real approve path, so
+  purged-terminal previews could collapse to `payload_expired`, preview catch
+  paths could skip internal-error telemetry, and the exact approval outcome
+  could drift across duplicate, expired, failed, or superseded proposals.
+  Preview and approve now share one precondition evaluation, the same inclusive
+  expiry boundary, and the same retention masking rules. Successful previews
+  stay pure-read and metering-free; unexpected preview exceptions still emit
+  `internal_error` telemetry. Terminal proposals whose payload has already been
+  purged still return the truthful non-writing outcome instead of claiming the
+  payload state blocked the answer. A real approval attempted after expiry still
+  returns the same machine-readable `review_expired` code and message
+  advertised by preview.
 
 - **`memory_delete` previews disclose and bind the full correction lineage
   they will remove (#281).** A delete of a corrected state entry removes its

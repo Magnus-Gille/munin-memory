@@ -4,6 +4,7 @@ import {
   approveReviewProposal,
   createReviewProposal,
   createUndoReviewProposal,
+  deriveReviewProposalStatus,
   declineReviewProposal,
   editReviewProposal,
   getReviewProposal,
@@ -482,6 +483,19 @@ describe("review proposal lifecycle", () => {
     )).toEqual({ status: "expired" });
     expect(getReviewProposal(db, editExpired.id, "owner")?.status).toBe("expired");
     expect(getReviewProposal(db, approveExpired.id, "owner")?.status).toBe("expired");
+    db.close();
+  });
+
+  it("uses the same inclusive expiry boundary for derived status and maintenance prune", () => {
+    const db = initDatabase(":memory:");
+    const created = createPending(db);
+
+    expect(deriveReviewProposalStatus(
+      getReviewProposal(db, created.id, "owner")!,
+      EXPIRES_AT,
+    )).toBe("expired");
+    expect(pruneReviewProposals(db, EXPIRES_AT)).toMatchObject({ expired: 1 });
+    expect(getReviewProposal(db, created.id, "owner")?.status).toBe("expired");
     db.close();
   });
 

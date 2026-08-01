@@ -157,6 +157,26 @@ export interface ReviewProposalRetentionPolicy {
   approvedUndoDays?: number;
 }
 
+export type ReviewProposalApprovalState =
+  | {
+      outcome: "approvable";
+      current_status: "pending" | "edited";
+    }
+  | {
+      outcome: "duplicate";
+      current_status: "approved";
+      applied_entry_id?: string | null;
+      applied_entry_updated_at?: string | null;
+    }
+  | {
+      outcome: "expired";
+      current_status: "expired";
+    }
+  | {
+      outcome: "invalid_transition";
+      current_status: "declined" | "failed" | "superseded";
+    };
+
 export type ReviewApplyResult =
   | {
       outcome: "applied";
@@ -651,20 +671,26 @@ export function approveReviewProposal(
   const txn = db.transaction((): ReviewTransitionResult => {
     const row = getOwnedProposalRow(db, id, principalId);
     if (!row) return { status: "not_found" };
-    if (row.status === "approved") {
+    const approvalState = evaluateReviewProposalApprovalState(row, now);
+    if (approvalState.outcome === "duplicate") {
       return {
         status: "approved",
         duplicate: true,
-        applied_entry_id: row.applied_entry_id,
-        applied_entry_updated_at: row.applied_entry_updated_at,
+        applied_entry_id: approvalState.applied_entry_id,
+        applied_entry_updated_at: approvalState.applied_entry_updated_at,
       };
     }
-    if (row.status !== "pending" && row.status !== "edited") {
-      return { status: "invalid_transition", current_status: row.status };
+    if (approvalState.outcome === "invalid_transition") {
+      return { status: "invalid_transition", current_status: approvalState.current_status };
     }
-    if (row.expires_at <= now) {
-      expireProposal(db, row, now, principalId);
+    if (approvalState.outcome === "expired") {
+      if (row.status === "pending" || row.status === "edited") {
+        expireProposal(db, row, now, principalId);
+      }
       return { status: "expired" };
+    }
+    if (approvalState.outcome !== "approvable") {
+      return { status: "invalid_transition", current_status: row.status };
     }
 
     const result = apply(parseProposal(row));
@@ -746,17 +772,58 @@ function subtractDays(iso: string, days: number): string {
   return new Date(new Date(iso).getTime() - days * 24 * 60 * 60 * 1000).toISOString();
 }
 
+function reviewProposalExpiredAtOrBefore(
+  proposal: Pick<ReviewProposalRow | ReviewProposal, "status" | "expires_at">,
+  now: string,
+): boolean {
+  return (
+    (proposal.status === "pending" || proposal.status === "edited")
+    && proposal.expires_at <= now
+  );
+}
+
 export function deriveReviewProposalStatus(
   proposal: Pick<ReviewProposalRow | ReviewProposal, "status" | "expires_at">,
   now: string,
 ): ReviewProposalStatus {
-  if (
-    (proposal.status === "pending" || proposal.status === "edited")
-    && proposal.expires_at <= now
-  ) {
+  if (reviewProposalExpiredAtOrBefore(proposal, now)) {
     return "expired";
   }
   return proposal.status;
+}
+
+export function evaluateReviewProposalApprovalState(
+  proposal: Pick<
+    ReviewProposalRow | ReviewProposal,
+    "status" | "expires_at" | "applied_entry_id" | "applied_entry_updated_at"
+  >,
+  now: string,
+): ReviewProposalApprovalState {
+  const effectiveStatus = deriveReviewProposalStatus(proposal, now);
+  if (effectiveStatus === "approved") {
+    return {
+      outcome: "duplicate",
+      current_status: "approved",
+      applied_entry_id: proposal.applied_entry_id,
+      applied_entry_updated_at: proposal.applied_entry_updated_at,
+    };
+  }
+  if (effectiveStatus === "expired") {
+    return {
+      outcome: "expired",
+      current_status: "expired",
+    };
+  }
+  if (effectiveStatus === "pending" || effectiveStatus === "edited") {
+    return {
+      outcome: "approvable",
+      current_status: effectiveStatus,
+    };
+  }
+  return {
+    outcome: "invalid_transition",
+    current_status: effectiveStatus,
+  };
 }
 
 export function reviewProposalPayloadPurgedOrDue(
@@ -791,32 +858,26 @@ export function pruneReviewProposals(
   now: string,
   retention: ReviewProposalRetentionPolicy = {},
 ): { expired: number; payloads_purged: number; undo_snapshots_purged: number } {
-  const policy = resolveReviewProposalRetentionPolicy(retention);
-  const terminalCutoff = subtractDays(now, policy.terminalPayloadDays);
-  const undoCutoff = subtractDays(now, policy.approvedUndoDays);
-
   const txn = db.transaction(() => {
     const expiring = db.prepare(
       `SELECT * FROM review_proposals
-       WHERE status IN ('pending', 'edited') AND expires_at <= ?
+       WHERE status IN ('pending', 'edited')
        ORDER BY expires_at, id`,
-    ).all(now) as ReviewProposalRow[];
+    ).all() as ReviewProposalRow[];
     for (const row of expiring) {
+      if (!reviewProposalExpiredAtOrBefore(row, now)) continue;
       expireProposal(db, row, now, "system:maintenance");
     }
 
     const purgeable = db.prepare(
       `SELECT * FROM review_proposals
        WHERE payload_purged_at IS NULL
-         AND (
-           (status IN ('declined', 'expired', 'failed') AND terminal_at <= ?)
-           OR
-           (status IN ('approved', 'superseded') AND terminal_at <= ?)
-         )
+         AND status IN ('declined', 'expired', 'failed', 'approved', 'superseded')
        ORDER BY terminal_at, id`,
-    ).all(terminalCutoff, undoCutoff) as ReviewProposalRow[];
+    ).all() as ReviewProposalRow[];
     let undoSnapshotsPurged = 0;
     for (const row of purgeable) {
+      if (!reviewProposalPayloadPurgedOrDue(row, now, retention)) continue;
       if (row.prior_entry_snapshot !== null) undoSnapshotsPurged += 1;
       db.prepare(
         `UPDATE review_proposals
