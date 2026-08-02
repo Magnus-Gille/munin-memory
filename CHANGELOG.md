@@ -53,6 +53,16 @@ changelog is the canonical record of what moved.
 
 ### Fixed
 
+- **Write-like responses now return only the settled stored classification
+  (#263).** Investigation confirmed this branch resolves and persists entry
+  classification synchronously before the write response and audit row are
+  emitted, and no per-entry pending/settlement path exists. `memory_write`,
+  `memory_update_status`, and `memory_log` therefore no longer emit the fake
+  `classification_provisional` field, and audit rows no longer stamp a
+  provisional classification suffix. The response, stored entry, and
+  `memory_history` now report the same effective classification without
+  pretending an asynchronous settlement flow exists. Optional background work
+  remains non-blocking.
 - **Namespace subtree filters are now literal and case-sensitive across query paths (#267).**
   The shared SQL matcher behind `memory_query`, semantic exact-namespace scans,
   audit history, commitments, and adjacent namespace-filtered reads previously

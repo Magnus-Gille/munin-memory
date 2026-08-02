@@ -263,6 +263,64 @@ describe("memory_write", () => {
     expect(entry.tags).toContain("classification:client-confidential");
   });
 
+  it("keeps write response, stored entry, and memory_history classification aligned (#263)", async () => {
+    const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+    try {
+      const raw = await callTool("memory_write", {
+        namespace: "clients/issue-263",
+        key: "notes",
+        content: "Classification is resolved before the response is emitted.",
+        tags: ["active"],
+      });
+      const result = parseToolResponse(raw) as {
+        status: string;
+        id: string;
+        classification: string;
+      };
+
+      expect(result).toMatchObject({
+        status: "created",
+        classification: "client-confidential",
+      });
+      expect(result).not.toHaveProperty("classification_provisional");
+
+      const readRaw = await callTool("memory_read", {
+        namespace: "clients/issue-263",
+        key: "notes",
+      });
+      const stored = parseToolResponse(readRaw) as { classification: string };
+      expect(stored.classification).toBe(result.classification);
+
+      const consumerOwnerCall = makeContextCallTool({
+        ...ownerContext(),
+        transportType: "consumer",
+        maxClassification: "internal",
+      });
+      const historyRaw = await consumerOwnerCall("memory_history", {
+        namespace: "clients/issue-263",
+      });
+      const history = parseToolResponse(historyRaw) as {
+        entries: Array<{ action: string; classification: string; detail: string | null }>;
+      };
+      const writeAudit = history.entries.find((entry) => entry.action === "write");
+      expect(writeAudit).toBeDefined();
+      expect(writeAudit?.classification).toBe(result.classification);
+      expect(writeAudit?.detail).toBeNull();
+
+      const audit = db.prepare(
+        "SELECT detail FROM audit_log WHERE entry_id = ?",
+      ).get(result.id) as { detail: string };
+      expect(audit.detail).not.toContain("classification_provisional");
+    } finally {
+      if (previousLibrarian === undefined) {
+        delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      } else {
+        process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
+      }
+    }
+  });
+
   it("rejects writes below the namespace floor without override", async () => {
     const raw = await callTool("memory_write", {
       namespace: "clients/acme",
@@ -589,6 +647,43 @@ describe("memory_update_status", () => {
     const entry = parseToolResponse(readRaw) as { classification: string; tags: string[] };
     expect(entry.classification).toBe("client-confidential");
     expect(entry.tags).toContain("classification:client-confidential");
+  });
+
+  it("returns the settled tracked-status classification without a provisional audit suffix (#263)", async () => {
+    const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+    try {
+      const raw = await callTool("memory_update_status", {
+        namespace: "projects/status-provisional",
+        phase: "Active",
+        current_work: "Classification is resolved in-band.",
+        blockers: "None.",
+        next_steps: ["Keep the write non-blocking"],
+        lifecycle: "active",
+      });
+      const result = parseToolResponse(raw) as {
+        status: string;
+        id: string;
+        classification: string;
+      };
+
+      expect(result).toMatchObject({
+        status: "created",
+        classification: "internal",
+      });
+      expect(result).not.toHaveProperty("classification_provisional");
+
+      const audit = db.prepare(
+        "SELECT detail FROM audit_log WHERE entry_id = ?",
+      ).get(result.id) as { detail: string };
+      expect(audit.detail).not.toContain("classification_provisional");
+    } finally {
+      if (previousLibrarian === undefined) {
+        delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      } else {
+        process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
+      }
+    }
   });
 
   it("preserves non-canonical sections (Vision, Roadmap, Milestones) across patches (#44)", async () => {
@@ -3669,6 +3764,45 @@ describe("memory_log", () => {
     const entry = parseToolResponse(getRaw) as { classification: string; tags: string[] };
     expect(entry.classification).toBe("client-confidential");
     expect(entry.tags).toContain("classification:client-confidential");
+  });
+
+  it("returns the settled log classification without a provisional audit suffix (#263)", async () => {
+    const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+    try {
+      const raw = await callTool("memory_log", {
+        namespace: "projects/log-provisional",
+        content: "Classification is resolved before the log response is emitted.",
+        tags: ["decision"],
+      });
+      const result = parseToolResponse(raw) as {
+        status: string;
+        id: string;
+        classification: string;
+      };
+
+      expect(result).toMatchObject({
+        status: "logged",
+        classification: "internal",
+      });
+      expect(result).not.toHaveProperty("classification_provisional");
+
+      const stored = db.prepare(
+        "SELECT classification FROM entries WHERE id = ?",
+      ).get(result.id) as { classification: string };
+      expect(stored.classification).toBe("internal");
+
+      const audit = db.prepare(
+        "SELECT detail FROM audit_log WHERE entry_id = ?",
+      ).get(result.id) as { detail: string };
+      expect(audit.detail).not.toContain("classification_provisional");
+    } finally {
+      if (previousLibrarian === undefined) {
+        delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      } else {
+        process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
+      }
+    }
   });
 
   it("rejects invalid namespace", async () => {

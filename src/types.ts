@@ -229,6 +229,7 @@ export interface WriteResponse {
   updated_at?: string;
   valid_from?: string;
   supersedes?: string;
+  classification?: ClassificationLevel;
   warnings?: string[];
   intake?: IntakeResult;
 }

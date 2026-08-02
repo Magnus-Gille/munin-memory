@@ -382,7 +382,11 @@ function resolveWriteClassification(
   tags: string[],
   options: ClassificationWriteOptions | undefined,
   existingClassification?: string | null,
-): { classification: ClassificationLevel; tags: string[]; usedOverride: boolean } {
+): {
+  classification: ClassificationLevel;
+  tags: string[];
+  usedOverride: boolean;
+} {
   const explicitClassification = parseExplicitClassification({
     classification: options?.classification,
     tags,
@@ -395,12 +399,24 @@ function resolveWriteClassification(
     existingClassification,
     allowBelowFloorOverride: options?.classificationOverride === true,
   });
-
   return {
     classification: resolved.classification,
     tags: syncClassificationTag(tags, resolved.classification),
     usedOverride: resolved.usedOverride,
   };
+}
+
+function buildClassificationAuditSuffix(
+  resolvedClassification: {
+    classification: ClassificationLevel;
+    usedOverride: boolean;
+  },
+): string {
+  const suffixes: string[] = [];
+  if (resolvedClassification.usedOverride) {
+    suffixes.push(`classification_override ${resolvedClassification.classification}`);
+  }
+  return suffixes.length > 0 ? `; ${suffixes.join("; ")}` : "";
 }
 
 export function writeState(
@@ -488,11 +504,17 @@ export function writeState(
         key,
       );
 
-      const overrideSuffix = resolvedClassification.usedOverride
-        ? `; classification_override ${resolvedClassification.classification}`
-        : "";
-      const updateDetail = `updated (${existing.content.length} → ${content.length} chars)${overrideSuffix}`;
-      insertAuditRow(db, now, agentId, "update", namespace, key, updateDetail, existing.id);
+      const classificationSuffix = buildClassificationAuditSuffix(resolvedClassification);
+      insertAuditRow(
+        db,
+        now,
+        agentId,
+        "update",
+        namespace,
+        key,
+        `updated (${existing.content.length} → ${content.length} chars)${classificationSuffix}`,
+        existing.id,
+      );
 
       return {
         status: "updated" as const,
@@ -522,10 +544,8 @@ export function writeState(
       );
 
       const writePreview = content.length > 80 ? content.slice(0, 80) + "..." : content;
-      const overrideSuffix = resolvedClassification.usedOverride
-        ? `; classification_override ${resolvedClassification.classification}`
-        : "";
-      insertAuditRow(db, now, agentId, "write", namespace, key, `${writePreview}${overrideSuffix}`, id);
+      const classificationSuffix = buildClassificationAuditSuffix(resolvedClassification);
+      insertAuditRow(db, now, agentId, "write", namespace, key, `${writePreview}${classificationSuffix}`, id);
 
       return {
         status: "created" as const,
@@ -900,7 +920,16 @@ export function supersedeState(
        VALUES (?, ?, ?, ?, ?)`,
     ).run(predecessorId, id, validFrom, agentId, now);
     cancelSupersededCommitments(db, predecessorId, now);
-    insertAuditRow(db, now, agentId, "supersede", namespace, key, "state correction", id);
+    insertAuditRow(
+      db,
+      now,
+      agentId,
+      "supersede",
+      namespace,
+      key,
+      `state correction${buildClassificationAuditSuffix(resolved)}`,
+      id,
+    );
     return {
       status: "superseded",
       id,
@@ -923,7 +952,12 @@ export function appendLog(
   tags: string[],
   agentId = "default",
   classificationOptions?: ClassificationWriteOptions,
-): { id: string; timestamp: string; classification: ClassificationLevel; tags: string[] } {
+): {
+  id: string;
+  timestamp: string;
+  classification: ClassificationLevel;
+  tags: string[];
+} {
   const now = nowUTC();
   const id = randomUUID();
   const resolvedClassification = resolveWriteClassification(
@@ -952,10 +986,8 @@ export function appendLog(
     );
 
     const logPreview = content.length > 80 ? content.slice(0, 80) + "..." : content;
-    const overrideSuffix = resolvedClassification.usedOverride
-      ? `; classification_override ${resolvedClassification.classification}`
-      : "";
-    insertAuditRow(db, now, agentId, "log_append", namespace, null, `${logPreview}${overrideSuffix}`, id);
+    const classificationSuffix = buildClassificationAuditSuffix(resolvedClassification);
+    insertAuditRow(db, now, agentId, "log_append", namespace, null, `${logPreview}${classificationSuffix}`, id);
   });
 
   txn();
@@ -1049,7 +1081,16 @@ export function supersedeLog(
        VALUES (?, ?, ?, ?, ?)`,
     ).run(predecessorId, id, validFrom, agentId, now);
     cancelSupersededCommitments(db, predecessorId, now);
-    insertAuditRow(db, now, agentId, "supersede", namespace, null, "log correction", id);
+    insertAuditRow(
+      db,
+      now,
+      agentId,
+      "supersede",
+      namespace,
+      null,
+      `log correction${buildClassificationAuditSuffix(resolved)}`,
+      id,
+    );
     return {
       status: "superseded",
       id,
