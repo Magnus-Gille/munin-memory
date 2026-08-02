@@ -190,6 +190,45 @@ async function seedLegacyPlainStatusCommitment(
   return { sourceId: source.id, commitmentId };
 }
 
+function seedHiddenCommitmentRows(
+  namespace: string,
+  count: number,
+  dueAt: string | null,
+): void {
+  const insert = db.prepare(
+    `INSERT INTO commitments
+       (id, namespace, source_entry_id, source_type, source_fingerprint, text, due_at, status, confidence, created_at, updated_at, resolved_at, source_classification)
+     VALUES (?, ?, ?, 'explicit_commitment', ?, ?, ?, 'open', 0.9, ?, ?, NULL, 'client-confidential')`,
+  );
+  const updateSourceTimestamp = db.prepare(
+    "UPDATE entries SET created_at = ?, updated_at = ? WHERE id = ?",
+  );
+  const baseTimestamp = new Date("2030-01-01T00:00:00.000Z").getTime();
+
+  for (let index = 0; index < count; index += 1) {
+    const source = appendLog(
+      db,
+      namespace,
+      `Hidden commitment source ${index}`,
+      [],
+      "owner",
+      { classification: "client-confidential" },
+    );
+    const timestamp = new Date(baseTimestamp + index * 1000).toISOString();
+    updateSourceTimestamp.run(timestamp, timestamp, source.id);
+    insert.run(
+      `hidden-commitment-${namespace.replace(/[^a-z0-9]+/gi, "-")}-${index}`,
+      namespace,
+      source.id,
+      `hidden:${index}`,
+      `Hidden commitment ${index}`,
+      dueAt,
+      timestamp,
+      timestamp,
+    );
+  }
+}
+
 beforeEach(() => {
   cleanupTestDb();
   db = initDatabase(TEST_DB_PATH);
@@ -3079,6 +3118,332 @@ describe("Librarian Pattern B enforcement for derived tools", () => {
 
     const commitmentCount = db.prepare("SELECT COUNT(*) AS count FROM commitments").get() as { count: number };
     expect(commitmentCount.count).toBe(0);
+  });
+
+  it("fails closed after a commitment source is reclassified into a confidential terminal status", async () => {
+    const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+
+    try {
+      const namespace = "projects/reclassified-terminal-commitment";
+      const commitmentText = "Publish the public report by 2099-12-31";
+      const confidentialMarker = "CONFIDENTIAL_TERMINAL_STATUS_MARKER";
+
+      await callTool("memory_update_status", {
+        namespace,
+        phase: "Active",
+        current_work: "Preparing the report",
+        blockers: "None.",
+        next_steps: [commitmentText],
+        lifecycle: "active",
+        classification: "internal",
+      });
+
+      await callTool("memory_write", {
+        namespace,
+        key: "status",
+        content: [
+          "## Phase",
+          "Completed",
+          "",
+          "## Current Work",
+          confidentialMarker,
+          "",
+          "## Blockers",
+          "None.",
+          "",
+          "## Next Steps",
+          "- None.",
+        ].join("\n"),
+        tags: ["completed"],
+        classification: "client-confidential",
+      });
+
+      const ownerRead = parseToolResponse(await callTool("memory_read", {
+        namespace,
+        key: "status",
+      })) as { found: boolean; content: string; classification: string };
+      expect(ownerRead).toMatchObject({
+        found: true,
+        classification: "client-confidential",
+      });
+      expect(ownerRead.content).toContain(confidentialMarker);
+
+      // A full-clearance read reconciles the shared derivative first. The later
+      // downgraded read must still authorize against the live source row.
+      const ownerCommitments = parseToolResponse(await callTool("memory_commitments", {
+        namespace,
+      })) as {
+        completed_recently: Array<{ text: string; source_classification: string; source_excerpt: string }>;
+      };
+      expect(ownerCommitments.completed_recently).toHaveLength(0);
+
+      const stored = db.prepare(
+        "SELECT source_classification FROM commitments WHERE namespace = ?",
+      ).get(namespace) as { source_classification: string };
+      expect(stored.source_classification).toBe("client-confidential");
+
+      const consumerOwnerCall = makeContextCallTool({
+        ...ownerContext(),
+        transportType: "consumer",
+        maxClassification: "internal",
+      });
+      const downgraded = parseToolResponse(await consumerOwnerCall("memory_commitments", {
+        namespace,
+      })) as {
+        open: Array<unknown>;
+        at_risk: Array<unknown>;
+        overdue: Array<unknown>;
+        completed_recently: Array<unknown>;
+        redacted_sources?: { count: number };
+      };
+
+      expect(JSON.stringify(downgraded)).not.toContain(commitmentText);
+      expect(JSON.stringify(downgraded)).not.toContain(confidentialMarker);
+      expect(downgraded.open).toHaveLength(0);
+      expect(downgraded.at_risk).toHaveLength(0);
+      expect(downgraded.overdue).toHaveLength(0);
+      expect(downgraded.completed_recently).toHaveLength(0);
+      expect(downgraded.redacted_sources?.count).toBeGreaterThan(0);
+    } finally {
+      if (previousLibrarian === undefined) delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      else process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
+    }
+  });
+
+  it("refreshes classification on a valid_until-only update and preserves a later downgrade", async () => {
+    const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+
+    try {
+      const namespace = "projects/valid-until-classification-refresh";
+      const commitmentText = "Review the release notes by 2099-12-30";
+      await callTool("memory_update_status", {
+        namespace,
+        phase: "Active",
+        current_work: "Preparing the release",
+        blockers: "None.",
+        next_steps: [commitmentText],
+        lifecycle: "active",
+        classification: "internal",
+      });
+
+      await callTool("memory_update_status", {
+        namespace,
+        valid_until: "2099-01-01T00:00:00Z",
+        classification: "client-confidential",
+      });
+
+      const owner = parseToolResponse(await callTool("memory_commitments", { namespace })) as {
+        open: Array<{ text: string; source_classification: string }>;
+      };
+      expect(owner.open).toContainEqual(expect.objectContaining({
+        text: commitmentText,
+        source_classification: "client-confidential",
+      }));
+
+      const consumerOwnerCall = makeContextCallTool({
+        ...ownerContext(),
+        transportType: "consumer",
+        maxClassification: "internal",
+      });
+      const hidden = parseToolResponse(await consumerOwnerCall("memory_commitments", { namespace })) as {
+        open: Array<unknown>;
+        at_risk: Array<unknown>;
+        overdue: Array<unknown>;
+        completed_recently: Array<unknown>;
+      };
+      expect(hidden.open).toHaveLength(0);
+      expect(hidden.at_risk).toHaveLength(0);
+      expect(hidden.overdue).toHaveLength(0);
+      expect(hidden.completed_recently).toHaveLength(0);
+
+      await callTool("memory_update_status", {
+        namespace,
+        valid_until: null,
+        classification: "internal",
+      });
+      const downgraded = parseToolResponse(await consumerOwnerCall("memory_commitments", { namespace })) as {
+        open: Array<{ text: string; source_classification: string }>;
+      };
+      expect(downgraded.open).toContainEqual(expect.objectContaining({
+        text: commitmentText,
+        source_classification: "internal",
+      }));
+    } finally {
+      if (previousLibrarian === undefined) delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      else process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
+    }
+  });
+
+  it("refreshes classification on a classification-only patch and preserves a later downgrade", async () => {
+    const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+
+    try {
+      const namespace = "projects/classification-only-patch";
+      const commitmentText = "Review the patch classification by 2099-12-30";
+      await callTool("memory_update_status", {
+        namespace,
+        phase: "Active",
+        current_work: "Preparing the patch",
+        blockers: "None.",
+        next_steps: [commitmentText],
+        lifecycle: "active",
+        classification: "internal",
+      });
+
+      const confidentialPatch = parseToolResponse(await callTool("memory_write", {
+        namespace,
+        key: "status",
+        patch: {},
+        classification: "client-confidential",
+      })) as { status: string };
+      expect(confidentialPatch.status).toBe("patched");
+
+      const owner = parseToolResponse(await callTool("memory_commitments", { namespace })) as {
+        open: Array<{ text: string; source_classification: string }>;
+      };
+      expect(owner.open).toContainEqual(expect.objectContaining({
+        text: commitmentText,
+        source_classification: "client-confidential",
+      }));
+
+      const consumerOwnerCall = makeContextCallTool({
+        ...ownerContext(),
+        transportType: "consumer",
+        maxClassification: "internal",
+      });
+      const hidden = parseToolResponse(await consumerOwnerCall("memory_commitments", { namespace })) as {
+        open: Array<unknown>;
+      };
+      expect(hidden.open).toHaveLength(0);
+
+      const internalPatch = parseToolResponse(await callTool("memory_write", {
+        namespace,
+        key: "status",
+        patch: {},
+        classification: "internal",
+      })) as { status: string };
+      expect(internalPatch.status).toBe("patched");
+
+      const downgraded = parseToolResponse(await consumerOwnerCall("memory_commitments", { namespace })) as {
+        open: Array<{ text: string; source_classification: string }>;
+      };
+      expect(downgraded.open).toContainEqual(expect.objectContaining({
+        text: commitmentText,
+        source_classification: "internal",
+      }));
+    } finally {
+      if (previousLibrarian === undefined) delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      else process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
+    }
+  });
+
+  it("paginates commitments after authorization beyond 200 hidden rows", async () => {
+    const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+
+    try {
+      const namespace = "projects/commitment-filtered-pagination";
+      const visibleText = "We will publish the visible notes by 2099-12-31.";
+      await callTool("memory_log", { namespace, content: visibleText });
+      seedHiddenCommitmentRows(namespace, 205, "2099-01-01T23:59:59.000Z");
+
+      const consumerOwnerCall = makeContextCallTool({
+        ...ownerContext(),
+        transportType: "consumer",
+        maxClassification: "internal",
+      });
+      const result = parseToolResponse(await consumerOwnerCall("memory_commitments", { namespace })) as {
+        open: Array<{ text: string }>;
+        at_risk: Array<{ text: string }>;
+        overdue: Array<{ text: string }>;
+        completed_recently: Array<{ text: string }>;
+      };
+      const visibleItems = [
+        ...result.open,
+        ...result.at_risk,
+        ...result.overdue,
+        ...result.completed_recently,
+      ];
+      expect(visibleItems).toContainEqual(expect.objectContaining({ text: visibleText }));
+      expect(JSON.stringify(result)).not.toContain("Hidden commitment");
+
+      const redactions = db.prepare(
+        "SELECT COUNT(*) AS total, COUNT(DISTINCT entry_id) AS distinct_entries FROM redaction_log WHERE tool_name = 'memory_commitments' AND entry_namespace = ?",
+      ).get(namespace) as { total: number; distinct_entries: number };
+      expect(redactions).toEqual({ total: 205, distinct_entries: 205 });
+    } finally {
+      if (previousLibrarian === undefined) delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      else process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
+    }
+  });
+
+  it("paginates pattern commitments after authorization beyond 200 hidden rows", async () => {
+    const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+
+    try {
+      const namespace = "projects/pattern-filtered-pagination";
+      await callTool("memory_log", { namespace, content: "Commitment: visible migration review" });
+      await callTool("memory_log", { namespace, content: "Commitment: visible rollback review" });
+      seedHiddenCommitmentRows(namespace, 205, null);
+
+      const consumerOwnerCall = makeContextCallTool({
+        ...ownerContext(),
+        transportType: "consumer",
+        maxClassification: "internal",
+      });
+      const result = parseToolResponse(await consumerOwnerCall("memory_patterns", { namespace })) as {
+        patterns: Array<{ kind: string; source_entry_ids: string[] }>;
+      };
+      expect(result.patterns).toContainEqual(expect.objectContaining({ kind: "undated_next_steps" }));
+      expect(JSON.stringify(result)).not.toContain("Hidden commitment");
+
+      const redactions = db.prepare(
+        "SELECT COUNT(*) AS total, COUNT(DISTINCT entry_id) AS distinct_entries FROM redaction_log WHERE tool_name = 'memory_patterns' AND entry_namespace = ?",
+      ).get(namespace) as { total: number; distinct_entries: number };
+      expect(redactions).toEqual({ total: 205, distinct_entries: 205 });
+    } finally {
+      if (previousLibrarian === undefined) delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      else process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
+    }
+  });
+
+  it("paginates handoff open loops after authorization beyond 200 hidden rows", async () => {
+    const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+
+    try {
+      const namespace = "projects/handoff-filtered-pagination";
+      const visibleDate = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      const visibleText = `We will review the visible handoff by ${visibleDate}.`;
+      await callTool("memory_log", { namespace, content: visibleText });
+      const hiddenDate = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      seedHiddenCommitmentRows(namespace, 205, `${hiddenDate}T23:59:59.000Z`);
+
+      const consumerOwnerCall = makeContextCallTool({
+        ...ownerContext(),
+        transportType: "consumer",
+        maxClassification: "internal",
+      });
+      const result = parseToolResponse(await consumerOwnerCall("memory_handoff", { namespace })) as {
+        found: boolean;
+        open_loops: string[];
+      };
+      expect(result.found).toBe(true);
+      expect(result.open_loops.some((loop) => loop.includes(visibleText))).toBe(true);
+      expect(JSON.stringify(result)).not.toContain("Hidden commitment");
+
+      const redactions = db.prepare(
+        "SELECT COUNT(*) AS total, COUNT(DISTINCT entry_id) AS distinct_entries FROM redaction_log WHERE tool_name = 'memory_handoff' AND entry_namespace = ?",
+      ).get(namespace) as { total: number; distinct_entries: number };
+      expect(redactions).toEqual({ total: 205, distinct_entries: 205 });
+    } finally {
+      if (previousLibrarian === undefined) delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      else process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
+    }
   });
 
   it("keeps visible log commitments visible when only a hidden terminal status resolves the namespace", async () => {

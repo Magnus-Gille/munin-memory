@@ -42,6 +42,7 @@ import {
   resolveNamespaceClassificationFloor,
   resolveNamespaceClassificationFloorFromRows,
   resolveStoredClassification,
+  stripClassificationTags,
   syncClassificationTag,
   validateClassificationPattern,
 } from "./librarian.js";
@@ -624,6 +625,14 @@ export function patchState(
     }
 
     let tags: string[] = JSON.parse(existing.tags) as string[];
+    // The stored classification tag is server-maintained metadata. When the
+    // caller supplies an explicit replacement, remove only the old tag before
+    // applying patch additions so the explicit value can be reconciled without
+    // a stale parameter/tag conflict. Newly added classification tags remain
+    // visible to resolveWriteClassification and still conflict if they differ.
+    if (classificationOptions?.classification !== undefined) {
+      tags = stripClassificationTags(tags);
+    }
     if (patch.tags_add && patch.tags_add.length > 0) {
       const existing_set = new Set(tags);
       for (const t of patch.tags_add) {
@@ -824,11 +833,15 @@ function cancelSupersededCommitments(
   predecessorId: string,
   now: string,
 ): void {
+  const source = db.prepare(
+    "SELECT classification FROM entries WHERE id = ?",
+  ).get(predecessorId) as { classification: string | null } | undefined;
+  const sourceClassification = normalizeStoredClassification(source?.classification);
   db.prepare(
     `UPDATE commitments
-     SET status = 'cancelled', resolved_at = ?, updated_at = ?
+     SET status = 'cancelled', resolved_at = ?, updated_at = ?, source_classification = ?
      WHERE source_entry_id = ? AND status = 'open'`,
-  ).run(now, now, predecessorId);
+  ).run(now, now, sourceClassification, predecessorId);
 }
 
 export function supersedeState(
@@ -1813,7 +1826,16 @@ export interface ListCommitmentsOptions {
   namespaceMode?: BareNamespaceMode;
   since?: string;
   limit?: number;
+  offset?: number;
   includeResolved?: boolean;
+  /** Optional SQL prefilter; canonical canRead remains authoritative in tools.ts. */
+  namespaceSelectors?: readonly NamespaceSelector[] | null;
+  /** Resolved tracked namespace patterns for pre-limit filtering. */
+  trackedPatterns?: readonly string[];
+  /** Live source classification ceiling for fail-closed pagination. */
+  classificationCeiling?: ClassificationLevel;
+  /** Caller-visible terminal namespaces suppressed before pagination. */
+  excludeNamespaces?: readonly string[];
 }
 
 export function syncCommitmentsForEntry(
@@ -1874,7 +1896,7 @@ export function syncCommitmentsForEntry(
   );
   const resolveCommitment = db.prepare(
     `UPDATE commitments
-     SET status = ?, updated_at = ?, resolved_at = COALESCE(resolved_at, ?)
+     SET status = ?, updated_at = ?, resolved_at = COALESCE(resolved_at, ?), source_classification = ?
      WHERE id = ? AND status = 'open'`,
   );
   // A rewording carries the row's identity forward: same id and created_at,
@@ -1996,7 +2018,7 @@ export function syncCommitmentsForEntry(
       if (nextFingerprints.has(existing.source_fingerprint)) continue;
       if (revisionPairs.has(existing.id)) continue;
       const resolvedStatus = resolvedStatusForMissingCommitment(existing);
-      resolveCommitment.run(resolvedStatus, now, now, existing.id);
+      resolveCommitment.run(resolvedStatus, now, now, sourceClassification, existing.id);
     }
   });
 
@@ -2007,21 +2029,68 @@ export function listCommitments(
   db: Database.Database,
   options: ListCommitmentsOptions = {},
 ): CommitmentRow[] {
-  const { namespace, namespaceMode = "exact", since, limit = 100, includeResolved = true } = options;
+  const {
+    namespace,
+    namespaceMode = "exact",
+    since,
+    limit = 100,
+    offset = 0,
+    includeResolved = true,
+    namespaceSelectors,
+    trackedPatterns,
+    classificationCeiling,
+    excludeNamespaces,
+  } = options;
   const clampedLimit = Math.min(Math.max(limit, 1), 200);
+  const clampedOffset = Number.isFinite(offset) ? Math.max(Math.floor(offset), 0) : 0;
 
   let sql = `
     SELECT c.*,
            e.key AS source_key,
            substr(e.content, 1, 220) AS source_excerpt,
-           COALESCE(c.source_classification, e.classification, '${FALLBACK_RESTRICTED_CLASSIFICATION}') AS source_classification
+           CASE
+             WHEN e.classification IN ('public', 'internal', 'client-confidential', 'client-restricted')
+               THEN e.classification
+             ELSE '${FALLBACK_RESTRICTED_CLASSIFICATION}'
+           END AS source_classification
     FROM commitments c
     JOIN entries e ON e.id = c.source_entry_id
     WHERE e.is_current = 1
   `;
   const params: unknown[] = [];
 
-  sql = appendNamespaceSqlFilter(sql, params, "c.namespace", namespace, namespaceMode);
+  sql = appendNamespaceSqlFilter(
+    sql,
+    params,
+    "c.namespace",
+    namespace,
+    namespaceMode,
+    namespaceSelectors,
+  );
+
+  if (trackedPatterns !== undefined) {
+    const trackedFilter = trackedPatternsToSqlLike(trackedPatterns, "c.namespace");
+    sql += ` AND ${trackedFilter.clause}`;
+    params.push(...trackedFilter.params);
+  }
+
+  if (classificationCeiling !== undefined) {
+    const allowedClassifications = CLASSIFICATION_LEVELS.filter((classification) =>
+      compareClassificationLevels(classification, classificationCeiling) <= 0,
+    );
+    if (allowedClassifications.length === 0) {
+      sql += " AND 0";
+    } else {
+      sql += ` AND e.classification IN (${allowedClassifications.map(() => "?").join(", ")})`;
+      params.push(...allowedClassifications);
+    }
+  }
+
+  const excludedNamespaces = [...new Set(excludeNamespaces ?? [])];
+  if (excludedNamespaces.length > 0) {
+    sql += ` AND c.namespace NOT IN (${excludedNamespaces.map(() => "?").join(", ")})`;
+    params.push(...excludedNamespaces);
+  }
 
   if (since) {
     sql += " AND c.updated_at >= ?";
@@ -2032,8 +2101,8 @@ export function listCommitments(
     sql += " AND c.status = 'open'";
   }
 
-  sql += " ORDER BY CASE WHEN c.due_at IS NULL THEN 1 ELSE 0 END, c.due_at ASC, c.updated_at DESC LIMIT ?";
-  params.push(clampedLimit);
+  sql += " ORDER BY CASE WHEN c.due_at IS NULL THEN 1 ELSE 0 END, c.due_at ASC, c.updated_at DESC, c.id ASC LIMIT ? OFFSET ?";
+  params.push(clampedLimit, clampedOffset);
 
   return db.prepare(sql).all(...params) as CommitmentRow[];
 }

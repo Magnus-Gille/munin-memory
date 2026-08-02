@@ -1946,6 +1946,7 @@ function getVisibleTrackedStatusAssessments(
   ctx: AccessContext,
   toolName: string,
   sessionId?: string,
+  loggedEntryIds?: Set<string>,
 ): { allowed: TrackedStatusAssessment[]; redacted: RedactableEntryMetadata[] } {
   const patterns = resolveTrackedPatterns(db, ctx);
   const accessible = [...getTrackedStatusAssessments(db, patterns).values()]
@@ -1957,6 +1958,7 @@ function getVisibleTrackedStatusAssessments(
     toolName,
     (assessment) => buildRedactableEntryMetadata(parseEntry(assessment.entry)),
     sessionId,
+    loggedEntryIds,
   );
 }
 
@@ -4776,6 +4778,7 @@ function listFreshCommitmentRows(
   },
   sessionId?: string,
   visibleResolvedNamespaces: Set<string> = new Set<string>(),
+  loggedEntryIds: Set<string> = new Set<string>(),
 ): {
   rows: CommitmentRow[];
   redacted: RedactableEntryMetadata[];
@@ -4784,7 +4787,6 @@ function listFreshCommitmentRows(
   readableEntryCount: number;
 } {
   const { namespace, since, limit, includeResolved = true } = options;
-  const loggedEntryIds = new Set<string>();
   const diagnostics = createCommitmentExclusionDiagnostics();
   const syncResult = syncCommitmentsForScope(
     db,
@@ -4800,33 +4802,81 @@ function listFreshCommitmentRows(
   const trackedPatterns = resolveTrackedPatterns(db, ctx);
   const refreshSourceRedacted: RedactableEntryMetadata[] = [];
 
-  const refreshCandidates = listCommitments(db, {
-    namespace,
-    since,
-    limit,
-    includeResolved: true,
-  }).filter((row) => canRead(ctx, row.namespace) && isTrackedNamespace(row.namespace, trackedPatterns));
+  const listFilteredRows = (pageLimit: number): {
+    rows: CommitmentRow[];
+    redacted: RedactableEntryMetadata[];
+    sourceEntryIds: Set<string>;
+  } => {
+    const rows: CommitmentRow[] = [];
+    const redacted: RedactableEntryMetadata[] = [];
+    const sourceEntryIds = new Set<string>();
+    const pageSize = Math.min(Math.max(pageLimit, 1), 200);
+    const readableNamespaceSelectors = resolveReadableNamespaceSelectors(ctx);
+    const classificationCeiling = isLibrarianEnabled()
+      ? getContextMaxClassification(ctx)
+      : undefined;
+    // SQLite's historical variable limit is commonly 999. If a caller-visible
+    // terminal set is larger, keep the exact post-filter below and paginate
+    // rather than risk a query failure or a widened suppression predicate.
+    const sqlExcludedNamespaces = visibleResolvedNamespaces.size <= 900
+      ? [...visibleResolvedNamespaces]
+      : undefined;
+    let offset = 0;
 
-  const allowedRefreshCandidates = filterDerivedSources(
-    db,
-    ctx,
-    refreshCandidates,
-    toolName,
-    (row) => ({
-      id: row.source_entry_id,
-      namespace: row.namespace,
-      key: row.source_key,
-      classification: row.source_classification,
-    }),
-    sessionId,
-    loggedEntryIds,
-  );
+    while (rows.length < pageSize) {
+      const page = listCommitments(db, {
+        namespace,
+        namespaceMode: "exact",
+        since,
+        limit: Math.min(200, pageSize),
+        offset,
+        includeResolved,
+        namespaceSelectors: readableNamespaceSelectors,
+        trackedPatterns,
+        classificationCeiling,
+        excludeNamespaces: sqlExcludedNamespaces,
+      });
+      if (page.length === 0) break;
 
+      const scopedPage = page.filter(
+        (row) => canRead(ctx, row.namespace) && isTrackedNamespace(row.namespace, trackedPatterns),
+      );
+      const visiblePage = filterDerivedSources(
+        db,
+        ctx,
+        scopedPage,
+        toolName,
+        (row) => ({
+          id: row.source_entry_id,
+          namespace: row.namespace,
+          key: row.source_key,
+          classification: row.source_classification,
+        }),
+        sessionId,
+        loggedEntryIds,
+      );
+      redacted.push(...visiblePage.redacted);
+
+      for (const row of visiblePage.allowed) {
+        if (visibleResolvedNamespaces.has(row.namespace)) continue;
+        rows.push(row);
+        sourceEntryIds.add(row.source_entry_id);
+        if (rows.length >= pageSize) break;
+      }
+
+      offset += page.length;
+      if (page.length < Math.min(200, pageSize)) break;
+    }
+
+    return { rows, redacted, sourceEntryIds };
+  };
+
+  const refreshCandidates = listFilteredRows(limit);
   const seenSourceEntries = new Set<string>();
-  for (const row of allowedRefreshCandidates.allowed) {
-    if (seenSourceEntries.has(row.source_entry_id)) continue;
-    seenSourceEntries.add(row.source_entry_id);
-    const entry = getById(db, row.source_entry_id);
+  for (const sourceEntryId of refreshCandidates.sourceEntryIds) {
+    if (seenSourceEntries.has(sourceEntryId)) continue;
+    seenSourceEntries.add(sourceEntryId);
+    const entry = getById(db, sourceEntryId);
     if (!entry || !canRead(ctx, entry.namespace)) continue;
     const entryFilter = filterDerivedSources(
       db,
@@ -4852,33 +4902,13 @@ function listFreshCommitmentRows(
     );
   }
 
-  const rows = listCommitments(db, {
-    namespace,
-    since,
-    limit,
-    includeResolved,
-  }).filter((row) => canRead(ctx, row.namespace) && isTrackedNamespace(row.namespace, trackedPatterns));
-
-  const visibleRows = filterDerivedSources(
-    db,
-    ctx,
-    rows,
-    toolName,
-    (row) => ({
-      id: row.source_entry_id,
-      namespace: row.namespace,
-      key: row.source_key,
-      classification: row.source_classification,
-    }),
-    sessionId,
-    loggedEntryIds,
-  );
+  const visibleRows = listFilteredRows(limit);
 
   return {
-    rows: visibleRows.allowed.filter((row) => !visibleResolvedNamespaces.has(row.namespace)),
+    rows: visibleRows.rows,
     redacted: combineRedactedSources(
       syncResult.redacted,
-      allowedRefreshCandidates.redacted,
+      refreshCandidates.redacted,
       refreshSourceRedacted,
       visibleRows.redacted,
     ),
@@ -8621,7 +8651,14 @@ export function registerTools(
                 }
               }
 
-              const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_commitments", sessionId);
+              const loggedEntryIds = new Set<string>();
+              const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(
+                db,
+                ctx,
+                "memory_commitments",
+                sessionId,
+                loggedEntryIds,
+              );
               const trackedStatusByNamespace = mapTrackedStatusAssessmentsByNamespace(visibleTrackedStatuses.allowed);
               const visibleResolvedNamespaces = getVisibleResolvedNamespaces(visibleTrackedStatuses.allowed);
               const { rows, redacted, diagnostics, visibleEntryCount, readableEntryCount } = listFreshCommitmentRows(db, ctx, "memory_commitments", {
@@ -8629,7 +8666,7 @@ export function registerTools(
                 since: normalizedSince,
                 limit: Math.max(limit * 8, 80),
                 includeResolved: true,
-              }, sessionId, visibleResolvedNamespaces);
+              }, sessionId, visibleResolvedNamespaces, loggedEntryIds);
 
               const classified = classifyCommitments(db, rows, trackedStatusByNamespace, limit);
               const response: Record<string, unknown> = { ...classified };
@@ -8712,6 +8749,7 @@ export function registerTools(
                 }
               }
 
+              const loggedEntryIds = new Set<string>();
               const topicNeedle = normalizeCompareText(topic ?? "");
               const rawEntries = listEntriesForDerivation(db, {
                 namespace,
@@ -8724,6 +8762,7 @@ export function registerTools(
                 "memory_patterns",
                 (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
                 sessionId,
+                loggedEntryIds,
               );
               const allEntries = filteredEntries.allowed;
 
@@ -8772,7 +8811,13 @@ export function registerTools(
                 });
               }
 
-              const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_patterns", sessionId);
+              const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(
+                db,
+                ctx,
+                "memory_patterns",
+                sessionId,
+                loggedEntryIds,
+              );
               const patternsTrackedPatterns = resolveTrackedPatterns(db, ctx);
               const trackedStatusByNamespace = mapTrackedStatusAssessmentsByNamespace(visibleTrackedStatuses.allowed);
               const visibleResolvedNamespaces = getVisibleResolvedNamespaces(visibleTrackedStatuses.allowed);
@@ -8781,7 +8826,7 @@ export function registerTools(
                 since: normalizedSince,
                 limit: 200,
                 includeResolved: true,
-              }, sessionId, visibleResolvedNamespaces);
+              }, sessionId, visibleResolvedNamespaces, loggedEntryIds);
 
               const undatedOpen = commitmentRows.filter((row) => row.status === "open" && !row.due_at);
               const undatedSources = new Set(undatedOpen.map((row) => row.source_entry_id));
@@ -8987,6 +9032,7 @@ export function registerTools(
                 });
               }
 
+              const loggedEntryIds = new Set<string>();
               const rawEntries = listEntriesForDerivation(db, {
                 namespace,
                 since: normalizedSince,
@@ -8998,6 +9044,7 @@ export function registerTools(
                 "memory_handoff",
                 (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
                 sessionId,
+                loggedEntryIds,
               );
               const allEntries = filteredEntries.allowed;
               const rawStatusEntry = resolveNarrativeStatusEntry(db, namespace);
@@ -9012,6 +9059,7 @@ export function registerTools(
                   "memory_handoff",
                   (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
                   sessionId,
+                  loggedEntryIds,
                 )
                 : { allowed: [] as Entry[], redacted: [] as RedactableEntryMetadata[] };
               const visibleStatusEntry = filteredStatusEntry.allowed[0] ?? null;
@@ -9030,16 +9078,23 @@ export function registerTools(
                 "memory_handoff",
                 (entry) => buildAuditHistoryMetadata(db, entry),
                 sessionId,
+                loggedEntryIds,
               );
               const history = filteredHistory.allowed;
-              const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_handoff", sessionId);
+              const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(
+                db,
+                ctx,
+                "memory_handoff",
+                sessionId,
+                loggedEntryIds,
+              );
               const visibleResolvedNamespaces = getVisibleResolvedNamespaces(visibleTrackedStatuses.allowed);
               const { rows: commitmentRows, redacted: redactedCommitmentSources } = listFreshCommitmentRows(db, ctx, "memory_handoff", {
                 namespace,
                 since: normalizedSince,
                 limit: 200,
                 includeResolved: true,
-              }, sessionId, visibleResolvedNamespaces);
+              }, sessionId, visibleResolvedNamespaces, loggedEntryIds);
               const trackedStatusByNamespace = mapTrackedStatusAssessmentsByNamespace(visibleTrackedStatuses.allowed);
               const currentState = buildHandoffCurrentState(namespace, visibleStatusEntry, allEntries);
 
@@ -9245,8 +9300,12 @@ export function registerTools(
                 // Pre-flight: reject patches that would create Librarian-orphaned entries
                 {
                   const existing = readState(db, namespace, key);
+                  const existingTags = existing ? parseTags(existing.tags) : [];
+                  const basePatchTags = classification !== undefined
+                    ? stripClassificationTags(existingTags)
+                    : existingTags;
                   const patchTags = existing
-                    ? [...parseTags(existing.tags), ...(patch.tags_add ?? [])].filter(t => !(patch.tags_remove ?? []).includes(t))
+                    ? [...basePatchTags, ...(patch.tags_add ?? [])].filter(t => !(patch.tags_remove ?? []).includes(t))
                     : (patch.tags_add ?? []);
                   const orphanError = preflightWriteClassification(
                     db, ctx, namespace, patchTags,
@@ -9721,7 +9780,11 @@ export function registerTools(
               const existingTags = existingParsed?.tags ?? [];
               const lifecycleTag = normalizedLifecycle ?? getLifecycleTags(existingTags)[0];
               const effectiveTags = isValidUntilOnlyUpdate
-                ? existingTags
+                // Classification tags are server-maintained metadata. Strip
+                // the old one even for a valid_until-only update so an
+                // explicit classification change is not rejected as a
+                // parameter/tag conflict.
+                ? stripClassificationTags(existingTags)
                 : (() => {
                     const retainedTags = stripClassificationTags(
                       existingTags.filter((tag) => !LIFECYCLE_TAGS.has(tag)),
@@ -9824,7 +9887,11 @@ export function registerTools(
               }
 
               const statusEntry = result.id ? getById(db, result.id) : undefined;
-              if (statusEntry && !isValidUntilOnlyUpdate) {
+              // Classification and valid_until are part of the source truth
+              // for derived commitments. Reconcile even when the status prose
+              // itself did not change, so an open row cannot retain a stale
+              // classification cache across a metadata-only update.
+              if (statusEntry) {
                 syncDerivedCommitmentsForEntry(db, statusEntry, resolveTrackedPatterns(db, ctx));
               }
 

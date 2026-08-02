@@ -983,6 +983,59 @@ describe("commitment classification lifecycle", () => {
     expect(rows[0].source_entry_id).toBe(id);
   });
 
+  it("uses live source classification when a cached derivative is stale", () => {
+    const { id } = appendLog(
+      db,
+      "projects/live-classification",
+      "We will publish the report by 2099-06-01.",
+      [],
+      "default",
+      { classification: "internal" },
+    );
+    syncCommitmentsForEntry(db, id, [{
+      sourceType: "explicit_dated_commitment",
+      fingerprint: "live-classification-report",
+      text: "We will publish the report by 2099-06-01.",
+      dueAt: "2099-06-01T23:59:59.000Z",
+      confidence: 0.9,
+    }]);
+
+    db.prepare("UPDATE entries SET classification = ? WHERE id = ?")
+      .run("client-confidential", id);
+
+    expect(listCommitments(db, { namespace: "projects/live-classification" })).toContainEqual(
+      expect.objectContaining({ source_classification: "client-confidential" }),
+    );
+  });
+
+  it("preserves exact, prefix, and subtree namespace semantics for commitment pages", () => {
+    const parent = appendLog(db, "projects/commitment-scope", "Parent commitment source", []);
+    syncCommitmentsForEntry(db, parent.id, [{
+      sourceType: "explicit_commitment",
+      fingerprint: "commitment-scope-parent",
+      text: "Parent commitment",
+      dueAt: null,
+      confidence: 0.8,
+    }]);
+    const child = appendLog(db, "projects/commitment-scope/child", "Child commitment source", []);
+    syncCommitmentsForEntry(db, child.id, [{
+      sourceType: "explicit_commitment",
+      fingerprint: "commitment-scope-child",
+      text: "Child commitment",
+      dueAt: null,
+      confidence: 0.8,
+    }]);
+
+    expect(listCommitments(db, { namespace: "projects/commitment-scope" }).map((row) => row.text))
+      .toEqual(["Parent commitment"]);
+    expect(listCommitments(db, { namespace: "projects/commitment-scope/" }).map((row) => row.text))
+      .toEqual(["Child commitment"]);
+    expect(listCommitments(db, {
+      namespace: "projects/commitment-scope",
+      namespaceMode: "subtree",
+    }).map((row) => row.text).sort()).toEqual(["Child commitment", "Parent commitment"]);
+  });
+
   it("keeps a first stale-source derivation from gaining confidence on unchanged reconciliation", () => {
     const { id } = appendLog(
       db,
