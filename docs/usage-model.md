@@ -199,15 +199,18 @@ timestamps.
 Default query, list, dashboard, consolidation, commitment, and derived-memory paths expose
 only current revisions. `include_expired` changes soft-expiry filtering only—it never brings
 superseded revisions back. Historical evidence remains available through `memory_get(id)`.
-For state, `memory_read(namespace, key, as_of)` returns the revision valid at that instant;
-validity intervals are half-open, so the successor wins exactly at its `valid_from` boundary.
+For state, `memory_read(namespace, key, as_of)` returns the recorded revision valid at that instant when explicit correction lineage covers that time; validity intervals are half-open, so the successor wins exactly at its `valid_from` boundary. Ordinary overwrites and patches rewrite the current row in place and advance that row's own `valid_from` boundary to the mutation time, so earlier instants are intentionally uncovered rather than returning rewritten current content. Legacy rows were backfilled from their last update, so uncovered timestamps return `found:false` with `history_available:false` instead of inventing history when the caller is authorized to know that recorded gap exists.
 
 Corrections require read and write access, ownership of the source entry unless the caller is
 the owner principal, an exact CAS match, the same namespace and state key, and a classification
 at least as restrictive as the predecessor. One revision can have only one successor, so stale
 or branching attempts return a conflict. Explicit backdating is owner-only, cannot precede the
-target revision's `valid_from`, and cannot be in the future. Omitting `valid_from` uses the
-server's current time. Deleting a state key removes its complete correction chain atomically.
+target revision's `valid_from`, and this write path still rejects future `valid_from` values.
+The one narrow temporal exception is `memory_read(as_of)`: the exact visible current
+`valid_from`/`updated_at` boundary can round-trip even if wall-clock comparison sees it as
+narrowly future, but arbitrary or hidden future instants remain rejected. Omitting `valid_from`
+uses the server's current time. Deleting a state key removes its complete correction chain
+atomically.
 
 `valid_until` remains independent soft expiry. An expired current successor stays current but
 is hidden from broad retrieval by default; expiry never resurrects an older revision. Retention,

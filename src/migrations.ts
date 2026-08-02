@@ -980,6 +980,22 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 23,
+    description: "Add key-aligned state-history index for as-of reads (#273)",
+    up: (db) => {
+      const entriesTableExists = db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'entries'",
+      ).get();
+      if (!entriesTableExists) return;
+
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_entries_state_history
+          ON entries(namespace, key, valid_from)
+          WHERE entry_type = 'state';
+      `);
+    },
+  },
 ];
 
 /**

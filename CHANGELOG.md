@@ -10,6 +10,19 @@ changelog is the canonical record of what moved.
 
 ### Changed
 
+- **`memory_orient` now has a total response budget, a beginner mode, and an
+  explicit response marker (#277).** The per-group dashboard caps from #254
+  still left `standard` responses large enough to blow past host output limits
+  on mature estates. `memory_orient` now applies a deterministic
+  `response_character_budget` on the final JSON payload in every detail mode,
+  preserving the core handshake and reporting every budget-driven omission or
+  truncation in `response_budget_meta.adjustments` instead of failing
+  silently. Every orient response also includes `generated_at` so callers can
+  identify the specific handshake they are looking at without pretending it is
+  a transactional snapshot across later `memory_list` calls. A new
+  `detail:"beginner"` mode returns the mental model, starter tool index,
+  three common workflows, and safe write examples with no live dashboard or
+  namespace-estate data, while `compact` remains the default first call.
 - **Manual `memory_consolidate` is now a reviewed, source-grounded flow (#270).**
   The first targeted call returns a non-persisting preview and a short-lived,
   one-use confirmation token; only confirmation writes that exact reviewed
@@ -58,6 +71,8 @@ changelog is the canonical record of what moved.
   reports `namespace_scope: "subtree"` for bare namespace filters,
   `namespace_scope: "prefix"` for trailing-slash filters, and omits the field
   when no real namespace filter was applied.
+
+- **`memory_read(as_of)` no longer leaks hidden history and ordinary rewrites now advance their own time boundary strictly (#273).** The tool description promised the state revision valid at any past instant, but ordinary overwrites and patches mutate the current row in place and migration v20 backfilled legacy state `valid_from` from the last `updated_at`, so uncovered times could return `found:false` with a contradictory hint listing the same key. Worse, the miss-coverage probe reasoned over raw rows, so a caller below the classification ceiling could learn that hidden history or a hidden current row existed via `history_available:false` or the "Read the current entry" hint. `memory_read(as_of)` now treats explicit correction lineage as the only rewindable history *and* only reports uncovered-gap metadata when the caller is authorized to know that recorded gap exists at all; otherwise the result stays indistinguishable from an ordinary miss while still listing any visible sibling keys. Ordinary in-place state rewrites also advance `valid_from` strictly past the prior row boundary even when two writes land in the same millisecond, so past `as_of` reads cannot return rewritten current content. Pre-creation timestamps remain ordinary misses. The exact visible current `valid_from`/`updated_at` boundary can be round-tripped even when a same-millisecond monotonic timestamp is narrowly ahead of the server clock; arbitrary future timestamps and hidden future boundaries remain rejected. Explicit `supersedes` chains keep their half-open boundary semantics.
 
 - **`memory_delete` previews disclose and bind the full correction lineage
   they will remove (#281).** A delete of a corrected state entry removes its
