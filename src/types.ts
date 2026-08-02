@@ -3,7 +3,7 @@
 export type EntryType = "state" | "log";
 export type EmbeddingStatus = "pending" | "processing" | "generated" | "failed";
 export type SearchMode = "lexical" | "semantic" | "hybrid";
-export type OrientDetail = "compact" | "standard" | "full";
+export type OrientDetail = "beginner" | "compact" | "standard" | "full";
 export type AuditAction = "write" | "update" | "patch" | "supersede" | "delete" | "namespace_delete" | "log_append" | "cross_zone_block" | "access_denied";
 export type CommitmentStatus = "open" | "done" | "cancelled";
 export type ClassificationLevel =
@@ -123,6 +123,7 @@ export interface OrientParams extends ListParams {
   dashboard_limit_per_group?: number;
   namespace_limit?: number;
   include_namespaces?: boolean;
+  response_character_budget?: number;
 }
 
 export interface ResumeParams {

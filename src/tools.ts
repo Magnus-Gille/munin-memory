@@ -1500,8 +1500,23 @@ import {
   type TrackedStatusAssessment,
 } from "./internal/reranker.js";
 const DEFAULT_ORIENT_DETAIL: OrientDetail = "compact";
+const DEFAULT_ORIENT_RESPONSE_CHARACTER_BUDGET = 24_000;
+const MIN_ORIENT_RESPONSE_CHARACTER_BUDGET = 4_000;
+const MAX_ORIENT_RESPONSE_CHARACTER_BUDGET = 120_000;
 const ISO_8601_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 const TRANSCRIPT_SPEAKER_ROLES = ["user", "assistant", "human", "claude", "codex", "owner"];
+
+type OrientBudgetSource = "default" | "requested";
+
+interface OrientBudgetAdjustment {
+  path: string;
+  action: "omitted" | "truncated";
+  original_count?: number;
+  returned_count?: number;
+  omitted_count?: number;
+  original_characters?: number;
+  returned_characters?: number;
+}
 
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -1820,8 +1835,51 @@ function clampOptionalLimit(value: unknown, max: number): number | undefined {
   return Math.min(Math.max(Math.floor(value), 1), max);
 }
 
+function clampOptionalCharacterBudget(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  return Math.min(
+    Math.max(Math.floor(value), MIN_ORIENT_RESPONSE_CHARACTER_BUDGET),
+    MAX_ORIENT_RESPONSE_CHARACTER_BUDGET,
+  );
+}
+
+function validateOptionalOrientCharacterBudget(value: unknown): string | null {
+  if (value === undefined) return null;
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    return "response_character_budget must be an integer.";
+  }
+  if (
+    value < MIN_ORIENT_RESPONSE_CHARACTER_BUDGET
+    || value > MAX_ORIENT_RESPONSE_CHARACTER_BUDGET
+  ) {
+    return `response_character_budget must be between ${MIN_ORIENT_RESPONSE_CHARACTER_BUDGET} and ${MAX_ORIENT_RESPONSE_CHARACTER_BUDGET}.`;
+  }
+  return null;
+}
+
+function resolveOrientResponseCharacterBudget(
+  params: OrientParams,
+): { characterBudget: number; budgetSource: OrientBudgetSource } {
+  const requested = clampOptionalCharacterBudget(params.response_character_budget);
+  if (requested !== undefined) {
+    return {
+      characterBudget: requested,
+      budgetSource: "requested",
+    };
+  }
+  return {
+    characterBudget: DEFAULT_ORIENT_RESPONSE_CHARACTER_BUDGET,
+    budgetSource: "default",
+  };
+}
+
 function resolveOrientDetail(params: OrientParams): OrientDetail {
-  if (params.detail === "compact" || params.detail === "standard" || params.detail === "full") {
+  if (
+    params.detail === "beginner"
+    || params.detail === "compact"
+    || params.detail === "standard"
+    || params.detail === "full"
+  ) {
     return params.detail;
   }
   if (params.include_full_conventions) return "full";
@@ -4720,6 +4778,497 @@ function universalConventions(full: boolean): string {
   return fullLines.join("\n");
 }
 
+function orientGettingStarted(): string[] {
+  return [
+    'Resume work: memory_read("projects/<name>", "status") for a known project, or memory_resume with an opener/namespace for a fuller continuation pack.',
+    "Find past context or decisions: memory_query with natural-language terms (default search_mode is hybrid — no need to guess exact keywords).",
+    "Record something: memory_log for a decision or event (append-only history); use memory_update_status ONLY when a tracked project's phase, next steps, or lifecycle actually changes.",
+  ];
+}
+
+function orientBeginnerMentalModel(): string[] {
+  return [
+    "Munin stores two kinds of memory: state entries hold the latest current truth, and log entries hold the chronological why/how behind that state.",
+    "Start broad, then narrow: use memory_orient for the handshake, memory_resume for a focused continuation pack, and memory_read or memory_query when you know what you want next.",
+    "Tracked work lives in status entries under tracked namespaces such as projects/* or clients/*, but you only update those when the current state actually changes.",
+    "Writes are safest when you preserve history and protect against races: log the decision, then update the current state with expected_updated_at when you need compare-and-swap.",
+  ];
+}
+
+function orientBeginnerToolIndex(): Array<{ tool: string; use_for: string }> {
+  return [
+    { tool: "memory_orient", use_for: "Session handshake and the shortest path to the current operating model." },
+    { tool: "memory_resume", use_for: "A compact follow-up pack for one project, namespace, or opener." },
+    { tool: "memory_read", use_for: "Read one known state entry by namespace and key." },
+    { tool: "memory_query", use_for: "Search when you know the topic but not the exact namespace or key." },
+    { tool: "memory_write", use_for: "Create or replace ordinary state entries." },
+    { tool: "memory_update_status", use_for: "Safely update tracked project/client status sections without editing a whole markdown blob." },
+    { tool: "memory_log", use_for: "Append an immutable decision, event, or milestone." },
+    { tool: "memory_list", use_for: "Browse namespaces or inspect a namespace you want to explore manually." },
+  ];
+}
+
+function orientBeginnerCommonWorkflows(): Array<{ name: string; steps: string[] }> {
+  return [
+    {
+      name: "Resume a known project",
+      steps: [
+        'Call memory_orient(detail:"compact") for the handshake.',
+        'Call memory_read(namespace:"projects/<name>", key:"status") for the current truth.',
+        "If the status mentions past decisions you need to inspect, follow with memory_query or memory_resume for recent context.",
+      ],
+    },
+    {
+      name: "Find context when you only know the topic",
+      steps: [
+        'Call memory_query(query:"natural language terms here").',
+        "Open the most relevant hit with memory_get if the preview is truncated, or memory_read when you know the namespace and key.",
+        "If the result points to active tracked work, use memory_resume on that namespace for a tighter continuation pack.",
+      ],
+    },
+    {
+      name: "Record a decision safely",
+      steps: [
+        "Append the decision rationale with memory_log so the history is immutable.",
+        "Read the current status if you need its exact updated_at for compare-and-swap.",
+        "Only then call memory_update_status or memory_write to change the current truth that future sessions should resume from.",
+      ],
+    },
+  ];
+}
+
+function orientBeginnerSafeWriteExamples(): Array<{
+  name: string;
+  tool: string;
+  args: Record<string, unknown>;
+  why_safe: string;
+}> {
+  return [
+    {
+      name: "Create the first tracked status entry",
+      tool: "memory_write",
+      args: {
+        namespace: "projects/example-project",
+        key: "status",
+        content: "## Phase\nPlanning\n\n## Current Work\nDefine the first milestone.\n\n## Blockers\nNone.\n\n## Next Steps\n- Write the initial checklist",
+        tags: ["active"],
+      },
+      why_safe: "This creates current truth once, with the required lifecycle tag, without overwriting another namespace.",
+    },
+    {
+      name: "Log a decision before changing status",
+      tool: "memory_log",
+      args: {
+        namespace: "projects/example-project",
+        content: "Chose SQLite for local portability and simple backups.",
+        tags: ["decision"],
+      },
+      why_safe: "History stays append-only, so you keep the rationale even if the project status changes later.",
+    },
+    {
+      name: "Update tracked status with compare-and-swap",
+      tool: "memory_update_status",
+      args: {
+        namespace: "projects/example-project",
+        lifecycle: "active",
+        phase: "Execution",
+        current_work: "Implement the parser.",
+        blockers: "None.",
+        next_steps: ["Run focused tests", "Update the quickstart notes"],
+        expected_updated_at: "<timestamp from the status you just read>",
+      },
+      why_safe: "expected_updated_at prevents you from overwriting somebody else's newer status update by accident.",
+    },
+  ];
+}
+
+function orientResponseCharacterLength(response: Record<string, unknown>): number {
+  return JSON.stringify({ ok: true, action: "orient", ...response }).length;
+}
+
+function cloneOrientBudgetAdjustments(adjustments: OrientBudgetAdjustment[]): OrientBudgetAdjustment[] {
+  return adjustments.map((adjustment) => ({ ...adjustment }));
+}
+
+function buildOrientBudgetMeta(
+  response: Record<string, unknown>,
+  characterBudget: number,
+  budgetSource: OrientBudgetSource,
+  adjustments: OrientBudgetAdjustment[],
+): {
+  meta: {
+    character_budget: number;
+    response_characters: number;
+    budget_source: OrientBudgetSource;
+    applied: boolean;
+    adjustments: OrientBudgetAdjustment[];
+  };
+  responseCharacters: number;
+} {
+  let responseCharacters = 0;
+  const applied = adjustments.length > 0;
+  while (true) {
+    const meta = {
+      character_budget: characterBudget,
+      response_characters: responseCharacters,
+      budget_source: budgetSource,
+      applied,
+      adjustments: cloneOrientBudgetAdjustments(adjustments),
+    };
+    const measured = orientResponseCharacterLength({
+      ...response,
+      response_budget_meta: meta,
+    });
+    if (measured === responseCharacters) {
+      return {
+        meta: {
+          ...meta,
+          response_characters: measured,
+        },
+        responseCharacters: measured,
+      };
+    }
+    responseCharacters = measured;
+  }
+}
+
+function upsertOrientBudgetAdjustment(
+  adjustments: OrientBudgetAdjustment[],
+  adjustment: OrientBudgetAdjustment,
+): void {
+  const index = adjustments.findIndex((entry) => entry.path === adjustment.path);
+  if (index === -1) {
+    adjustments.push(adjustment);
+    return;
+  }
+
+  const existing = adjustments[index];
+  if (adjustment.action === "omitted") {
+    const originalCount = existing.original_count ?? adjustment.original_count;
+    const originalCharacters = existing.original_characters ?? adjustment.original_characters;
+    adjustments[index] = {
+      ...existing,
+      ...adjustment,
+      action: "omitted",
+      original_count: originalCount,
+      returned_count: originalCount === undefined ? undefined : 0,
+      omitted_count: originalCount,
+      original_characters: originalCharacters,
+      returned_characters: originalCharacters === undefined ? undefined : 0,
+    };
+    return;
+  }
+
+  const originalCount = existing.original_count ?? adjustment.original_count;
+  const returnedCount = adjustment.returned_count ?? existing.returned_count;
+  adjustments[index] = {
+    ...existing,
+    ...adjustment,
+    action: "truncated",
+    original_count: originalCount,
+    returned_count: returnedCount,
+    omitted_count: originalCount === undefined || returnedCount === undefined
+      ? undefined
+      : Math.max(originalCount - returnedCount, 0),
+    original_characters: existing.original_characters ?? adjustment.original_characters,
+  };
+}
+
+function recordOrientCountTruncation(
+  adjustments: OrientBudgetAdjustment[],
+  path: string,
+  originalCount: number,
+  returnedCount: number,
+): void {
+  upsertOrientBudgetAdjustment(adjustments, {
+    path,
+    action: "truncated",
+    original_count: originalCount,
+    returned_count: returnedCount,
+    omitted_count: Math.max(originalCount - returnedCount, 0),
+  });
+}
+
+function recordOrientStringTruncation(
+  adjustments: OrientBudgetAdjustment[],
+  path: string,
+  originalCharacters: number,
+  returnedCharacters: number,
+): void {
+  upsertOrientBudgetAdjustment(adjustments, {
+    path,
+    action: "truncated",
+    original_characters: originalCharacters,
+    returned_characters: returnedCharacters,
+  });
+}
+
+function recordOrientOmission(
+  adjustments: OrientBudgetAdjustment[],
+  path: string,
+  value: unknown,
+): void {
+  const descendantPrefix = `${path}.`;
+  const descendantAdjustments = adjustments.filter((entry) =>
+    entry.path.startsWith(descendantPrefix)
+  );
+  const omission: OrientBudgetAdjustment = {
+    path,
+    action: "omitted",
+  };
+  if (Array.isArray(value)) {
+    omission.original_count = value.length;
+    omission.returned_count = 0;
+    omission.omitted_count = value.length;
+  } else if (typeof value === "string") {
+    omission.original_characters = value.length;
+    omission.returned_characters = 0;
+  } else if (value && typeof value === "object") {
+    const entries = value as Record<string, unknown>;
+    if (Array.isArray(entries.entries)) {
+      omission.original_count = entries.entries.length;
+      omission.returned_count = 0;
+      omission.omitted_count = entries.entries.length;
+    } else if (typeof entries.content === "string") {
+      const contentAdjustment = descendantAdjustments.find(
+        (entry) => entry.path === `${path}.content`,
+      );
+      omission.original_characters = contentAdjustment?.original_characters
+        ?? entries.content.length;
+      omission.returned_characters = 0;
+    } else {
+      const nestedArrays = Object.entries(entries).filter(
+        (entry): entry is [string, unknown[]] => Array.isArray(entry[1]),
+      );
+      if (nestedArrays.length > 0) {
+        const count = nestedArrays.reduce((sum, [nestedPath, items]) => {
+          const childAdjustment = descendantAdjustments.find(
+            (entry) => entry.path === `${path}.${nestedPath}`,
+          );
+          return sum + (childAdjustment?.original_count ?? items.length);
+        }, 0);
+        omission.original_count = count;
+        omission.returned_count = 0;
+        omission.omitted_count = count;
+      }
+    }
+  }
+  for (let index = adjustments.length - 1; index >= 0; index -= 1) {
+    if (adjustments[index].path.startsWith(descendantPrefix)) {
+      adjustments.splice(index, 1);
+    }
+  }
+  upsertOrientBudgetAdjustment(adjustments, omission);
+}
+
+function truncateTextWithEllipsis(text: string, maxCharacters: number): string {
+  if (text.length <= maxCharacters) return text;
+  if (maxCharacters <= 3) return text.slice(0, maxCharacters);
+  const base = text.endsWith("...") ? text.slice(0, -3) : text;
+  return base.slice(0, maxCharacters - 3) + "...";
+}
+
+function truncateOrientNamespaces(
+  response: Record<string, unknown>,
+  adjustments: OrientBudgetAdjustment[],
+  maxCount: number,
+): boolean {
+  const namespaces = response.namespaces;
+  if (!Array.isArray(namespaces) || namespaces.length <= maxCount) return false;
+  const originalCount = namespaces.length;
+  response.namespaces = namespaces.slice(0, maxCount);
+  const meta = response.namespaces_meta;
+  if (meta && typeof meta === "object") {
+    (meta as Record<string, unknown>).returned = maxCount;
+    (meta as Record<string, unknown>).truncated = true;
+  }
+  recordOrientCountTruncation(adjustments, "namespaces", originalCount, maxCount);
+  return true;
+}
+
+function omitOrientResponseField(
+  response: Record<string, unknown>,
+  adjustments: OrientBudgetAdjustment[],
+  field: string,
+): boolean {
+  if (!(field in response)) return false;
+  const value = response[field];
+
+  if (field === "namespaces") {
+    const meta = response.namespaces_meta;
+    if (meta && typeof meta === "object") {
+      (meta as Record<string, unknown>).returned = 0;
+      (meta as Record<string, unknown>).truncated = true;
+    }
+  } else if (field === "maintenance_needed") {
+    const meta = response.maintenance_meta;
+    if (meta && typeof meta === "object") {
+      (meta as Record<string, unknown>).shown = 0;
+      (meta as Record<string, unknown>).truncated = true;
+    }
+  }
+
+  delete response[field];
+  recordOrientOmission(adjustments, field, value);
+  return true;
+}
+
+function truncateOrientMaintenanceItems(
+  response: Record<string, unknown>,
+  adjustments: OrientBudgetAdjustment[],
+  maxCount: number,
+): boolean {
+  const items = response.maintenance_needed;
+  if (!Array.isArray(items) || items.length <= maxCount) return false;
+  const originalCount = items.length;
+  response.maintenance_needed = items.slice(0, maxCount);
+  const meta = response.maintenance_meta;
+  if (meta && typeof meta === "object") {
+    (meta as Record<string, unknown>).shown = maxCount;
+    (meta as Record<string, unknown>).truncated = true;
+  }
+  recordOrientCountTruncation(adjustments, "maintenance_needed", originalCount, maxCount);
+  return true;
+}
+
+function truncateOrientArrayField(
+  response: Record<string, unknown>,
+  adjustments: OrientBudgetAdjustment[],
+  field: string,
+  maxCount: number,
+): boolean {
+  const items = response[field];
+  if (!Array.isArray(items) || items.length <= maxCount) return false;
+  const originalCount = items.length;
+  response[field] = items.slice(0, maxCount);
+  recordOrientCountTruncation(adjustments, field, originalCount, maxCount);
+  return true;
+}
+
+function truncateOrientDashboardGroups(
+  response: Record<string, unknown>,
+  adjustments: OrientBudgetAdjustment[],
+  maxPerGroup: number,
+): boolean {
+  const dashboard = response.dashboard;
+  if (!dashboard || typeof dashboard !== "object") return false;
+
+  let changed = false;
+  for (const [groupName, entries] of Object.entries(dashboard as Record<string, unknown>)) {
+    if (!Array.isArray(entries) || entries.length <= maxPerGroup) continue;
+    const originalCount = entries.length;
+    (dashboard as Record<string, unknown>)[groupName] = entries.slice(0, maxPerGroup);
+    recordOrientCountTruncation(adjustments, `dashboard.${groupName}`, originalCount, maxPerGroup);
+    changed = true;
+  }
+
+  if (!changed) return false;
+
+  const meta = response.dashboard_meta;
+  if (meta && typeof meta === "object") {
+    const truncatedGroups = (meta as Record<string, unknown>).truncated_groups;
+    if (Array.isArray(truncatedGroups)) {
+      const existing = new Set(truncatedGroups.filter((item): item is string => typeof item === "string"));
+      for (const adjustment of adjustments) {
+        if (!adjustment.path.startsWith("dashboard.") || adjustment.action !== "truncated") continue;
+        existing.add(adjustment.path.slice("dashboard.".length));
+      }
+      (meta as Record<string, unknown>).truncated_groups = [...existing];
+    }
+  }
+  return true;
+}
+
+function truncateOrientNestedContent(
+  response: Record<string, unknown>,
+  adjustments: OrientBudgetAdjustment[],
+  field: string,
+  nestedField: string,
+  maxCharacters: number,
+): boolean {
+  const container = response[field];
+  if (!container || typeof container !== "object") return false;
+  if ((container as Record<string, unknown>).untrusted_content === true) return false;
+  const nested = (container as Record<string, unknown>)[nestedField];
+  if (typeof nested !== "string" || nested.length <= maxCharacters) return false;
+  const truncated = truncateTextWithEllipsis(nested, maxCharacters);
+  (container as Record<string, unknown>)[nestedField] = truncated;
+  recordOrientStringTruncation(adjustments, `${field}.${nestedField}`, nested.length, truncated.length);
+  return true;
+}
+
+function applyOrientResponseBudget(
+  response: Record<string, unknown>,
+  characterBudget: number,
+  budgetSource: OrientBudgetSource,
+): void {
+  const adjustments: OrientBudgetAdjustment[] = [];
+
+  while (true) {
+    const { meta, responseCharacters } = buildOrientBudgetMeta(
+      response,
+      characterBudget,
+      budgetSource,
+      adjustments,
+    );
+    if (responseCharacters <= characterBudget) {
+      response.response_budget_meta = meta;
+      return;
+    }
+
+    const changed =
+      truncateOrientNamespaces(response, adjustments, 10)
+      || omitOrientResponseField(response, adjustments, "namespaces")
+      || omitOrientResponseField(response, adjustments, "legacy_workbench")
+      || omitOrientResponseField(response, adjustments, "notes")
+      || omitOrientResponseField(response, adjustments, "references")
+      || truncateOrientNestedContent(response, adjustments, "telos", "content", 1200)
+      || omitOrientResponseField(response, adjustments, "telos")
+      || truncateOrientMaintenanceItems(response, adjustments, 5)
+      || truncateOrientMaintenanceItems(response, adjustments, 3)
+      || omitOrientResponseField(response, adjustments, "maintenance_needed")
+      || truncateOrientArrayField(response, adjustments, "safe_write_examples", 2)
+      || truncateOrientArrayField(response, adjustments, "common_workflows", 2)
+      || truncateOrientArrayField(response, adjustments, "tool_index", 6)
+      || truncateOrientArrayField(response, adjustments, "mental_model", 3)
+      || truncateOrientDashboardGroups(response, adjustments, 6)
+      || truncateOrientDashboardGroups(response, adjustments, 4)
+      || truncateOrientDashboardGroups(response, adjustments, 2)
+      || truncateOrientDashboardGroups(response, adjustments, 1)
+      || truncateOrientDashboardGroups(response, adjustments, 0)
+      || truncateOrientNestedContent(response, adjustments, "conventions", "content", 4000)
+      || truncateOrientNestedContent(response, adjustments, "conventions", "content", 2000)
+      || truncateOrientNestedContent(response, adjustments, "conventions", "content", 1200)
+      || truncateOrientNestedContent(response, adjustments, "conventions", "content", 600)
+      || truncateOrientArrayField(response, adjustments, "getting_started", 2)
+      || truncateOrientArrayField(response, adjustments, "getting_started", 1)
+      || omitOrientResponseField(response, adjustments, "safe_write_examples")
+      || omitOrientResponseField(response, adjustments, "common_workflows")
+      || omitOrientResponseField(response, adjustments, "tool_index")
+      || omitOrientResponseField(response, adjustments, "mental_model")
+      || omitOrientResponseField(response, adjustments, "conventions")
+      || omitOrientResponseField(response, adjustments, "getting_started")
+      || omitOrientResponseField(response, adjustments, "dashboard")
+      || omitOrientResponseField(response, adjustments, "redacted_sources")
+      || omitOrientResponseField(response, adjustments, "librarian_summary");
+
+    if (!changed) {
+      response.response_budget_meta = meta;
+      return;
+    }
+  }
+}
+
+/** @internal Deterministic reducer seam for exhaustive budget-path tests. */
+export function _applyOrientResponseBudgetForTesting(
+  response: Record<string, unknown>,
+  characterBudget: number,
+  budgetSource: OrientBudgetSource = "requested",
+): Record<string, unknown> {
+  applyOrientResponseBudget(response, characterBudget, budgetSource);
+  return response;
+}
+
 /**
  * Resolve the orient `conventions` block for the calling principal:
  *  - owner → the global meta/conventions entry (compact summary by default,
@@ -4823,19 +5372,35 @@ function projectConventions(
   return conv;
 }
 
+function attachOrientLibrarianSummary(
+  response: Record<string, unknown>,
+  ctx: AccessContext,
+  redactedSources: RedactableEntryMetadata[],
+  redactedDashboardCount?: number,
+): void {
+  const redactedSourcesSummary = summarizeRedactedSources(ctx, redactedSources);
+  response.librarian_summary = buildLibrarianRuntimeSummary(ctx, {
+    redactedDashboardCount,
+    redactedSourceCount: redactedSources.length,
+  });
+  if (redactedSourcesSummary) {
+    response.redacted_sources = redactedSourcesSummary;
+  }
+}
+
 const TOOL_DEFINITIONS = [
   {
     name: "memory_orient",
     description:
-      `\`memory_orient\` is the session handshake and first memory operation. START HERE: call this at the beginning of every conversation before using any other memory tool when it is callable. If a host/deferred tool discovery layer does not expose \`memory_orient\`, use \`memory_status\` to inspect available tools or \`memory_resume\` for targeted context as a fallback. Returns conventions, a computed project dashboard (grouped by lifecycle from status entries), optional curated notes, actionable maintenance suggestions, and optionally a namespace overview — everything needed to orient yourself in one call. Use \`memory_resume\` after this when you want a targeted continuation pack for a project, namespace, or opener.\n\nThe dashboard is computed automatically from status entries in projects/* and clients/* namespaces. No manual workbench maintenance needed. Demo namespaces and completed task-run namespaces are hidden by default.\n\nUse \`detail\` to control response size. \`${DEFAULT_ORIENT_DETAIL}\` is the default for token-sensitive handshakes, \`standard\` includes the full dashboard and namespace overview, and \`full\` includes the full conventions document.`,
+      `\`memory_orient\` is the session handshake and first memory operation. START HERE: call this at the beginning of every conversation before using any other memory tool when it is callable. If a host/deferred tool discovery layer does not expose \`memory_orient\`, use \`memory_status\` to inspect available tools or \`memory_resume\` for targeted context as a fallback. Returns conventions, a computed project dashboard (grouped by lifecycle from status entries), optional curated notes, actionable maintenance suggestions, and optionally a namespace overview — everything needed to orient yourself in one call. Use \`memory_resume\` after this when you want a targeted continuation pack for a project, namespace, or opener.\n\nThe dashboard is computed automatically from status entries in projects/* and clients/* namespaces. No manual workbench maintenance needed. Demo namespaces and completed task-run namespaces are hidden by default.\n\nUse \`detail\` to control response size. \`${DEFAULT_ORIENT_DETAIL}\` is the default for routine handshakes, and \`beginner\` is the safest first-time mode when you want the mental model, tool index, common workflows, and safe write examples without live estate data. \`standard\` and \`full\` expand into the live dashboard/namespace overview. Every orient response includes \`generated_at\` and \`response_budget_meta\`, which reports any budget-driven omission or truncation.`,
     inputSchema: {
       type: "object" as const,
       properties: {
         detail: {
           type: "string",
-          enum: ["compact", "standard", "full"],
+          enum: ["beginner", "compact", "standard", "full"],
           description:
-            `Optional. Controls response size. \`${DEFAULT_ORIENT_DETAIL}\` is the default. \`compact\` returns a skeleton dashboard (phase one-liner per entry, no synthesis or cross-refs, no namespace list). \`standard\` adds synthesis summaries and cross-reference counts. \`full\` includes full cross-reference arrays and the full conventions document.`,
+            `Optional. Controls response size. \`${DEFAULT_ORIENT_DETAIL}\` is the default. \`beginner\` returns the mental model, starter tool index, three common workflows, and safe write examples with no live dashboard or namespace estate data. \`compact\` returns a skeleton dashboard (phase one-liner per entry, no synthesis or cross-refs, no namespace list). \`standard\` adds synthesis summaries and cross-reference counts. \`full\` includes full cross-reference arrays and the full conventions document.`,
         },
         include_demo: {
           type: "boolean",
@@ -4855,17 +5420,24 @@ const TOOL_DEFINITIONS = [
         dashboard_limit_per_group: {
           type: "integer",
           description:
-            "Optional. Maximum entries to return per lifecycle group in the dashboard. Defaults to 10 in every detail mode so the mandatory first call stays bounded as an estate grows. Raise it explicitly when you can afford the tokens. `dashboard_meta.counts` reports the true size of each group and `dashboard_meta.truncated_groups` lists the ones that were capped.",
+            "Optional. Maximum entries to return per lifecycle group in the dashboard. Defaults to 10 in every live-dashboard detail mode so the mandatory first call stays bounded as an estate grows. Ignored in `beginner`, which never returns live dashboard data. Raise it explicitly when you can afford the tokens. `dashboard_meta.counts` reports the true size of each group and `dashboard_meta.truncated_groups` lists the ones that were capped.",
         },
         namespace_limit: {
           type: "integer",
           description:
-            "Optional. Maximum namespaces to return in the namespace overview. Defaults to 20 in `compact` and 50 otherwise; on a large estate the full list is the single biggest contributor to orient's response size. `namespaces_meta` reports `total`, `returned`, and `truncated` so a capped list is never mistaken for the whole estate — use `memory_list` to page through all of them.",
+            "Optional. Maximum namespaces to return in the namespace overview. Defaults to 20 in `compact` and 50 otherwise; on a large estate the full list is the single biggest contributor to orient's response size. Ignored in `beginner`, which never returns live namespace estate data. `namespaces_meta` reports `total`, `returned`, and `truncated` so a capped list is never mistaken for the whole estate — use `memory_list` to page through all of them.",
         },
         include_namespaces: {
           type: "boolean",
           description:
-            "Optional. If false, omit the namespace overview entirely. By default `compact` omits it and other detail levels include it.",
+            "Optional. If false, omit the namespace overview entirely. By default `compact` and `beginner` omit it and other detail levels include it. `beginner` ignores this flag and never returns live namespace estate data.",
+        },
+        response_character_budget: {
+          type: "integer",
+          minimum: MIN_ORIENT_RESPONSE_CHARACTER_BUDGET,
+          maximum: MAX_ORIENT_RESPONSE_CHARACTER_BUDGET,
+          description:
+            `Optional. Total response-size cap measured on the final JSON string returned by this tool. Accepts ${MIN_ORIENT_RESPONSE_CHARACTER_BUDGET}-${MAX_ORIENT_RESPONSE_CHARACTER_BUDGET} and defaults to ${DEFAULT_ORIENT_RESPONSE_CHARACTER_BUDGET} characters in every detail mode so the mandatory handshake stays inside common host limits. When the response would exceed the budget, memory_orient preserves the core handshake, trims lower-priority sections first, and reports each budget-driven omission or truncation in \`response_budget_meta.adjustments\`. Raise it explicitly when your host can afford a larger first response.`,
         },
       },
       required: [],
@@ -6024,9 +6596,19 @@ export function registerTools(
           case "memory_orient": {
             const handleMemoryOrient = async () => {
               const orientArgs = (args ?? {}) as OrientParams;
+              const responseBudgetError = validateOptionalOrientCharacterBudget(
+                orientArgs.response_character_budget,
+              );
+              if (responseBudgetError) {
+                return errResult("orient", "validation_error", responseBudgetError);
+              }
               const { include_demo, include_completed_tasks } = orientArgs;
               const detail = resolveOrientDetail(orientArgs);
-              const includeNamespaces = orientArgs.include_namespaces ?? detail !== "compact";
+              const includeNamespaces = orientArgs.include_namespaces ?? (
+                detail !== "compact" && detail !== "beginner"
+              );
+              const { characterBudget, budgetSource } = resolveOrientResponseCharacterBudget(orientArgs);
+              const generatedAt = nowUTC();
               // Every branch of orient is capped by default: it is the mandatory
               // first call, so an estate that has grown for months must not make
               // it fail (#254). Measured on a 424-namespace production corpus,
@@ -6043,13 +6625,10 @@ export function registerTools(
                 ?? 10;
               const namespaceLimit = clampOptionalLimit(orientArgs.namespace_limit, 200)
                 ?? (detail === "compact" ? 20 : 50);
-              // Namespace list and tracked statuses (conventions resolved below)
-              const namespaces = listVisibleNamespaces(db, ctx).filter(ns => canRead(ctx, ns.namespace));
-              const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_orient", sessionId);
-              const orientTrackedPatterns = resolveTrackedPatterns(db, ctx);
-              const orientRedactedSources: RedactableEntryMetadata[] = [...visibleTrackedStatuses.redacted];
-
-              const response: Record<string, unknown> = {};
+              const orientRedactedSources: RedactableEntryMetadata[] = [];
+              const response: Record<string, unknown> = {
+                generated_at: generatedAt,
+              };
 
               // Conventions — resolved per principal: owner → global
               // meta/conventions; non-owner → personal entry at <home>/meta,
@@ -6059,11 +6638,35 @@ export function registerTools(
               // A concrete "what do I do next" scaffold — the #1 onboarding gap
               // reported by cross-model user-testing (#147) was that orient gives
               // a map but no first action. Static, tool-choice-disambiguating.
-              response.getting_started = [
-                'Resume work: memory_read("projects/<name>", "status") for a known project, or memory_resume with an opener/namespace for a fuller continuation pack.',
-                "Find past context or decisions: memory_query with natural-language terms (default search_mode is hybrid — no need to guess exact keywords).",
-                "Record something: memory_log for a decision or event (append-only history); use memory_update_status ONLY when a tracked project's phase, next steps, or lifecycle actually changes.",
-              ];
+              response.getting_started = orientGettingStarted();
+
+              if (detail === "beginner") {
+                response.mental_model = orientBeginnerMentalModel();
+                response.tool_index = orientBeginnerToolIndex();
+                response.common_workflows = orientBeginnerCommonWorkflows();
+                response.safe_write_examples = orientBeginnerSafeWriteExamples();
+                attachOrientLibrarianSummary(response, ctx, orientRedactedSources);
+                applyOrientResponseBudget(response, characterBudget, budgetSource);
+
+                // Analytics: log orient event (no result IDs — orient has no specific entries)
+                if (sessionId) {
+                  logRetrievalEvent(db, {
+                    sessionId,
+                    toolName: "memory_orient",
+                    resultIds: [],
+                    resultNamespaces: [],
+                    resultRanks: [],
+                  });
+                }
+
+                return okResult("orient", response);
+              }
+
+              // Namespace list and tracked statuses (conventions resolved above)
+              const namespaces = listVisibleNamespaces(db, ctx).filter(ns => canRead(ctx, ns.namespace));
+              const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_orient", sessionId);
+              const orientTrackedPatterns = resolveTrackedPatterns(db, ctx);
+              orientRedactedSources.push(...visibleTrackedStatuses.redacted);
 
               // Computed dashboard from tracked status entries
               const trackedStatusAssessments = visibleTrackedStatuses.allowed;
@@ -6516,14 +7119,13 @@ export function registerTools(
                 };
               }
 
-              const redactedSourcesSummary = summarizeRedactedSources(ctx, orientRedactedSources);
-              response.librarian_summary = buildLibrarianRuntimeSummary(ctx, {
-                redactedDashboardCount: visibleTrackedStatuses.redacted.length,
-                redactedSourceCount: orientRedactedSources.length,
-              });
-              if (redactedSourcesSummary) {
-                response.redacted_sources = redactedSourcesSummary;
-              }
+              attachOrientLibrarianSummary(
+                response,
+                ctx,
+                orientRedactedSources,
+                visibleTrackedStatuses.redacted.length,
+              );
+              applyOrientResponseBudget(response, characterBudget, budgetSource);
 
               // Analytics: log orient event (no result IDs — orient has no specific entries)
               if (sessionId) {
