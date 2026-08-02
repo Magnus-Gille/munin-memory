@@ -1488,6 +1488,8 @@ describe("memory_read", () => {
 
   it("rejects hidden future boundaries even when they match the current row's exact stored timestamp", async () => {
     const boundary = "2026-07-20T10:00:00.000Z";
+    const previousLibrarianEnabled = process.env.MUNIN_LIBRARIAN_ENABLED;
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
     const restrictedCallTool = makeContextCallTool({
       ...ownerContext(),
       maxClassification: "internal",
@@ -1528,6 +1530,11 @@ describe("memory_read", () => {
       expect(result.hint).toBeUndefined();
     } finally {
       vi.useRealTimers();
+      if (previousLibrarianEnabled === undefined) {
+        delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      } else {
+        process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarianEnabled;
+      }
     }
   });
 
