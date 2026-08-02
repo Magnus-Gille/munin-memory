@@ -697,19 +697,24 @@ export function getStateAsOfCoverage(
     visible?: (row: {
       created_at: string;
       valid_from: string;
+      lineage_valid_from: string | null;
       is_current: number;
       classification: ClassificationLevel;
     }) => boolean;
   } = {},
 ): StateAsOfCoverage {
   const rows = db.prepare(
-    `SELECT created_at, valid_from, is_current, classification
-       FROM entries
+    `SELECT e.created_at, e.valid_from, e.is_current, e.classification,
+            (SELECT MIN(s.effective_at)
+               FROM entry_supersessions s
+              WHERE s.successor_id = e.id) AS lineage_valid_from
+       FROM entries e
       WHERE namespace = ? AND key = ? AND entry_type = 'state'
       ORDER BY valid_from ASC, rowid ASC`,
   ).all(namespace, key) as Array<{
     created_at: string;
     valid_from: string;
+    lineage_valid_from: string | null;
     is_current: number;
     classification: ClassificationLevel;
   }>;
@@ -724,7 +729,13 @@ export function getStateAsOfCoverage(
   }
 
   return {
-    historyAvailable: !visibleRows.some((row) => row.created_at <= asOf && row.valid_from > asOf),
+    historyAvailable: !visibleRows.some((row) => {
+      const recordedFrom = row.lineage_valid_from !== null
+        && row.lineage_valid_from < row.created_at
+        ? row.lineage_valid_from
+        : row.created_at;
+      return recordedFrom <= asOf && row.valid_from > asOf;
+    }),
     currentExists: visibleRows.some((row) => row.is_current === 1),
   };
 }
@@ -803,6 +814,7 @@ export function supersedeState(
   validFrom: string,
   validUntil: string | null | undefined,
   classificationOptions?: ClassificationWriteOptions,
+  allowExistingFutureBoundary = false,
 ): SupersedeEntryResult {
   const txn = db.transaction((): SupersedeEntryResult => {
     const existing = db.prepare(
@@ -833,7 +845,7 @@ export function supersedeState(
     if (validFrom < existing.valid_from) {
       throw new Error("valid_from cannot precede the correction target's valid_from timestamp.");
     }
-    if (validFrom > nowUTC()) {
+    if (validFrom > nowUTC() && !(allowExistingFutureBoundary && validFrom === existing.valid_from)) {
       throw new Error("valid_from cannot be in the future.");
     }
 

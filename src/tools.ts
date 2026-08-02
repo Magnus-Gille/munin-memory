@@ -8354,6 +8354,11 @@ export function registerTools(
 
               let result;
               try {
+                const implicitCorrectionNow = nowUTC();
+                const effectiveCorrectionValidFrom = correction.validFrom
+                  ?? (correctionTarget && correctionTarget.valid_from > implicitCorrectionNow
+                    ? correctionTarget.valid_from
+                    : implicitCorrectionNow);
                 result = supersedes
                   ? supersedeState(
                       db,
@@ -8364,12 +8369,13 @@ export function registerTools(
                       effectiveTags,
                       ctx.principalId,
                       expected_updated_at!,
-                      correction.validFrom ?? nowUTC(),
+                      effectiveCorrectionValidFrom,
                       valid_until === undefined ? undefined : normalizedValidUntil,
                       {
                         classification,
                         classificationOverride: classification_override,
                       },
+                      correction.validFrom === undefined,
                     )
                   : writeState(
                       db,
@@ -8778,7 +8784,7 @@ export function registerTools(
                 const currentTime = nowUTC();
                 const allowExactVisibleBoundary = timestampCheck.value > currentTime
                   && isExactCurrentStateBoundaryVisible(db, namespace, key, timestampCheck.value, {
-                    visible: (row) => classificationAllowed(
+                    visible: (row) => !isLibrarianEnabled() || classificationAllowed(
                       row.classification,
                       getContextMaxClassification(ctx),
                     ),
@@ -8824,7 +8830,7 @@ export function registerTools(
               }
               if (normalizedAsOf !== undefined) {
                 const coverage = getStateAsOfCoverage(db, namespace, key, normalizedAsOf, {
-                  visible: (row) => classificationAllowed(
+                  visible: (row) => !isLibrarianEnabled() || classificationAllowed(
                     row.classification,
                     getContextMaxClassification(ctx),
                   ),
