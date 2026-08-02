@@ -3,7 +3,7 @@ import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { initDatabase, storeEmbedding, vecLoaded } from "../src/db.js";
-import { registerTools } from "../src/tools.js";
+import { registerTools, _setConsolidationPreviewTokenCountForTesting } from "../src/tools.js";
 import { ownerContext } from "../src/access.js";
 import type { AccessContext } from "../src/access.js";
 import {
@@ -1966,6 +1966,7 @@ describe("memory_consolidate", () => {
     _setApiKey(null);
     resetConsolidationCircuitBreaker();
     vi.unstubAllGlobals();
+    _setConsolidationPreviewTokenCountForTesting(0);
   });
 
   it("rejects an invalid namespace", async () => {
@@ -1981,11 +1982,65 @@ describe("memory_consolidate", () => {
     expect(res.message).toContain('Did you mean "maintenance"?');
   });
 
+  it("previews exact source-linked claims before one-shot persistence and rejects testing namespaces (#270)", async () => {
+    const content = "Aurora-9 verification is scheduled for 2026-07-27.";
+    await callTool("memory_log", { namespace: "projects/aurora", content });
+    const id = (db.prepare("SELECT id FROM entries WHERE namespace = ? AND entry_type = 'log'").get("projects/aurora") as { id: string }).id;
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: JSON.stringify({
+        status_content: "ignored by strict renderer",
+        claims: [{ text: content, source_log_ids: [id] }],
+        tags: ["active", "invented-risk"], cross_references: [{
+          target_namespace: "projects/invented", reference_type: "blocks", context: "invented", confidence: 1,
+        }],
+      }) } }], usage: { prompt_tokens: 5, completion_tokens: 7 } }),
+    }));
+
+    const preview = parseToolResponse(await callTool("memory_consolidate", { namespace: "projects/aurora" }));
+    expect(preview.status).toBe("preview");
+    expect(preview.result.preview.status_content).toContain(content);
+    expect(preview.result.preview.tags).toEqual([]);
+    expect(preview.result.preview.cross_references).toEqual([]);
+    expect(db.prepare("SELECT 1 FROM entries WHERE namespace = ? AND key = 'synthesis'").get("projects/aurora")).toBeUndefined();
+
+    const persisted = parseToolResponse(await callTool("memory_consolidate", {
+      namespace: "projects/aurora", confirm_token: preview.preview_token,
+    }));
+    expect(persisted.status).toBe("persisted");
+    expect(db.prepare("SELECT content FROM entries WHERE namespace = ? AND key = 'synthesis'").get("projects/aurora")).toMatchObject({ content: expect.stringContaining(content) });
+    expect((db.prepare("SELECT tags FROM entries WHERE namespace = ? AND key = 'synthesis'").get("projects/aurora") as { tags: string }).tags).toContain("source:synthesis");
+    expect((db.prepare("SELECT tags FROM entries WHERE namespace = ? AND key = 'synthesis'").get("projects/aurora") as { tags: string }).tags).not.toContain("invented-risk");
+    expect(db.prepare("SELECT 1 FROM cross_references WHERE source_namespace = ?").get("projects/aurora")).toBeUndefined();
+
+    const rejected = parseToolResponse(await callTool("memory_consolidate", { namespace: "testing/aurora" }));
+    expect(rejected.error).toBe("ineligible_namespace");
+  });
+
+  it("rejects malformed manual consolidation arguments", async () => {
+    const badNamespace = parseToolResponse(await callTool("memory_consolidate", { namespace: 42 }));
+    expect(badNamespace.error).toBe("validation_error");
+    const badToken = parseToolResponse(await callTool("memory_consolidate", { namespace: "projects/aurora", confirm_token: 42 }));
+    expect(badToken.error).toBe("validation_error");
+    const unknown = parseToolResponse(await callTool("memory_consolidate", { namespace: "projects/aurora", unexpected: true }));
+    expect(unknown.error).toBe("validation_error");
+    const emptyToken = parseToolResponse(await callTool("memory_consolidate", { namespace: "projects/aurora", confirm_token: "" }));
+    expect(emptyToken.error).toBe("validation_error");
+  });
+
+  it("refuses capacity before paying for an LLM preview (#270)", async () => {
+    _setConsolidationPreviewTokenCountForTesting(100);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const response = parseToolResponse(await callTool("memory_consolidate", { namespace: "projects/aurora" }));
+    expect(response.error).toBe("preview_capacity");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("completes immediately for a namespace with no unincorporated logs", async () => {
     const res = parseToolResponse(await callTool("memory_consolidate", { namespace: "projects/empty-ns" }));
     expect(res.ok).toBe(true);
-    expect(res.status).toBe("completed");
-    expect(res.results[0].logs_processed).toBe(0);
+    expect(res.status).toBe("no_candidates");
   });
 
   it("returns synthesis_error when the API call fails for a targeted namespace", async () => {
@@ -1998,9 +2053,8 @@ describe("memory_consolidate", () => {
 
   it("reports no_candidates when nothing needs consolidation", async () => {
     const res = parseToolResponse(await callTool("memory_consolidate", {}));
-    expect(res.ok).toBe(true);
-    expect(res.status).toBe("no_candidates");
-    expect(res.results).toEqual([]);
+    expect(res.ok).toBe(false);
+    expect(res.error).toBe("validation_error");
   });
 
   it("drains all candidates and reports a summary on success", async () => {
@@ -2028,12 +2082,8 @@ describe("memory_consolidate", () => {
       });
     }
     const res = parseToolResponse(await callTool("memory_consolidate", {}));
-    expect(res.ok).toBe(true);
-    expect(res.status).toBe("completed");
-    expect(res.summary.candidates).toBe(1);
-    expect(res.summary.succeeded).toBe(1);
-    expect(res.summary.failed).toBe(0);
-    expect(res.summary.total_logs_processed).toBeGreaterThanOrEqual(_consolidationConfig.minLogs);
+    expect(res.ok).toBe(false);
+    expect(res.error).toBe("validation_error");
   });
 
   it("reports partial status when candidate runs fail", async () => {
@@ -2045,9 +2095,7 @@ describe("memory_consolidate", () => {
       });
     }
     const res = parseToolResponse(await callTool("memory_consolidate", {}));
-    expect(res.ok).toBe(true);
-    expect(res.status).toBe("partial");
-    expect(res.summary.failed).toBe(1);
-    expect(res.results[0].error).toBeDefined();
+    expect(res.ok).toBe(false);
+    expect(res.error).toBe("validation_error");
   });
 });

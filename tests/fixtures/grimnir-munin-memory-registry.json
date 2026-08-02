@@ -1,0 +1,27 @@
+{
+  "name": "munin-memory",
+  "workload_id": "workload-munin-memory",
+  "target_node_id": "node-huginmunin",
+  "workload_contract": {
+    "kind": "workload-requirement",
+    "schema_version": "v1",
+    "producer": "munin-memory",
+    "digest": "sha256:754071860f784ef02c74951e56d857fb30ff1a5724bec28d45cc091bb5441804"
+  },
+  "repo": "munin-memory",
+  "host": "huginmunin.local",
+  "port": 3030,
+  "deploy": true,
+  "scan": true,
+  "deploy_path": "/home/magnus/munin-memory",
+  "persistent_paths": [
+    "/home/magnus/.munin-memory"
+  ],
+  "needs_build": true,
+  "systemd_units": [
+    {
+      "name": "munin-memory",
+      "type": "service"
+    }
+  ]
+}

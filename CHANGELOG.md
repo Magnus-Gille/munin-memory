@@ -23,8 +23,46 @@ changelog is the canonical record of what moved.
   `detail:"beginner"` mode returns the mental model, starter tool index,
   three common workflows, and safe write examples with no live dashboard or
   namespace-estate data, while `compact` remains the default first call.
+- **Manual `memory_consolidate` is now a reviewed, source-grounded flow (#270).**
+  The first targeted call returns a non-persisting preview and a short-lived,
+  one-use confirmation token; only confirmation writes that exact reviewed
+  payload. The token fingerprints the whole unincorporated log window, so a
+  newer log makes confirmation stale rather than being silently consumed.
+  Preview claims must carry source-log UUIDs and be verbatim excerpts
+  of every cited log, so unsupported teams, deadlines, risks, plans, or named
+  entities are rejected instead of becoming durable synthesis. The server
+  renders source links itself and strips model-supplied lifecycle tags, so a
+  consolidation cannot assert or overwrite human-maintained status truth.
+  Manual invocations now require an eligible `projects/*` or `clients/*`
+  namespace; `testing/*` and other ephemeral/untracked roots fail closed.
+  The preview discloses model, actual duration, completion-token count, the
+  historical duration average when available, and explicitly reports when no
+  provider-pricing estimate is configured. The prior unscoped, immediate-write
+  manual invocation is intentionally retired; the background worker remains
+  separately configured and retains its existing operational behavior.
+
+- **External backup requirements now have a public-safe, versioned v1 consumer
+  contract (#235).** The contract binds a stable logical near-site target,
+  owner-overlay authentication boundary, capacity/write guarantees, SQLite
+  snapshot cadence/timeout, and a measured transfer-window preflight. It fails
+  closed for offline, stale, interrupted, timed-out, or relocated targets.
+  Verified copy/integrity evidence is distinct from periodic representative
+  restore evidence, and encrypted offsite backup remains independent. The
+  published schema and fixtures contain no deployment endpoint, private path,
+  or credential.
 
 ### Fixed
+
+- **`memory_delete` previews disclose and bind the full correction lineage
+  they will remove (#281).** A delete of a corrected state entry removes its
+  current revision *and* superseded revisions, but the preview previously
+  reported and fingerprinted only the current row. `state_count` now includes
+  every state revision that confirmation can delete, with
+  `current_state_count` and `historical_state_count` making that scope explicit;
+  the token fingerprint covers the same complete set. A classification- or
+  owner-scoped delete that would cut through a correction chain now fails
+  closed with `partial_lineage` before it issues a token, rather than presenting
+  a misleading partial preview and failing only at confirmation.
 
 - **`memory_delete` preview tokens are bound to the entries they previewed
   (#266).** A token carried only `{namespace, key, expiresAt}`, so a preview
@@ -48,6 +86,15 @@ changelog is the canonical record of what moved.
   *inside* the delete transaction rather than just before it, so a second
   connection committing between check and DELETE cannot reopen the same
   window.
+
+- **A reworded next step no longer reads as a completed commitment (#253).** A
+  commitment's identity was its normalized text, so editing a `## Next Steps`
+  line changed its fingerprint. Reconciliation then resolved the old row
+  `done` while inserting the reworded successor as `open`, so one live item
+  appeared in both buckets. An unambiguous, meaningfully similar rewording now
+  revises the existing row in place; issue references constrain matches but
+  cannot alone identify a step, and different non-empty reference sets never
+  pair. A genuinely removed step still resolves.
 
 ## [0.6.1] — 2026-07-25
 

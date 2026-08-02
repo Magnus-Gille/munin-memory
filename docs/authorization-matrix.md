@@ -160,6 +160,9 @@ Invisible denial is critical: non-owner principals must not be able to distingui
 |-------|------|
 | **Who can call** | Owner only |
 | **Non-owner** | Invisible denial (`access_denied` for agents) |
+| **Manual persistence** | First call is preview-only. A 10-minute, single-use `confirm_token` persists exactly that reviewed preview; restart, expiry, source mismatch, or token reuse fails closed. |
+| **Grounding** | Manual previews require verbatim claims with source-log UUID links. Server rendering strips lifecycle tags and cannot overwrite the human `status` entry. |
+| **Eligible roots** | Manual calls accept only `projects/*` and `clients/*`; `testing/*` and other ephemeral/untracked roots are rejected before an LLM call. |
 | **Cross-zone guard (#96)** | The derived `cross_references` are floor-bounded: a reference for a source namespace whose classification floor is `F_S` may only point at a target whose floor is `≤ F_S`. The orphan scanner prunes out-of-zone targets before reading their content; an authoritative chokepoint drops any remaining out-of-zone reference (LLM- or scanner-sourced) and records a `cross_zone_block` event in `audit_log`. This is a **blanket floor independent of the requester** (it also protects the autonomous background worker) and is enforced regardless of `MUNIN_LIBRARIAN_ENABLED`. When invoked via the tool, the requester's `AccessContext` ceiling (`canRead` + `maxClassification`) applies as additional defense-in-depth. |
 
 ### memory_history (admin view)

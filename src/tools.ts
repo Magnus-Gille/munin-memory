@@ -49,6 +49,7 @@ import {
   previewDeleteByClassification,
   type DeleteInfo,
   DeletePreviewStaleError,
+  DeletePreviewPartialLineageError,
   executeDelete,
   executeDeleteByClassification,
   listCommitments,
@@ -75,7 +76,6 @@ import {
   insertRedactionLog,
   getOtherKeysInNamespaceByClassification,
   getNamespaceEntriesForIntake,
-  getNamespacesNeedingConsolidation,
   getCrossReferences,
   countLogsIncorporated,
   getConsolidationMetadata,
@@ -157,7 +157,8 @@ import {
   getActiveEmbeddingDtype,
 } from "./embeddings.js";
 import {
-  consolidateNamespace,
+  previewConsolidationNamespace,
+  persistGroundedPreview,
   isConsolidationAvailable,
   getConsolidationBacklog,
   getConsolidationHealth,
@@ -206,7 +207,6 @@ import type {
   HandoffResponse,
   AuditAction,
   AuditEntry,
-  ConsolidationRunResult,
   CrossReference,
   RetrievalFeedbackParams,
   RetrievalAggregates,
@@ -226,6 +226,45 @@ type DeleteTokenRecord = {
 };
 const deleteTokens = new Map<string, DeleteTokenRecord>();
 const DELETE_TOKEN_TTL_MS = 60_000; // 1 minute
+
+// Manual consolidation is deliberately a two-step, in-process review flow.
+// A token stores the exact grounded preview, never an instruction supplied by a
+// log. Restarting invalidates it safely; callers simply preview again.
+const consolidationPreviewTokens = new Map<string, {
+  namespace: string;
+  preview: import("./types.js").SynthesisResult;
+  tokenCount: number | null;
+  durationMs: number;
+  sourceFingerprint: string;
+  expiresAt: number;
+}>();
+const CONSOLIDATION_PREVIEW_TTL_MS = 10 * 60_000;
+const MAX_CONSOLIDATION_PREVIEW_TOKENS = 100;
+
+function pruneConsolidationPreviewTokens(now = Date.now()): void {
+  for (const [token, preview] of consolidationPreviewTokens) {
+    if (preview.expiresAt < now) consolidationPreviewTokens.delete(token);
+  }
+}
+
+/** Test-only bounded token fixture; never used by the runtime protocol. */
+export function _setConsolidationPreviewTokenCountForTesting(count: number): void {
+  consolidationPreviewTokens.clear();
+  for (let index = 0; index < count; index++) {
+    consolidationPreviewTokens.set(`test-preview-${index}`, {
+      namespace: "projects/test",
+      preview: { status_content: "test", tags: [], cross_references: [], claims: [{ text: "test", source_log_ids: ["test"] }] },
+      tokenCount: null,
+      durationMs: 0,
+      sourceFingerprint: "test",
+      expiresAt: Date.now() + CONSOLIDATION_PREVIEW_TTL_MS,
+    });
+  }
+}
+
+function isManualConsolidationEligibleNamespace(namespace: string): boolean {
+  return namespace.startsWith("projects/") || namespace.startsWith("clients/");
+}
 
 function generateDeleteToken(namespace: string, info: DeleteInfo, key?: string): string {
   const token = randomBytes(16).toString("hex");
@@ -1152,7 +1191,7 @@ function normalizeStatusLabel(raw: string): keyof StructuredStatus | null {
 }
 
 function extractStatusSectionValue(key: keyof StructuredStatus, raw: string): string | string[] | undefined {
-  const trimmed = raw.trim();
+  const trimmed = raw.trim().replace(/^\\##(?=\s)/gm, "##");
   if (!trimmed) return undefined;
   if (key === "next_steps") {
     const bulletItems = trimmed
@@ -1165,6 +1204,46 @@ function extractStatusSectionValue(key: keyof StructuredStatus, raw: string): st
     return [trimmed];
   }
   return trimmed;
+}
+
+function escapeNestedStatusHeadings(value: string): string {
+  // Canonical status sections are delimited by level-two headings. Preserve a
+  // heading supplied as field content literally, rather than letting it become
+  // a second top-level section when this status is parsed on its next update.
+  return value.replace(/^##(?=\s)/gm, "\\##");
+}
+
+function findDuplicateStatusExtraTitles(status: StructuredStatus): string[] {
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  for (const extra of status.extras ?? []) {
+    const normalizedTitle = extra.title.trim().toLowerCase();
+    if (seen.has(normalizedTitle)) duplicates.add(extra.title);
+    seen.add(normalizedTitle);
+  }
+  return [...duplicates].sort();
+}
+
+function reconcileTrackedStatusLifecycle(
+  isTrackedStatus: boolean,
+  requestedTags: string[] | undefined,
+  effectiveTags: string[],
+  existingTags: string[],
+): { tags: string[]; error?: string } {
+  if (!isTrackedStatus) return { tags: effectiveTags };
+
+  const existingLifecycleTags = getLifecycleTags(existingTags);
+  const requestedLifecycleTags = getLifecycleTags(effectiveTags);
+  if (requestedTags !== undefined && requestedTags.length === 0 && existingLifecycleTags.length > 0) {
+    return {
+      tags: effectiveTags,
+      error: "A full write of an existing tracked status cannot remove its lifecycle with tags: []. Supply one lifecycle tag to change it, or omit lifecycle tags to preserve the existing lifecycle.",
+    };
+  }
+  if (requestedLifecycleTags.length === 0 && existingLifecycleTags.length === 1) {
+    return { tags: [...effectiveTags, existingLifecycleTags[0]] };
+  }
+  return { tags: effectiveTags };
 }
 
 function assignStructuredStatusValue(
@@ -1298,9 +1377,9 @@ function formatStructuredStatus(status: BuiltStructuredStatus): string {
     if (key === "notes" && !value) continue;
     sections.push(`## ${title}`);
     if (key === "next_steps") {
-      sections.push((value as string[]).map((item) => `- ${item}`).join("\n"));
+      sections.push((value as string[]).map((item) => `- ${escapeNestedStatusHeadings(item)}`).join("\n"));
     } else {
-      sections.push(value as string);
+      sections.push(escapeNestedStatusHeadings(value as string));
     }
     sections.push("");
   }
@@ -1602,6 +1681,63 @@ function normalizeIsoTimestamp(value: unknown, fieldName: string): { ok: true; v
   }
 
   return { ok: true, value: date.toISOString() };
+}
+
+function rejectUnknownArguments(args: unknown, allowed: readonly string[]): string | null {
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    return "Tool arguments must be an object.";
+  }
+  const unknown = Object.keys(args).filter((key) => !allowed.includes(key)).sort();
+  return unknown.length > 0
+    ? `Unknown argument(s): ${unknown.join(", ")}.`
+    : null;
+}
+
+function resolveBoundedPositiveInteger(
+  value: unknown,
+  fieldName: string,
+  defaultValue: number,
+  maximum: number,
+): { ok: true; requested: number; applied: number; warning?: string } | { ok: false; error: string } {
+  if (value === undefined) return { ok: true, requested: defaultValue, applied: defaultValue };
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    return { ok: false, error: `${fieldName} must be a positive integer.` };
+  }
+  if (value > maximum) {
+    return {
+      ok: true,
+      requested: value,
+      applied: maximum,
+      warning: `Requested ${fieldName} ${value} exceeds the maximum of ${maximum}; returning at most ${maximum}.`,
+    };
+  }
+  return { ok: true, requested: value, applied: value };
+}
+
+function validateNonNegativeInteger(value: unknown, fieldName: string, defaultValue: number): { ok: true; value: number } | { ok: false; error: string } {
+  if (value === undefined) return { ok: true, value: defaultValue };
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    return { ok: false, error: `${fieldName} must be a non-negative integer.` };
+  }
+  return { ok: true, value };
+}
+
+function validateOptionalBoolean(value: unknown, fieldName: string): string | null {
+  return value === undefined || typeof value === "boolean"
+    ? null
+    : `${fieldName} must be a boolean.`;
+}
+
+function validateOptionalString(value: unknown, fieldName: string): string | null {
+  return value === undefined || typeof value === "string"
+    ? null
+    : `${fieldName} must be a string.`;
+}
+
+function validateOptionalStringArray(value: unknown, fieldName: string): string | null {
+  return value === undefined || (Array.isArray(value) && value.every((item) => typeof item === "string"))
+    ? null
+    : `${fieldName} must be an array of strings.`;
 }
 
 function filterExpiredEntries<T extends Entry | { entry: Entry }>(
@@ -2939,6 +3075,16 @@ function prepareReviewStatus(
   const existingStructured = existingParsed
     ? parseStructuredStatus(existingParsed.content)
     : undefined;
+  const duplicateExtraTitles = existingStructured
+    ? findDuplicateStatusExtraTitles(existingStructured)
+    : [];
+  if (duplicateExtraTitles.length > 0) {
+    return {
+      ok: false,
+      code: "validation_error",
+      error: `Existing status has duplicate non-canonical section headings (${duplicateExtraTitles.join(", ")}), so it cannot be updated safely. Rename or consolidate those headings with memory_write before using memory_update_status.`,
+    };
+  }
   const hasRequestedStatusUpdate = [
     patch.phase,
     patch.current_work,
@@ -5512,7 +5658,7 @@ const TOOL_DEFINITIONS = [
     name: "memory_write",
     description:
       "Successful full writes return a local, bounded, authorization-filtered advisory `intake` report for duplicate keys, overlap/consolidation candidates, sparse content, tag drift, and deep namespaces. Intake never blocks the write.\n\n" +
-      "Store or update a state entry in memory. If an entry with the same namespace+key exists, it will be overwritten. Use this for mutable facts and non-tracked state. For `status` entries under `projects/*` or `clients/*`, prefer `memory_update_status`. Optional `valid_until` adds soft expiry for temporary state; direct reads still work after expiry, but broad search hides expired state by default. To preserve a wrong or outdated value as historical evidence, pass its UUID in `supersedes` together with its exact `expected_updated_at`; Munin creates a new revision and normal retrieval hides the predecessor.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.\n\nNamespace conventions: projects/<name> for project state, people/<name> for context about people, decisions/<topic> for cross-cutting decisions, meta/<topic> for system notes.\n\nKey conventions: 'status' = compact resumption summary (Phase / Current work / Blockers / Next — keep brief, move details to other keys like 'architecture', 'workflow', 'research'). 'index' = directory of important keys in this namespace and their purpose.\n\nTag vocabulary: Use canonical lifecycle tags on status entries: active, blocked, completed, stopped, maintenance, archived. Aliases are auto-normalized (done→completed, paused→stopped, inactive→archived). Category tags: decision, architecture, preference, milestone, convention. Type tags: bug, feature, research. Prefixed tags for cross-referencing: client:<name>, person:<name>, topic:<topic>, type:<artifact> (pdf, presentation, meeting-notes), source:external/internal.\n\nThe project dashboard is computed automatically from status entries with lifecycle tags. No manual workbench maintenance needed. Compare-and-swap via expected_updated_at is OPTIONAL and supported for any state write (all namespaces), not only 'status' in projects/* or clients/*; omit it for a plain write — only pass it when you want the write to fail if the entry changed since your last read. For an atomic first write, pass create_if_absent:true instead: exactly one competing writer creates the key, while losers receive error:'conflict', conflict_reason:'already_exists', and current_updated_at. Do not combine create_if_absent:true with expected_updated_at or patch.\n\nTo start a new project: (1) write projects/<name>/status with a lifecycle tag (e.g. 'active'), (2) optionally write projects/<name>/index listing the keys.",
+      "Store or update a state entry in memory. If an entry with the same namespace+key exists, it will be overwritten. Use this for mutable facts and non-tracked state. For `status` entries under `projects/*` or `clients/*`, prefer `memory_update_status`. A full write of an existing tracked status preserves its lifecycle if you omit lifecycle tags; supply one lifecycle tag to change it. `tags: []` cannot remove an existing tracked lifecycle. Optional `valid_until` adds soft expiry for temporary state; direct reads still work after expiry, but broad search hides expired state by default. To preserve a wrong or outdated value as historical evidence, pass its UUID in `supersedes` together with its exact `expected_updated_at`; Munin creates a new revision and normal retrieval hides the predecessor.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.\n\nNamespace conventions: projects/<name> for project state, people/<name> for context about people, decisions/<topic> for cross-cutting decisions, meta/<topic> for system notes.\n\nKey conventions: 'status' = compact resumption summary (Phase / Current work / Blockers / Next — keep brief, move details to other keys like 'architecture', 'workflow', 'research'). 'index' = directory of important keys in this namespace and their purpose.\n\nTag vocabulary: Use canonical lifecycle tags on status entries: active, blocked, completed, stopped, maintenance, archived. Aliases are auto-normalized (done→completed, paused→stopped, inactive→archived). Category tags: decision, architecture, preference, milestone, convention. Type tags: bug, feature, research. Prefixed tags for cross-referencing: client:<name>, person:<name>, topic:<topic>, type:<artifact> (pdf, presentation, meeting-notes), source:external/internal.\n\nThe project dashboard is computed automatically from status entries with lifecycle tags. No manual workbench maintenance needed. Compare-and-swap via expected_updated_at is OPTIONAL and supported for any state write (all namespaces), not only 'status' in projects/* or clients/*; omit it for a plain write — only pass it when you want the write to fail if the entry changed since your last read. For an atomic first write, pass create_if_absent:true instead: exactly one competing writer creates the key, while losers receive error:'conflict', conflict_reason:'already_exists', and current_updated_at. Do not combine create_if_absent:true with expected_updated_at or patch.\n\nTo start a new project: (1) write projects/<name>/status with a lifecycle tag (e.g. 'active'), (2) optionally write projects/<name>/index listing the keys.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -5576,6 +5722,7 @@ const TOOL_DEFINITIONS = [
         patch: {
           type: "object",
           description: "Partial update for an existing entry. Mutually exclusive with content. Entry must already exist.",
+          additionalProperties: false,
           properties: {
             content_append: { type: "string", description: "Text to append after existing content (separated by newline)" },
             content_prepend: { type: "string", description: "Text to prepend before existing content (separated by newline)" },
@@ -5584,6 +5731,7 @@ const TOOL_DEFINITIONS = [
           },
         },
       },
+      additionalProperties: false,
       required: ["namespace", "key"],
     },
   },
@@ -5643,6 +5791,7 @@ const TOOL_DEFINITIONS = [
           description: "Optional compare-and-swap guard. Pass the updated_at from a prior read to avoid blind overwrites. OPTIONAL — omit it for an unconditional update; it is never required to create a new tracked status.",
         },
       },
+      additionalProperties: false,
       required: ["namespace"],
     },
   },
@@ -5696,15 +5845,16 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_get",
     description:
-      "Retrieve the full content of a single memory entry by its UUID, including an authorized correction link when present. Use this after `memory_query` returns truncated previews or to inspect a historical superseded UUID. If you already know namespace+key and want current or as-of state, use `memory_read` instead. Works for both state and log entries.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
+      "Retrieve the full content of a single memory entry by its opaque ID (normally a UUID returned by `memory_query`), including an authorized correction link when present. Any non-empty ID is accepted as a lookup and returns `found:false` when absent, preserving safe not-found semantics for stale or externally stored IDs. If you already know namespace+key and want current or as-of state, use `memory_read` instead. Works for both state and log entries.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
         id: {
           type: "string",
-          description: "The UUID of the entry to retrieve",
+          description: "Opaque entry ID to retrieve (normally a UUID returned by memory_query)",
         },
       },
+      additionalProperties: false,
       required: ["id"],
     },
   },
@@ -5778,6 +5928,7 @@ const TOOL_DEFINITIONS = [
           description: "Optional (default \"linear\"). Output ordering of ranked results. \"linear\" returns strict best-first rank order. \"boundary\" places the strongest results at the two context edges (rank 1 first, rank 2 last, rank 3 second, …) to counter the \"Lost in the Middle\" attention dip when dropping a long result list straight into context. The result set and underlying ranks are unchanged — only display order — and retrieval analytics always record the true linear rank order. No effect on filter-only browse queries.",
         },
       },
+      additionalProperties: false,
       required: [],
     },
   },
@@ -5885,7 +6036,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_list",
     description:
-      "Browse memory contents. Without a namespace: shows all namespaces with entry counts and last_activity_at (demo/* and completed task-run namespaces hidden by default). With a namespace: shows all state keys, log count, and the 5 most recent log entry previews.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
+      "Browse memory contents. Without a namespace: shows all namespaces with entry counts and last_activity_at (demo/* and completed task-run namespaces hidden by default). With a namespace: shows all state keys, log count, and the 5 most recent log entry previews. `limit` and `offset` apply only to the top-level namespace listing; non-default paging values with `namespace` are rejected rather than ignored.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -5907,14 +6058,15 @@ const TOOL_DEFINITIONS = [
         limit: {
           type: "integer",
           description:
-            "Optional. Max namespaces to return in the top-level listing (default 20, max 200). Ignored when a namespace is provided.",
+            "Optional. Max namespaces to return in the top-level listing (default 20, max 200). Non-default values are rejected when a namespace is provided.",
         },
         offset: {
           type: "integer",
           description:
-            "Optional. Skip first N namespaces for pagination of the top-level listing (default 0). Ignored when a namespace is provided.",
+            "Optional. Skip first N namespaces for pagination of the top-level listing (default 0). Non-default values are rejected when a namespace is provided.",
         },
       },
+      additionalProperties: false,
       required: [],
     },
   },
@@ -5955,7 +6107,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_delete",
     description:
-      "Delete a specific state entry by namespace+key, or all entries in a namespace. First call without delete_token to preview what will be deleted. Then call with the returned delete_token to execute. The token is bound to the exact entries the preview showed: if any of them is written, added, or removed before you confirm, the delete is refused with `preview_stale` and you must preview again.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
+      "Delete a specific state entry by namespace+key, or all entries in a namespace. First call without delete_token to preview what will be deleted. `state_count` includes current and superseded state revisions; `current_state_count` and `historical_state_count` make that destructive scope explicit. Then call with the returned delete_token to execute. The token is bound to the exact entries the preview showed: if any of them is written, added, or removed before you confirm, the delete is refused with `preview_stale` and you must preview again. If classification or ownership filtering would split a correction lineage, preview fails closed with `partial_lineage` and issues no token.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -6048,17 +6200,23 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_consolidate",
     description:
-      "Manually trigger memory consolidation for a specific namespace or all eligible tracked namespaces. Consolidation synthesizes unincorporated log entries into an enriched 'synthesis' status summary using an LLM, and extracts cross-namespace references. The background worker runs automatically when enabled, but this tool allows on-demand consolidation. Owner-only.",
+      "Preview a source-grounded consolidation for an eligible tracked namespace, then confirm its exact preview token to persist it. Manual calls never write on the first call. Every persisted claim is a verbatim excerpt linked to source log UUIDs; testing/ephemeral namespaces are rejected. Owner-only.",
     inputSchema: {
       type: "object" as const,
       properties: {
         namespace: {
           type: "string",
           description:
-            "Optional. Consolidate a specific namespace (e.g. 'projects/hugin'). If omitted, consolidates all eligible tracked namespaces (those with enough unincorporated log entries).",
+            "Required for manual preview. Must be an eligible tracked namespace such as 'projects/hugin' or 'clients/acme'.",
+        },
+        confirm_token: {
+          type: "string",
+          minLength: 1,
+          description: "Token returned by a reviewed preview. Supplying it persists that exact preview once; tokens expire after 10 minutes and are invalid after restart.",
         },
       },
-      required: [],
+      required: ["namespace"],
+      additionalProperties: false,
     },
   },
   {
@@ -8476,7 +8634,16 @@ export function registerTools(
           }
 
           case "memory_write": {
+            // eslint-disable-next-line complexity -- one handler intentionally validates the mutually-exclusive full-write, patch, correction, and tracked-status paths before mutation.
             const handleMemoryWrite = async () => {
+              const unknownArgumentError = rejectUnknownArguments(args, [
+                "namespace", "key", "content", "tags", "valid_until", "expected_updated_at",
+                "create_if_absent", "classification", "classification_override", "supersedes",
+                "valid_from", "patch",
+              ]);
+              if (unknownArgumentError) {
+                return errResult("write", "validation_error", unknownArgumentError);
+              }
               const {
                 namespace,
                 key,
@@ -8501,6 +8668,12 @@ export function registerTools(
               const keyCheck = validateKey(key);
               if (!keyCheck.valid) {
                 return errResult("write", "validation_error", keyCheck.error!);
+              }
+              if (expected_updated_at !== undefined) {
+                const timestampCheck = normalizeIsoTimestamp(expected_updated_at, "expected_updated_at");
+                if (!timestampCheck.ok) {
+                  return errResult("write", "validation_error", timestampCheck.error);
+                }
               }
 
               // Mutually exclusive: patch and content cannot both be provided
@@ -8670,6 +8843,7 @@ export function registerTools(
               const correctionTarget = correction.target;
 
               const isTrackedStatus = key === "status" && isTrackedNamespace(namespace, resolveTrackedPatterns(db, ctx));
+              const existing = readState(db, namespace, key);
 
               // #167: memory_write is a documented migration path for tracked
               // status entries, so apply the same parameter-markup guard here —
@@ -8711,6 +8885,20 @@ export function registerTools(
                 effectiveTags = canonical;
               }
 
+              // A full write normally replaces tags. For an already tracked
+              // status, omission preserves one lifecycle; an explicit tag
+              // changes it, and tags: [] is rejected as removal.
+              const lifecycleResolution = reconcileTrackedStatusLifecycle(
+                isTrackedStatus,
+                tags,
+                effectiveTags,
+                existing ? parseTags(existing.tags) : [],
+              );
+              if (lifecycleResolution.error) {
+                return errResult("write", "validation_error", lifecycleResolution.error, { namespace, key });
+              }
+              effectiveTags = lifecycleResolution.tags;
+
               // Lifecycle validation for tracked status writes
               if (isTrackedStatus) {
                 const lifecycleTags = getLifecycleTags(effectiveTags);
@@ -8723,7 +8911,6 @@ export function registerTools(
 
               // Pre-flight: reject writes that would create Librarian-orphaned entries
               {
-                const existing = readState(db, namespace, key);
                 const orphanError = preflightWriteClassification(
                   db, ctx, namespace, effectiveTags,
                   classification, classification_override,
@@ -8849,6 +9036,13 @@ export function registerTools(
 
           case "memory_update_status": {
             const handleMemoryUpdateStatus = async () => {
+              const unknownArgumentError = rejectUnknownArguments(args, [
+                "namespace", "phase", "current_work", "blockers", "next_steps", "notes",
+                "lifecycle", "valid_until", "expected_updated_at", "classification", "classification_override",
+              ]);
+              if (unknownArgumentError) {
+                return errResult("update_status", "validation_error", unknownArgumentError);
+              }
               const {
                 namespace,
                 phase,
@@ -8866,6 +9060,12 @@ export function registerTools(
               const nsCheck = validateNamespace(namespace);
               if (!nsCheck.valid) {
                 return errResult("update_status", "validation_error", nsCheck.error!);
+              }
+              if (expected_updated_at !== undefined) {
+                const timestampCheck = normalizeIsoTimestamp(expected_updated_at, "expected_updated_at");
+                if (!timestampCheck.ok) {
+                  return errResult("update_status", "validation_error", timestampCheck.error);
+                }
               }
               if (!isTrackedNamespace(namespace, resolveTrackedPatterns(db, ctx))) {
                 return errResult("update_status", "validation_error", "memory_update_status only supports the caller's configured tracked namespaces (default projects/* or clients/*).");
@@ -8927,6 +9127,17 @@ export function registerTools(
               const existing = readState(db, namespace, "status");
               const existingParsed = existing ? parseEntry(existing) : null;
               const existingStructured = existingParsed ? parseStructuredStatus(existingParsed.content) : undefined;
+              const duplicateExtraTitles = existingStructured
+                ? findDuplicateStatusExtraTitles(existingStructured)
+                : [];
+              if (duplicateExtraTitles.length > 0) {
+                return errResult(
+                  "update_status",
+                  "validation_error",
+                  `Existing status has duplicate non-canonical section headings (${duplicateExtraTitles.join(", ")}), so it cannot be updated safely. Rename or consolidate those headings with memory_write before using memory_update_status.`,
+                  { namespace, key: "status", duplicate_extra_sections: duplicateExtraTitles },
+                );
+              }
               // Canonical-only: an entry whose content parses into ONLY
               // non-canonical `extras` (e.g. a legacy `## Context` heading) has
               // no canonical sections to preserve, so a partial update would
@@ -9247,6 +9458,10 @@ export function registerTools(
 
           case "memory_get": {
             const handleMemoryGet = async () => {
+              const unknownArgumentError = rejectUnknownArguments(args, ["id"]);
+              if (unknownArgumentError) {
+                return errResult("get", "validation_error", unknownArgumentError);
+              }
               const { id } = args as unknown as GetParams;
               if (!id || typeof id !== "string") {
                 return errResult("get", "validation_error", "ID is required.");
@@ -9287,12 +9502,54 @@ export function registerTools(
           }
 
           case "memory_query": {
+            // eslint-disable-next-line complexity -- one handler validates and executes the filter-only, lexical, semantic, and hybrid retrieval paths.
             const handleMemoryQuery = async () => {
               // Wall-clock start for the retrieval-latency metric (#161). Recorded
               // onto the retrieval_event so memory_health can report p50/p95.
               const queryStartedAt = Date.now();
+              const unknownArgumentError = rejectUnknownArguments(args, [
+                "query", "namespace", "entry_type", "tags", "limit", "search_mode",
+                "search_recency_weight", "include_expired", "explain", "since", "until",
+                "require_lexical_match", "serialization",
+              ]);
+              if (unknownArgumentError) {
+                return errResult("query", "validation_error", unknownArgumentError);
+              }
               const queryArgs = (args ?? {}) as unknown as QueryParams;
-              const { query, namespace, entry_type, tags, limit, search_mode, since, until } = queryArgs;
+              let { query, namespace, entry_type, tags, limit, search_mode, since, until } = queryArgs;
+              for (const validationError of [
+                validateOptionalString(query, "query"),
+                validateOptionalString(namespace, "namespace"),
+                validateOptionalStringArray(tags, "tags"),
+                validateOptionalBoolean(queryArgs.include_expired, "include_expired"),
+                validateOptionalBoolean(queryArgs.explain, "explain"),
+                validateOptionalBoolean(queryArgs.require_lexical_match, "require_lexical_match"),
+              ]) {
+                if (validationError) return errResult("query", "validation_error", validationError);
+              }
+              if (entry_type !== undefined && entry_type !== "state" && entry_type !== "log") {
+                return errResult("query", "validation_error", "entry_type must be 'state' or 'log'.");
+              }
+              if (search_mode !== undefined && !["lexical", "semantic", "hybrid"].includes(search_mode)) {
+                return errResult("query", "validation_error", "search_mode must be 'lexical', 'semantic', or 'hybrid'.");
+              }
+              const normalizedSince = since === undefined ? undefined : normalizeIsoTimestamp(since, "since");
+              if (normalizedSince !== undefined && !normalizedSince.ok) {
+                return errResult("query", "validation_error", normalizedSince.error);
+              }
+              const normalizedUntil = until === undefined ? undefined : normalizeIsoTimestamp(until, "until");
+              if (normalizedUntil !== undefined && !normalizedUntil.ok) {
+                return errResult("query", "validation_error", normalizedUntil.error);
+              }
+              const limitResolution = resolveBoundedPositiveInteger(limit, "limit", 10, MAX_QUERY_LIMIT);
+              if (!limitResolution.ok) {
+                return errResult("query", "validation_error", limitResolution.error);
+              }
+              since = normalizedSince?.value;
+              until = normalizedUntil?.value;
+              if (since !== undefined && until !== undefined && since > until) {
+                return errResult("query", "validation_error", "since must be earlier than or equal to until.");
+              }
               const explain = queryArgs.explain === true;
               const includeExpired = queryArgs.include_expired === true;
               const requireLexicalMatch = queryArgs.require_lexical_match === true;
@@ -9316,8 +9573,8 @@ export function registerTools(
 
               // Validate the namespace filter (parity with write/read/log paths).
               // A trailing slash is permitted for prefix filters (e.g. "projects/").
-              if (namespace !== undefined && namespace !== null) {
-                const nsCheck = validateNamespace(namespace as string);
+              if (namespace !== undefined) {
+                const nsCheck = validateNamespace(namespace);
                 if (!nsCheck.valid) {
                   return errResult("query", "validation_error", nsCheck.error!);
                 }
@@ -9329,7 +9586,7 @@ export function registerTools(
                 if (!namespace && (!tags || tags.length === 0) && !since && !until && !entry_type) {
                   return errResult("query", "validation_error", "Provide either a 'query' string for search, or at least one filter (namespace, tags, entry_type, since, until) to browse.");
                 }
-                const requestedLimit = Math.min(Math.max(limit ?? 10, 1), 50);
+                const requestedLimit = limitResolution.applied;
                 const internalFilterLimit = Math.min(requestedLimit * QUERY_RERANK_OVERFETCH_MULTIPLIER, 50);
                 let filterResults = queryEntriesByFilter(db, {
                   namespace,
@@ -9381,6 +9638,11 @@ export function registerTools(
                   total: formatted.length,
                   redacted_count: redactedCount,
                   search_mode: "filter",
+                  ...(limitResolution.warning ? {
+                    requested_limit: limitResolution.requested,
+                    limit_applied: limitResolution.applied,
+                    warning: limitResolution.warning,
+                  } : {}),
                   retrieval: {
                     reranked: false,
                     relaxed_lexical: false,
@@ -9395,7 +9657,7 @@ export function registerTools(
                 });
               }
 
-              const requestedLimit = Math.min(Math.max(limit ?? 10, 1), 50);
+              const requestedLimit = limitResolution.applied;
               const internalLimit = Math.min(requestedLimit * QUERY_RERANK_OVERFETCH_MULTIPLIER, 50);
               const queryParams: QueryParams = {
                 query,
@@ -9412,13 +9674,10 @@ export function registerTools(
               };
               const requestedMode: SearchMode = search_mode ?? "hybrid";
               let actualMode: SearchMode = requestedMode;
-              let warning: string | undefined;
+              let warning: string | undefined = limitResolution.warning;
               // The storage layer clamps to MAX_QUERY_LIMIT, so an over-limit
               // request used to return fewer rows than asked for with no signal
               // — indistinguishable from "that is all there was". Say so.
-              if (typeof limit === "number" && Number.isFinite(limit) && limit > MAX_QUERY_LIMIT) {
-                warning = `Requested limit ${limit} exceeds the maximum of ${MAX_QUERY_LIMIT}; returning at most ${MAX_QUERY_LIMIT} results. Narrow with filters or since/until rather than paging.`;
-              }
               let fallbackReason: string | null = null;
               let relaxedLexical = false;
               let expiredFilteredCount = 0;
@@ -9637,12 +9896,17 @@ export function registerTools(
                 redacted_count: redactedCount,
                 query,
                 search_mode: requestedMode,
+                ...(limitResolution.warning ? {
+                  requested_limit: limitResolution.requested,
+                  limit_applied: limitResolution.applied,
+                } : {}),
               };
               if (actualMode !== requestedMode) {
                 response.search_mode_actual = actualMode;
               }
-              if (warning) {
-                response.warning = warning;
+              const responseWarnings = [...new Set([limitResolution.warning, warning].filter(Boolean))];
+              if (responseWarnings.length > 0) {
+                response.warning = responseWarnings.join(" ");
               }
               response.retrieval = {
                 reranked: true,
@@ -10003,10 +10267,31 @@ export function registerTools(
 
           case "memory_list": {
             const handleMemoryList = async () => {
+              const unknownArgumentError = rejectUnknownArguments(args, [
+                "namespace", "include_demo", "include_completed_tasks", "limit", "offset",
+              ]);
+              if (unknownArgumentError) {
+                return errResult("list", "validation_error", unknownArgumentError);
+              }
               const { namespace, include_demo, include_completed_tasks, limit: rawLimit, offset: rawOffset } = (args ?? {}) as ListParams;
+              for (const validationError of [
+                validateOptionalString(namespace, "namespace"),
+                validateOptionalBoolean(include_demo, "include_demo"),
+                validateOptionalBoolean(include_completed_tasks, "include_completed_tasks"),
+              ]) {
+                if (validationError) return errResult("list", "validation_error", validationError);
+              }
+              const limitResolution = resolveBoundedPositiveInteger(rawLimit, "limit", 20, 200);
+              if (!limitResolution.ok) {
+                return errResult("list", "validation_error", limitResolution.error);
+              }
+              const offsetResolution = validateNonNegativeInteger(rawOffset, "offset", 0);
+              if (!offsetResolution.ok) {
+                return errResult("list", "validation_error", offsetResolution.error);
+              }
               if (!namespace) {
-                const resolvedLimit = Math.min(Math.max(1, typeof rawLimit === "number" ? rawLimit : 20), 200);
-                const resolvedOffset = Math.max(0, typeof rawOffset === "number" ? rawOffset : 0);
+                const resolvedLimit = limitResolution.applied;
+                const resolvedOffset = offsetResolution.value;
                 const allNamespaces = listVisibleNamespaces(db, ctx);
                 const completedTasks = include_completed_tasks ? new Set<string>() : getCompletedTaskNamespaces(db);
                 const filtered = allNamespaces.filter((ns) => {
@@ -10020,7 +10305,20 @@ export function registerTools(
                   ...ns,
                   last_activity_at_local: toLocalDisplay(ns.last_activity_at),
                 }));
-                return okResult("list", { namespaces: namespacesWithLocal, total, returned: namespacesWithLocal.length, has_more });
+                return okResult("list", {
+                  namespaces: namespacesWithLocal,
+                  total,
+                  returned: namespacesWithLocal.length,
+                  has_more,
+                  ...(limitResolution.warning ? {
+                    requested_limit: limitResolution.requested,
+                    limit_applied: limitResolution.applied,
+                    warning: limitResolution.warning,
+                  } : {}),
+                });
+              }
+              if ((rawLimit !== undefined && rawLimit !== 20) || (rawOffset !== undefined && rawOffset !== 0)) {
+                return errResult("list", "validation_error", "limit and offset apply only to top-level namespace listings; omit them when listing one namespace.");
               }
               const nsCheck = validateNamespace(namespace);
               if (!nsCheck.valid) {
@@ -10189,6 +10487,9 @@ export function registerTools(
                       { namespace, key: key ?? undefined },
                     );
                   }
+                  if (error instanceof DeletePreviewPartialLineageError) {
+                    return errResult("delete", "partial_lineage", error.message, { namespace, key: key ?? undefined });
+                  }
                   return errResult("delete", "conflict", (error as Error).message, { namespace, key });
                 }
                 const target = key ? `entry "${key}" in "${namespace}"` : `all entries in "${namespace}"`;
@@ -10202,7 +10503,15 @@ export function registerTools(
               }
 
               // Preview
-              const info = readDeleteTarget();
+              let info: DeleteInfo;
+              try {
+                info = readDeleteTarget();
+              } catch (error) {
+                if (error instanceof DeletePreviewPartialLineageError) {
+                  return errResult("delete", "partial_lineage", error.message, { namespace, key: key ?? undefined });
+                }
+                return errResult("delete", "conflict", (error as Error).message, { namespace, key: key ?? undefined });
+              }
               const token = generateDeleteToken(namespace, info, key);
               const target = key ? `entry "${key}" in "${namespace}"` : `all entries in "${namespace}"`;
               return okResult("delete", {
@@ -10211,6 +10520,8 @@ export function registerTools(
                 key: key ?? undefined,
                 will_delete: {
                   state_count: info.stateCount,
+                  current_state_count: info.currentStateCount,
+                  historical_state_count: info.historicalStateCount,
                   log_count: info.logCount,
                   keys: info.keys.length > 0 ? info.keys : undefined,
                 },
@@ -10394,52 +10705,68 @@ export function registerTools(
                   "Consolidation is not available. Ensure the feature is enabled and an API key is configured.");
               }
 
-              const { namespace: consolidateNs } = (args ?? {}) as { namespace?: string };
+              if (!args || typeof args !== "object" || Array.isArray(args) ||
+                  Object.keys(args as Record<string, unknown>).some((key) => key !== "namespace" && key !== "confirm_token")) {
+                return errResult("consolidate", "validation_error", "only namespace and confirm_token are accepted");
+              }
 
-              if (consolidateNs) {
-                const nsCheck = validateWriteNamespace(consolidateNs);
-                if (!nsCheck.valid) {
-                  return errResult("consolidate", "validation_error", nsCheck.error!);
+              const { namespace: consolidateNs, confirm_token: confirmToken } = (args ?? {}) as {
+                namespace?: string; confirm_token?: string;
+              };
+              if (typeof consolidateNs !== "string" || consolidateNs.length === 0) {
+                return errResult("consolidate", "validation_error", "namespace is required for the safe manual preview flow");
+              }
+              if (confirmToken !== undefined && typeof confirmToken !== "string") {
+                return errResult("consolidate", "validation_error", "confirm_token must be a string");
+              }
+              if (confirmToken === "") {
+                return errResult("consolidate", "validation_error", "confirm_token must not be empty");
+              }
+              const nsCheck = validateWriteNamespace(consolidateNs);
+              if (!nsCheck.valid) return errResult("consolidate", "validation_error", nsCheck.error!);
+              if (!isManualConsolidationEligibleNamespace(consolidateNs)) {
+                return errResult("consolidate", "ineligible_namespace",
+                  "Manual consolidation is limited to tracked projects/* and clients/* namespaces; testing and ephemeral namespaces fail closed.");
+              }
+
+              if (confirmToken !== undefined) {
+                pruneConsolidationPreviewTokens();
+                const pending = consolidationPreviewTokens.get(confirmToken);
+                consolidationPreviewTokens.delete(confirmToken); // one-shot even on rejection
+                if (!pending || pending.expiresAt < Date.now() || pending.namespace !== consolidateNs) {
+                  return errResult("consolidate", "invalid_preview_token", "Preview token is invalid, expired, or for a different namespace. Preview again.");
                 }
-
-                const result = await consolidateNamespace(db, consolidateNs, undefined, ctx);
-                if (result.error) {
-                  return errResult("consolidate", "synthesis_error", result.error);
-                }
-                return okResult("consolidate", {
-                  status: "completed",
-                  results: [result],
-                });
+                const result = persistGroundedPreview(db, consolidateNs, pending.preview, pending.tokenCount, pending.durationMs, pending.sourceFingerprint, ctx);
+                if (result.error) return errResult("consolidate", "preview_stale", result.error);
+                return okResult("consolidate", { status: "persisted", result });
               }
 
-              const candidates = getNamespacesNeedingConsolidation(db);
-              if (candidates.length === 0) {
-                return okResult("consolidate", {
-                  status: "no_candidates",
-                  message: "No namespaces have enough unincorporated logs to consolidate.",
-                  results: [],
-                });
+              pruneConsolidationPreviewTokens();
+              if (consolidationPreviewTokens.size >= MAX_CONSOLIDATION_PREVIEW_TOKENS) {
+                return errResult("consolidate", "preview_capacity", "Too many active consolidation previews; wait for expiry before creating another.");
               }
-
-              const consolidateResults: ConsolidationRunResult[] = [];
-              for (const candidate of candidates) {
-                const result = await consolidateNamespace(db, candidate.namespace, undefined, ctx);
-                consolidateResults.push(result);
-              }
-
-              const succeeded = consolidateResults.filter((r) => !r.error).length;
-              const failed = consolidateResults.filter((r) => r.error).length;
-
+              const result = await previewConsolidationNamespace(db, consolidateNs, undefined, ctx);
+              if (result.error) return errResult("consolidate", "synthesis_error", result.error);
+              if (!result.preview) return okResult("consolidate", { status: "no_candidates", result });
+              const previewToken = randomBytes(16).toString("hex");
+              consolidationPreviewTokens.set(previewToken, {
+                namespace: consolidateNs, preview: result.preview, tokenCount: result.token_count,
+                durationMs: result.duration_ms, sourceFingerprint: result.source_fingerprint!, expiresAt: Date.now() + CONSOLIDATION_PREVIEW_TTL_MS,
+              });
               return okResult("consolidate", {
-                status: failed === 0 ? "completed" : "partial",
-                summary: {
-                  candidates: candidates.length,
-                  succeeded,
-                  failed,
-                  total_logs_processed: consolidateResults.reduce((sum, r) => sum + r.logs_processed, 0),
-                  total_cross_references: consolidateResults.reduce((sum, r) => sum + r.cross_references_found, 0),
+                status: "preview",
+                preview_token: previewToken,
+                expires_in_ms: CONSOLIDATION_PREVIEW_TTL_MS,
+                result,
+                disclosure: {
+                  model: result.synthesis_model,
+                  actual_duration_ms: result.duration_ms,
+                  completion_tokens: result.token_count,
+                  provider_reported_cost_usd: result.provider_cost_usd ?? null,
+                  estimated_cost_usd: null,
+                  estimated_cost_note: "Provider pricing is not configured in this server; no pre-call cost estimate is available.",
+                  historical_avg_duration_ms: getAvgConsolidationLatencyMs(db, true),
                 },
-                results: consolidateResults,
               });
             };
             return handleMemoryConsolidate();

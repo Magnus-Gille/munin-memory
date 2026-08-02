@@ -6,6 +6,7 @@ import {
   computeCommitmentConfidence,
   initDatabase,
   listCommitments,
+  supersedeState,
   upsertConsolidationMetadata,
   writeState,
 } from "../src/db.js";
@@ -159,6 +160,29 @@ describe("memory_write", () => {
     const result = parseToolResponse(raw) as { status: string; hint: string };
     expect(result.status).toBe("updated");
     expect(result.hint).toContain("architecture");
+  });
+
+  it("rejects malformed expected_updated_at before evaluating CAS conflicts (#269)", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/cas-timestamp",
+      key: "status",
+      content: "Current value",
+    });
+    const raw = await callTool("memory_write", {
+      namespace: "projects/cas-timestamp",
+      key: "status",
+      content: "Must not write",
+      expected_updated_at: "yesterday",
+    });
+    const result = parseToolResponse(raw) as { ok: boolean; error: string; message: string };
+    expect(result).toMatchObject({ ok: false, error: "validation_error" });
+    expect(result.message).toContain("expected_updated_at");
+
+    const read = parseToolResponse(await callTool("memory_read", {
+      namespace: "projects/cas-timestamp",
+      key: "status",
+    })) as { content: string };
+    expect(read.content).toBe("Current value");
   });
 
   it("rejects invalid namespace", async () => {
@@ -455,6 +479,22 @@ describe("memory_write patch", () => {
 });
 
 describe("memory_update_status", () => {
+  it("rejects malformed expected_updated_at before evaluating CAS conflicts (#269)", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/status-cas-timestamp",
+      phase: "Active",
+      lifecycle: "active",
+    });
+    const raw = await callTool("memory_update_status", {
+      namespace: "projects/status-cas-timestamp",
+      current_work: "Must not write",
+      expected_updated_at: "yesterday",
+    });
+    const result = parseToolResponse(raw) as { ok: boolean; error: string; message: string };
+    expect(result).toMatchObject({ ok: false, error: "validation_error" });
+    expect(result.message).toContain("expected_updated_at");
+  });
+
   it("rejects a trailing slash namespace at the handler boundary", async () => {
     const raw = await callTool("memory_update_status", {
       namespace: "projects/status-tool/",
@@ -610,6 +650,77 @@ describe("memory_update_status", () => {
     expect(entry2.content).toContain("## Roadmap");
     expect(entry2.content).toContain("## Milestones");
     expect(entry2.content).toContain("Waiting on PR review.");
+  });
+
+  it("keeps extra sections unique when notes contain a rendered status (#280)", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/status-roundtrip",
+      key: "status",
+      content: [
+        "## Phase",
+        "Active",
+        "",
+        "## Current Work",
+        "Keep status rendering stable.",
+        "",
+        "## Extra Context",
+        "This heading must remain a single preserved extra.",
+      ].join("\n"),
+      tags: ["active"],
+    });
+
+    const seed = parseToolResponse(await callTool("memory_read", {
+      namespace: "projects/status-roundtrip",
+      key: "status",
+    })) as { content: string };
+
+    const first = parseToolResponse(await callTool("memory_update_status", {
+      namespace: "projects/status-roundtrip",
+      notes: seed.content,
+    })) as { content: string; structured_status: { extras?: Array<{ title: string; body: string }> } };
+    const second = parseToolResponse(await callTool("memory_update_status", {
+      namespace: "projects/status-roundtrip",
+      notes: seed.content,
+    })) as { content: string; structured_status: { extras?: Array<{ title: string; body: string }> } };
+
+    expect(second.content).toBe(first.content);
+    expect(second.structured_status).toEqual(first.structured_status);
+    expect(second.structured_status.extras).toEqual([
+      { title: "Extra Context", body: "This heading must remain a single preserved extra." },
+    ]);
+    expect((second.content.match(/^## Extra Context$/gm) ?? [])).toHaveLength(1);
+  });
+
+  it("rejects ambiguous duplicate extra headings before changing a status (#280)", async () => {
+    const originalContent = [
+      "## Phase",
+      "Active",
+      "",
+      "## Context",
+      "First interpretation.",
+      "",
+      "## Context",
+      "Second interpretation.",
+    ].join("\n");
+    await callTool("memory_write", {
+      namespace: "projects/status-duplicate-extra",
+      key: "status",
+      content: originalContent,
+      tags: ["active"],
+    });
+
+    const rejected = parseToolResponse(await callTool("memory_update_status", {
+      namespace: "projects/status-duplicate-extra",
+      blockers: "None.",
+    })) as { ok: boolean; error: string; message: string };
+    expect(rejected).toMatchObject({ ok: false, error: "validation_error" });
+    expect(rejected.message).toContain("duplicate non-canonical section headings");
+
+    const read = parseToolResponse(await callTool("memory_read", {
+      namespace: "projects/status-duplicate-extra",
+      key: "status",
+    })) as { content: string };
+    expect(read.content).toBe(originalContent);
   });
 
   it("rejects string fields polluted with tool-call parameter markup (#167)", async () => {
@@ -1263,6 +1374,12 @@ describe("memory_get", () => {
     expect(result.found).toBe(false);
   });
 
+  it("keeps non-empty opaque IDs as ordinary lookup misses (#269 compatibility)", async () => {
+    const raw = await callTool("memory_get", { id: "not-a-uuid" });
+    const result = parseToolResponse(raw) as { ok: boolean; found: boolean };
+    expect(result).toMatchObject({ ok: true, found: false });
+  });
+
   it("returns expired flag on memory_get for expired state entries", async () => {
     const writeRaw = await callTool("memory_write", {
       namespace: "projects/test",
@@ -1675,6 +1792,37 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
     expect(result.will_delete.keys).toBeUndefined();
     expect(result.message).toContain("visible entries on this connection");
     delete process.env.MUNIN_ALLOW_NAMESPACE_DELETE;
+  });
+
+  it("refuses a classified delete preview when it can see only part of a correction lineage", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/delete-partial-lineage",
+      key: "restricted-correction",
+      content: "initial internal revision",
+      classification: "internal",
+    });
+    const original = db.prepare(
+      "SELECT id, updated_at, valid_from FROM entries WHERE namespace = ? AND key = ? AND is_current = 1",
+    ).get("projects/delete-partial-lineage", "restricted-correction") as { id: string; updated_at: string; valid_from: string };
+    const corrected = supersedeState(
+      db, "projects/delete-partial-lineage", "restricted-correction", original.id,
+      "later client-confidential correction", [], "test-agent", original.updated_at, original.valid_from, undefined,
+      { classification: "client-confidential" },
+    );
+    expect(corrected.status).toBe("superseded");
+
+    const consumerOwnerCall = makeContextCallTool({
+      ...ownerContext(),
+      transportType: "consumer",
+      maxClassification: "internal",
+    });
+    const result = parseToolResponse(await consumerOwnerCall("memory_delete", {
+      namespace: "projects/delete-partial-lineage",
+      key: "restricted-correction",
+    })) as { error: string; message: string };
+
+    expect(result.error).toBe("partial_lineage");
+    expect(result.message).toContain("correction chain");
   });
 
   it("confirmed delete only removes entries within classification ceiling", async () => {
@@ -2377,6 +2525,85 @@ describe("memory_query", () => {
     expect(result.total).toBeGreaterThanOrEqual(2);
     expect(result.results[0].id).toBeTruthy();
     expect(result.results[0].provenance.principal_id).toBe("owner");
+  });
+
+  it.each(["yesterday", "not-a-date"])("rejects malformed since timestamps (%s) (#269)", async (since) => {
+    const raw = await callTool("memory_query", { namespace: "projects/alpha", since });
+    const result = parseToolResponse(raw) as { ok: boolean; error: string; message: string };
+    expect(result).toMatchObject({ ok: false, error: "validation_error" });
+    expect(result.message).toContain("since");
+    expect(result.message).toContain("ISO 8601");
+  });
+
+  it("rejects malformed until timestamps (#269)", async () => {
+    const raw = await callTool("memory_query", { namespace: "projects/alpha", until: "not-a-date" });
+    const result = parseToolResponse(raw) as { ok: boolean; error: string; message: string };
+    expect(result).toMatchObject({ ok: false, error: "validation_error" });
+    expect(result.message).toContain("until");
+  });
+
+  it("rejects an unknown search_mode rather than returning an empty success (#269)", async () => {
+    const raw = await callTool("memory_query", { query: "SQLite", search_mode: "vector" });
+    const result = parseToolResponse(raw) as { ok: boolean; error: string; message: string };
+    expect(result).toMatchObject({ ok: false, error: "validation_error" });
+    expect(result.message).toContain("lexical");
+    expect(result.message).toContain("semantic");
+    expect(result.message).toContain("hybrid");
+  });
+
+  it("rejects an invalid query limit rather than silently clamping it (#269)", async () => {
+    const raw = await callTool("memory_query", { query: "SQLite", limit: -1 });
+    const result = parseToolResponse(raw) as { ok: boolean; error: string; message: string };
+    expect(result).toMatchObject({ ok: false, error: "validation_error" });
+    expect(result.message).toContain("limit");
+  });
+
+  it("reports query limit clamping with requested and applied values (#269)", async () => {
+    const raw = await callTool("memory_query", { query: "SQLite", search_mode: "lexical", limit: 51 });
+    const result = parseToolResponse(raw) as {
+      requested_limit: number;
+      limit_applied: number;
+      warning: string;
+    };
+    expect(result.requested_limit).toBe(51);
+    expect(result.limit_applied).toBe(50);
+    expect(result.warning).toContain("51");
+    expect(result.warning).toContain("50");
+  });
+
+  it("rejects unknown query arguments rather than ignoring them (#269)", async () => {
+    const raw = await callTool("memory_query", { query: "SQLite", offset: 50 });
+    const result = parseToolResponse(raw) as { ok: boolean; error: string; message: string };
+    expect(result).toMatchObject({ ok: false, error: "validation_error" });
+    expect(result.message).toContain("offset");
+  });
+
+  it.each([
+    [{ query: 42, namespace: "projects/alpha" }, "query"],
+    [{ query: "SQLite", namespace: 42 }, "namespace"],
+    [{ query: "SQLite", entry_type: "event" }, "entry_type"],
+    [{ query: "SQLite", tags: "active" }, "tags"],
+    [{ query: "SQLite", include_expired: "true" }, "include_expired"],
+    [{ query: "SQLite", explain: "true" }, "explain"],
+    [{ query: "SQLite", require_lexical_match: "true" }, "require_lexical_match"],
+    [{ query: "SQLite", search_recency_weight: "high" }, "search_recency_weight"],
+  ])("rejects malformed known query argument %s (#269)", async (args, field) => {
+    const raw = await callTool("memory_query", args as Record<string, unknown>);
+    const result = parseToolResponse(raw) as { ok: boolean; error: string; message: string };
+    expect(result).toMatchObject({ ok: false, error: "validation_error" });
+    expect(result.message.toLowerCase()).toContain(field.toLowerCase());
+  });
+
+  it("rejects an inverted query time range (#269)", async () => {
+    const raw = await callTool("memory_query", {
+      namespace: "projects/alpha",
+      since: "2027-01-02T00:00:00Z",
+      until: "2027-01-01T00:00:00Z",
+    });
+    const result = parseToolResponse(raw) as { ok: boolean; error: string; message: string };
+    expect(result).toMatchObject({ ok: false, error: "validation_error" });
+    expect(result.message).toContain("since");
+    expect(result.message).toContain("until");
   });
 
   describe("boundary serialization", () => {
@@ -3174,6 +3401,50 @@ describe("memory_list", () => {
     const raw = await callTool("memory_list", {});
     const result = parseToolResponse(raw) as { namespaces: Array<{ namespace: string }> };
     expect(result.namespaces).toHaveLength(2);
+  });
+
+  it("reports list limit clamping explicitly (#269)", async () => {
+    for (let i = 0; i < 3; i++) {
+      await callTool("memory_write", { namespace: `projects/list-clamp-${i}`, key: "status", content: "c" });
+    }
+    const raw = await callTool("memory_list", { limit: 999 });
+    const result = parseToolResponse(raw) as { requested_limit: number; limit_applied: number; warning: string };
+    expect(result.requested_limit).toBe(999);
+    expect(result.limit_applied).toBe(200);
+    expect(result.warning).toContain("999");
+    expect(result.warning).toContain("200");
+  });
+
+  it("rejects negative list offsets rather than treating them as zero (#269)", async () => {
+    const raw = await callTool("memory_list", { offset: -1 });
+    const result = parseToolResponse(raw) as { ok: boolean; error: string; message: string };
+    expect(result).toMatchObject({ ok: false, error: "validation_error" });
+    expect(result.message).toContain("offset");
+  });
+
+  it("rejects unknown list arguments rather than ignoring them (#269)", async () => {
+    const raw = await callTool("memory_list", { cursor: 5 });
+    const result = parseToolResponse(raw) as { ok: boolean; error: string; message: string };
+    expect(result).toMatchObject({ ok: false, error: "validation_error" });
+    expect(result.message).toContain("cursor");
+  });
+
+  it.each([
+    [{ namespace: 42 }, "namespace"],
+    [{ include_demo: "true" }, "include_demo"],
+    [{ include_completed_tasks: "true" }, "include_completed_tasks"],
+  ])("rejects malformed known list argument %s (#269)", async (args, field) => {
+    const raw = await callTool("memory_list", args as Record<string, unknown>);
+    const result = parseToolResponse(raw) as { ok: boolean; error: string; message: string };
+    expect(result).toMatchObject({ ok: false, error: "validation_error" });
+    expect(result.message.toLowerCase()).toContain(field.toLowerCase());
+  });
+
+  it("rejects top-level pagination arguments when listing one namespace (#269)", async () => {
+    const raw = await callTool("memory_list", { namespace: "projects/alpha", limit: 1 });
+    const result = parseToolResponse(raw) as { ok: boolean; error: string; message: string };
+    expect(result).toMatchObject({ ok: false, error: "validation_error" });
+    expect(result.message).toContain("top-level");
   });
 
   it("includes last_activity_at per namespace", async () => {
@@ -6332,6 +6603,26 @@ describe("compare-and-swap (memory_write)", () => {
     });
   });
 
+  it("advertises closed argument objects for the #269 validated tools", async () => {
+    const handler = (
+      server as unknown as { _requestHandlers: Map<string, Function> }
+    )._requestHandlers?.get("tools/list");
+    const toolList = await handler!({ method: "tools/list", params: {} });
+    const toolsByName = new Map(
+      (toolList as {
+        tools: Array<{
+          name: string;
+          inputSchema: { additionalProperties?: boolean; properties?: Record<string, { additionalProperties?: boolean }> };
+        }>;
+      }).tools.map((tool) => [tool.name, tool]),
+    );
+
+    for (const toolName of ["memory_query", "memory_list", "memory_get", "memory_write", "memory_update_status"]) {
+      expect(toolsByName.get(toolName)?.inputSchema.additionalProperties).toBe(false);
+    }
+    expect(toolsByName.get("memory_write")?.inputSchema.properties?.patch?.additionalProperties).toBe(false);
+  });
+
   it("advertises valid_until as string-or-null for memory_write and memory_update_status", async () => {
     const handler = (
       server as unknown as { _requestHandlers: Map<string, Function> }
@@ -6604,6 +6895,88 @@ describe("tag canonicalization (memory_write)", () => {
 });
 
 describe("lifecycle validation (memory_write)", () => {
+  it("allows a new tracked status without a lifecycle but warns that it is untracked", async () => {
+    const result = parseToolResponse(await callTool("memory_write", {
+      namespace: "projects/lifecycle-new",
+      key: "status",
+      content: "New status without a lifecycle.",
+    })) as { status: string; warnings?: string[] };
+
+    expect(result.status).toBe("created");
+    expect(result.warnings).toContainEqual(expect.stringContaining("No lifecycle tag"));
+  });
+
+  it("preserves an existing tracked status lifecycle when a full write omits it (#280)", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/lifecycle-preserve",
+      key: "status",
+      content: "Initial tracked status.",
+      tags: ["active", "feature"],
+    });
+
+    const updated = parseToolResponse(await callTool("memory_write", {
+      namespace: "projects/lifecycle-preserve",
+      key: "status",
+      content: "Replacement content without a lifecycle tag.",
+      tags: ["feature"],
+    })) as { status: string };
+    expect(updated.status).toBe("updated");
+
+    const read = parseToolResponse(await callTool("memory_read", {
+      namespace: "projects/lifecycle-preserve",
+      key: "status",
+    })) as { tags: string[] };
+    expect(read.tags).toEqual(expect.arrayContaining(["active", "feature"]));
+  });
+
+  it("uses an explicit lifecycle tag to replace the existing lifecycle", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/lifecycle-change",
+      key: "status",
+      content: "Active status.",
+      tags: ["active"],
+    });
+
+    await callTool("memory_write", {
+      namespace: "projects/lifecycle-change",
+      key: "status",
+      content: "Completed status.",
+      tags: ["completed"],
+    });
+
+    const read = parseToolResponse(await callTool("memory_read", {
+      namespace: "projects/lifecycle-change",
+      key: "status",
+    })) as { tags: string[] };
+    expect(read.tags).toContain("completed");
+    expect(read.tags).not.toContain("active");
+  });
+
+  it("rejects an explicit empty tag list that would remove a tracked status lifecycle", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/lifecycle-removal",
+      key: "status",
+      content: "Active status.",
+      tags: ["active"],
+    });
+
+    const rejected = parseToolResponse(await callTool("memory_write", {
+      namespace: "projects/lifecycle-removal",
+      key: "status",
+      content: "Attempted lifecycle removal.",
+      tags: [],
+    })) as { ok: boolean; error: string; message: string };
+    expect(rejected).toMatchObject({ ok: false, error: "validation_error" });
+    expect(rejected.message).toContain("cannot remove its lifecycle");
+
+    const read = parseToolResponse(await callTool("memory_read", {
+      namespace: "projects/lifecycle-removal",
+      key: "status",
+    })) as { content: string; tags: string[] };
+    expect(read.content).toBe("Active status.");
+    expect(read.tags).toContain("active");
+  });
+
   it("warns when no lifecycle tag", async () => {
     const raw = await callTool("memory_write", {
       namespace: "projects/lc",

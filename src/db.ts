@@ -1400,6 +1400,107 @@ export interface DerivedCommitmentInput {
   confidence: number;
 }
 
+/** Minimum token overlap for two commitment texts to count as the same work. */
+const COMMITMENT_REVISION_SIMILARITY = 0.5;
+
+/** Tokens for similarity comparison: words of 3+ chars, deduplicated. */
+function commitmentTokens(text: string): Set<string> {
+  return new Set(
+    text.toLowerCase().match(/[a-z0-9#][a-z0-9#_-]{2,}/g) ?? [],
+  );
+}
+
+/** Issue-style references (`#248`) are a stable identity across rewording. */
+function issueReferences(text: string): Set<string> {
+  return new Set(text.match(/#\d+/g) ?? []);
+}
+
+function equalSets(a: Set<string>, b: Set<string>): boolean {
+  return a.size === b.size && [...a].every((value) => b.has(value));
+}
+
+function jaccard(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let shared = 0;
+  for (const token of a) if (b.has(token)) shared += 1;
+  return shared / (a.size + b.size - shared);
+}
+
+/**
+ * Pair commitments that vanished from a source with newly derived ones that are
+ * the *same work item reworded*.
+ *
+ * A commitment's fingerprint is its normalized text, so editing a next step —
+ * fixing a typo, appending an issue number — changes its identity. Without this
+ * pairing the old row is resolved `done` (with `resolved_at`) while the reworded
+ * successor is inserted `open`, so `memory_commitments` reports one live item as
+ * both open and completed in a single response, and a rewording silently reads
+ * as delivery. We only carry identity over when the texts have meaningful token
+ * overlap. Issue references constrain that match: distinct non-empty reference
+ * sets are different work, even if the prose overlaps. Ambiguous candidates are
+ * left unpaired rather than guessing, while a step that truly disappears still
+ * resolves.
+ *
+ * Exported for tests.
+ */
+export function pairRevisedCommitments(
+  orphans: Array<{ id: string; source_type: string; text: string }>,
+  fresh: DerivedCommitmentInput[],
+): Map<string, DerivedCommitmentInput> {
+  const pairs = new Map<string, DerivedCommitmentInput>();
+  const claimed = new Set<string>();
+
+  const scored: Array<{ score: number; orphanId: string; commitment: DerivedCommitmentInput }> = [];
+  for (const orphan of orphans) {
+    const orphanTokens = commitmentTokens(orphan.text);
+    const orphanIssues = issueReferences(orphan.text);
+    for (const commitment of fresh) {
+      // Never merge across derivation kinds: a tracked next step and an ad-hoc
+      // dated commitment are different objects even when worded alike.
+      if (commitment.sourceType !== orphan.source_type) continue;
+      const freshIssues = issueReferences(commitment.text);
+      // An issue reference is useful negative evidence, not a shortcut to
+      // identity: multiple sequential tasks can legitimately share one issue.
+      // If both sides name issue references, their sets must agree exactly.
+      if (orphanIssues.size > 0 && freshIssues.size > 0 && !equalSets(orphanIssues, freshIssues)) continue;
+      const score = jaccard(orphanTokens, commitmentTokens(commitment.text));
+      if (score < COMMITMENT_REVISION_SIMILARITY) continue;
+      scored.push({ score, orphanId: orphan.id, commitment });
+    }
+  }
+
+  // Only carry identity through an unambiguous best match on both sides. A
+  // deterministic but arbitrary tie would silently merge distinct next steps.
+  const bestByOrphan = new Map<string, { score: number; count: number }>();
+  const bestByFresh = new Map<string, { score: number; count: number }>();
+  for (const candidate of scored) {
+    for (const [key, scores] of [[candidate.orphanId, bestByOrphan], [candidate.commitment.fingerprint, bestByFresh]] as const) {
+      const current = scores.get(key);
+      if (!current || candidate.score > current.score) {
+        scores.set(key, { score: candidate.score, count: 1 });
+      } else if (candidate.score === current.score) {
+        current.count += 1;
+      }
+    }
+  }
+
+  scored.sort((a, b) => b.score - a.score);
+  for (const candidate of scored) {
+    const orphanBest = bestByOrphan.get(candidate.orphanId);
+    const freshBest = bestByFresh.get(candidate.commitment.fingerprint);
+    if (
+      !orphanBest || !freshBest
+      || orphanBest.score !== candidate.score || orphanBest.count !== 1
+      || freshBest.score !== candidate.score || freshBest.count !== 1
+    ) continue;
+    if (pairs.has(candidate.orphanId)) continue;
+    if (claimed.has(candidate.commitment.fingerprint)) continue;
+    pairs.set(candidate.orphanId, candidate.commitment);
+    claimed.add(candidate.commitment.fingerprint);
+  }
+  return pairs;
+}
+
 export function computeCommitmentConfidence(
   sourceType: string,
   semanticRevisionAt: string,
@@ -1537,6 +1638,24 @@ export function syncCommitmentsForEntry(
      SET status = ?, updated_at = ?, resolved_at = COALESCE(resolved_at, ?)
      WHERE id = ? AND status = 'open'`,
   );
+  // A rewording carries the row's identity forward: same id and created_at,
+  // new fingerprint/text, and a refreshed semantic-revision timestamp.
+  const reviseCommitment = db.prepare(
+    `UPDATE commitments
+     SET namespace = ?, source_fingerprint = ?, text = ?, due_at = ?, confidence = ?,
+         status = 'open', updated_at = ?, resolved_at = NULL, source_classification = ?
+     WHERE id = ?`,
+  );
+
+  // Pair vanished commitments with newly derived ones that are the same work
+  // reworded, so an edit is a revision rather than a completion plus an insert.
+  const revisionPairs = pairRevisedCommitments(
+    existingRows.filter(
+      (row) => row.status === "open" && !nextFingerprints.has(row.source_fingerprint),
+    ),
+    derivedCommitments.filter((commitment) => !existingByFingerprint.has(commitment.fingerprint)),
+  );
+  const revisedFingerprints = new Set([...revisionPairs.values()].map((c) => c.fingerprint));
 
   const txn = db.transaction(() => {
     if (sourceClassification === "client-restricted") {
@@ -1592,6 +1711,10 @@ export function syncCommitmentsForEntry(
         continue;
       }
 
+      // Reworded successors are applied through the revision pass below, which
+      // keeps the original row's id and created_at instead of inserting a twin.
+      if (revisedFingerprints.has(commitment.fingerprint)) continue;
+
       insertCommitment.run(
         randomUUID(),
         source.namespace,
@@ -1607,8 +1730,22 @@ export function syncCommitmentsForEntry(
       );
     }
 
+    for (const [orphanId, commitment] of revisionPairs) {
+      reviseCommitment.run(
+        source.namespace,
+        commitment.fingerprint,
+        commitment.text,
+        commitment.dueAt ?? null,
+        commitment.confidence,
+        now,
+        sourceClassification,
+        orphanId,
+      );
+    }
+
     for (const existing of existingRows) {
       if (nextFingerprints.has(existing.source_fingerprint)) continue;
+      if (revisionPairs.has(existing.id)) continue;
       const resolvedStatus: CommitmentStatus = existing.source_type === "tracked_next_step"
         ? "done"
         : "cancelled";
@@ -1838,7 +1975,12 @@ export function pruneRedactionLog(
 // --- Delete operations ---
 
 export interface DeleteInfo {
+  /** Total state revisions the delete will remove, including superseded history. */
   stateCount: number;
+  /** Current state entries within stateCount. */
+  currentStateCount: number;
+  /** Superseded state revisions within stateCount. */
+  historicalStateCount: number;
   logCount: number;
   keys: string[];
   /**
@@ -1861,6 +2003,18 @@ export class DeletePreviewStaleError extends Error {
   constructor(readonly current: DeleteInfo) {
     super("Delete target changed since the preview was generated.");
     this.name = "DeletePreviewStaleError";
+  }
+}
+
+/**
+ * Raised before a classified/owner-scoped preview can mint a token when its
+ * selection cuts through a correction chain. Confirming such a preview would
+ * either fail later or, worse, conceal revisions the caller cannot review.
+ */
+export class DeletePreviewPartialLineageError extends Error {
+  constructor() {
+    super("Deletion would remove only part of a correction chain; no preview token was generated.");
+    this.name = "DeletePreviewPartialLineageError";
   }
 }
 
@@ -1918,7 +2072,7 @@ function buildOwnerClause(allowGlobal: boolean, agentId: string): { clause: stri
   return { clause: " AND COALESCE(owner_principal_id, agent_id) = ?", params: [agentId] };
 }
 
-function deleteLineageForSelection(
+function assertCompleteLineageSelection(
   db: Database.Database,
   selectionSql: string,
   params: unknown[],
@@ -1929,8 +2083,16 @@ function deleteLineageForSelection(
      LIMIT 1`,
   ).get(...params, ...params);
   if (partial) {
-    throw new Error("Deletion would remove only part of a correction chain; no entries were deleted.");
+    throw new DeletePreviewPartialLineageError();
   }
+}
+
+function deleteLineageForSelection(
+  db: Database.Database,
+  selectionSql: string,
+  params: unknown[],
+): void {
+  assertCompleteLineageSelection(db, selectionSql, params);
   db.prepare(
     `DELETE FROM entry_supersessions
      WHERE predecessor_id IN (${selectionSql}) OR successor_id IN (${selectionSql})`,
@@ -2036,34 +2198,53 @@ export function previewDelete(
 
   if (key) {
     const sql = allowGlobalNamespaceDelete
-      ? `SELECT ${DELETE_TARGET_COLUMNS} FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1`
-      : `SELECT ${DELETE_TARGET_COLUMNS} FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1 AND COALESCE(owner_principal_id, agent_id) = ?`;
+      ? `SELECT ${DELETE_TARGET_COLUMNS}, is_current FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' ORDER BY id`
+      : `SELECT ${DELETE_TARGET_COLUMNS}, is_current FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND COALESCE(owner_principal_id, agent_id) = ? ORDER BY id`;
     const params = allowGlobalNamespaceDelete ? [namespace, key] : [namespace, key, agentId];
-    const entry = db.prepare(sql).get(...params) as DeleteTargetRow | undefined;
-    if (entry) hashDeleteRow(hash, entry);
+    const selectionSql = allowGlobalNamespaceDelete
+      ? "SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state'"
+      : "SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND COALESCE(owner_principal_id, agent_id) = ?";
+    assertCompleteLineageSelection(db, selectionSql, params);
+    let stateCount = 0;
+    let currentStateCount = 0;
+    for (const entry of db.prepare(sql).iterate(...params) as Iterable<DeleteTargetRow & { is_current: number }>) {
+      stateCount += 1;
+      currentStateCount += entry.is_current;
+      hashDeleteRow(hash, entry);
+    }
     return {
-      stateCount: entry ? 1 : 0,
+      stateCount,
+      currentStateCount,
+      historicalStateCount: stateCount - currentStateCount,
       logCount: 0,
-      keys: entry ? [key] : [],
+      keys: currentStateCount > 0 ? [key] : [],
       fingerprint: hash.digest("hex"),
     };
   }
 
   const stateSql = allowGlobalNamespaceDelete
-    ? `SELECT key, ${DELETE_TARGET_COLUMNS} FROM entries WHERE namespace = ? AND entry_type = 'state' AND is_current = 1 ORDER BY key, id`
-    : `SELECT key, ${DELETE_TARGET_COLUMNS} FROM entries WHERE namespace = ? AND entry_type = 'state' AND is_current = 1 AND COALESCE(owner_principal_id, agent_id) = ? ORDER BY key, id`;
+    ? `SELECT key, ${DELETE_TARGET_COLUMNS}, is_current FROM entries WHERE namespace = ? AND entry_type = 'state' ORDER BY key, id`
+    : `SELECT key, ${DELETE_TARGET_COLUMNS}, is_current FROM entries WHERE namespace = ? AND entry_type = 'state' AND COALESCE(owner_principal_id, agent_id) = ? ORDER BY key, id`;
   const stateParams = allowGlobalNamespaceDelete ? [namespace] : [namespace, agentId];
 
   const logSql = allowGlobalNamespaceDelete
-    ? `SELECT ${DELETE_TARGET_COLUMNS} FROM entries WHERE namespace = ? AND entry_type = 'log' AND is_current = 1 ORDER BY id`
-    : `SELECT ${DELETE_TARGET_COLUMNS} FROM entries WHERE namespace = ? AND entry_type = 'log' AND is_current = 1 AND COALESCE(owner_principal_id, agent_id) = ? ORDER BY id`;
+    ? `SELECT ${DELETE_TARGET_COLUMNS} FROM entries WHERE namespace = ? AND entry_type = 'log' ORDER BY id`
+    : `SELECT ${DELETE_TARGET_COLUMNS} FROM entries WHERE namespace = ? AND entry_type = 'log' AND COALESCE(owner_principal_id, agent_id) = ? ORDER BY id`;
   const logParams = allowGlobalNamespaceDelete ? [namespace] : [namespace, agentId];
 
   // Streamed, not materialised: a namespace delete may cover thousands of rows
   // and the digest needs their content, which we never want to hold at once.
+  const selectionSql = allowGlobalNamespaceDelete
+    ? "SELECT id FROM entries WHERE namespace = ?"
+    : "SELECT id FROM entries WHERE namespace = ? AND COALESCE(owner_principal_id, agent_id) = ?";
+  assertCompleteLineageSelection(db, selectionSql, stateParams);
   const keys: string[] = [];
-  for (const row of db.prepare(stateSql).iterate(...stateParams) as Iterable<{ key: string } & DeleteTargetRow>) {
-    keys.push(row.key);
+  let stateCount = 0;
+  let currentStateCount = 0;
+  for (const row of db.prepare(stateSql).iterate(...stateParams) as Iterable<{ key: string; is_current: number } & DeleteTargetRow>) {
+    stateCount += 1;
+    currentStateCount += row.is_current;
+    if (row.is_current === 1) keys.push(row.key);
     hashDeleteRow(hash, row);
   }
   let logCount = 0;
@@ -2073,7 +2254,9 @@ export function previewDelete(
   }
 
   return {
-    stateCount: keys.length,
+    stateCount,
+    currentStateCount,
+    historicalStateCount: stateCount - currentStateCount,
     logCount,
     keys,
     fingerprint: hash.digest("hex"),
@@ -2094,37 +2277,44 @@ export function previewDeleteByClassification(
 
   if (key) {
     const sql = allowGlobalNamespaceDelete
-      ? `SELECT ${DELETE_TARGET_COLUMNS} FROM entries
+      ? `SELECT ${DELETE_TARGET_COLUMNS}, is_current FROM entries
          WHERE namespace = ? AND key = ? AND entry_type = 'state'
-           AND is_current = 1
-           AND classification IN (${placeholders})`
-      : `SELECT ${DELETE_TARGET_COLUMNS} FROM entries
+           AND classification IN (${placeholders}) ORDER BY id`
+      : `SELECT ${DELETE_TARGET_COLUMNS}, is_current FROM entries
          WHERE namespace = ? AND key = ? AND entry_type = 'state'
-           AND is_current = 1
            AND COALESCE(owner_principal_id, agent_id) = ?
-           AND classification IN (${placeholders})`;
+           AND classification IN (${placeholders}) ORDER BY id`;
     const params = allowGlobalNamespaceDelete
       ? [namespace, key, ...visibleLevels]
       : [namespace, key, agentId, ...visibleLevels];
-    const entry = db.prepare(sql).get(...params) as DeleteTargetRow | undefined;
-    if (entry) hashDeleteRow(hash, entry);
+    const selectionSql = allowGlobalNamespaceDelete
+      ? `SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND classification IN (${placeholders})`
+      : `SELECT id FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND COALESCE(owner_principal_id, agent_id) = ? AND classification IN (${placeholders})`;
+    assertCompleteLineageSelection(db, selectionSql, params);
+    let stateCount = 0;
+    let currentStateCount = 0;
+    for (const entry of db.prepare(sql).iterate(...params) as Iterable<DeleteTargetRow & { is_current: number }>) {
+      stateCount += 1;
+      currentStateCount += entry.is_current;
+      hashDeleteRow(hash, entry);
+    }
     return {
-      stateCount: entry ? 1 : 0,
+      stateCount,
+      currentStateCount,
+      historicalStateCount: stateCount - currentStateCount,
       logCount: 0,
-      keys: entry ? [key] : [],
+      keys: currentStateCount > 0 ? [key] : [],
       fingerprint: hash.digest("hex"),
     };
   }
 
   const stateSql = allowGlobalNamespaceDelete
-    ? `SELECT key, ${DELETE_TARGET_COLUMNS} FROM entries
+    ? `SELECT key, ${DELETE_TARGET_COLUMNS}, is_current FROM entries
        WHERE namespace = ? AND entry_type = 'state'
-         AND is_current = 1
          AND classification IN (${placeholders})
        ORDER BY key, id`
-    : `SELECT key, ${DELETE_TARGET_COLUMNS} FROM entries
+    : `SELECT key, ${DELETE_TARGET_COLUMNS}, is_current FROM entries
        WHERE namespace = ? AND entry_type = 'state'
-         AND is_current = 1
          AND COALESCE(owner_principal_id, agent_id) = ?
          AND classification IN (${placeholders})
        ORDER BY key, id`;
@@ -2135,12 +2325,10 @@ export function previewDeleteByClassification(
   const logSql = allowGlobalNamespaceDelete
     ? `SELECT ${DELETE_TARGET_COLUMNS} FROM entries
        WHERE namespace = ? AND entry_type = 'log'
-         AND is_current = 1
          AND classification IN (${placeholders})
        ORDER BY id`
     : `SELECT ${DELETE_TARGET_COLUMNS} FROM entries
        WHERE namespace = ? AND entry_type = 'log'
-         AND is_current = 1
          AND COALESCE(owner_principal_id, agent_id) = ?
          AND classification IN (${placeholders})
        ORDER BY id`;
@@ -2148,9 +2336,17 @@ export function previewDeleteByClassification(
     ? [namespace, ...visibleLevels]
     : [namespace, agentId, ...visibleLevels];
 
+  const selectionSql = allowGlobalNamespaceDelete
+    ? `SELECT id FROM entries WHERE namespace = ? AND classification IN (${placeholders})`
+    : `SELECT id FROM entries WHERE namespace = ? AND COALESCE(owner_principal_id, agent_id) = ? AND classification IN (${placeholders})`;
+  assertCompleteLineageSelection(db, selectionSql, stateParams);
   const keys: string[] = [];
-  for (const row of db.prepare(stateSql).iterate(...stateParams) as Iterable<{ key: string } & DeleteTargetRow>) {
-    keys.push(row.key);
+  let stateCount = 0;
+  let currentStateCount = 0;
+  for (const row of db.prepare(stateSql).iterate(...stateParams) as Iterable<{ key: string; is_current: number } & DeleteTargetRow>) {
+    stateCount += 1;
+    currentStateCount += row.is_current;
+    if (row.is_current === 1) keys.push(row.key);
     hashDeleteRow(hash, row);
   }
   let logCount = 0;
@@ -2160,7 +2356,9 @@ export function previewDeleteByClassification(
   }
 
   return {
-    stateCount: keys.length,
+    stateCount,
+    currentStateCount,
+    historicalStateCount: stateCount - currentStateCount,
     logCount,
     keys,
     fingerprint: hash.digest("hex"),
