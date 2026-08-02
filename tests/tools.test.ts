@@ -10,6 +10,12 @@ import {
   writeState,
 } from "../src/db.js";
 import { registerTools, _setHealthSectionOverridesForTesting } from "../src/tools.js";
+import {
+  KEY_PATTERN,
+  NAMESPACE_PATTERN,
+  TAG_PATTERN,
+  WRITE_NAMESPACE_PATTERN,
+} from "../src/security.js";
 import { ownerContext } from "../src/access.js";
 import type { AccessContext } from "../src/access.js";
 import { _setApiKey, _consolidationConfig, resetConsolidationCircuitBreaker, getConsolidationHealth, _resetHealthState } from "../src/consolidation.js";
@@ -6195,8 +6201,9 @@ describe("compare-and-swap (memory_write)", () => {
     for (const name of ["memory_write", "memory_log"]) {
       const description = tools.find((tool) => tool.name === name)
         ?.inputSchema.properties?.namespace?.description;
-      expect(description).toContain("trailing slashes");
-      expect(description).toContain("empty segments");
+      const normalized = description?.toLowerCase();
+      expect(normalized).toContain("trailing slashes");
+      expect(normalized).toContain("empty segments");
       expect(description).toContain("maintenance/");
     }
   });
@@ -6238,6 +6245,125 @@ describe("compare-and-swap (memory_write)", () => {
       expect(toolsByName.get(toolName)?.inputSchema.properties?.valid_until?.type)
         .toEqual(expect.arrayContaining(["string", "null"]));
     }
+  });
+
+  it("advertises namespace and key grammar patterns across tool schemas", async () => {
+    const handler = (
+      server as unknown as { _requestHandlers: Map<string, Function> }
+    )._requestHandlers?.get("tools/list");
+    const toolList = await handler!({ method: "tools/list", params: {} });
+    const toolsByName = new Map(
+      (toolList as {
+        tools: Array<{
+          name: string;
+          inputSchema: {
+            properties?: Record<string, unknown>;
+          };
+        }>;
+      }).tools.map((tool) => [tool.name, tool]),
+    );
+
+    type SchemaNode = {
+      pattern?: string;
+      title?: string;
+      description?: string;
+      enum?: unknown[];
+      properties?: Record<string, SchemaNode>;
+      items?: SchemaNode;
+    };
+
+    const readSchema = (toolName: string, path: string[]): SchemaNode | undefined => {
+      let current: SchemaNode | undefined = toolsByName.get(toolName)?.inputSchema as SchemaNode | undefined;
+      for (const segment of path) {
+        current = segment === "items"
+          ? current?.items
+          : current?.properties?.[segment];
+      }
+      return current;
+    };
+
+    const expectPattern = (toolName: string, path: string[], pattern: string) => {
+      const schema = readSchema(toolName, path);
+      expect(schema, `${toolName} ${path.join(".")} schema should exist`).toBeDefined();
+      expect(schema?.pattern, `${toolName} ${path.join(".")} should advertise a pattern`).toBe(pattern);
+      expect(schema?.description, `${toolName} ${path.join(".")} should advertise a description`).toBeTruthy();
+    };
+
+    for (const [toolName, path] of [
+      ["memory_resume", ["namespace"]],
+      ["memory_extract", ["namespace_hint"]],
+      ["memory_narrative", ["namespace"]],
+      ["memory_commitments", ["namespace"]],
+      ["memory_patterns", ["namespace"]],
+      ["memory_handoff", ["namespace"]],
+      ["memory_query", ["namespace"]],
+      ["memory_list", ["namespace"]],
+      ["memory_delete", ["namespace"]],
+    ] as const) {
+      expectPattern(toolName, [...path], NAMESPACE_PATTERN);
+    }
+
+    for (const [toolName, path] of [
+      ["memory_write", ["namespace"]],
+      ["memory_log", ["namespace"]],
+      ["memory_update_status", ["namespace"]],
+      ["memory_consolidate", ["namespace"]],
+    ] as const) {
+      expectPattern(toolName, [...path], WRITE_NAMESPACE_PATTERN);
+    }
+
+    for (const [toolName, path] of [
+      ["memory_write", ["key"]],
+      ["memory_read", ["key"]],
+      ["memory_read_batch", ["reads", "items", "key"]],
+      ["memory_delete", ["key"]],
+    ] as const) {
+      expectPattern(toolName, [...path], KEY_PATTERN);
+    }
+
+    expect(readSchema("memory_write", ["namespace"])?.description).toContain("Write target");
+    expect(readSchema("memory_query", ["namespace"])?.description).toContain("Prefix filters may end with '/'");
+  });
+
+  it("keeps tag schemas freeform while constraining item grammar", async () => {
+    const handler = (
+      server as unknown as { _requestHandlers: Map<string, Function> }
+    )._requestHandlers?.get("tools/list");
+    const toolList = await handler!({ method: "tools/list", params: {} });
+    const toolsByName = new Map(
+      (toolList as {
+        tools: Array<{
+          name: string;
+          inputSchema: {
+            properties?: Record<string, unknown>;
+          };
+        }>;
+      }).tools.map((tool) => [tool.name, tool]),
+    );
+
+    type ArraySchema = {
+      description?: string;
+      items?: {
+        pattern?: string;
+        enum?: unknown[];
+      };
+    };
+
+    for (const toolName of ["memory_write", "memory_log"] as const) {
+      const tags = toolsByName.get(toolName)?.inputSchema.properties?.tags as ArraySchema | undefined;
+      expect(tags?.description, `${toolName} tags should stay documented as freeform`).toContain("freeform");
+      expect(tags?.items?.pattern, `${toolName} tags should constrain item grammar`).toBe(TAG_PATTERN);
+      expect(tags?.items?.enum, `${toolName} tags must not be falsely enumerated`).toBeUndefined();
+    }
+
+    const queryTags = toolsByName.get("memory_query")?.inputSchema.properties?.tags as ArraySchema | undefined;
+    expect(queryTags?.description).toContain("freeform");
+    expect(queryTags?.items?.pattern).toBeUndefined();
+    expect(queryTags?.items?.enum).toBeUndefined();
+
+    const patchSchema = toolsByName.get("memory_write")?.inputSchema.properties?.patch as SchemaNode | undefined;
+    const patchTags = patchSchema?.properties?.tags_add?.items;
+    expect(patchTags?.pattern).toBe(TAG_PATTERN);
   });
 
   it("provides an explicit create-if-absent contract and typed winner conflict", async () => {
