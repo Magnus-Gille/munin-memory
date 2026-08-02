@@ -11,6 +11,12 @@
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import { nowUTC } from "./db.js";
+import {
+  intersectNamespaceSelectors,
+  namespaceFilterToSelectors,
+  type NamespaceSelector,
+  normalizeNamespaceSelectors,
+} from "./internal/namespace-filter.js";
 import type { AuthMethod, ClassificationLevel, TransportType } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -361,6 +367,84 @@ export function filterByAccess<T extends { namespace: string }>(
     return entries;
   }
   return entries.filter((entry) => canRead(ctx, entry.namespace));
+}
+
+function readableNamespaceRules(ctx: AccessContext): NamespaceRule[] {
+  return ctx.accessibleNamespaces.filter(
+    (rule) => rule.permissions === "read" || rule.permissions === "rw",
+  );
+}
+
+/**
+ * Translate a readable namespace rule into the exact SQL-selector shape we can
+ * prove is equivalent to canonical namespaceMatchesPattern/canRead semantics:
+ *   - "*"      → unrestricted
+ *   - "x/*"    → descendants under "x/" only
+ *   - "x"      → exact namespace only
+ *
+ * Any other wildcard-bearing pattern is intentionally treated as
+ * unrepresentable. Canonical read authorization remains authoritative after the
+ * DB read, so widening the SQL prefilter is safe; narrowing on guessed rule
+ * semantics is not.
+ */
+function selectorsForReadableRule(rule: NamespaceRule): NamespaceSelector[] | null | undefined {
+  if (rule.pattern === "*") return null;
+  const firstWildcard = rule.pattern.indexOf("*");
+  if (firstWildcard === rule.pattern.length - 1 && rule.pattern.endsWith("/*")) {
+    return [{ kind: "prefix", value: rule.pattern.slice(0, -1) }];
+  }
+  if (firstWildcard !== -1) return undefined;
+  return [{ kind: "exact", value: rule.pattern }];
+}
+
+function resolveRepresentableReadableNamespaceSelectors(
+  readableRules: NamespaceRule[],
+): NamespaceSelector[] | null | undefined {
+  const selectors: NamespaceSelector[] = [];
+  for (const rule of readableRules) {
+    const ruleSelectors = selectorsForReadableRule(rule);
+    if (ruleSelectors === undefined) return undefined;
+    if (ruleSelectors === null) return null;
+    selectors.push(...ruleSelectors);
+  }
+  return normalizeNamespaceSelectors(selectors);
+}
+
+/**
+ * Resolve the literal namespace selectors a query-like read should search
+ * after applying the caller's readable namespace rules. `null` means
+ * unrestricted (owner, readable wildcard, or deliberately widened fallback
+ * with no requested namespace); `[]` means the caller has no readable overlap
+ * at all. When a readable rule shape cannot be translated to provably
+ * equivalent selectors, the helper fails open to requested-namespace-only SQL
+ * filtering and leaves canonical canRead post-filtering authoritative.
+ */
+export function resolveReadableNamespaceSelectors(
+  ctx: AccessContext,
+  requestedNamespace?: string,
+): NamespaceSelector[] | null {
+  const requestedSelectors = namespaceFilterToSelectors(requestedNamespace, "subtree");
+
+  if (ctx.principalType === "owner") {
+    return requestedSelectors ?? null;
+  }
+
+  const readableRules = readableNamespaceRules(ctx);
+  if (readableRules.length === 0) return [];
+
+  const readableSelectors = resolveRepresentableReadableNamespaceSelectors(readableRules);
+  if (readableSelectors === undefined) {
+    return requestedSelectors ?? null;
+  }
+  if (readableSelectors === null) {
+    return requestedSelectors ?? null;
+  }
+
+  if (requestedSelectors === undefined) {
+    return readableSelectors;
+  }
+
+  return intersectNamespaceSelectors(readableSelectors, requestedSelectors);
 }
 
 // ---------------------------------------------------------------------------

@@ -92,6 +92,7 @@ describe("runMigrations", () => {
     expect(names).toContain("idx_entries_ns_key");
     expect(names).toContain("idx_entries_ns_type_key");
     expect(names).toContain("idx_entries_ns_type_created");
+    expect(names).toContain("idx_entries_state_history");
     expect(names).toContain("idx_entries_created");
     expect(names).toContain("idx_entries_state_valid_until");
     expect(names).toContain("idx_commitments_namespace_status_due");
@@ -132,6 +133,45 @@ describe("runMigrations", () => {
       .prepare("SELECT * FROM schema_version")
       .all() as Array<{ version: number }>;
     expect(records).toHaveLength(migrations.length);
+    db.close();
+  });
+
+  it("reconciles the pre-merge v23 histories without losing either index", () => {
+    const db = openRawDb();
+    registerMuninUDFs(db);
+    db.exec(`
+      CREATE TABLE schema_version (
+        version INTEGER PRIMARY KEY,
+        applied_at TEXT NOT NULL
+      );
+    `);
+    for (const migration of migrations.filter(({ version }) => version <= 22)) {
+      migration.up(db);
+      db.prepare("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)")
+        .run(migration.version, new Date().toISOString());
+    }
+
+    // The pre-merge #300 branch used v23 for this index before #299 occupied
+    // v23 on main. Mark that history as applied, then let v24 repair the
+    // state-history index while remaining idempotent for the review index.
+    db.exec(`
+      CREATE INDEX idx_review_proposals_terminal_retention
+        ON review_proposals(status, payload_purged_at, terminal_at, id);
+    `);
+    db.prepare("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)")
+      .run(23, new Date().toISOString());
+
+    runMigrations(db);
+
+    const indexes = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'index'")
+      .all() as Array<{ name: string }>;
+    const names = indexes.map(({ name }) => name);
+    expect(names).toEqual(expect.arrayContaining([
+      "idx_entries_state_history",
+      "idx_review_proposals_terminal_retention",
+    ]));
+    expect(getSchemaVersion(db)).toBe(24);
     db.close();
   });
 

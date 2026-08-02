@@ -61,7 +61,30 @@ Status entries use lifecycle tags (`active`, `blocked`, `completed`, `stopped`,
 `memory_update_status` can also set or clear `valid_until` to declare when a tracked
 status should next be reviewed. Expired statuses remain directly readable, are surfaced
 by `memory_attention` when `include_expiring` is enabled, and are hidden from broad search
-by default.
+by default. For sandbox-safe rehearsals, `memory_update_status(validate_only:true)` runs
+the same namespace authorization, lifecycle/classification/CAS, and content validation
+logic without mutating memory state; that dry-run path may target any namespace the caller
+can write, while a real `memory_update_status` mutation remains restricted to tracked roots.
+Ordinary content-blind tool-call telemetry remains enabled for observability.
+
+Namespace-scoped retrieval is literal and case-sensitive. In `memory_query`, a bare
+namespace such as `projects/munin-memory` matches that namespace and its descendants,
+while a trailing-slash filter such as `projects/` matches only descendants under that
+literal prefix. Successful query responses echo this as `namespace_scope: "subtree"` or
+`namespace_scope: "prefix"`; responses omit `namespace_scope` when no namespace filter
+was applied.
+
+`memory_commitments` derives tracked follow-through from canonical tracked-status
+`Next Steps`, dated future clauses in visible tracked-status prose, explicit
+`memory_log` commitment phrases such as `We agreed to: ...` or
+`I commit to: ...`, and future-dated `memory_log` phrases. Generic non-status
+state fields are not commitment sources. Legacy plain markdown status blobs with
+ad-hoc `Next Steps:` headings remain readable, but they do not become
+commitment rows until they are migrated to the canonical structure.
+Compatibility note: older derived rows from those legacy plain-status blocks
+are retired as non-completions during refresh, and older whole-segment dated
+rows are revised to the surviving future clause when that obligation is still
+present in the source.
 
 ---
 
@@ -209,15 +232,18 @@ timestamps.
 Default query, list, dashboard, consolidation, commitment, and derived-memory paths expose
 only current revisions. `include_expired` changes soft-expiry filtering only—it never brings
 superseded revisions back. Historical evidence remains available through `memory_get(id)`.
-For state, `memory_read(namespace, key, as_of)` returns the revision valid at that instant;
-validity intervals are half-open, so the successor wins exactly at its `valid_from` boundary.
+For state, `memory_read(namespace, key, as_of)` returns the recorded revision valid at that instant when explicit correction lineage covers that time; validity intervals are half-open, so the successor wins exactly at its `valid_from` boundary. Ordinary overwrites and patches rewrite the current row in place and advance that row's own `valid_from` boundary to the mutation time, so earlier instants are intentionally uncovered rather than returning rewritten current content. Legacy rows were backfilled from their last update, so uncovered timestamps return `found:false` with `history_available:false` instead of inventing history when the caller is authorized to know that recorded gap exists.
 
 Corrections require read and write access, ownership of the source entry unless the caller is
 the owner principal, an exact CAS match, the same namespace and state key, and a classification
 at least as restrictive as the predecessor. One revision can have only one successor, so stale
 or branching attempts return a conflict. Explicit backdating is owner-only, cannot precede the
-target revision's `valid_from`, and cannot be in the future. Omitting `valid_from` uses the
-server's current time. Deleting a state key removes its complete correction chain atomically.
+target revision's `valid_from`, and this write path still rejects future `valid_from` values.
+The one narrow temporal exception is `memory_read(as_of)`: the exact visible current
+`valid_from`/`updated_at` boundary can round-trip even if wall-clock comparison sees it as
+narrowly future, but arbitrary or hidden future instants remain rejected. Omitting `valid_from`
+uses the server's current time. Deleting a state key removes its complete correction chain
+atomically.
 
 `valid_until` remains independent soft expiry. An expired current successor stays current but
 is hidden from broad retrieval by default; expiry never resurrects an older revision. Retention,

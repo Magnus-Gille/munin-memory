@@ -142,6 +142,16 @@ describe("getAuditHistory — namespace filter", () => {
     expect(namespaces).toContain("projects/alpha/subns");
   });
 
+  it("matches namespace filters case-sensitively", () => {
+    writeState(db, "Projects/Alpha", "status", "upper status", []);
+    writeState(db, "Projects/Alpha/Sub", "status", "upper child", []);
+    writeState(db, "projects/alpha/sub-lower", "status", "lower child", []);
+
+    const result = getAuditHistory(db, { namespace: "Projects/Alpha" });
+
+    expect(result.map((e) => e.namespace).sort()).toEqual(["Projects/Alpha", "Projects/Alpha/Sub"]);
+  });
+
   it("namespace filter excludes other namespaces", () => {
     const result = getAuditHistory(db, { namespace: "people/owner" });
     expect(result.length).toBe(1);
@@ -366,6 +376,94 @@ describe("memory_history tool handler", () => {
 
     expect(result.count).toBe(1);
     expect(result.entries[0].namespace).toBe("projects/alpha");
+  });
+
+  it("trailing-slash namespace filters stay descendant-only through the tool handler", async () => {
+    writeState(db, "projects/root", "status", "parent", []);
+    writeState(db, "projects/root/sub", "status", "child", []);
+
+    const raw = await callTool(server, "memory_history", {
+      namespace: "projects/root/",
+    });
+    const result = parseToolResponse(raw) as {
+      count: number;
+      entries: Array<{ namespace: string }>;
+    };
+
+    expect(result.count).toBe(1);
+    expect(result.entries.map((entry) => entry.namespace)).toEqual(["projects/root/sub"]);
+  });
+
+  it("namespace filters stay case-sensitive through the tool handler", async () => {
+    writeState(db, "Projects/Alpha", "status", "upper parent", []);
+    writeState(db, "Projects/Alpha/Sub", "status", "upper child", []);
+    writeState(db, "projects/alpha/sub-lower", "status", "lower child", []);
+
+    const raw = await callTool(server, "memory_history", {
+      namespace: "Projects/Alpha",
+    });
+    const result = parseToolResponse(raw) as {
+      count: number;
+      entries: Array<{ namespace: string }>;
+    };
+
+    expect(result.count).toBe(2);
+    expect(result.entries.map((entry) => entry.namespace).sort()).toEqual([
+      "Projects/Alpha",
+      "Projects/Alpha/Sub",
+    ]);
+  });
+
+  it("bare namespace filters keep emoji descendants through the tool handler", async () => {
+    writeState(db, "projects/emoji", "status", "parent", []);
+    writeState(db, "projects/emoji-child-temp", "status", "child", []);
+    writeState(db, "projects/emoji-grandchild-temp", "status", "grandchild", []);
+    writeState(db, "projects/emoji-outside-temp", "status", "outside", []);
+    db.prepare("UPDATE entries SET namespace = ? WHERE namespace = ? AND key = ?").run(
+      "projects/emoji/😀",
+      "projects/emoji-child-temp",
+      "status",
+    );
+    db.prepare("UPDATE entries SET namespace = ? WHERE namespace = ? AND key = ?").run(
+      "projects/emoji/😀/deep",
+      "projects/emoji-grandchild-temp",
+      "status",
+    );
+    db.prepare("UPDATE entries SET namespace = ? WHERE namespace = ? AND key = ?").run(
+      "projects/emojiish/😀",
+      "projects/emoji-outside-temp",
+      "status",
+    );
+    db.prepare("UPDATE audit_log SET namespace = ? WHERE namespace = ? AND key = ?").run(
+      "projects/emoji/😀",
+      "projects/emoji-child-temp",
+      "status",
+    );
+    db.prepare("UPDATE audit_log SET namespace = ? WHERE namespace = ? AND key = ?").run(
+      "projects/emoji/😀/deep",
+      "projects/emoji-grandchild-temp",
+      "status",
+    );
+    db.prepare("UPDATE audit_log SET namespace = ? WHERE namespace = ? AND key = ?").run(
+      "projects/emojiish/😀",
+      "projects/emoji-outside-temp",
+      "status",
+    );
+
+    const raw = await callTool(server, "memory_history", {
+      namespace: "projects/emoji",
+    });
+    const result = parseToolResponse(raw) as {
+      count: number;
+      entries: Array<{ namespace: string }>;
+    };
+
+    expect(result.count).toBe(3);
+    expect(result.entries.map((entry) => entry.namespace).sort()).toEqual([
+      "projects/emoji",
+      "projects/emoji/😀",
+      "projects/emoji/😀/deep",
+    ]);
   });
 
   it("action filter works through tool handler", async () => {

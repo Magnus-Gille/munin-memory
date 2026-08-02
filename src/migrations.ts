@@ -982,8 +982,35 @@ export const migrations: Migration[] = [
   },
   {
     version: 23,
-    description: "Index terminal review proposal payload pruning by status and cutoff (#300)",
+    description: "Add key-aligned state-history index for as-of reads (#273)",
     up: (db) => {
+      const entriesTableExists = db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'entries'",
+      ).get();
+      if (!entriesTableExists) return;
+
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_entries_state_history
+          ON entries(namespace, key, valid_from)
+          WHERE entry_type = 'state';
+      `);
+    },
+  },
+  {
+    version: 24,
+    description: "Index review retention and reconcile state-history indexes (#300)",
+    up: (db) => {
+      const entriesTableExists = db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'entries'",
+      ).get();
+      if (entriesTableExists) {
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS idx_entries_state_history
+            ON entries(namespace, key, valid_from)
+            WHERE entry_type = 'state';
+        `);
+      }
+
       db.exec(`
         CREATE INDEX IF NOT EXISTS idx_review_proposals_terminal_retention
           ON review_proposals(status, payload_purged_at, terminal_at, id);
