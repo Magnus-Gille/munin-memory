@@ -259,104 +259,55 @@ describe("memory_write", () => {
     expect(entry.tags).toContain("classification:client-confidential");
   });
 
-  it("marks floor-defaulted write classifications as provisional without blocking the write (#263)", async () => {
+  it("keeps write response, stored entry, and memory_history classification aligned (#263)", async () => {
     const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
     process.env.MUNIN_LIBRARIAN_ENABLED = "true";
     try {
       const raw = await callTool("memory_write", {
-        namespace: "projects/classification-response",
+        namespace: "clients/issue-263",
         key: "notes",
-        content: "Returned classification is a floor default until the optional classifier settles.",
+        content: "Classification is resolved before the response is emitted.",
         tags: ["active"],
       });
       const result = parseToolResponse(raw) as {
         status: string;
         id: string;
         classification: string;
-        classification_provisional?: boolean;
-      };
-
-      expect(result).toMatchObject({
-        status: "created",
-        classification: "internal",
-        classification_provisional: true,
-      });
-
-      const stored = db.prepare(
-        "SELECT classification FROM entries WHERE id = ?",
-      ).get(result.id) as { classification: string };
-      expect(stored.classification).toBe("internal");
-
-      const audit = db.prepare(
-        "SELECT detail FROM audit_log WHERE entry_id = ?",
-      ).get(result.id) as { detail: string };
-      expect(audit.detail).toContain("classification_provisional internal");
-    } finally {
-      if (previousLibrarian === undefined) {
-        delete process.env.MUNIN_LIBRARIAN_ENABLED;
-      } else {
-        process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
-      }
-    }
-  });
-
-  it("keeps caller-set classifications provisional when the Librarian can still escalate them (#263)", async () => {
-    const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
-    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
-    try {
-      const raw = await callTool("memory_write", {
-        namespace: "projects/classification-explicit",
-        key: "notes",
-        content: "Caller-selected classification may still be raised by content classification.",
-        classification: "client-confidential",
-      });
-      const result = parseToolResponse(raw) as {
-        status: string;
-        id: string;
-        classification: string;
-        classification_provisional?: boolean;
       };
 
       expect(result).toMatchObject({
         status: "created",
         classification: "client-confidential",
-        classification_provisional: true,
       });
+      expect(result).not.toHaveProperty("classification_provisional");
+
+      const readRaw = await callTool("memory_read", {
+        namespace: "clients/issue-263",
+        key: "notes",
+      });
+      const stored = parseToolResponse(readRaw) as { classification: string };
+      expect(stored.classification).toBe(result.classification);
+
+      const consumerOwnerCall = makeContextCallTool({
+        ...ownerContext(),
+        transportType: "consumer",
+        maxClassification: "internal",
+      });
+      const historyRaw = await consumerOwnerCall("memory_history", {
+        namespace: "clients/issue-263",
+      });
+      const history = parseToolResponse(historyRaw) as {
+        entries: Array<{ action: string; classification: string; detail: string | null }>;
+      };
+      const writeAudit = history.entries.find((entry) => entry.action === "write");
+      expect(writeAudit).toBeDefined();
+      expect(writeAudit?.classification).toBe(result.classification);
+      expect(writeAudit?.detail).toBeNull();
 
       const audit = db.prepare(
         "SELECT detail FROM audit_log WHERE entry_id = ?",
       ).get(result.id) as { detail: string };
-      expect(audit.detail).toContain("classification_provisional client-confidential");
-    } finally {
-      if (previousLibrarian === undefined) {
-        delete process.env.MUNIN_LIBRARIAN_ENABLED;
-      } else {
-        process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
-      }
-    }
-  });
-
-  it("does not mark the top classification as provisional because it cannot escalate (#263)", async () => {
-    const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
-    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
-    try {
-      const raw = await callTool("memory_write", {
-        namespace: "projects/classification-settled",
-        key: "notes",
-        content: "Already at the top of the classification lattice.",
-        classification: "client-restricted",
-      });
-      const result = parseToolResponse(raw) as {
-        status: string;
-        classification: string;
-        classification_provisional?: boolean;
-      };
-
-      expect(result).toMatchObject({
-        status: "created",
-        classification: "client-restricted",
-      });
-      expect(result.classification_provisional).toBeUndefined();
+      expect(audit.detail).not.toContain("classification_provisional");
     } finally {
       if (previousLibrarian === undefined) {
         delete process.env.MUNIN_LIBRARIAN_ENABLED;
@@ -694,14 +645,14 @@ describe("memory_update_status", () => {
     expect(entry.tags).toContain("classification:client-confidential");
   });
 
-  it("marks tracked-status classifications as provisional when classification is not explicit (#263)", async () => {
+  it("returns the settled tracked-status classification without a provisional audit suffix (#263)", async () => {
     const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
     process.env.MUNIN_LIBRARIAN_ENABLED = "true";
     try {
       const raw = await callTool("memory_update_status", {
         namespace: "projects/status-provisional",
         phase: "Active",
-        current_work: "Waiting for optional classification settlement.",
+        current_work: "Classification is resolved in-band.",
         blockers: "None.",
         next_steps: ["Keep the write non-blocking"],
         lifecycle: "active",
@@ -710,19 +661,18 @@ describe("memory_update_status", () => {
         status: string;
         id: string;
         classification: string;
-        classification_provisional?: boolean;
       };
 
       expect(result).toMatchObject({
         status: "created",
         classification: "internal",
-        classification_provisional: true,
       });
+      expect(result).not.toHaveProperty("classification_provisional");
 
       const audit = db.prepare(
         "SELECT detail FROM audit_log WHERE entry_id = ?",
       ).get(result.id) as { detail: string };
-      expect(audit.detail).toContain("classification_provisional internal");
+      expect(audit.detail).not.toContain("classification_provisional");
     } finally {
       if (previousLibrarian === undefined) {
         delete process.env.MUNIN_LIBRARIAN_ENABLED;
@@ -3515,27 +3465,26 @@ describe("memory_log", () => {
     expect(entry.tags).toContain("classification:client-confidential");
   });
 
-  it("marks floor-defaulted log classifications as provisional without blocking the write (#263)", async () => {
+  it("returns the settled log classification without a provisional audit suffix (#263)", async () => {
     const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
     process.env.MUNIN_LIBRARIAN_ENABLED = "true";
     try {
       const raw = await callTool("memory_log", {
         namespace: "projects/log-provisional",
-        content: "Classification may still be raised by the optional Librarian worker.",
+        content: "Classification is resolved before the log response is emitted.",
         tags: ["decision"],
       });
       const result = parseToolResponse(raw) as {
         status: string;
         id: string;
         classification: string;
-        classification_provisional?: boolean;
       };
 
       expect(result).toMatchObject({
         status: "logged",
         classification: "internal",
-        classification_provisional: true,
       });
+      expect(result).not.toHaveProperty("classification_provisional");
 
       const stored = db.prepare(
         "SELECT classification FROM entries WHERE id = ?",
@@ -3545,7 +3494,7 @@ describe("memory_log", () => {
       const audit = db.prepare(
         "SELECT detail FROM audit_log WHERE entry_id = ?",
       ).get(result.id) as { detail: string };
-      expect(audit.detail).toContain("classification_provisional internal");
+      expect(audit.detail).not.toContain("classification_provisional");
     } finally {
       if (previousLibrarian === undefined) {
         delete process.env.MUNIN_LIBRARIAN_ENABLED;

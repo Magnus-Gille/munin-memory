@@ -27,7 +27,6 @@ import {
   CLASSIFICATION_LEVELS,
   compareClassificationLevels,
   FALLBACK_RESTRICTED_CLASSIFICATION,
-  isLibrarianEnabled,
   listNamespaceClassificationFloors as listNamespaceClassificationFloorsFromPolicy,
   normalizeStoredClassification,
   parseExplicitClassification,
@@ -240,7 +239,6 @@ export interface WriteStateResult {
   id?: string;
   updated_at?: string;
   classification?: ClassificationLevel;
-  classification_provisional?: boolean;
   tags?: string[];
   message?: string;
   current_updated_at?: string;
@@ -254,7 +252,6 @@ export type SupersedeEntryResult =
       updated_at: string;
       valid_from: string;
       classification: ClassificationLevel;
-      classification_provisional: boolean;
       tags: string[];
       supersedes: string;
     }
@@ -358,7 +355,6 @@ function resolveWriteClassification(
   existingClassification?: string | null,
 ): {
   classification: ClassificationLevel;
-  classification_provisional: boolean;
   tags: string[];
   usedOverride: boolean;
 } {
@@ -376,11 +372,6 @@ function resolveWriteClassification(
   });
   return {
     classification: resolved.classification,
-    // The optional classifier may still raise any value below the top of the
-    // lattice, including a value explicitly supplied by the caller. Only
-    // client-restricted is intrinsically settled because no escalation exists.
-    classification_provisional:
-      isLibrarianEnabled() && resolved.classification !== "client-restricted",
     tags: syncClassificationTag(tags, resolved.classification),
     usedOverride: resolved.usedOverride,
   };
@@ -389,16 +380,12 @@ function resolveWriteClassification(
 function buildClassificationAuditSuffix(
   resolvedClassification: {
     classification: ClassificationLevel;
-    classification_provisional: boolean;
     usedOverride: boolean;
   },
 ): string {
   const suffixes: string[] = [];
   if (resolvedClassification.usedOverride) {
     suffixes.push(`classification_override ${resolvedClassification.classification}`);
-  }
-  if (resolvedClassification.classification_provisional) {
-    suffixes.push(`classification_provisional ${resolvedClassification.classification}`);
   }
   return suffixes.length > 0 ? `; ${suffixes.join("; ")}` : "";
 }
@@ -503,7 +490,6 @@ export function writeState(
         id: existing.id,
         updated_at: now,
         classification: resolvedClassification.classification,
-        classification_provisional: resolvedClassification.classification_provisional,
         tags: resolvedClassification.tags,
       };
     } else {
@@ -535,7 +521,6 @@ export function writeState(
         id,
         updated_at: now,
         classification: resolvedClassification.classification,
-        classification_provisional: resolvedClassification.classification_provisional,
         tags: resolvedClassification.tags,
       };
     }
@@ -835,7 +820,6 @@ export function supersedeState(
       updated_at: now,
       valid_from: validFrom,
       classification: resolved.classification,
-      classification_provisional: resolved.classification_provisional,
       tags: resolved.tags,
       supersedes: predecessorId,
     };
@@ -856,7 +840,6 @@ export function appendLog(
   id: string;
   timestamp: string;
   classification: ClassificationLevel;
-  classification_provisional: boolean;
   tags: string[];
 } {
   const now = nowUTC();
@@ -896,7 +879,6 @@ export function appendLog(
     id,
     timestamp: now,
     classification: resolvedClassification.classification,
-    classification_provisional: resolvedClassification.classification_provisional,
     tags: resolvedClassification.tags,
   };
 }
@@ -999,7 +981,6 @@ export function supersedeLog(
       updated_at: now,
       valid_from: validFrom,
       classification: resolved.classification,
-      classification_provisional: resolved.classification_provisional,
       tags: resolved.tags,
       supersedes: predecessorId,
     };

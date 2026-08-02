@@ -40,16 +40,16 @@ changelog is the canonical record of what moved.
 
 ### Fixed
 
-- **Write-like responses now flag provisional classification instead of
-  pretending floor-defaulted values are final (#263).** `memory_write`,
-  `memory_update_status`, and `memory_log` still return the classification
-  stored immediately by the synchronous write path. When the Librarian is
-  enabled and that value is below `client-restricted`, they now add
-  `classification_provisional: true` rather than implying asynchronous
-  classification has already settled. This applies even to caller-supplied
-  values because content classification may still raise them. The write path
-  remains non-blocking, and audit rows stamp the same provisional signal so a
-  later escalation does not silently contradict the original write record.
+- **Write-like responses now return only the settled stored classification
+  (#263).** Investigation confirmed this branch resolves and persists entry
+  classification synchronously before the write response and audit row are
+  emitted, and no per-entry pending/settlement path exists. `memory_write`,
+  `memory_update_status`, and `memory_log` therefore no longer emit the fake
+  `classification_provisional` field, and audit rows no longer stamp a
+  provisional classification suffix. The response, stored entry, and
+  `memory_history` now report the same effective classification without
+  pretending an asynchronous settlement flow exists. Optional background work
+  remains non-blocking.
 
 - **`memory_delete` previews disclose and bind the full correction lineage
   they will remove (#281).** A delete of a corrected state entry removes its

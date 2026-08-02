@@ -413,7 +413,7 @@ describe("writeState + readState", () => {
     expect(JSON.parse(entry!.tags)).toContain("classification:client-confidential");
   });
 
-  it("marks floor-defaulted classifications as provisional without blocking the write (#263)", () => {
+  it("returns the settled stored classification without a provisional audit suffix (#263)", () => {
     const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
     process.env.MUNIN_LIBRARIAN_ENABLED = "true";
     try {
@@ -421,25 +421,27 @@ describe("writeState + readState", () => {
         db,
         "projects/test",
         "status",
-        "default floor classification",
+        "Settled classification",
         ["active"],
       ) as {
         status: string;
         id?: string;
         classification?: string;
-        classification_provisional?: boolean;
       };
 
       expect(result).toMatchObject({
         status: "created",
         classification: "internal",
-        classification_provisional: true,
       });
+      expect(result).not.toHaveProperty("classification_provisional");
+
+      const stored = readState(db, "projects/test", "status");
+      expect(stored?.classification).toBe("internal");
 
       const audit = db.prepare(
         "SELECT detail FROM audit_log WHERE entry_id = ?",
       ).get(result.id) as { detail: string };
-      expect(audit.detail).toContain("classification_provisional internal");
+      expect(audit.detail).not.toContain("classification_provisional");
     } finally {
       if (previousLibrarian === undefined) {
         delete process.env.MUNIN_LIBRARIAN_ENABLED;
