@@ -64,7 +64,6 @@ import {
   getStateAsOfCoverage,
   isExactCurrentStateBoundaryVisible,
   getCompletedTaskNamespaces,
-  getResolvedNamespaces,
   isEntryExpired,
   nowUTC,
   vecLoaded,
@@ -4361,6 +4360,16 @@ function mapTrackedStatusAssessmentsByNamespace(
   return byNamespace;
 }
 
+function getVisibleResolvedNamespaces(
+  assessments: TrackedStatusAssessment[],
+): Set<string> {
+  return new Set(
+    assessments
+      .filter((assessment) => TERMINAL_LIFECYCLE_TAGS.has(assessment.lifecycle))
+      .map((assessment) => assessment.row.namespace),
+  );
+}
+
 function normalizeCommitmentText(text: string): string {
   return normalizeCompareText(
     text
@@ -4544,7 +4553,6 @@ function entryHasTerminalLifecycle(entry: Entry): boolean {
 
 function extractCommitmentsFromEntry(
   entry: Entry,
-  resolvedNamespaces?: Set<string>,
   trackedPatterns: string[] = [...DEFAULT_TRACKED_PATTERNS],
   diagnostics?: CommitmentExclusionDiagnostics,
 ): DerivedCommitmentInput[] {
@@ -4557,25 +4565,19 @@ function extractCommitmentsFromEntry(
     return matchedUnitCount;
   };
 
-  // Suppression rules: entries from resolved sources are historical records,
-  // not open commitments. Skip them entirely so existing commitments derived
-  // from the same entry get resolved on the next sync pass.
+  // Suppression rules: self-contained terminal sources are historical records,
+  // not open commitments. Namespace-level terminal status is handled only in
+  // the caller-scoped read layer so a broader-visibility caller cannot mutate
+  // shared derivation rows away for a narrower caller.
   //
   // 1. synthesis keys: already a distillation of the underlying logs/status.
   //    Re-extracting from synthesis double-counts and surfaces milestone
   //    labels like "Genesis (MVP Complete - 2026-03-21)" as commitments.
   // 2. entries whose own tags carry a terminal lifecycle (completed, archived,
   //    stopped, failed).
-  // 3. entries in a namespace whose status entry is terminal — catches task
-  //    result documents and post-mortems that don't carry lifecycle tags of
-  //    their own but live in a done namespace.
   if (entry.key === "synthesis") return commitments;
   if (entryHasTerminalLifecycle(entry)) {
     noteCommitmentExclusion(diagnostics, "terminal_lifecycle", getMatchedUnitCount());
-    return commitments;
-  }
-  if (resolvedNamespaces?.has(entry.namespace)) {
-    noteCommitmentExclusion(diagnostics, "resolved_namespace", getMatchedUnitCount());
     return commitments;
   }
 
@@ -4691,7 +4693,7 @@ function syncDerivedCommitmentsForEntry(
   syncCommitmentsForEntry(
     db,
     entry.id,
-    extractCommitmentsFromEntry(entry, getResolvedNamespaces(db), trackedPatterns),
+    extractCommitmentsFromEntry(entry, trackedPatterns),
   );
 }
 
@@ -4704,6 +4706,7 @@ function syncCommitmentsForScope(
   sessionId?: string,
   loggedEntryIds?: Set<string>,
   diagnostics?: CommitmentExclusionDiagnostics,
+  visibleResolvedNamespaces: Set<string> = new Set<string>(),
 ): { redacted: RedactableEntryMetadata[]; visibleEntryCount: number; readableEntryCount: number } {
   const entries = listEntriesForDerivation(db, { namespace, since })
     .filter((entry) => canRead(ctx, entry.namespace));
@@ -4716,8 +4719,6 @@ function syncCommitmentsForScope(
     sessionId,
     loggedEntryIds,
   );
-
-  const resolvedNamespaces = getResolvedNamespaces(db);
   const trackedPatterns = resolveTrackedPatterns(db, ctx);
   let visibleEntryCount = 0;
   let readableEntryCount = 0;
@@ -4734,10 +4735,25 @@ function syncCommitmentsForScope(
     if (isCommitmentReadableSourceEntry(entry)) {
       visibleEntryCount += 1;
     }
+    const visibleResolvedNamespaceExclusion =
+      visibleResolvedNamespaces.has(entry.namespace)
+      && entry.key !== "synthesis"
+      && !entryHasTerminalLifecycle(entry);
+    if (visibleResolvedNamespaceExclusion) {
+      noteCommitmentExclusion(
+        diagnostics,
+        "resolved_namespace",
+        countEntryCommitmentLikeUnits(entry, trackedPatterns),
+      );
+    }
     syncCommitmentsForEntry(
       db,
       entry.id,
-      extractCommitmentsFromEntry(entry, resolvedNamespaces, trackedPatterns, diagnostics),
+      extractCommitmentsFromEntry(
+        entry,
+        trackedPatterns,
+        visibleResolvedNamespaceExclusion ? undefined : diagnostics,
+      ),
     );
   }
 
@@ -4759,6 +4775,7 @@ function listFreshCommitmentRows(
     includeResolved?: boolean;
   },
   sessionId?: string,
+  visibleResolvedNamespaces: Set<string> = new Set<string>(),
 ): {
   rows: CommitmentRow[];
   redacted: RedactableEntryMetadata[];
@@ -4778,8 +4795,8 @@ function listFreshCommitmentRows(
     sessionId,
     loggedEntryIds,
     diagnostics,
+    visibleResolvedNamespaces,
   );
-  const resolvedNamespaces = getResolvedNamespaces(db);
   const trackedPatterns = resolveTrackedPatterns(db, ctx);
   const refreshSourceRedacted: RedactableEntryMetadata[] = [];
 
@@ -4831,7 +4848,7 @@ function listFreshCommitmentRows(
     syncCommitmentsForEntry(
       db,
       entry.id,
-      extractCommitmentsFromEntry(entry, resolvedNamespaces, trackedPatterns),
+      extractCommitmentsFromEntry(entry, trackedPatterns),
     );
   }
 
@@ -4858,7 +4875,7 @@ function listFreshCommitmentRows(
   );
 
   return {
-    rows: visibleRows.allowed,
+    rows: visibleRows.allowed.filter((row) => !visibleResolvedNamespaces.has(row.namespace)),
     redacted: combineRedactedSources(
       syncResult.redacted,
       allowedRefreshCandidates.redacted,
@@ -8606,12 +8623,13 @@ export function registerTools(
 
               const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_commitments", sessionId);
               const trackedStatusByNamespace = mapTrackedStatusAssessmentsByNamespace(visibleTrackedStatuses.allowed);
+              const visibleResolvedNamespaces = getVisibleResolvedNamespaces(visibleTrackedStatuses.allowed);
               const { rows, redacted, diagnostics, visibleEntryCount, readableEntryCount } = listFreshCommitmentRows(db, ctx, "memory_commitments", {
                 namespace,
                 since: normalizedSince,
                 limit: Math.max(limit * 8, 80),
                 includeResolved: true,
-              }, sessionId);
+              }, sessionId, visibleResolvedNamespaces);
 
               const classified = classifyCommitments(db, rows, trackedStatusByNamespace, limit);
               const response: Record<string, unknown> = { ...classified };
@@ -8757,12 +8775,13 @@ export function registerTools(
               const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_patterns", sessionId);
               const patternsTrackedPatterns = resolveTrackedPatterns(db, ctx);
               const trackedStatusByNamespace = mapTrackedStatusAssessmentsByNamespace(visibleTrackedStatuses.allowed);
+              const visibleResolvedNamespaces = getVisibleResolvedNamespaces(visibleTrackedStatuses.allowed);
               const { rows: commitmentRows, redacted: redactedCommitmentSources } = listFreshCommitmentRows(db, ctx, "memory_patterns", {
                 namespace,
                 since: normalizedSince,
                 limit: 200,
                 includeResolved: true,
-              }, sessionId);
+              }, sessionId, visibleResolvedNamespaces);
 
               const undatedOpen = commitmentRows.filter((row) => row.status === "open" && !row.due_at);
               const undatedSources = new Set(undatedOpen.map((row) => row.source_entry_id));
@@ -9013,13 +9032,14 @@ export function registerTools(
                 sessionId,
               );
               const history = filteredHistory.allowed;
+              const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_handoff", sessionId);
+              const visibleResolvedNamespaces = getVisibleResolvedNamespaces(visibleTrackedStatuses.allowed);
               const { rows: commitmentRows, redacted: redactedCommitmentSources } = listFreshCommitmentRows(db, ctx, "memory_handoff", {
                 namespace,
                 since: normalizedSince,
                 limit: 200,
                 includeResolved: true,
-              }, sessionId);
-              const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_handoff", sessionId);
+              }, sessionId, visibleResolvedNamespaces);
               const trackedStatusByNamespace = mapTrackedStatusAssessmentsByNamespace(visibleTrackedStatuses.allowed);
               const currentState = buildHandoffCurrentState(namespace, visibleStatusEntry, allEntries);
 

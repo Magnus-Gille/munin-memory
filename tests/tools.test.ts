@@ -3081,6 +3081,105 @@ describe("Librarian Pattern B enforcement for derived tools", () => {
     expect(commitmentCount.count).toBe(0);
   });
 
+  it("keeps visible log commitments visible when only a hidden terminal status resolves the namespace", async () => {
+    const namespace = "projects/mixed-visibility-resolved";
+    const publishDate = commitmentTestDate(20);
+    const commitmentText = `We will publish the public notes by ${publishDate}.`;
+
+    await callTool("memory_update_status", {
+      namespace,
+      phase: "Completed",
+      current_work: "Privately wrapped up.",
+      blockers: "None.",
+      next_steps: [],
+      lifecycle: "completed",
+      classification: "client-confidential",
+    });
+    await callTool("memory_log", {
+      namespace,
+      content: commitmentText,
+      tags: ["decision"],
+    });
+
+    const consumerOwnerCall = makeContextCallTool({
+      ...ownerContext(),
+      transportType: "consumer",
+      maxClassification: "internal",
+    });
+
+    const downgradedRaw = await consumerOwnerCall("memory_commitments", {
+      namespace,
+    });
+    const downgraded = parseToolResponse(downgradedRaw) as {
+      open: Array<{ text: string; namespace: string; status: string }>;
+      at_risk: Array<unknown>;
+      overdue: Array<unknown>;
+      completed_recently: Array<unknown>;
+      exclusion_diagnostics?: unknown;
+    };
+
+    expect(downgraded.open).toContainEqual(expect.objectContaining({
+      text: commitmentText,
+      namespace,
+      status: "open",
+    }));
+    expect(downgraded.at_risk).toHaveLength(0);
+    expect(downgraded.overdue).toHaveLength(0);
+    expect(downgraded.completed_recently).toHaveLength(0);
+    expect(downgraded.exclusion_diagnostics).toBeUndefined();
+
+    const ownerRaw = await callTool("memory_commitments", { namespace });
+    const ownerResult = parseToolResponse(ownerRaw) as {
+      open: Array<unknown>;
+      at_risk: Array<unknown>;
+      overdue: Array<unknown>;
+      completed_recently: Array<unknown>;
+      exclusion_diagnostics?: {
+        matched_but_excluded: number;
+        reason_counts?: Record<string, number>;
+      };
+    };
+
+    expect(ownerResult.open).toHaveLength(0);
+    expect(ownerResult.at_risk).toHaveLength(0);
+    expect(ownerResult.overdue).toHaveLength(0);
+    expect(ownerResult.completed_recently).toHaveLength(0);
+    expect(ownerResult.exclusion_diagnostics).toEqual(expect.objectContaining({
+      matched_but_excluded: 1,
+      reason_counts: expect.objectContaining({
+        resolved_namespace: 1,
+      }),
+    }));
+
+    const downgradedAfterOwnerRaw = await consumerOwnerCall("memory_commitments", {
+      namespace,
+    });
+    const downgradedAfterOwner = parseToolResponse(downgradedAfterOwnerRaw) as {
+      open: Array<{ text: string; namespace: string; status: string }>;
+      exclusion_diagnostics?: unknown;
+    };
+
+    expect(downgradedAfterOwner.open).toContainEqual(expect.objectContaining({
+      text: commitmentText,
+      namespace,
+      status: "open",
+    }));
+    expect(downgradedAfterOwner.exclusion_diagnostics).toBeUndefined();
+
+    expect(listCommitments(db, {
+      namespace,
+      includeResolved: true,
+      limit: 10,
+    })).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        text: commitmentText,
+        namespace,
+        status: "open",
+        source_classification: "internal",
+      }),
+    ]));
+  });
+
   it("does not mine classified decision logs in memory_patterns", async () => {
     for (const content of [
       "Decision: acme pricing review stays private until Monday.",
