@@ -64,7 +64,12 @@ These features exist to solve specific friction points that appear once you actu
   fields because there is no preview payload to describe. Preview no longer
   returns the old ambiguous `writes_memory` field. Approval itself re-runs
   authorization, classification, secret, source-freshness, and CAS gates, and
-  it remains the only step that can change memory truth.
+  it remains the only step that can change memory truth. When approval rejects
+  without applying, it returns the same machine-readable code preview
+  advertised; for example, an expired proposal rejects with `ok:false`,
+  `error/code:"review_expired"`, and `status:"expired"`. Non-terminal
+  approve-time precondition rejections also append a durable
+  `approval_conflict` event that `memory_review get` exposes.
 
 ## Architecture
 

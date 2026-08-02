@@ -61,7 +61,11 @@ changelog is the canonical record of what moved.
   purged still return the truthful non-writing outcome instead of claiming the
   payload state blocked the answer. A real approval attempted after expiry still
   returns the same machine-readable `review_expired` code and message
-  advertised by preview.
+  advertised by preview through the stable `ok:false` rejection envelope.
+  Non-terminal approve-time rejections now run through the transactional
+  approval path, append one durable `approval_conflict` event per rejected
+  attempt, and restore the indexed `expires_at <= ?` prune range instead of
+  scanning every pending or edited proposal row.
 
 - **`memory_delete` previews disclose and bind the full correction lineage
   they will remove (#281).** A delete of a corrected state entry removes its

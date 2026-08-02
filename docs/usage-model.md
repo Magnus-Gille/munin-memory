@@ -132,7 +132,12 @@ memory:
 3. Call `memory_review` with `action:"approve"` only after review. Approval
    re-runs the ordinary write gates and applies the operation atomically with the
    proposal transition. Approval remains the only step that can change memory
-   truth. After an approval, `prepare_undo` can create a second review proposal
+   truth. When approval rejects without applying, it returns the same
+   machine-readable code preview advertised; for example, an expired proposal
+   rejects with `ok:false`, `error/code:"review_expired"`, and
+   `status:"expired"`. Non-terminal approve-time precondition rejections also
+   append a durable `approval_conflict` event that `memory_review get` exposes.
+   After an approval, `prepare_undo` can create a second review proposal
    that restores prior state or withdraws a reviewed log without mutating memory
    until that new proposal is approved.
 4. Call `memory_resume` or `memory_read` to verify the accepted memory in normal

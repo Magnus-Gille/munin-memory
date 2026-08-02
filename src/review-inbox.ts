@@ -864,8 +864,9 @@ export function pruneReviewProposals(
     const expiring = db.prepare(
       `SELECT * FROM review_proposals
        WHERE status IN ('pending', 'edited')
+         AND expires_at <= ?
        ORDER BY expires_at, id`,
-    ).all() as ReviewProposalRow[];
+    ).all(now) as ReviewProposalRow[];
     let expired = 0;
     for (const row of expiring) {
       if (!reviewProposalExpiredAtOrBefore(row, now)) continue;

@@ -772,4 +772,19 @@ describe("review proposal retention", () => {
     });
     db.close();
   });
+
+  it("uses the indexed expiry range when pruning actionable proposals", () => {
+    const db = initDatabase(":memory:");
+
+    const plan = db.prepare(
+      `EXPLAIN QUERY PLAN
+       SELECT * FROM review_proposals
+       WHERE status IN ('pending', 'edited') AND expires_at <= ?
+       ORDER BY expires_at, id`,
+    ).all("2026-08-23T10:06:00.000Z") as Array<{ detail: string }>;
+
+    expect(plan.some(({ detail }) => detail.includes("idx_review_proposals_expiry"))).toBe(true);
+    expect(plan.some(({ detail }) => /^SCAN review_proposals\b/.test(detail))).toBe(false);
+    db.close();
+  });
 });
