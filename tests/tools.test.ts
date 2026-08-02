@@ -229,29 +229,64 @@ function seedHiddenCommitmentRows(
   }
 }
 
-function seedCommitmentStatusRow(
+type SeedPublicCommitmentRowsOptions = {
+  idPrefix: string;
+  count: number;
+  status: "open" | "done" | "cancelled";
+  dueAt: string | null;
+  resolvedAt?: string | null;
+  baseTimestamp: string;
+  sourceType?: "explicit_commitment" | "explicit_dated_commitment";
+  textForIndex: (index: number) => string;
+};
+
+function seedPublicCommitmentRows(
   namespace: string,
-  id: string,
-  text: string,
-  status: "done" | "cancelled",
-  resolvedAt: string,
+  options: SeedPublicCommitmentRowsOptions,
 ): void {
-  const source = appendLog(db, namespace, text, []);
-  db.prepare(
+  const insert = db.prepare(
     `INSERT INTO commitments
        (id, namespace, source_entry_id, source_type, source_fingerprint, text, due_at, status, confidence, created_at, updated_at, resolved_at, source_classification)
-     VALUES (?, ?, ?, 'explicit_commitment', ?, ?, NULL, ?, 0.9, ?, ?, ?, 'public')`,
-  ).run(
-    id,
-    namespace,
-    source.id,
-    `seeded:${id}`,
-    text,
-    status,
-    source.timestamp,
-    source.timestamp,
-    resolvedAt,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'public')`,
   );
+  const updateSourceTimestamp = db.prepare(
+    "UPDATE entries SET created_at = ?, updated_at = ?, valid_from = ? WHERE id = ?",
+  );
+  const baseTimestamp = new Date(options.baseTimestamp).getTime();
+  if (!Number.isFinite(baseTimestamp)) {
+    throw new Error(`Invalid seed timestamp: ${options.baseTimestamp}`);
+  }
+
+  for (let index = 0; index < options.count; index += 1) {
+    const text = options.textForIndex(index);
+    const id = `${options.idPrefix}-${namespace.replace(/[^a-z0-9]+/gi, "-")}-${index}`;
+    const source = appendLog(
+      db,
+      namespace,
+      text,
+      [],
+      "owner",
+      { classification: "public", classificationOverride: true },
+    );
+    const timestamp = new Date(baseTimestamp + index * 1000).toISOString();
+    updateSourceTimestamp.run(timestamp, timestamp, timestamp, source.id);
+    const sourceType = options.sourceType ?? "explicit_commitment";
+    const sourceFingerprint = `${sourceType}:${text.toLowerCase().replace(/\s+/g, " ").trim()}`;
+    insert.run(
+      id,
+      namespace,
+      source.id,
+      sourceType,
+      sourceFingerprint,
+      text,
+      options.dueAt,
+      options.status,
+      0.9,
+      timestamp,
+      timestamp,
+      options.resolvedAt ?? null,
+    );
+  }
 }
 
 beforeEach(() => {
@@ -3471,57 +3506,209 @@ describe("Librarian Pattern B enforcement for derived tools", () => {
     }
   });
 
-  it("does not let authorized cancelled rows hide open, at-risk, or recent-done commitments across public handlers", async () => {
-    const namespace = "projects/commitment-resolved-page-cap";
-    seedHiddenCommitmentRows(namespace, 205, "2026-07-01T23:59:59.000Z");
-    seedCommitmentStatusRow(
-      namespace,
-      "recently-done-commitment",
-      "Recently completed handoff notes",
-      "done",
-      "2026-07-31T12:00:00.000Z",
-    );
-    seedCommitmentStatusRow(
-      namespace,
-      "old-done-commitment",
-      "Old completed handoff notes",
-      "done",
-      "2026-06-01T12:00:00.000Z",
-    );
-    const undatedTexts = [
-      "Commitment: review the undated migration notes",
-      "Commitment: review the undated rollback notes",
-    ];
-    for (const content of undatedTexts) {
-      await callTool("memory_log", { namespace, content });
+  it("does not let authorized cancelled rows hide later obligations across public handlers", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(COMMITMENTS_TEST_NOW);
+
+    try {
+      const namespace = "projects/commitment-resolved-page-cap";
+      const cancelledMarker = "Cancelled public commitment";
+      const recentDoneText = "Recently completed handoff notes";
+      const oldDoneText = "Old completed handoff notes";
+      seedPublicCommitmentRows(namespace, {
+        idPrefix: "public-cancelled",
+        count: 205,
+        status: "cancelled",
+        dueAt: "2026-07-01T23:59:59.000Z",
+        resolvedAt: "2026-07-01T23:59:59.000Z",
+        baseTimestamp: "2026-07-01T00:00:00.000Z",
+        textForIndex: (index) => `${cancelledMarker} ${String(index).padStart(3, "0")}`,
+      });
+      seedPublicCommitmentRows(namespace, {
+        idPrefix: "public-recent-done",
+        count: 1,
+        status: "done",
+        dueAt: null,
+        resolvedAt: "2026-07-31T12:00:00.000Z",
+        baseTimestamp: "2026-07-31T11:00:00.000Z",
+        textForIndex: () => recentDoneText,
+      });
+      seedPublicCommitmentRows(namespace, {
+        idPrefix: "public-old-done",
+        count: 1,
+        status: "done",
+        dueAt: null,
+        resolvedAt: "2026-06-01T12:00:00.000Z",
+        baseTimestamp: "2026-06-01T11:00:00.000Z",
+        textForIndex: () => oldDoneText,
+      });
+
+      const undatedTexts = [
+        "Commitment: review the undated migration notes",
+        "Commitment: review the undated rollback notes",
+      ];
+      for (const content of undatedTexts) {
+        await callTool("memory_log", {
+          namespace,
+          content,
+          classification: "public",
+          classification_override: true,
+        });
+      }
+      const dueSoonText = `We will review the due-soon handoff by ${commitmentTestDate(1)}.`;
+      await callTool("memory_log", {
+        namespace,
+        content: dueSoonText,
+        classification: "public",
+        classification_override: true,
+      });
+
+      const ordered = [
+        ...listCommitments(db, { namespace, includeResolved: true, limit: 200, offset: 0 }),
+        ...listCommitments(db, { namespace, includeResolved: true, limit: 6, offset: 200 }),
+      ];
+      expect(ordered.slice(0, 205)).toHaveLength(205);
+      expect(ordered.slice(0, 205).every((row) => row.status === "cancelled" && row.source_classification === "public")).toBe(true);
+      expect(ordered[205].status).toBe("open");
+
+      const consumerOwnerCall = makeContextCallTool({
+        ...ownerContext(),
+        transportType: "consumer",
+        maxClassification: "internal",
+      });
+      const commitments = parseToolResponse(await consumerOwnerCall("memory_commitments", { namespace })) as {
+        open: Array<{ text: string }>;
+        at_risk: Array<{ text: string }>;
+        overdue: Array<{ text: string }>;
+        completed_recently: Array<{ text: string; status: string }>;
+      };
+      expect(commitments.open.map((item) => item.text)).toEqual(expect.arrayContaining(undatedTexts));
+      expect(commitments.at_risk).toContainEqual(expect.objectContaining({ text: dueSoonText }));
+      expect(commitments.completed_recently).toEqual([
+        expect.objectContaining({ text: recentDoneText, status: "done" }),
+      ]);
+      for (const bucket of [commitments.open, commitments.at_risk, commitments.overdue]) {
+        expect(bucket.map((item) => item.text)).not.toContain(recentDoneText);
+        expect(bucket.map((item) => item.text)).not.toContain(oldDoneText);
+        expect(bucket.some((item) => item.text.startsWith(cancelledMarker))).toBe(false);
+      }
+      expect(commitments.completed_recently.map((item) => item.text)).not.toContain(oldDoneText);
+      expect(commitments.completed_recently.some((item) => item.text.startsWith(cancelledMarker))).toBe(false);
+
+      const patterns = parseToolResponse(await consumerOwnerCall("memory_patterns", { namespace })) as {
+        patterns: Array<{ kind: string }>;
+      };
+      expect(patterns.patterns).toContainEqual(expect.objectContaining({ kind: "undated_next_steps" }));
+
+      const handoff = parseToolResponse(await consumerOwnerCall("memory_handoff", { namespace })) as {
+        open_loops: string[];
+      };
+      expect(handoff.open_loops.some((loop) => loop.includes(dueSoonText))).toBe(true);
+
+      for (const payload of [patterns, handoff]) {
+        const serialized = JSON.stringify(payload);
+        expect(serialized).not.toContain(cancelledMarker);
+        expect(serialized).not.toContain(recentDoneText);
+        expect(serialized).not.toContain(oldDoneText);
+      }
+    } finally {
+      vi.useRealTimers();
     }
-    const dueSoonText = `We will review the due-soon handoff by ${commitmentTestDate(1)}.`;
-    await callTool("memory_log", { namespace, content: dueSoonText });
+  });
 
-    const commitments = parseToolResponse(await callTool("memory_commitments", { namespace })) as {
-      open: Array<{ text: string }>;
-      at_risk: Array<{ text: string }>;
-      overdue: Array<{ text: string }>;
-      completed_recently: Array<{ text: string; status: string }>;
-    };
-    expect(commitments.open.map((item) => item.text)).toEqual(expect.arrayContaining(undatedTexts));
-    expect(commitments.at_risk).toContainEqual(expect.objectContaining({ text: dueSoonText }));
-    expect(commitments.completed_recently).toContainEqual(expect.objectContaining({
-      text: "Recently completed handoff notes",
-      status: "done",
-    }));
-    expect(JSON.stringify(commitments)).not.toContain("Hidden commitment");
-    expect(JSON.stringify(commitments)).not.toContain("Old completed handoff notes");
+  it("does not let one eligible commitment bucket consume the shared cap", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(COMMITMENTS_TEST_NOW);
 
-    const patterns = parseToolResponse(await callTool("memory_patterns", { namespace })) as {
-      patterns: Array<{ kind: string }>;
-    };
-    expect(patterns.patterns).toContainEqual(expect.objectContaining({ kind: "undated_next_steps" }));
+    try {
+      const namespace = "projects/commitment-bucket-page-cap";
+      const overdueMarker = "Overdue bucket commitment";
+      const normalOpenText = "Commitment: normal open bucket obligation";
+      const atRiskText = `We will review the at-risk bucket obligation by ${commitmentTestDate(2)}.`;
+      const recentDoneText = "Recently completed bucket obligation";
+      seedPublicCommitmentRows(namespace, {
+        idPrefix: "public-overdue",
+        count: 205,
+        status: "open",
+        dueAt: "2026-07-01T23:59:59.000Z",
+        baseTimestamp: "2026-07-01T00:00:00.000Z",
+        sourceType: "explicit_dated_commitment",
+        textForIndex: (index) => `We will complete ${overdueMarker.toLowerCase()} ${String(index).padStart(3, "0")} by 2026-07-01.`,
+      });
+      seedPublicCommitmentRows(namespace, {
+        idPrefix: "public-normal-open",
+        count: 1,
+        status: "open",
+        dueAt: null,
+        baseTimestamp: "2026-08-01T11:59:00.000Z",
+        textForIndex: () => normalOpenText,
+      });
+      seedPublicCommitmentRows(namespace, {
+        idPrefix: "public-at-risk",
+        count: 1,
+        status: "open",
+        dueAt: "2026-08-03T23:59:59.000Z",
+        baseTimestamp: "2026-08-01T11:58:00.000Z",
+        sourceType: "explicit_dated_commitment",
+        textForIndex: () => atRiskText,
+      });
+      seedPublicCommitmentRows(namespace, {
+        idPrefix: "public-recent-done",
+        count: 1,
+        status: "done",
+        dueAt: null,
+        resolvedAt: "2026-08-01T11:00:00.000Z",
+        baseTimestamp: "2026-08-01T10:59:00.000Z",
+        textForIndex: () => recentDoneText,
+      });
 
-    const handoff = parseToolResponse(await callTool("memory_handoff", { namespace })) as {
-      open_loops: string[];
-    };
-    expect(handoff.open_loops.some((loop) => loop.includes(dueSoonText))).toBe(true);
+      const eligible = [
+        ...listCommitments(db, {
+          namespace,
+          statuses: ["open", "done"],
+          recentlyDoneSince: "2026-07-18T12:00:00.000Z",
+          limit: 200,
+          offset: 0,
+        }),
+        ...listCommitments(db, {
+          namespace,
+          statuses: ["open", "done"],
+          recentlyDoneSince: "2026-07-18T12:00:00.000Z",
+          limit: 9,
+          offset: 200,
+        }),
+      ];
+      expect(eligible).toHaveLength(208);
+      expect(eligible.every((row) => row.source_classification === "public")).toBe(true);
+      expect(eligible.slice(0, 205).every((row) => row.status === "open" && row.text.startsWith("We will complete overdue bucket commitment"))).toBe(true);
+      expect(eligible.slice(205).map((row) => row.text)).toEqual(expect.arrayContaining([
+        normalOpenText,
+        atRiskText,
+        recentDoneText,
+      ]));
+
+      const consumerOwnerCall = makeContextCallTool({
+        ...ownerContext(),
+        transportType: "consumer",
+        maxClassification: "internal",
+      });
+      const commitments = parseToolResponse(await consumerOwnerCall("memory_commitments", { namespace })) as {
+        open: Array<{ text: string }>;
+        at_risk: Array<{ text: string }>;
+        overdue: Array<{ text: string }>;
+        completed_recently: Array<{ text: string; status: string }>;
+      };
+      expect(commitments.overdue).toHaveLength(10);
+      expect(commitments.overdue[0].text).toContain(overdueMarker.toLowerCase());
+      expect(commitments.open).toContainEqual(expect.objectContaining({ text: normalOpenText }));
+      expect(commitments.at_risk).toContainEqual(expect.objectContaining({ text: atRiskText }));
+      expect(commitments.completed_recently).toContainEqual(expect.objectContaining({
+        text: recentDoneText,
+        status: "done",
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("keeps visible log commitments visible when only a hidden terminal status resolves the namespace", async () => {
