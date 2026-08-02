@@ -16,10 +16,18 @@ import {
   _applyOrientResponseBudgetForTesting,
   _setHealthSectionOverridesForTesting,
 } from "../src/tools.js";
+import {
+  KEY_PATTERN,
+  MAX_TAGS,
+  NAMESPACE_PATTERN,
+  TAG_PATTERN,
+  WRITE_NAMESPACE_PATTERN,
+} from "../src/security.js";
 import { ownerContext } from "../src/access.js";
 import type { AccessContext } from "../src/access.js";
 import { _setApiKey, _consolidationConfig, resetConsolidationCircuitBreaker, getConsolidationHealth, _resetHealthState } from "../src/consolidation.js";
 import { _embeddingConfig, isEmbeddingCircuitBreakerTripped, getActiveEmbeddingDtype, _forceCircuitBreakerTrippedForTesting, resetCircuitBreaker } from "../src/embeddings.js";
+import { LIFECYCLE_TAGS } from "../src/internal/retrieval-shared.js";
 import type { LibrarianRuntimeConfig } from "../src/librarian.js";
 
 const TEST_DB_PATH = "/tmp/munin-memory-tools-test.db";
@@ -42,6 +50,17 @@ function cleanupTestDb() {
 
 let db: Database.Database;
 let server: Server;
+
+type SchemaNode = {
+  type?: string | string[];
+  pattern?: string;
+  title?: string;
+  description?: string;
+  enum?: unknown[];
+  maxItems?: number;
+  properties?: Record<string, SchemaNode>;
+  items?: SchemaNode;
+};
 
 // Helper to call a tool handler directly through the server's request handler
 async function callTool(name: string, args: Record<string, unknown> = {}): Promise<unknown> {
@@ -9430,8 +9449,9 @@ describe("compare-and-swap (memory_write)", () => {
     for (const name of ["memory_write", "memory_log"]) {
       const description = tools.find((tool) => tool.name === name)
         ?.inputSchema.properties?.namespace?.description;
-      expect(description).toContain("trailing slashes");
-      expect(description).toContain("empty segments");
+      const normalized = description?.toLowerCase();
+      expect(normalized).toContain("trailing slashes");
+      expect(normalized).toContain("empty segments");
       expect(description).toContain("maintenance/");
     }
   });
@@ -9520,7 +9540,7 @@ describe("compare-and-swap (memory_write)", () => {
     }
   });
 
-  it("advertises validate_only as a boolean for memory_update_status", async () => {
+  it("advertises namespace/key grammar patterns and validate_only across tool schemas", async () => {
     const handler = (
       server as unknown as { _requestHandlers: Map<string, Function> }
     )._requestHandlers?.get("tools/list");
@@ -9529,13 +9549,142 @@ describe("compare-and-swap (memory_write)", () => {
       (toolList as {
         tools: Array<{
           name: string;
-          inputSchema: { properties?: Record<string, { type?: string | string[] }> };
+          inputSchema: { properties?: Record<string, SchemaNode> };
         }>;
       }).tools.map((tool) => [tool.name, tool]),
     );
 
     expect(toolsByName.get("memory_update_status")?.inputSchema.properties?.validate_only?.type)
       .toBe("boolean");
+
+    const readSchema = (toolName: string, path: string[]): SchemaNode | undefined => {
+      let current: SchemaNode | undefined = toolsByName.get(toolName)?.inputSchema as SchemaNode | undefined;
+      for (const segment of path) {
+        current = segment === "items"
+          ? current?.items
+          : current?.properties?.[segment];
+      }
+      return current;
+    };
+
+    const expectPattern = (toolName: string, path: string[], pattern: string) => {
+      const schema = readSchema(toolName, path);
+      expect(schema, `${toolName} ${path.join(".")} schema should exist`).toBeDefined();
+      expect(schema?.pattern, `${toolName} ${path.join(".")} should advertise a pattern`).toBe(pattern);
+      expect(schema?.description, `${toolName} ${path.join(".")} should advertise a description`).toBeTruthy();
+    };
+
+    for (const [toolName, path] of [
+      ["memory_resume", ["namespace"]],
+      ["memory_extract", ["namespace_hint"]],
+      ["memory_narrative", ["namespace"]],
+      ["memory_commitments", ["namespace"]],
+      ["memory_patterns", ["namespace"]],
+      ["memory_handoff", ["namespace"]],
+      ["memory_query", ["namespace"]],
+      ["memory_list", ["namespace"]],
+      ["memory_delete", ["namespace"]],
+    ] as const) {
+      expectPattern(toolName, [...path], NAMESPACE_PATTERN);
+    }
+
+    for (const [toolName, path] of [
+      ["memory_write", ["namespace"]],
+      ["memory_log", ["namespace"]],
+      ["memory_update_status", ["namespace"]],
+      ["memory_consolidate", ["namespace"]],
+    ] as const) {
+      expectPattern(toolName, [...path], WRITE_NAMESPACE_PATTERN);
+    }
+
+    for (const [toolName, path] of [
+      ["memory_write", ["key"]],
+      ["memory_read", ["key"]],
+      ["memory_read_batch", ["reads", "items", "key"]],
+      ["memory_delete", ["key"]],
+    ] as const) {
+      expectPattern(toolName, [...path], KEY_PATTERN);
+    }
+
+    expect(readSchema("memory_write", ["namespace"])?.description).toContain("Write target");
+    expect(readSchema("memory_query", ["namespace"])?.description).toContain("Prefix filters may end with '/'");
+  });
+
+  it("keeps syntactic namespace validation ahead of status-field validation", async () => {
+    for (const validate_only of [false, true]) {
+      const res = parseToolResponse(await callTool("memory_update_status", {
+        namespace: "projects/",
+        phase: "Build",
+        valid_until: "next tuesday",
+        validate_only,
+      })) as { ok?: boolean; error?: string; message?: string };
+      expect(res.ok).toBe(false);
+      expect(res.error).toBe("validation_error");
+      expect(res.message ?? "").toContain('Invalid "valid_until" value');
+      expect(res.message ?? "").not.toContain("write target");
+    }
+  });
+
+  it("keeps well-formed but non-tracked status targets on the tracked-namespace error path", async () => {
+    const res = parseToolResponse(await callTool("memory_update_status", {
+      namespace: "tasks/heartbeat",
+      phase: "Build",
+      valid_until: "2027-01-01T00:00:00Z",
+    })) as { ok?: boolean; error?: string; message?: string };
+    expect(res.ok).toBe(false);
+    expect(res.error).toBe("validation_error");
+    expect(res.message).toContain("configured tracked namespaces");
+  });
+
+  it("keeps tag schemas freeform while constraining item grammar", async () => {
+    const handler = (
+      server as unknown as { _requestHandlers: Map<string, Function> }
+    )._requestHandlers?.get("tools/list");
+    const toolList = await handler!({ method: "tools/list", params: {} });
+    const toolsByName = new Map(
+      (toolList as {
+        tools: Array<{
+          name: string;
+          inputSchema: { properties?: Record<string, SchemaNode> };
+        }>;
+      }).tools.map((tool) => [tool.name, tool]),
+    );
+
+    for (const toolName of ["memory_write", "memory_log"] as const) {
+      const tags = toolsByName.get(toolName)?.inputSchema.properties?.tags as SchemaNode | undefined;
+      expect(tags?.description, `${toolName} tags should stay documented as freeform`).toContain("freeform");
+      expect(tags?.maxItems, `${toolName} tags should advertise the validated max item count`).toBe(MAX_TAGS);
+      expect(tags?.items?.pattern, `${toolName} tags should constrain item grammar`).toBe(TAG_PATTERN);
+      expect(tags?.items?.enum, `${toolName} tags must not be falsely enumerated`).toBeUndefined();
+    }
+
+    const writeTags = toolsByName.get("memory_write")?.inputSchema.properties?.tags as SchemaNode | undefined;
+    for (const fragment of ["done", "paused", "inactive", "architecture", "preference", "convention", "bug", "feature", "research"]) {
+      expect(writeTags?.description, `memory_write tags should mention ${fragment}`).toContain(fragment);
+    }
+
+    const logTags = toolsByName.get("memory_log")?.inputSchema.properties?.tags as SchemaNode | undefined;
+    for (const fragment of ["blocker", "discovery", "correction", "person:", "topic:", "type:", "source:"]) {
+      expect(logTags?.description, `memory_log tags should mention ${fragment}`).toContain(fragment);
+    }
+
+    const queryTags = toolsByName.get("memory_query")?.inputSchema.properties?.tags as SchemaNode | undefined;
+    expect(queryTags?.description).toContain("freeform");
+    expect(queryTags?.maxItems).toBeUndefined();
+    expect(queryTags?.items?.pattern).toBeUndefined();
+    expect(queryTags?.items?.enum).toBeUndefined();
+
+    const patchSchema = toolsByName.get("memory_write")?.inputSchema.properties?.patch as SchemaNode | undefined;
+    const patchTagsAdd = patchSchema?.properties?.tags_add;
+    expect(patchTagsAdd?.maxItems).toBe(MAX_TAGS);
+    expect(patchTagsAdd?.items?.pattern).toBe(TAG_PATTERN);
+
+    const patchTagsRemove = patchSchema?.properties?.tags_remove;
+    expect(patchTagsRemove?.maxItems).toBeUndefined();
+    expect(patchTagsRemove?.items?.pattern).toBeUndefined();
+
+    const lifecycle = toolsByName.get("memory_update_status")?.inputSchema.properties?.lifecycle as SchemaNode | undefined;
+    expect(lifecycle?.enum).toEqual([...LIFECYCLE_TAGS]);
   });
 
   it("documents tracked-only mutation vs writable-namespace validate_only for memory_update_status", async () => {
@@ -9545,10 +9694,7 @@ describe("compare-and-swap (memory_write)", () => {
     const toolList = await handler!({ method: "tools/list", params: {} });
     const toolsByName = new Map(
       (toolList as {
-        tools: Array<{
-          name: string;
-          inputSchema: { properties?: Record<string, { description?: string }> };
-        }>;
+        tools: Array<{ name: string; description?: string; inputSchema: SchemaNode }>;
       }).tools.map((tool) => [tool.name, tool]),
     );
 
@@ -9575,10 +9721,7 @@ describe("compare-and-swap (memory_write)", () => {
     const toolList = await handler!({ method: "tools/list", params: {} });
     const toolsByName = new Map(
       (toolList as {
-        tools: Array<{
-          name: string;
-          inputSchema: { properties?: Record<string, { description?: string }> };
-        }>;
+        tools: Array<{ name: string; inputSchema: SchemaNode }>;
       }).tools.map((tool) => [tool.name, tool]),
     );
 

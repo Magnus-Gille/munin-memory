@@ -9,6 +9,7 @@ import {
   getRequestAuthLogContext,
   type RequestLogEntry,
 } from "../src/index.js";
+import { MCP_SERVER_INSTRUCTIONS } from "../src/tools.js";
 
 const TEST_DB_PATH = "/tmp/munin-memory-http-transport-test.db";
 const LEGACY_API_KEY = "http-transport-test-api-key";
@@ -130,6 +131,7 @@ describe("stateless HTTP transport", () => {
       name: "munin-memory",
       version: packageVersion,
     });
+    expect((initPayload.result as Record<string, unknown>).instructions).toBe(MCP_SERVER_INSTRUCTIONS);
 
     const toolResponse = await supertest(app)
       .post("/mcp")

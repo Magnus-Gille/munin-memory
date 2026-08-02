@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { REGISTERED_TOOL_METADATA } from "../src/tools.js";
+import { MCP_SERVER_INSTRUCTIONS, REGISTERED_TOOL_METADATA } from "../src/tools.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const normalizeWhitespace = (text: string): string => text.replace(/\s+/g, " ").trim();
@@ -12,6 +12,20 @@ const changelog = normalizeWhitespace(readFileSync(join(repoRoot, "CHANGELOG.md"
 const metadataByName = new Map(REGISTERED_TOOL_METADATA.map((tool) => [tool.name, tool]));
 
 describe("MCP tool metadata discovery contract", () => {
+  it("publishes fallback-safe first-call guidance at the server level", () => {
+    const instructions = MCP_SERVER_INSTRUCTIONS.toLowerCase();
+    for (const phrase of [
+      "first memory operation",
+      "memory_orient",
+      "callable",
+      "deferred tool discovery",
+      "memory_status",
+      "memory_resume",
+    ]) {
+      expect(instructions).toContain(phrase);
+    }
+  });
+
   it("makes memory_orient self-describing for deferred discovery", () => {
     const orient = metadataByName.get("memory_orient");
     expect(orient).toBeDefined();
@@ -31,25 +45,28 @@ describe("MCP tool metadata discovery contract", () => {
     }
   });
 
-  it("keeps first-call guidance fallback-safe when memory_orient is not callable", () => {
+  it("keeps memory_status self-describing as the fallback discovery tool", () => {
+    const status = metadataByName.get("memory_status");
+    expect(status).toBeDefined();
+
+    const description = status!.description.toLowerCase();
+    for (const phrase of ["memory_orient", "fallback", "deferred tool discovery", "memory_status"]) {
+      expect(description).toContain(phrase);
+    }
+  });
+
+  it("moves the repeated first-call guidance out of individual tool descriptions", () => {
     const staleRequirement = "if this is your first memory operation in this conversation, call memory_orient first.";
     for (const tool of REGISTERED_TOOL_METADATA) {
       expect(tool.description.toLowerCase()).not.toContain(staleRequirement);
+      expect(tool.description).not.toContain("First memory operation:");
     }
 
-    const fallbackGuidanceTools = REGISTERED_TOOL_METADATA.filter((tool) =>
-      tool.description.includes("First memory operation:"),
-    );
-    expect(fallbackGuidanceTools.length).toBeGreaterThan(10);
-
-    for (const tool of fallbackGuidanceTools) {
-      const description = tool.description.toLowerCase();
-      expect(description, `${tool.name} should mention callable/discovery fallback`).toContain("callable");
-      expect(description, `${tool.name} should mention deferred discovery fallback`).toContain(
-        "deferred tool discovery",
-      );
-      expect(description, `${tool.name} should name memory_status fallback`).toContain("memory_status");
-      expect(description, `${tool.name} should name memory_resume fallback`).toContain("memory_resume");
+    const repeatedFallbackClause =
+      "If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.";
+    for (const tool of REGISTERED_TOOL_METADATA) {
+      if (tool.name === "memory_status") continue;
+      expect(tool.description).not.toContain(repeatedFallbackClause);
     }
   });
 

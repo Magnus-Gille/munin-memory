@@ -11,7 +11,7 @@ import { createServer, IncomingMessage } from "node:http";
 import { timingSafeEqual, randomUUID, createHash, createHmac, randomBytes } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { initDatabase, nowUTC, pruneRedactionLog, pruneRetrievalAnalytics } from "./db.js";
-import { registerTools } from "./tools.js";
+import { MCP_SERVER_INSTRUCTIONS, registerTools } from "./tools.js";
 import { initEmbeddings, startEmbeddingWorker, stopEmbeddingWorker } from "./embeddings.js";
 import { initConsolidation, startConsolidationWorker, stopConsolidationWorker } from "./consolidation.js";
 import { getConfiguredLegacyBearerTransportType, resolveAccessContext } from "./access.js";
@@ -187,7 +187,7 @@ function createMcpServer(
 ): Server {
   const server = new Server(
     { name: "munin-memory", version: SERVER_VERSION },
-    { capabilities: { tools: {} } },
+    { capabilities: { tools: {} }, instructions: MCP_SERVER_INSTRUCTIONS },
   );
   registerTools(server, database, sessionId, accessContext, runtimeConfig);
   return server;

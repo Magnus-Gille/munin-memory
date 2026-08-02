@@ -130,9 +130,17 @@ function buildOwnerAliasConcealmentPattern(): RegExp | null {
 }
 
 const NAMESPACE_RE = /^[a-zA-Z0-9][a-zA-Z0-9/_-]*$/;
+const WRITE_NAMESPACE_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]*(?:\/[a-zA-Z0-9_-]+)*$/;
 const KEY_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
 const TAG_RE = /^[a-zA-Z0-9][a-zA-Z0-9_:-]*$/;
-const MAX_TAGS = 20;
+export const MAX_TAGS = 20;
+
+// JSON Schema sources for MCP metadata. Derive them from the runtime
+// validators so the advertised interface cannot drift from enforcement.
+export const NAMESPACE_PATTERN = NAMESPACE_RE.source;
+export const WRITE_NAMESPACE_PATTERN = WRITE_NAMESPACE_RE.source;
+export const KEY_PATTERN = KEY_RE.source;
+export const TAG_PATTERN = TAG_RE.source;
 
 export function scanForSecrets(content: string): SecurityResult {
   for (const { pattern, label } of SECRET_PATTERNS) {
@@ -271,7 +279,7 @@ export function validateWriteNamespace(namespace: string): SecurityResult {
   const base = validateNamespace(namespace);
   if (!base.valid) return base;
 
-  if (namespace.split("/").some((segment) => segment.length === 0)) {
+  if (!WRITE_NAMESPACE_RE.test(namespace)) {
     const trimmed = namespace.replace(/\/+$/, "");
     const hint = trimmed.length > 0 && !trimmed.includes("//") ? ` Did you mean "${trimmed}"?` : "";
     return {
