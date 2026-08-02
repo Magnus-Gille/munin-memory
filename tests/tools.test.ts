@@ -3,6 +3,7 @@ import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
+  appendLog,
   computeCommitmentConfidence,
   initDatabase,
   listCommitments,
@@ -24,6 +25,13 @@ import type { LibrarianRuntimeConfig } from "../src/librarian.js";
 const TEST_DB_PATH = "/tmp/munin-memory-tools-test.db";
 const RETROSPECTIVE_CI_FIX_LOG =
   "Follow-up CI fix committed and pushed on 2026-03-12 as b74ed58 after GitHub Actions failed on prettier --check. Root cause: six TypeScript files from the security hardening commit were not Prettier-formatted. Local verification after formatting: npm run build, npm test (131/131), and npm run format:check all passed before pushing.";
+const COMMITMENTS_TEST_NOW = new Date("2026-08-01T12:00:00.000Z");
+
+function commitmentTestDate(offsetDays: number): string {
+  return new Date(COMMITMENTS_TEST_NOW.getTime() + offsetDays * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
+}
 
 function cleanupTestDb() {
   for (const suffix of ["", "-wal", "-shm"]) {
@@ -133,6 +141,152 @@ async function seedRetrospectiveCommitmentRow(namespace: string, content: string
   );
 
   return { entryId: logResult.id, commitmentId: `stale-${suffix}` };
+}
+
+async function seedLegacyPlainStatusCommitment(
+  namespace: string,
+  header: string,
+  nextStep: string,
+  commitmentId = `${namespace.replace(/[^a-z0-9]+/gi, "-")}-legacy-row`,
+) {
+  await callTool("memory_write", {
+    namespace,
+    key: "status",
+    content: [
+      "Phase: Build",
+      "Current Work: Stabilizing the rollout",
+      "Blockers: None.",
+      header,
+      `- ${nextStep}`,
+    ].join("\n"),
+    tags: ["active"],
+  });
+
+  const source = db.prepare(
+    "SELECT id FROM entries WHERE namespace = ? AND key = 'status' AND is_current = 1",
+  ).get(namespace) as { id: string };
+  const normalized = nextStep.toLowerCase().replace(/\s+/g, " ").trim();
+  const dueDate = nextStep.match(/\d{4}-\d{2}-\d{2}/)?.[0];
+  if (!dueDate) {
+    throw new Error(`Missing due date in next step: ${nextStep}`);
+  }
+
+  db.prepare(
+    `INSERT INTO commitments
+       (id, namespace, source_entry_id, source_type, source_fingerprint, text, due_at, status, confidence, created_at, updated_at, resolved_at)
+     VALUES (?, ?, ?, 'tracked_next_step', ?, ?, ?, 'open', ?, ?, ?, NULL)`,
+  ).run(
+    commitmentId,
+    namespace,
+    source.id,
+    `tracked_next_step:${normalized}`,
+    nextStep,
+    `${dueDate}T23:59:59.000Z`,
+    0.9,
+    "2026-07-15T12:00:00.000Z",
+    "2026-07-15T12:00:00.000Z",
+  );
+
+  return { sourceId: source.id, commitmentId };
+}
+
+function seedHiddenCommitmentRows(
+  namespace: string,
+  count: number,
+  dueAt: string | null,
+): void {
+  const insert = db.prepare(
+    `INSERT INTO commitments
+       (id, namespace, source_entry_id, source_type, source_fingerprint, text, due_at, status, confidence, created_at, updated_at, resolved_at, source_classification)
+     VALUES (?, ?, ?, 'explicit_commitment', ?, ?, ?, 'open', 0.9, ?, ?, NULL, 'client-confidential')`,
+  );
+  const updateSourceTimestamp = db.prepare(
+    "UPDATE entries SET created_at = ?, updated_at = ? WHERE id = ?",
+  );
+  const baseTimestamp = new Date("2030-01-01T00:00:00.000Z").getTime();
+
+  for (let index = 0; index < count; index += 1) {
+    const source = appendLog(
+      db,
+      namespace,
+      `Hidden commitment source ${index}`,
+      [],
+      "owner",
+      { classification: "client-confidential" },
+    );
+    const timestamp = new Date(baseTimestamp + index * 1000).toISOString();
+    updateSourceTimestamp.run(timestamp, timestamp, source.id);
+    insert.run(
+      `hidden-commitment-${namespace.replace(/[^a-z0-9]+/gi, "-")}-${index}`,
+      namespace,
+      source.id,
+      `hidden:${index}`,
+      `Hidden commitment ${index}`,
+      dueAt,
+      timestamp,
+      timestamp,
+    );
+  }
+}
+
+type SeedPublicCommitmentRowsOptions = {
+  idPrefix: string;
+  count: number;
+  status: "open" | "done" | "cancelled";
+  dueAt: string | null;
+  resolvedAt?: string | null;
+  baseTimestamp: string;
+  sourceType?: "explicit_commitment" | "explicit_dated_commitment";
+  textForIndex: (index: number) => string;
+};
+
+function seedPublicCommitmentRows(
+  namespace: string,
+  options: SeedPublicCommitmentRowsOptions,
+): void {
+  const insert = db.prepare(
+    `INSERT INTO commitments
+       (id, namespace, source_entry_id, source_type, source_fingerprint, text, due_at, status, confidence, created_at, updated_at, resolved_at, source_classification)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'public')`,
+  );
+  const updateSourceTimestamp = db.prepare(
+    "UPDATE entries SET created_at = ?, updated_at = ?, valid_from = ? WHERE id = ?",
+  );
+  const baseTimestamp = new Date(options.baseTimestamp).getTime();
+  if (!Number.isFinite(baseTimestamp)) {
+    throw new Error(`Invalid seed timestamp: ${options.baseTimestamp}`);
+  }
+
+  for (let index = 0; index < options.count; index += 1) {
+    const text = options.textForIndex(index);
+    const id = `${options.idPrefix}-${namespace.replace(/[^a-z0-9]+/gi, "-")}-${index}`;
+    const source = appendLog(
+      db,
+      namespace,
+      text,
+      [],
+      "owner",
+      { classification: "public", classificationOverride: true },
+    );
+    const timestamp = new Date(baseTimestamp + index * 1000).toISOString();
+    updateSourceTimestamp.run(timestamp, timestamp, timestamp, source.id);
+    const sourceType = options.sourceType ?? "explicit_commitment";
+    const sourceFingerprint = `${sourceType}:${text.toLowerCase().replace(/\s+/g, " ").trim()}`;
+    insert.run(
+      id,
+      namespace,
+      source.id,
+      sourceType,
+      sourceFingerprint,
+      text,
+      options.dueAt,
+      options.status,
+      0.9,
+      timestamp,
+      timestamp,
+      options.resolvedAt ?? null,
+    );
+  }
 }
 
 beforeEach(() => {
@@ -3010,6 +3164,7 @@ describe("Librarian Pattern B enforcement for derived tools", () => {
       at_risk: Array<unknown>;
       overdue: Array<unknown>;
       completed_recently: Array<unknown>;
+      exclusion_diagnostics?: unknown;
       redacted_sources?: { count: number; namespaces?: string[] };
     };
 
@@ -3017,11 +3172,714 @@ describe("Librarian Pattern B enforcement for derived tools", () => {
     expect(result.at_risk).toHaveLength(0);
     expect(result.overdue).toHaveLength(0);
     expect(result.completed_recently).toHaveLength(0);
+    expect(result.exclusion_diagnostics).toBeUndefined();
     expect(result.redacted_sources?.count).toBeGreaterThan(0);
     expect(result.redacted_sources?.namespaces).toContain("projects/client-followthrough");
 
     const commitmentCount = db.prepare("SELECT COUNT(*) AS count FROM commitments").get() as { count: number };
     expect(commitmentCount.count).toBe(0);
+  });
+
+  it("fails closed after a commitment source is reclassified into a confidential terminal status", async () => {
+    const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+
+    try {
+      const namespace = "projects/reclassified-terminal-commitment";
+      const commitmentText = "Publish the public report by 2099-12-31";
+      const confidentialMarker = "CONFIDENTIAL_TERMINAL_STATUS_MARKER";
+
+      await callTool("memory_update_status", {
+        namespace,
+        phase: "Active",
+        current_work: "Preparing the report",
+        blockers: "None.",
+        next_steps: [commitmentText],
+        lifecycle: "active",
+        classification: "internal",
+      });
+
+      await callTool("memory_write", {
+        namespace,
+        key: "status",
+        content: [
+          "## Phase",
+          "Completed",
+          "",
+          "## Current Work",
+          confidentialMarker,
+          "",
+          "## Blockers",
+          "None.",
+          "",
+          "## Next Steps",
+          "- None.",
+        ].join("\n"),
+        tags: ["completed"],
+        classification: "client-confidential",
+      });
+
+      const ownerRead = parseToolResponse(await callTool("memory_read", {
+        namespace,
+        key: "status",
+      })) as { found: boolean; content: string; classification: string };
+      expect(ownerRead).toMatchObject({
+        found: true,
+        classification: "client-confidential",
+      });
+      expect(ownerRead.content).toContain(confidentialMarker);
+
+      // A full-clearance read reconciles the shared derivative first. The later
+      // downgraded read must still authorize against the live source row.
+      const ownerCommitments = parseToolResponse(await callTool("memory_commitments", {
+        namespace,
+      })) as {
+        completed_recently: Array<{ text: string; source_classification: string; source_excerpt: string }>;
+      };
+      expect(ownerCommitments.completed_recently).toHaveLength(0);
+
+      const stored = db.prepare(
+        "SELECT source_classification FROM commitments WHERE namespace = ?",
+      ).get(namespace) as { source_classification: string };
+      expect(stored.source_classification).toBe("client-confidential");
+
+      const consumerOwnerCall = makeContextCallTool({
+        ...ownerContext(),
+        transportType: "consumer",
+        maxClassification: "internal",
+      });
+      const downgraded = parseToolResponse(await consumerOwnerCall("memory_commitments", {
+        namespace,
+      })) as {
+        open: Array<unknown>;
+        at_risk: Array<unknown>;
+        overdue: Array<unknown>;
+        completed_recently: Array<unknown>;
+        redacted_sources?: { count: number };
+      };
+
+      expect(JSON.stringify(downgraded)).not.toContain(commitmentText);
+      expect(JSON.stringify(downgraded)).not.toContain(confidentialMarker);
+      expect(downgraded.open).toHaveLength(0);
+      expect(downgraded.at_risk).toHaveLength(0);
+      expect(downgraded.overdue).toHaveLength(0);
+      expect(downgraded.completed_recently).toHaveLength(0);
+      expect(downgraded.redacted_sources?.count).toBeGreaterThan(0);
+    } finally {
+      if (previousLibrarian === undefined) delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      else process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
+    }
+  });
+
+  it("does not return a removed confidential next step over a downgraded consumer transport", async () => {
+    const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+
+    try {
+      const namespace = "projects/commitment-confidential-downgrade";
+      const confidentialText = "CONFIDENTIAL_REMOVED_NEXT_STEP: send the private client brief by 2099-12-31";
+      const confidentialMarker = "CONFIDENTIAL_REMOVED_STATUS_DETAILS";
+
+      await callTool("memory_update_status", {
+        namespace,
+        phase: "Active",
+        current_work: confidentialMarker,
+        blockers: "None.",
+        next_steps: [confidentialText],
+        lifecycle: "active",
+        classification: "client-confidential",
+      });
+
+      await callTool("memory_update_status", {
+        namespace,
+        phase: "Active",
+        current_work: "Safe current work",
+        blockers: "None.",
+        next_steps: ["None."],
+        lifecycle: "active",
+        classification: "internal",
+      });
+
+      const ownerCommitments = parseToolResponse(await callTool("memory_commitments", {
+        namespace,
+      })) as {
+        completed_recently: Array<{
+          text: string;
+          source_excerpt?: string;
+          source_classification: string;
+        }>;
+      };
+      expect(ownerCommitments.completed_recently).toContainEqual(expect.objectContaining({
+        text: confidentialText,
+        source_classification: "client-confidential",
+      }));
+      expect(JSON.stringify(ownerCommitments.completed_recently)).toContain(confidentialText);
+      expect(JSON.stringify(ownerCommitments.completed_recently)).not.toContain(confidentialMarker);
+
+      const consumerOwnerCall = makeContextCallTool({
+        ...ownerContext(),
+        transportType: "consumer",
+        maxClassification: "internal",
+      });
+      const downgraded = parseToolResponse(await consumerOwnerCall("memory_commitments", {})) as {
+        open: Array<unknown>;
+        at_risk: Array<unknown>;
+        overdue: Array<unknown>;
+        completed_recently: Array<unknown>;
+      };
+      const serialized = JSON.stringify(downgraded);
+
+      expect(serialized).not.toContain(confidentialText);
+      expect(serialized).not.toContain(confidentialMarker);
+      expect(serialized).not.toContain(namespace);
+      expect(serialized).not.toContain("source_excerpt");
+      expect(downgraded.open).toHaveLength(0);
+      expect(downgraded.at_risk).toHaveLength(0);
+      expect(downgraded.overdue).toHaveLength(0);
+      expect(downgraded.completed_recently).toHaveLength(0);
+    } finally {
+      if (previousLibrarian === undefined) delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      else process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
+    }
+  });
+
+  it("refreshes classification on a valid_until-only update and preserves a later downgrade", async () => {
+    const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+
+    try {
+      const namespace = "projects/valid-until-classification-refresh";
+      const commitmentText = "Review the release notes by 2099-12-30";
+      await callTool("memory_update_status", {
+        namespace,
+        phase: "Active",
+        current_work: "Preparing the release",
+        blockers: "None.",
+        next_steps: [commitmentText],
+        lifecycle: "active",
+        classification: "internal",
+      });
+
+      await callTool("memory_update_status", {
+        namespace,
+        valid_until: "2099-01-01T00:00:00Z",
+        classification: "client-confidential",
+      });
+
+      const owner = parseToolResponse(await callTool("memory_commitments", { namespace })) as {
+        open: Array<{ text: string; source_classification: string }>;
+      };
+      expect(owner.open).toContainEqual(expect.objectContaining({
+        text: commitmentText,
+        source_classification: "client-confidential",
+      }));
+
+      const consumerOwnerCall = makeContextCallTool({
+        ...ownerContext(),
+        transportType: "consumer",
+        maxClassification: "internal",
+      });
+      const hidden = parseToolResponse(await consumerOwnerCall("memory_commitments", { namespace })) as {
+        open: Array<unknown>;
+        at_risk: Array<unknown>;
+        overdue: Array<unknown>;
+        completed_recently: Array<unknown>;
+      };
+      expect(hidden.open).toHaveLength(0);
+      expect(hidden.at_risk).toHaveLength(0);
+      expect(hidden.overdue).toHaveLength(0);
+      expect(hidden.completed_recently).toHaveLength(0);
+
+      await callTool("memory_update_status", {
+        namespace,
+        valid_until: null,
+        classification: "internal",
+      });
+      const downgraded = parseToolResponse(await consumerOwnerCall("memory_commitments", { namespace })) as {
+        open: Array<{ text: string; source_classification: string }>;
+      };
+      expect(downgraded.open).toContainEqual(expect.objectContaining({
+        text: commitmentText,
+        source_classification: "internal",
+      }));
+    } finally {
+      if (previousLibrarian === undefined) delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      else process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
+    }
+  });
+
+  it("refreshes classification on a classification-only patch and preserves a later downgrade", async () => {
+    const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+
+    try {
+      const namespace = "projects/classification-only-patch";
+      const commitmentText = "Review the patch classification by 2099-12-30";
+      await callTool("memory_update_status", {
+        namespace,
+        phase: "Active",
+        current_work: "Preparing the patch",
+        blockers: "None.",
+        next_steps: [commitmentText],
+        lifecycle: "active",
+        classification: "internal",
+      });
+
+      const confidentialPatch = parseToolResponse(await callTool("memory_write", {
+        namespace,
+        key: "status",
+        patch: {},
+        classification: "client-confidential",
+      })) as { status: string };
+      expect(confidentialPatch.status).toBe("patched");
+
+      const owner = parseToolResponse(await callTool("memory_commitments", { namespace })) as {
+        open: Array<{ text: string; source_classification: string }>;
+      };
+      expect(owner.open).toContainEqual(expect.objectContaining({
+        text: commitmentText,
+        source_classification: "client-confidential",
+      }));
+
+      const consumerOwnerCall = makeContextCallTool({
+        ...ownerContext(),
+        transportType: "consumer",
+        maxClassification: "internal",
+      });
+      const hidden = parseToolResponse(await consumerOwnerCall("memory_commitments", { namespace })) as {
+        open: Array<unknown>;
+      };
+      expect(hidden.open).toHaveLength(0);
+
+      const internalPatch = parseToolResponse(await callTool("memory_write", {
+        namespace,
+        key: "status",
+        patch: {},
+        classification: "internal",
+      })) as { status: string };
+      expect(internalPatch.status).toBe("patched");
+
+      const downgraded = parseToolResponse(await consumerOwnerCall("memory_commitments", { namespace })) as {
+        open: Array<{ text: string; source_classification: string }>;
+      };
+      expect(downgraded.open).toContainEqual(expect.objectContaining({
+        text: commitmentText,
+        source_classification: "internal",
+      }));
+    } finally {
+      if (previousLibrarian === undefined) delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      else process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
+    }
+  });
+
+  it("paginates commitments after authorization beyond 200 hidden rows", async () => {
+    const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+
+    try {
+      const namespace = "projects/commitment-filtered-pagination";
+      const visibleText = "We will publish the visible notes by 2099-12-31.";
+      await callTool("memory_log", { namespace, content: visibleText });
+      seedHiddenCommitmentRows(namespace, 205, "2099-01-01T23:59:59.000Z");
+
+      const consumerOwnerCall = makeContextCallTool({
+        ...ownerContext(),
+        transportType: "consumer",
+        maxClassification: "internal",
+      });
+      const result = parseToolResponse(await consumerOwnerCall("memory_commitments", { namespace })) as {
+        open: Array<{ text: string }>;
+        at_risk: Array<{ text: string }>;
+        overdue: Array<{ text: string }>;
+        completed_recently: Array<{ text: string }>;
+      };
+      const visibleItems = [
+        ...result.open,
+        ...result.at_risk,
+        ...result.overdue,
+        ...result.completed_recently,
+      ];
+      expect(visibleItems).toContainEqual(expect.objectContaining({ text: visibleText }));
+      expect(JSON.stringify(result)).not.toContain("Hidden commitment");
+
+      const redactions = db.prepare(
+        "SELECT COUNT(*) AS total, COUNT(DISTINCT entry_id) AS distinct_entries FROM redaction_log WHERE tool_name = 'memory_commitments' AND entry_namespace = ?",
+      ).get(namespace) as { total: number; distinct_entries: number };
+      expect(redactions).toEqual({ total: 205, distinct_entries: 205 });
+    } finally {
+      if (previousLibrarian === undefined) delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      else process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
+    }
+  });
+
+  it("paginates pattern commitments after authorization beyond 200 hidden rows", async () => {
+    const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+
+    try {
+      const namespace = "projects/pattern-filtered-pagination";
+      await callTool("memory_log", { namespace, content: "Commitment: visible migration review" });
+      await callTool("memory_log", { namespace, content: "Commitment: visible rollback review" });
+      seedHiddenCommitmentRows(namespace, 205, null);
+
+      const consumerOwnerCall = makeContextCallTool({
+        ...ownerContext(),
+        transportType: "consumer",
+        maxClassification: "internal",
+      });
+      const result = parseToolResponse(await consumerOwnerCall("memory_patterns", { namespace })) as {
+        patterns: Array<{ kind: string; source_entry_ids: string[] }>;
+      };
+      expect(result.patterns).toContainEqual(expect.objectContaining({ kind: "undated_next_steps" }));
+      expect(JSON.stringify(result)).not.toContain("Hidden commitment");
+
+      const redactions = db.prepare(
+        "SELECT COUNT(*) AS total, COUNT(DISTINCT entry_id) AS distinct_entries FROM redaction_log WHERE tool_name = 'memory_patterns' AND entry_namespace = ?",
+      ).get(namespace) as { total: number; distinct_entries: number };
+      expect(redactions).toEqual({ total: 205, distinct_entries: 205 });
+    } finally {
+      if (previousLibrarian === undefined) delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      else process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
+    }
+  });
+
+  it("paginates handoff open loops after authorization beyond 200 hidden rows", async () => {
+    const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+
+    try {
+      const namespace = "projects/handoff-filtered-pagination";
+      const visibleDate = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      const visibleText = `We will review the visible handoff by ${visibleDate}.`;
+      await callTool("memory_log", { namespace, content: visibleText });
+      const hiddenDate = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      seedHiddenCommitmentRows(namespace, 205, `${hiddenDate}T23:59:59.000Z`);
+
+      const consumerOwnerCall = makeContextCallTool({
+        ...ownerContext(),
+        transportType: "consumer",
+        maxClassification: "internal",
+      });
+      const result = parseToolResponse(await consumerOwnerCall("memory_handoff", { namespace })) as {
+        found: boolean;
+        open_loops: string[];
+      };
+      expect(result.found).toBe(true);
+      expect(result.open_loops.some((loop) => loop.includes(visibleText))).toBe(true);
+      expect(JSON.stringify(result)).not.toContain("Hidden commitment");
+
+      const redactions = db.prepare(
+        "SELECT COUNT(*) AS total, COUNT(DISTINCT entry_id) AS distinct_entries FROM redaction_log WHERE tool_name = 'memory_handoff' AND entry_namespace = ?",
+      ).get(namespace) as { total: number; distinct_entries: number };
+      expect(redactions).toEqual({ total: 205, distinct_entries: 205 });
+    } finally {
+      if (previousLibrarian === undefined) delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      else process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
+    }
+  });
+
+  it("does not let authorized cancelled rows hide later obligations across public handlers", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(COMMITMENTS_TEST_NOW);
+
+    try {
+      const namespace = "projects/commitment-resolved-page-cap";
+      const cancelledMarker = "Cancelled public commitment";
+      const recentDoneText = "Recently completed handoff notes";
+      const oldDoneText = "Old completed handoff notes";
+      seedPublicCommitmentRows(namespace, {
+        idPrefix: "public-cancelled",
+        count: 205,
+        status: "cancelled",
+        dueAt: "2026-07-01T23:59:59.000Z",
+        resolvedAt: "2026-07-01T23:59:59.000Z",
+        baseTimestamp: "2026-07-01T00:00:00.000Z",
+        textForIndex: (index) => `${cancelledMarker} ${String(index).padStart(3, "0")}`,
+      });
+      seedPublicCommitmentRows(namespace, {
+        idPrefix: "public-recent-done",
+        count: 1,
+        status: "done",
+        dueAt: null,
+        resolvedAt: "2026-07-31T12:00:00.000Z",
+        baseTimestamp: "2026-07-31T11:00:00.000Z",
+        textForIndex: () => recentDoneText,
+      });
+      seedPublicCommitmentRows(namespace, {
+        idPrefix: "public-old-done",
+        count: 1,
+        status: "done",
+        dueAt: null,
+        resolvedAt: "2026-06-01T12:00:00.000Z",
+        baseTimestamp: "2026-06-01T11:00:00.000Z",
+        textForIndex: () => oldDoneText,
+      });
+
+      const undatedTexts = [
+        "Commitment: review the undated migration notes",
+        "Commitment: review the undated rollback notes",
+      ];
+      for (const content of undatedTexts) {
+        await callTool("memory_log", {
+          namespace,
+          content,
+          classification: "public",
+          classification_override: true,
+        });
+      }
+      const dueSoonText = `We will review the due-soon handoff by ${commitmentTestDate(1)}.`;
+      await callTool("memory_log", {
+        namespace,
+        content: dueSoonText,
+        classification: "public",
+        classification_override: true,
+      });
+
+      const ordered = [
+        ...listCommitments(db, { namespace, includeResolved: true, limit: 200, offset: 0 }),
+        ...listCommitments(db, { namespace, includeResolved: true, limit: 6, offset: 200 }),
+      ];
+      expect(ordered.slice(0, 205)).toHaveLength(205);
+      expect(ordered.slice(0, 205).every((row) => row.status === "cancelled" && row.source_classification === "public")).toBe(true);
+      expect(ordered[205].status).toBe("open");
+
+      const consumerOwnerCall = makeContextCallTool({
+        ...ownerContext(),
+        transportType: "consumer",
+        maxClassification: "internal",
+      });
+      const commitments = parseToolResponse(await consumerOwnerCall("memory_commitments", { namespace })) as {
+        open: Array<{ text: string }>;
+        at_risk: Array<{ text: string }>;
+        overdue: Array<{ text: string }>;
+        completed_recently: Array<{ text: string; status: string }>;
+      };
+      expect(commitments.open.map((item) => item.text)).toEqual(expect.arrayContaining(undatedTexts));
+      expect(commitments.at_risk).toContainEqual(expect.objectContaining({ text: dueSoonText }));
+      expect(commitments.completed_recently).toEqual([
+        expect.objectContaining({ text: recentDoneText, status: "done" }),
+      ]);
+      for (const bucket of [commitments.open, commitments.at_risk, commitments.overdue]) {
+        expect(bucket.map((item) => item.text)).not.toContain(recentDoneText);
+        expect(bucket.map((item) => item.text)).not.toContain(oldDoneText);
+        expect(bucket.some((item) => item.text.startsWith(cancelledMarker))).toBe(false);
+      }
+      expect(commitments.completed_recently.map((item) => item.text)).not.toContain(oldDoneText);
+      expect(commitments.completed_recently.some((item) => item.text.startsWith(cancelledMarker))).toBe(false);
+
+      const patterns = parseToolResponse(await consumerOwnerCall("memory_patterns", { namespace })) as {
+        patterns: Array<{ kind: string }>;
+      };
+      expect(patterns.patterns).toContainEqual(expect.objectContaining({ kind: "undated_next_steps" }));
+
+      const handoff = parseToolResponse(await consumerOwnerCall("memory_handoff", { namespace })) as {
+        open_loops: string[];
+      };
+      expect(handoff.open_loops.some((loop) => loop.includes(dueSoonText))).toBe(true);
+
+      for (const payload of [patterns, handoff]) {
+        const serialized = JSON.stringify(payload);
+        expect(serialized).not.toContain(cancelledMarker);
+        expect(serialized).not.toContain(recentDoneText);
+        expect(serialized).not.toContain(oldDoneText);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not let one eligible commitment bucket consume the shared cap", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(COMMITMENTS_TEST_NOW);
+
+    try {
+      const namespace = "projects/commitment-bucket-page-cap";
+      const overdueMarker = "Overdue bucket commitment";
+      const normalOpenText = "Commitment: normal open bucket obligation";
+      const atRiskText = `We will review the at-risk bucket obligation by ${commitmentTestDate(2)}.`;
+      const recentDoneText = "Recently completed bucket obligation";
+      seedPublicCommitmentRows(namespace, {
+        idPrefix: "public-overdue",
+        count: 205,
+        status: "open",
+        dueAt: "2026-07-01T23:59:59.000Z",
+        baseTimestamp: "2026-07-01T00:00:00.000Z",
+        sourceType: "explicit_dated_commitment",
+        textForIndex: (index) => `We will complete ${overdueMarker.toLowerCase()} ${String(index).padStart(3, "0")} by 2026-07-01.`,
+      });
+      seedPublicCommitmentRows(namespace, {
+        idPrefix: "public-normal-open",
+        count: 1,
+        status: "open",
+        dueAt: null,
+        baseTimestamp: "2026-08-01T11:59:00.000Z",
+        textForIndex: () => normalOpenText,
+      });
+      seedPublicCommitmentRows(namespace, {
+        idPrefix: "public-at-risk",
+        count: 1,
+        status: "open",
+        dueAt: "2026-08-03T23:59:59.000Z",
+        baseTimestamp: "2026-08-01T11:58:00.000Z",
+        sourceType: "explicit_dated_commitment",
+        textForIndex: () => atRiskText,
+      });
+      seedPublicCommitmentRows(namespace, {
+        idPrefix: "public-recent-done",
+        count: 1,
+        status: "done",
+        dueAt: null,
+        resolvedAt: "2026-08-01T11:00:00.000Z",
+        baseTimestamp: "2026-08-01T10:59:00.000Z",
+        textForIndex: () => recentDoneText,
+      });
+
+      const eligible = [
+        ...listCommitments(db, {
+          namespace,
+          statuses: ["open", "done"],
+          recentlyDoneSince: "2026-07-18T12:00:00.000Z",
+          limit: 200,
+          offset: 0,
+        }),
+        ...listCommitments(db, {
+          namespace,
+          statuses: ["open", "done"],
+          recentlyDoneSince: "2026-07-18T12:00:00.000Z",
+          limit: 9,
+          offset: 200,
+        }),
+      ];
+      expect(eligible).toHaveLength(208);
+      expect(eligible.every((row) => row.source_classification === "public")).toBe(true);
+      expect(eligible.slice(0, 205).every((row) => row.status === "open" && row.text.startsWith("We will complete overdue bucket commitment"))).toBe(true);
+      expect(eligible.slice(205).map((row) => row.text)).toEqual(expect.arrayContaining([
+        normalOpenText,
+        atRiskText,
+        recentDoneText,
+      ]));
+
+      const consumerOwnerCall = makeContextCallTool({
+        ...ownerContext(),
+        transportType: "consumer",
+        maxClassification: "internal",
+      });
+      const commitments = parseToolResponse(await consumerOwnerCall("memory_commitments", { namespace })) as {
+        open: Array<{ text: string }>;
+        at_risk: Array<{ text: string }>;
+        overdue: Array<{ text: string }>;
+        completed_recently: Array<{ text: string; status: string }>;
+      };
+      expect(commitments.overdue).toHaveLength(10);
+      expect(commitments.overdue[0].text).toContain(overdueMarker.toLowerCase());
+      expect(commitments.open).toContainEqual(expect.objectContaining({ text: normalOpenText }));
+      expect(commitments.at_risk).toContainEqual(expect.objectContaining({ text: atRiskText }));
+      expect(commitments.completed_recently).toContainEqual(expect.objectContaining({
+        text: recentDoneText,
+        status: "done",
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps visible log commitments visible when only a hidden terminal status resolves the namespace", async () => {
+    const namespace = "projects/mixed-visibility-resolved";
+    const publishDate = commitmentTestDate(20);
+    const commitmentText = `We will publish the public notes by ${publishDate}.`;
+
+    await callTool("memory_update_status", {
+      namespace,
+      phase: "Completed",
+      current_work: "Privately wrapped up.",
+      blockers: "None.",
+      next_steps: [],
+      lifecycle: "completed",
+      classification: "client-confidential",
+    });
+    await callTool("memory_log", {
+      namespace,
+      content: commitmentText,
+      tags: ["decision"],
+    });
+
+    const consumerOwnerCall = makeContextCallTool({
+      ...ownerContext(),
+      transportType: "consumer",
+      maxClassification: "internal",
+    });
+
+    const downgradedRaw = await consumerOwnerCall("memory_commitments", {
+      namespace,
+    });
+    const downgraded = parseToolResponse(downgradedRaw) as {
+      open: Array<{ text: string; namespace: string; status: string }>;
+      at_risk: Array<unknown>;
+      overdue: Array<unknown>;
+      completed_recently: Array<unknown>;
+      exclusion_diagnostics?: unknown;
+    };
+
+    expect(downgraded.open).toContainEqual(expect.objectContaining({
+      text: commitmentText,
+      namespace,
+      status: "open",
+    }));
+    expect(downgraded.at_risk).toHaveLength(0);
+    expect(downgraded.overdue).toHaveLength(0);
+    expect(downgraded.completed_recently).toHaveLength(0);
+    expect(downgraded.exclusion_diagnostics).toBeUndefined();
+
+    const ownerRaw = await callTool("memory_commitments", { namespace });
+    const ownerResult = parseToolResponse(ownerRaw) as {
+      open: Array<unknown>;
+      at_risk: Array<unknown>;
+      overdue: Array<unknown>;
+      completed_recently: Array<unknown>;
+      exclusion_diagnostics?: {
+        matched_but_excluded: number;
+        reason_counts?: Record<string, number>;
+      };
+    };
+
+    expect(ownerResult.open).toHaveLength(0);
+    expect(ownerResult.at_risk).toHaveLength(0);
+    expect(ownerResult.overdue).toHaveLength(0);
+    expect(ownerResult.completed_recently).toHaveLength(0);
+    expect(ownerResult.exclusion_diagnostics).toEqual(expect.objectContaining({
+      matched_but_excluded: 1,
+      reason_counts: expect.objectContaining({
+        resolved_namespace: 1,
+      }),
+    }));
+
+    const downgradedAfterOwnerRaw = await consumerOwnerCall("memory_commitments", {
+      namespace,
+    });
+    const downgradedAfterOwner = parseToolResponse(downgradedAfterOwnerRaw) as {
+      open: Array<{ text: string; namespace: string; status: string }>;
+      exclusion_diagnostics?: unknown;
+    };
+
+    expect(downgradedAfterOwner.open).toContainEqual(expect.objectContaining({
+      text: commitmentText,
+      namespace,
+      status: "open",
+    }));
+    expect(downgradedAfterOwner.exclusion_diagnostics).toBeUndefined();
+
+    expect(listCommitments(db, {
+      namespace,
+      includeResolved: true,
+      limit: 10,
+    })).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        text: commitmentText,
+        namespace,
+        status: "open",
+        source_classification: "internal",
+      }),
+    ]));
   });
 
   it("does not mine classified decision logs in memory_patterns", async () => {
@@ -6233,14 +7091,24 @@ describe("memory_narrative", () => {
 });
 
 describe("memory_commitments", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(COMMITMENTS_TEST_NOW);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("tracks status next steps and resolves them when they are cleared", async () => {
+    const notesDueDate = commitmentTestDate(30);
     await callTool("memory_update_status", {
       namespace: "projects/bifrost",
       phase: "Active",
       current_work: "Polish onboarding",
       blockers: "None.",
       next_steps: [
-        "Ship onboarding notes by 2027-04-05",
+        `Ship onboarding notes by ${notesDueDate}`,
         "Add cleanup checklist",
       ],
       lifecycle: "active",
@@ -6256,7 +7124,7 @@ describe("memory_commitments", () => {
 
     expect(initial.open).toHaveLength(2);
     expect(initial.open).toContainEqual(expect.objectContaining({
-      text: "Ship onboarding notes by 2027-04-05",
+      text: `Ship onboarding notes by ${notesDueDate}`,
       source_type: "tracked_next_step",
     }));
     expect(initial.open[0].source_entry_id).toBeTruthy();
@@ -6280,7 +7148,7 @@ describe("memory_commitments", () => {
 
     expect(resolved.open).toHaveLength(0);
     expect(resolved.completed_recently).toContainEqual(expect.objectContaining({
-      text: "Ship onboarding notes by 2027-04-05",
+      text: `Ship onboarding notes by ${notesDueDate}`,
       status: "done",
     }));
   });
@@ -6411,12 +7279,13 @@ describe("memory_commitments", () => {
   });
 
   it("does not include reason when commitments are found", async () => {
+    const featureDueDate = commitmentTestDate(45);
     await callTool("memory_update_status", {
       namespace: "projects/commitments-reason-check",
       phase: "Active",
       current_work: "Building the feature",
       blockers: "None.",
-      next_steps: ["Ship the feature by 2027-06-01"],
+      next_steps: [`Ship the feature by ${featureDueDate}`],
       lifecycle: "active",
     });
 
@@ -6496,13 +7365,155 @@ describe("memory_commitments", () => {
     }));
   });
 
+  it("detects future-dated verify/run/validate/check/test commitments in log entries", async () => {
+    const entries = [
+      `We will verify the backup restore by ${commitmentTestDate(9)}.`,
+      `I will run the rollback drill on ${commitmentTestDate(10)}.`,
+      `We will validate the schema by ${commitmentTestDate(11)}.`,
+      `I will check the migration on ${commitmentTestDate(12)}.`,
+      `We will test the failover by ${commitmentTestDate(13)}.`,
+    ];
+
+    for (const content of entries) {
+      await callTool("memory_log", {
+        namespace: "projects/dated-action-verbs",
+        content,
+        tags: ["decision"],
+      });
+    }
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/dated-action-verbs",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ text: string; source_type: string }>;
+      overdue: Array<{ text: string; source_type: string }>;
+    };
+
+    const allCommitments = [...result.open, ...result.overdue];
+    for (const text of entries) {
+      expect(allCommitments).toContainEqual(expect.objectContaining({
+        text,
+        source_type: "explicit_dated_commitment",
+      }));
+    }
+  });
+
+  it("does not derive commitments from tracked non-status state entries", async () => {
+    const publishDate = commitmentTestDate(14);
+    await callTool("memory_update_status", {
+      namespace: "projects/non-status-state-commitments",
+      phase: "Delivery",
+      current_work: "Keep canonical status current.",
+      blockers: "None.",
+      next_steps: [],
+      lifecycle: "active",
+    });
+    await callTool("memory_write", {
+      namespace: "projects/non-status-state-commitments",
+      key: "architecture",
+      content: `We will publish the API reference by ${publishDate}.`,
+    });
+
+    const rowCount = db.prepare(
+      "SELECT COUNT(*) AS count FROM commitments WHERE namespace = ?",
+    ).get("projects/non-status-state-commitments") as { count: number };
+    expect(rowCount.count).toBe(0);
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/non-status-state-commitments",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ text: string }>;
+      overdue: Array<{ text: string }>;
+      at_risk: Array<{ text: string }>;
+    };
+
+    expect(result.open).toHaveLength(0);
+    expect(result.overdue).toHaveLength(0);
+    expect(result.at_risk).toHaveLength(0);
+  });
+
+  it("deduplicates repeated commitment sentences within one entry and reports the dropped duplicate", async () => {
+    const duplicateDueDate = commitmentTestDate(19);
+    await callTool("memory_log", {
+      namespace: "projects/duplicate-commitment-sentence",
+      content: `We will verify the restore by ${duplicateDueDate}. We will verify the restore by ${duplicateDueDate}.`,
+      tags: ["decision"],
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/duplicate-commitment-sentence",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ text: string }>;
+      exclusion_diagnostics?: {
+        matched_but_excluded: number;
+        reason_counts?: Record<string, number>;
+      };
+    };
+
+    expect(result.open).toHaveLength(1);
+    expect(result.open[0].text).toBe(`We will verify the restore by ${duplicateDueDate}.`);
+    expect(result.exclusion_diagnostics).toEqual(expect.objectContaining({
+      matched_but_excluded: 1,
+      reason_counts: expect.objectContaining({
+        duplicate_within_entry: 1,
+      }),
+    }));
+  });
+
+  it("drops retrospective verify/run/validate/check/test logs and reports content-blind exclusions", async () => {
+    const retrospectiveEntries = [
+      `We verified the backup restore on ${commitmentTestDate(-5)}.`,
+      `I ran the rollback drill on ${commitmentTestDate(-4)}.`,
+      `We validated the schema on ${commitmentTestDate(-3)}.`,
+      `I checked the migration on ${commitmentTestDate(-2)}.`,
+      `We tested the failover on ${commitmentTestDate(-1)}.`,
+    ];
+
+    for (const content of retrospectiveEntries) {
+      await callTool("memory_log", {
+        namespace: "projects/retrospective-action-verbs",
+        content,
+        tags: ["milestone"],
+      });
+    }
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/retrospective-action-verbs",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<unknown>;
+      at_risk: Array<unknown>;
+      overdue: Array<unknown>;
+      completed_recently: Array<unknown>;
+      exclusion_diagnostics?: {
+        matched_but_excluded: number;
+        reason_counts?: Record<string, number>;
+      };
+    };
+
+    expect(result.open).toHaveLength(0);
+    expect(result.at_risk).toHaveLength(0);
+    expect(result.overdue).toHaveLength(0);
+    expect(result.completed_recently).toHaveLength(0);
+    expect(result.exclusion_diagnostics).toEqual(expect.objectContaining({
+      matched_but_excluded: retrospectiveEntries.length,
+      reason_counts: expect.objectContaining({
+        retrospective_completion: retrospectiveEntries.length,
+      }),
+    }));
+  });
+
   it("still extracts commitments from status next-steps (regression)", async () => {
+    const featureShipDate = commitmentTestDate(365);
     await callTool("memory_update_status", {
       namespace: "projects/regression-next-steps",
       phase: "Active",
       current_work: "Working on feature X",
       blockers: "None.",
-      next_steps: ["Ship feature X by 2027-08-01", "Write tests"],
+      next_steps: [`Ship feature X by ${featureShipDate}`, "Write tests"],
       lifecycle: "active",
     });
 
@@ -6514,9 +7525,722 @@ describe("memory_commitments", () => {
     };
 
     expect(result.open).toContainEqual(expect.objectContaining({
-      text: "Ship feature X by 2027-08-01",
+      text: `Ship feature X by ${featureShipDate}`,
       source_type: "tracked_next_step",
     }));
+  });
+
+  it("extracts dated status prose outside canonical Next Steps and omits empty diagnostics", async () => {
+    const proseDueDate = commitmentTestDate(7);
+    const nextStepDueDate = commitmentTestDate(14);
+    await callTool("memory_write", {
+      namespace: "projects/status-prose-commitments",
+      key: "status",
+      content: [
+        "## Phase",
+        "Active",
+        "",
+        "## Current Work",
+        `We will publish the migration notes by ${proseDueDate}.`,
+        "",
+        "## Blockers",
+        "None.",
+        "",
+        "## Next Steps",
+        `- Ship the rollout checklist by ${nextStepDueDate}`,
+      ].join("\n"),
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/status-prose-commitments",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ text: string; source_type: string }>;
+      exclusion_diagnostics?: unknown;
+    };
+
+    expect(result.open).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        text: `We will publish the migration notes by ${proseDueDate}.`,
+        source_type: "explicit_dated_commitment",
+      }),
+      expect.objectContaining({
+        text: `Ship the rollout checklist by ${nextStepDueDate}`,
+        source_type: "tracked_next_step",
+      }),
+    ]));
+    expect(result.exclusion_diagnostics).toBeUndefined();
+  });
+
+  it("keeps persisted status-prose commitments open when the source status still contains the dated clause", async () => {
+    const proseDueDate = commitmentTestDate(9);
+    const proseText = `We will publish the migration notes by ${proseDueDate}.`;
+    const { id: sourceId } = writeState(
+      db,
+      "projects/status-prose-resync",
+      "status",
+      [
+        "## Phase",
+        "Active",
+        "",
+        "## Current Work",
+        proseText,
+        "",
+        "## Blockers",
+        "None.",
+        "",
+        "## Next Steps",
+        "- Keep shipping",
+      ].join("\n"),
+      ["active"],
+    );
+    db.prepare("UPDATE entries SET created_at = ?, updated_at = ? WHERE id = ?").run(
+      "2026-08-01T12:00:00.000Z",
+      "2026-08-01T12:00:00.000Z",
+      sourceId,
+    );
+
+    const normalized = proseText.toLowerCase().replace(/\s+/g, " ").trim();
+    db.prepare(
+      `INSERT INTO commitments
+         (id, namespace, source_entry_id, source_type, source_fingerprint, text, due_at, status, confidence, created_at, updated_at, resolved_at)
+       VALUES (?, ?, ?, 'explicit_dated_commitment', ?, ?, ?, 'open', ?, ?, ?, NULL)`,
+    ).run(
+      "persisted-status-prose",
+      "projects/status-prose-resync",
+      sourceId,
+      `explicit_dated_commitment:${normalized}`,
+      proseText,
+      `${proseDueDate}T23:59:59.000Z`,
+      0.7,
+      "2026-07-15T12:00:00.000Z",
+      "2026-07-15T12:00:00.000Z",
+    );
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/status-prose-resync",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ id: string; text: string; source_type: string }>;
+      completed_recently: Array<{ id: string }>;
+    };
+
+    expect(result.open).toContainEqual(expect.objectContaining({
+      id: "persisted-status-prose",
+      text: proseText,
+      source_type: "explicit_dated_commitment",
+    }));
+    expect(result.completed_recently).toHaveLength(0);
+
+    const row = db.prepare(
+      "SELECT status, resolved_at FROM commitments WHERE id = ?",
+    ).get("persisted-status-prose") as { status: string; resolved_at: string | null };
+    expect(row).toEqual({ status: "open", resolved_at: null });
+  });
+
+  it("extracts the future clause from mixed-tense dated prose", async () => {
+    const retrospectiveDate = commitmentTestDate(-2);
+    const followupDate = commitmentTestDate(8);
+    await callTool("memory_log", {
+      namespace: "projects/mixed-tense-dated-prose",
+      content: `We verified the backup restore on ${retrospectiveDate} and will publish the follow-up by ${followupDate}.`,
+      tags: ["decision"],
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/mixed-tense-dated-prose",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ text: string; source_type: string }>;
+      exclusion_diagnostics?: unknown;
+    };
+
+    expect(result.open).toContainEqual(expect.objectContaining({
+      text: `We will publish the follow-up by ${followupDate}.`,
+      source_type: "explicit_dated_commitment",
+    }));
+    expect(result.exclusion_diagnostics).toBeUndefined();
+  });
+
+  it.each([
+    {
+      name: "comma + repeated-subject omission",
+      namespace: "projects/mixed-tense-boundary-comma",
+      content: (retrospectiveDate: string, followupDate: string) =>
+        `Yesterday we verified the backup restore on ${retrospectiveDate}, and will publish the follow-up by ${followupDate}.`,
+    },
+    {
+      name: "semicolon boundary",
+      namespace: "projects/mixed-tense-boundary-semicolon",
+      content: (retrospectiveDate: string, followupDate: string) =>
+        `Yesterday we verified the backup restore on ${retrospectiveDate}; we will publish the follow-up by ${followupDate}.`,
+    },
+    {
+      name: "then boundary",
+      namespace: "projects/mixed-tense-boundary-then",
+      content: (retrospectiveDate: string, followupDate: string) =>
+        `Yesterday we verified the backup restore on ${retrospectiveDate}, then we will publish the follow-up by ${followupDate}.`,
+    },
+  ])("binds the future due date across a $name", async ({ namespace, content }) => {
+    const retrospectiveDate = commitmentTestDate(-4);
+    const followupDate = commitmentTestDate(12);
+    await callTool("memory_log", {
+      namespace,
+      content: content(retrospectiveDate, followupDate),
+      tags: ["decision"],
+    });
+
+    const raw = await callTool("memory_commitments", { namespace });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ text: string; due_at: string | null }>;
+      overdue: Array<unknown>;
+    };
+
+    expect(result.open).toContainEqual(expect.objectContaining({
+      text: `We will publish the follow-up by ${followupDate}.`,
+      due_at: `${followupDate}T23:59:59.000Z`,
+    }));
+    expect(result.overdue).toHaveLength(0);
+  });
+
+  it("does not reuse a retrospective date when an unsplit noun-subject future clause has no due date of its own", async () => {
+    const retrospectiveDate = commitmentTestDate(-1);
+    await callTool("memory_log", {
+      namespace: "projects/mixed-tense-noun-subject-no-due",
+      content: `We completed the audit on ${retrospectiveDate}; the report should be filed later.`,
+      tags: ["decision"],
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/mixed-tense-noun-subject-no-due",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<unknown>;
+      at_risk: Array<unknown>;
+      overdue: Array<unknown>;
+      completed_recently: Array<unknown>;
+    };
+
+    expect(result.open).toHaveLength(0);
+    expect(result.at_risk).toHaveLength(0);
+    expect(result.overdue).toHaveLength(0);
+    expect(result.completed_recently).toHaveLength(0);
+  });
+
+  it("extracts passive future commitments from dated clauses", async () => {
+    const validationDate = commitmentTestDate(10);
+    await callTool("memory_log", {
+      namespace: "projects/passive-future-dated-prose",
+      content: `The runbook must be validated by ${validationDate}.`,
+      tags: ["decision"],
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/passive-future-dated-prose",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ text: string; source_type: string }>;
+    };
+
+    expect(result.open).toContainEqual(expect.objectContaining({
+      text: `The runbook must be validated by ${validationDate}.`,
+      source_type: "explicit_dated_commitment",
+    }));
+  });
+
+  it("normalizes an inline canonical Next Steps line into a single tracked next-step commitment", async () => {
+    const dueDate = commitmentTestDate(11);
+    await callTool("memory_write", {
+      namespace: "projects/inline-canonical-next-steps",
+      key: "status",
+      content: [
+        "**Phase**: Build",
+        "**Current Work**: Stabilizing the rollout",
+        "**Blockers**: None.",
+        `**Next Steps**: File the incident report by ${dueDate}`,
+      ].join("\n"),
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/inline-canonical-next-steps",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ text: string; source_type: string }>;
+      exclusion_diagnostics?: unknown;
+    };
+
+    expect(result.open).toEqual([expect.objectContaining({
+      text: `File the incident report by ${dueDate}`,
+      source_type: "tracked_next_step",
+    })]);
+    expect(result.exclusion_diagnostics).toBeUndefined();
+  });
+
+  it("reports plain markdown status next steps as unsupported rather than silently treating them as eligible", async () => {
+    const restoreDate = commitmentTestDate(14);
+    const canaryDate = commitmentTestDate(15);
+    await callTool("memory_write", {
+      namespace: "projects/plain-status-next-steps",
+      key: "status",
+      content: [
+        "Phase: Build",
+        "Current Work: Stabilizing the rollout",
+        "Blockers: None.",
+        "Next Steps:",
+        `- Verify the restore path by ${restoreDate}`,
+        `- Run the canary on ${canaryDate}`,
+      ].join("\n"),
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/plain-status-next-steps",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<unknown>;
+      at_risk: Array<unknown>;
+      overdue: Array<unknown>;
+      completed_recently: Array<unknown>;
+      data_requirements?: string;
+      exclusion_diagnostics?: {
+        matched_but_excluded: number;
+        reason_counts?: Record<string, number>;
+      };
+    };
+
+    expect(result.open).toHaveLength(0);
+    expect(result.at_risk).toHaveLength(0);
+    expect(result.overdue).toHaveLength(0);
+    expect(result.completed_recently).toHaveLength(0);
+    expect(result.data_requirements).toContain("memory_update_status");
+    expect(result.exclusion_diagnostics).toEqual(expect.objectContaining({
+      matched_but_excluded: 1,
+      reason_counts: expect.objectContaining({
+        legacy_plain_status_next_steps: 1,
+      }),
+    }));
+    expect(JSON.stringify(result.exclusion_diagnostics)).not.toContain("Verify the restore path");
+    expect(JSON.stringify(result.exclusion_diagnostics)).not.toContain("Run the canary");
+  });
+
+  it.each([
+    {
+      name: "the legacy block precedes its plain status context",
+      lines: (dueDate: string) => [
+        "Next Steps:",
+        `- Verify the restore path by ${dueDate}`,
+        "",
+        "Phase: Build",
+        "Current Work: Stabilizing the rollout",
+        "Blockers: None.",
+      ],
+    },
+    {
+      name: "inline canonical context precedes a plain legacy block",
+      lines: (dueDate: string) => [
+        "**Phase**: Build",
+        "**Current Work**: Stabilizing the rollout",
+        "**Blockers**: None.",
+        "Next Steps:",
+        `- Verify the restore path by ${dueDate}`,
+      ],
+    },
+  ])("excludes unsupported Next Steps when $name", async ({ name, lines }) => {
+    const dueDate = commitmentTestDate(15);
+    const namespace = `projects/legacy-layout-${name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}`;
+    await callTool("memory_write", {
+      namespace,
+      key: "status",
+      content: lines(dueDate).join("\n"),
+      tags: ["active"],
+    });
+
+    const result = parseToolResponse(await callTool("memory_commitments", {
+      namespace,
+    })) as {
+      open: Array<unknown>;
+      completed_recently: Array<unknown>;
+      exclusion_diagnostics?: {
+        matched_but_excluded: number;
+        reason_counts?: Record<string, number>;
+      };
+    };
+
+    expect(result.open).toHaveLength(0);
+    expect(result.completed_recently).toHaveLength(0);
+    expect(result.exclusion_diagnostics).toEqual(expect.objectContaining({
+      matched_but_excluded: 1,
+      reason_counts: expect.objectContaining({
+        legacy_plain_status_next_steps: 1,
+      }),
+    }));
+  });
+
+  it("strips a legacy plain Next Steps block before the first canonical heading without leaking its commitments", async () => {
+    const legacyDueDate = commitmentTestDate(16);
+    await callTool("memory_write", {
+      namespace: "projects/legacy-prefix-before-heading",
+      key: "status",
+      content: [
+        "Phase: Build",
+        "Current Work: Stabilizing the rollout",
+        "Blockers: None.",
+        "Next Steps:",
+        `- Verify the restore path by ${legacyDueDate}`,
+        "",
+        "## Notes",
+        "Canonical notes only.",
+      ].join("\n"),
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/legacy-prefix-before-heading",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<unknown>;
+      at_risk: Array<unknown>;
+      overdue: Array<unknown>;
+      completed_recently: Array<unknown>;
+      exclusion_diagnostics?: {
+        matched_but_excluded: number;
+        reason_counts?: Record<string, number>;
+      };
+    };
+
+    expect(result.open).toHaveLength(0);
+    expect(result.at_risk).toHaveLength(0);
+    expect(result.overdue).toHaveLength(0);
+    expect(result.completed_recently).toHaveLength(0);
+    expect(result.exclusion_diagnostics).toEqual(expect.objectContaining({
+      matched_but_excluded: 1,
+      reason_counts: expect.objectContaining({
+        legacy_plain_status_next_steps: 1,
+      }),
+    }));
+    expect(JSON.stringify(result.exclusion_diagnostics)).not.toContain("Verify the restore path");
+  });
+
+  it.each([
+    "TODO",
+    "Action Items",
+  ])("keeps a canonical ## %s extras section visible for dated prose even when another section contains a Status: line", async (title) => {
+    const dueDate = commitmentTestDate(17);
+    const namespace = `projects/canonical-extra-${title.toLowerCase().replace(/\s+/g, "-")}`;
+    await callTool("memory_write", {
+      namespace,
+      key: "status",
+      content: [
+        "## Phase",
+        "Build",
+        "",
+        "## Current Work",
+        "Stabilizing the rollout",
+        "",
+        "## Blockers",
+        "None.",
+        "",
+        "## Notes",
+        "Status: waiting on finance approval.",
+        "",
+        `## ${title}`,
+        `The report should be filed by ${dueDate}.`,
+      ].join("\n"),
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_commitments", { namespace });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ text: string; due_at: string | null }>;
+      exclusion_diagnostics?: { reason_counts?: Record<string, number> };
+    };
+
+    expect(result.open).toContainEqual(expect.objectContaining({
+      text: `The report should be filed by ${dueDate}.`,
+      due_at: `${dueDate}T23:59:59.000Z`,
+    }));
+    expect(result.exclusion_diagnostics?.reason_counts?.legacy_plain_status_next_steps ?? 0).toBe(0);
+  });
+
+  it("bounds a legacy line-mode Next Steps block so later dated prose still derives commitments", async () => {
+    const legacyDueDate = commitmentTestDate(19);
+    const followupDate = commitmentTestDate(20);
+    await callTool("memory_write", {
+      namespace: "projects/legacy-line-mode-bounds",
+      key: "status",
+      content: [
+        "Phase: Build",
+        "Current Work: Stabilizing the rollout",
+        "Blockers: None.",
+        "Next Steps:",
+        `- Verify the restore path by ${legacyDueDate}`,
+        "",
+        `Later, we will file the rollout report by ${followupDate}.`,
+      ].join("\n"),
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/legacy-line-mode-bounds",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ text: string; due_at: string | null }>;
+      exclusion_diagnostics?: {
+        matched_but_excluded: number;
+        reason_counts?: Record<string, number>;
+      };
+    };
+
+    expect(result.open).toContainEqual(expect.objectContaining({
+      text: `We will file the rollout report by ${followupDate}.`,
+      due_at: `${followupDate}T23:59:59.000Z`,
+    }));
+    expect(result.exclusion_diagnostics).toEqual(expect.objectContaining({
+      matched_but_excluded: 1,
+      reason_counts: expect.objectContaining({
+        legacy_plain_status_next_steps: 1,
+      }),
+    }));
+  });
+
+  it.each([
+    "Next Steps:",
+    "Next Steps",
+    "## Action Items",
+    "Action Items:",
+    "Action Item",
+    "TODO",
+    "Next",
+  ])("retires legacy plain-status commitment rows with a %s header without surfacing them as completed", async (header) => {
+    const restoreDate = commitmentTestDate(24);
+    const nextStep = `Verify the restore path by ${restoreDate}`;
+    const namespace = `projects/legacy-plain-status-${header.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+    const { commitmentId } = await seedLegacyPlainStatusCommitment(namespace, header, nextStep, `${namespace}-row`);
+
+    const raw = await callTool("memory_commitments", { namespace });
+    const result = parseToolResponse(raw) as {
+      open: Array<unknown>;
+      completed_recently: Array<{ id: string }>;
+      exclusion_diagnostics?: {
+        matched_but_excluded: number;
+        reason_counts?: Record<string, number>;
+      };
+    };
+
+    expect(result.open).toHaveLength(0);
+    expect(result.completed_recently).toHaveLength(0);
+    expect(result.exclusion_diagnostics).toEqual(expect.objectContaining({
+      matched_but_excluded: 1,
+      reason_counts: expect.objectContaining({
+        legacy_plain_status_next_steps: 1,
+      }),
+    }));
+
+    const row = db.prepare(
+      "SELECT status, resolved_at FROM commitments WHERE id = ?",
+    ).get(commitmentId) as { status: string; resolved_at: string | null };
+    expect(row.status).toBe("cancelled");
+    expect(row.resolved_at).not.toBeNull();
+  });
+
+  it("reopens the same tracked next-step row when a legacy plain status is rewritten canonically", async () => {
+    const restoreDate = commitmentTestDate(25);
+    const nextStep = `Verify the restore path by ${restoreDate}`;
+    const namespace = "projects/legacy-plain-status-reopen";
+    const { commitmentId } = await seedLegacyPlainStatusCommitment(
+      namespace,
+      "Action Items",
+      nextStep,
+      "legacy-plain-status-reopen-row",
+    );
+
+    await callTool("memory_commitments", { namespace });
+    let row = db.prepare(
+      "SELECT status, resolved_at FROM commitments WHERE id = ?",
+    ).get(commitmentId) as { status: string; resolved_at: string | null };
+    expect(row.status).toBe("cancelled");
+    expect(row.resolved_at).not.toBeNull();
+
+    await callTool("memory_update_status", {
+      namespace,
+      phase: "Build",
+      current_work: "Stabilizing the rollout",
+      blockers: "None.",
+      next_steps: [nextStep],
+      lifecycle: "active",
+    });
+
+    const raw = await callTool("memory_commitments", { namespace });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ id: string; text: string }>;
+      completed_recently: Array<{ id: string }>;
+    };
+
+    expect(result.open).toContainEqual(expect.objectContaining({
+      id: commitmentId,
+      text: nextStep,
+    }));
+    expect(result.completed_recently).toHaveLength(0);
+
+    row = db.prepare(
+      "SELECT status, resolved_at FROM commitments WHERE id = ?",
+    ).get(commitmentId) as { status: string; resolved_at: string | null };
+    expect(row).toEqual({ status: "open", resolved_at: null });
+  });
+
+  it("does not let a literal Next Steps line in canonical notes cancel a completed canonical next step", async () => {
+    const nextStepDueDate = commitmentTestDate(29);
+    const namespace = "projects/canonical-next-steps-note-literal";
+    await callTool("memory_write", {
+      namespace,
+      key: "status",
+      content: [
+        "## Phase",
+        "Active",
+        "",
+        "## Current Work",
+        "Wrapping up the rollout",
+        "",
+        "## Blockers",
+        "None.",
+        "",
+        "## Next Steps",
+        `- Ship the importer by ${nextStepDueDate}`,
+        "",
+        "## Notes",
+        "Copied transcript marker:",
+        "Next Steps:",
+        "- legacy pasted bullet",
+      ].join("\n"),
+      tags: ["active"],
+    });
+
+    await callTool("memory_commitments", { namespace });
+    await callTool("memory_update_status", {
+      namespace,
+      phase: "Active",
+      current_work: "Wrapping up the rollout",
+      blockers: "None.",
+      next_steps: [],
+      notes: "Copied transcript marker:\nNext Steps:\n- legacy pasted bullet",
+      lifecycle: "active",
+    });
+
+    const raw = await callTool("memory_commitments", { namespace });
+    const result = parseToolResponse(raw) as {
+      completed_recently: Array<{ text: string }>;
+    };
+
+    expect(result.completed_recently).toContainEqual(expect.objectContaining({
+      text: `Ship the importer by ${nextStepDueDate}`,
+    }));
+
+    const row = db.prepare(
+      "SELECT status FROM commitments WHERE namespace = ? ORDER BY created_at DESC LIMIT 1",
+    ).get(namespace) as { status: string };
+    expect(row.status).toBe("done");
+  });
+
+  it("conservatively retires an unversioned legacy row after its source block is rewritten away", async () => {
+    const nextStepDueDate = commitmentTestDate(30);
+    const nextStep = `Verify the restore path by ${nextStepDueDate}`;
+    const namespace = "projects/free-form-quoted-next-steps";
+    const { commitmentId } = await seedLegacyPlainStatusCommitment(
+      namespace,
+      "Next Steps:",
+      nextStep,
+      "free-form-quoted-next-steps-row",
+    );
+
+    await callTool("memory_write", {
+      namespace,
+      key: "status",
+      content: [
+        "Copied transcript excerpt for the incident record:",
+        "Next Steps:",
+        "- this pasted line is historical context, not the live status contract",
+      ].join("\n"),
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_commitments", { namespace });
+    const result = parseToolResponse(raw) as {
+      completed_recently: Array<{ id: string; status: string }>;
+      exclusion_diagnostics?: { reason_counts?: Record<string, number> };
+    };
+
+    expect(result.completed_recently).toHaveLength(0);
+    expect(db.prepare("SELECT status FROM commitments WHERE id = ?").get(commitmentId))
+      .toEqual({ status: "cancelled" });
+  });
+
+  it("revises legacy whole-segment dated rows in place when the future clause still survives", async () => {
+    const retrospectiveDate = commitmentTestDate(-3);
+    const followupDate = commitmentTestDate(18);
+    const legacyText =
+      `We verified the backup restore on ${retrospectiveDate}, confirmed the incident timeline, captured operator notes, and will publish the follow-up memo by ${followupDate} after legal review.`;
+    const revisedText = `We will publish the follow-up memo by ${followupDate} after legal review.`;
+    const { id: logId } = appendLog(
+      db,
+      "projects/legacy-whole-segment-upgrade",
+      legacyText,
+      ["decision"],
+    );
+    db.prepare("UPDATE entries SET created_at = ?, updated_at = ? WHERE id = ?").run(
+      "2026-08-01T12:00:00.000Z",
+      "2026-08-01T12:00:00.000Z",
+      logId,
+    );
+
+    db.prepare(
+      `INSERT INTO commitments
+         (id, namespace, source_entry_id, source_type, source_fingerprint, text, due_at, status, confidence, created_at, updated_at, resolved_at)
+       VALUES (?, ?, ?, 'explicit_dated_commitment', ?, ?, ?, 'open', ?, ?, ?, NULL)`,
+    ).run(
+      "legacy-whole-segment-row",
+      "projects/legacy-whole-segment-upgrade",
+      logId,
+      `explicit_dated_commitment:${legacyText.toLowerCase().replace(/\s+/g, " ").trim()}`,
+      legacyText,
+      `${followupDate}T23:59:59.000Z`,
+      0.7,
+      "2026-07-15T12:00:00.000Z",
+      "2026-07-15T12:00:00.000Z",
+    );
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/legacy-whole-segment-upgrade",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ id: string; text: string; source_type: string }>;
+      completed_recently: Array<{ id: string }>;
+    };
+
+    expect(result.open).toContainEqual(expect.objectContaining({
+      id: "legacy-whole-segment-row",
+      text: revisedText,
+      source_type: "explicit_dated_commitment",
+    }));
+    expect(result.completed_recently).toHaveLength(0);
+
+    const rows = db.prepare(
+      "SELECT id, status, text, source_fingerprint FROM commitments WHERE namespace = ? ORDER BY id",
+    ).all("projects/legacy-whole-segment-upgrade") as Array<{
+      id: string;
+      status: string;
+      text: string;
+      source_fingerprint: string;
+    }>;
+    expect(rows).toEqual([
+      expect.objectContaining({
+        id: "legacy-whole-segment-row",
+        status: "open",
+        text: revisedText,
+      }),
+    ]);
+    expect(rows[0].source_fingerprint).toContain("we will publish the follow-up memo");
   });
 
   it("does not extract commitments from synthesis entries (#26)", async () => {
@@ -6546,12 +8270,13 @@ describe("memory_commitments", () => {
   });
 
   it("does not extract commitments from entries with terminal lifecycle tags (#26)", async () => {
+    const shipDate = commitmentTestDate(21);
     // Log entries that were written with an archived/completed/stopped tag
     // are records of resolved work, even when the text contains forward-
     // looking dated language.
     await callTool("memory_log", {
       namespace: "projects/skadi",
-      content: "We will ship the migration by 2027-01-15.",
+      content: `We will ship the migration by ${shipDate}.`,
       tags: ["archived"],
     });
 
@@ -6567,6 +8292,41 @@ describe("memory_commitments", () => {
     expect(result.open).toHaveLength(0);
     expect(result.overdue).toHaveLength(0);
     expect(result.at_risk).toHaveLength(0);
+  });
+
+  it("reports terminal lifecycle exclusions per matched visible candidate", async () => {
+    const shipDate = commitmentTestDate(22);
+    await callTool("memory_log", {
+      namespace: "projects/terminal-commitment-diagnostics",
+      content: `We will ship the migration by ${shipDate}.`,
+      tags: ["archived"],
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/terminal-commitment-diagnostics",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<unknown>;
+      at_risk: Array<unknown>;
+      overdue: Array<unknown>;
+      completed_recently: Array<unknown>;
+      exclusion_diagnostics?: {
+        matched_but_excluded: number;
+        reason_counts?: Record<string, number>;
+      };
+    };
+
+    expect(result.open).toHaveLength(0);
+    expect(result.at_risk).toHaveLength(0);
+    expect(result.overdue).toHaveLength(0);
+    expect(result.completed_recently).toHaveLength(0);
+    expect(result.exclusion_diagnostics).toEqual(expect.objectContaining({
+      matched_but_excluded: 1,
+      reason_counts: expect.objectContaining({
+        terminal_lifecycle: 1,
+      }),
+    }));
+    expect(JSON.stringify(result.exclusion_diagnostics)).not.toContain("ship the migration");
   });
 
   it("does not extract commitments from entries in a resolved-status namespace (#26)", async () => {
@@ -6601,6 +8361,49 @@ describe("memory_commitments", () => {
     expect(result.at_risk).toHaveLength(0);
   });
 
+  it("reports resolved namespace exclusions per matched visible candidate", async () => {
+    const followupDate = commitmentTestDate(23);
+    await callTool("memory_update_status", {
+      namespace: "projects/resolved-commitment-diagnostics",
+      phase: "Completed",
+      current_work: "Shipped and archived.",
+      blockers: "None.",
+      next_steps: [],
+      lifecycle: "completed",
+    });
+    await callTool("memory_log", {
+      namespace: "projects/resolved-commitment-diagnostics",
+      content: `We will publish the remaining notes by ${followupDate}.`,
+      tags: ["decision"],
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/resolved-commitment-diagnostics",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<unknown>;
+      at_risk: Array<unknown>;
+      overdue: Array<unknown>;
+      completed_recently: Array<unknown>;
+      exclusion_diagnostics?: {
+        matched_but_excluded: number;
+        reason_counts?: Record<string, number>;
+      };
+    };
+
+    expect(result.open).toHaveLength(0);
+    expect(result.at_risk).toHaveLength(0);
+    expect(result.overdue).toHaveLength(0);
+    expect(result.completed_recently).toHaveLength(0);
+    expect(result.exclusion_diagnostics).toEqual(expect.objectContaining({
+      matched_but_excluded: 1,
+      reason_counts: expect.objectContaining({
+        resolved_namespace: 1,
+      }),
+    }));
+    expect(JSON.stringify(result.exclusion_diagnostics)).not.toContain("publish the remaining notes");
+  });
+
   it("includes a reason string in empty results and omits it in non-empty results", async () => {
     // Empty namespace — no entries at all
     const emptyRaw = await callTool("memory_commitments", {
@@ -6619,13 +8422,33 @@ describe("memory_commitments", () => {
     expect(typeof emptyResult.reason).toBe("string");
     expect(emptyResult.reason!.length).toBeGreaterThan(0);
 
+    // Readable entries but no commitments — explanatory summary should name
+    // the explicit log prefixes that do qualify.
+    await callTool("memory_log", {
+      namespace: "projects/commitments-reason-field-explained",
+      content: "General observations without follow-through.",
+    });
+    const explainedRaw = await callTool("memory_commitments", {
+      namespace: "projects/commitments-reason-field-explained",
+    });
+    const explainedResult = parseToolResponse(explainedRaw) as {
+      open: Array<unknown>;
+      reason?: string;
+    };
+
+    expect(explainedResult.open).toHaveLength(0);
+    expect(explainedResult.reason).toContain("explicit `memory_log` commitment phrases");
+    expect(explainedResult.reason).toContain("We agreed to: ...");
+    expect(explainedResult.reason).toContain("I commit to: ...");
+
     // Non-empty namespace — commitments found
+    const deliverDate = commitmentTestDate(31);
     await callTool("memory_update_status", {
       namespace: "projects/commitments-reason-field-nonempty",
       phase: "Active",
       current_work: "Building things",
       blockers: "None.",
-      next_steps: ["Deliver feature by 2027-09-01"],
+      next_steps: [`Deliver feature by ${deliverDate}`],
       lifecycle: "active",
     });
     const nonEmptyRaw = await callTool("memory_commitments", {
@@ -6638,6 +8461,91 @@ describe("memory_commitments", () => {
 
     expect(nonEmptyResult.open.length).toBeGreaterThan(0);
     expect(nonEmptyResult.reason).toBeUndefined();
+  });
+
+  it("uses a tracked-pattern reason for readable but untracked namespaces", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/another-visible-tracked-status",
+      phase: "Active",
+      current_work: "Keep this unrelated tracked status visible",
+      blockers: "None.",
+      next_steps: [],
+      lifecycle: "active",
+    });
+    await callTool("memory_write", {
+      namespace: "tasks/untracked-readable-commitments",
+      key: "status",
+      content: "Still working through the imported result notes.",
+      tags: ["active"],
+    });
+    await callTool("memory_log", {
+      namespace: "tasks/untracked-readable-commitments",
+      content: "Will archive the result after the postmortem on 2026-08-10.",
+      tags: ["decision"],
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "tasks/untracked-readable-commitments",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<unknown>;
+      reason?: string;
+      data_requirements?: string;
+    };
+
+    expect(result.open).toHaveLength(0);
+    expect(result.reason).toMatch(/tracked/i);
+    expect(result.reason).not.toMatch(/no status or log entries to scan/i);
+    expect(result.data_requirements).toBeDefined();
+  });
+
+  it("stops deriving and surfacing log commitments when a namespace becomes untracked", async () => {
+    const namespace = "projects/commitment-tracked-pattern-regression";
+    const firstPublishDate = commitmentTestDate(15);
+    const secondPublishDate = commitmentTestDate(16);
+
+    await callTool("memory_log", {
+      namespace,
+      content: `We will publish the rollout checklist by ${firstPublishDate}.`,
+      tags: ["decision"],
+    });
+
+    let rowCount = db.prepare(
+      "SELECT COUNT(*) AS count FROM commitments WHERE namespace = ?",
+    ).get(namespace) as { count: number };
+    expect(rowCount.count).toBe(1);
+
+    await callTool("memory_write", {
+      namespace: "meta/config",
+      key: "config",
+      content: JSON.stringify({ tracked_patterns: ["clients/*"] }),
+    });
+    await callTool("memory_log", {
+      namespace,
+      content: `We will publish the release notes by ${secondPublishDate}.`,
+      tags: ["decision"],
+    });
+
+    rowCount = db.prepare(
+      "SELECT COUNT(*) AS count FROM commitments WHERE namespace = ?",
+    ).get(namespace) as { count: number };
+    expect(rowCount.count).toBe(1);
+
+    const raw = await callTool("memory_commitments", { namespace });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ text: string }>;
+      overdue: Array<{ text: string }>;
+      at_risk: Array<{ text: string }>;
+      reason?: string;
+    };
+
+    expect(result.open).toHaveLength(0);
+    expect(result.overdue).toHaveLength(0);
+    expect(result.at_risk).toHaveLength(0);
+    expect(result.reason).toMatch(/tracked/i);
+    expect(result.open).not.toContainEqual(expect.objectContaining({
+      text: `We will publish the rollout checklist by ${firstPublishDate}.`,
+    }));
   });
 
   it("includes data_requirements and suggestion in empty results, omits them in non-empty results", async () => {
@@ -6659,16 +8567,20 @@ describe("memory_commitments", () => {
     expect(emptyResult.data_requirements).toBeDefined();
     expect(typeof emptyResult.data_requirements).toBe("string");
     expect(emptyResult.data_requirements!.length).toBeGreaterThan(0);
+    expect(emptyResult.data_requirements).toContain("explicit `memory_log` commitment phrases");
+    expect(emptyResult.data_requirements).toContain("We agreed to: ...");
+    expect(emptyResult.data_requirements).toContain("I commit to: ...");
     expect(emptyResult.suggestion).toBeDefined();
     expect(emptyResult.suggestion).toBe("Use memory_read to check the status entry's next steps directly.");
 
     // Non-empty namespace — commitments found
+    const featureShipDate = commitmentTestDate(61);
     await callTool("memory_update_status", {
       namespace: "projects/commitments-data-req-nonempty",
       phase: "Active",
       current_work: "Working on feature",
       blockers: "None.",
-      next_steps: ["Ship feature by 2027-10-01"],
+      next_steps: [`Ship feature by ${featureShipDate}`],
       lifecycle: "active",
     });
     const nonEmptyRaw = await callTool("memory_commitments", {
@@ -6684,6 +8596,93 @@ describe("memory_commitments", () => {
     expect(nonEmptyResult.data_requirements).toBeUndefined();
     expect(nonEmptyResult.suggestion).toBeUndefined();
   });
+
+  it("omits refresh-only exclusions from since-scoped empty diagnostics", async () => {
+    const restoreDate = commitmentTestDate(27);
+    const since = "2026-07-31T00:00:00.000Z";
+    await callTool("memory_write", {
+      namespace: "projects/commitment-since-refresh-scope",
+      key: "status",
+      content: [
+        "Phase: Build",
+        "Current Work: Stabilizing the rollout",
+        "Blockers: None.",
+        "Next Steps:",
+        `- Verify the restore path by ${restoreDate}`,
+      ].join("\n"),
+      tags: ["active"],
+    });
+
+    const source = db.prepare(
+      "SELECT id FROM entries WHERE namespace = ? AND key = 'status' AND is_current = 1",
+    ).get("projects/commitment-since-refresh-scope") as { id: string };
+    db.prepare("UPDATE entries SET created_at = ?, updated_at = ? WHERE id = ?").run(
+      "2026-07-01T12:00:00.000Z",
+      "2026-07-01T12:00:00.000Z",
+      source.id,
+    );
+    db.prepare(
+      `INSERT INTO commitments
+         (id, namespace, source_entry_id, source_type, source_fingerprint, text, due_at, status, confidence, created_at, updated_at, resolved_at)
+       VALUES (?, ?, ?, 'tracked_next_step', ?, ?, ?, 'open', ?, ?, ?, NULL)`,
+    ).run(
+      "older-refresh-only-row",
+      "projects/commitment-since-refresh-scope",
+      source.id,
+      `tracked_next_step:verify the restore path by ${restoreDate}`,
+      `Verify the restore path by ${restoreDate}`,
+      `${restoreDate}T23:59:59.000Z`,
+      0.9,
+      "2026-07-15T12:00:00.000Z",
+      "2026-07-31T12:00:00.000Z",
+    );
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/commitment-since-refresh-scope",
+      since,
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<unknown>;
+      at_risk: Array<unknown>;
+      overdue: Array<unknown>;
+      completed_recently: Array<unknown>;
+      reason?: string;
+      exclusion_diagnostics?: {
+        matched_but_excluded: number;
+        reason_counts?: Record<string, number>;
+      };
+    };
+
+    expect(result.open).toHaveLength(0);
+    expect(result.at_risk).toHaveLength(0);
+    expect(result.overdue).toHaveLength(0);
+    expect(result.completed_recently).toHaveLength(0);
+    expect(result.reason).toMatch(/no status or log entries to scan/i);
+    expect(result.exclusion_diagnostics).toBeUndefined();
+  });
+
+  it("omits exclusion diagnostics when no matched candidates were dropped", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/omits-empty-commitment-diagnostics",
+      phase: "Active",
+      current_work: "Working on the rollout",
+      blockers: "None.",
+      next_steps: [`Ship feature by ${commitmentTestDate(16)}`],
+      lifecycle: "active",
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/omits-empty-commitment-diagnostics",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<unknown>;
+      exclusion_diagnostics?: unknown;
+    };
+
+    expect(result.open.length).toBeGreaterThan(0);
+    expect(result.exclusion_diagnostics).toBeUndefined();
+  });
+
 });
 
 describe("memory_patterns", () => {

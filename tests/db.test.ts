@@ -22,6 +22,7 @@ import {
   buildQueryEntriesByFilterStatement,
   buildQueryEntriesLexicalStatement,
   listCommitments,
+  pairRevisedCommitments,
   listEntriesForDerivation,
   queryEntries,
   queryEntriesByFilter,
@@ -58,6 +59,7 @@ import {
   upsertConsolidationMetadata,
   countUnusedSurfaces,
 } from "../src/db.js";
+import { CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX } from "../src/commitment-status.js";
 import { embeddingToBuffer } from "../src/embeddings.js";
 import { namespacePrefixSuccessor } from "../src/internal/namespace-filter.js";
 
@@ -766,7 +768,7 @@ describe("appendLog", () => {
 describe("commitment revision identity (#253)", () => {
   const trackedStep = (text: string) => ({
     sourceType: "tracked_next_step",
-    fingerprint: `tracked_next_step:${text.toLowerCase()}`,
+    fingerprint: `${CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX}${text.toLowerCase()}`,
     text,
     dueAt: null,
     confidence: 0.8,
@@ -795,6 +797,26 @@ describe("commitment revision identity (#253)", () => {
     expect(after[0].text).toContain("restore evidence");
     // The bug this guards: live work reported as delivered.
     expect(after.some((row) => row.status === "done")).toBe(false);
+  });
+
+  it("does not reopen a completed canonical step when similar work appears later", () => {
+    const { id } = writeState(db, "projects/test", "status", "## Next Steps\n- placeholder", ["active"]);
+
+    syncCommitmentsForEntry(db, id, [trackedStep("Publish the restore report (#222)")]);
+    const originalId = listCommitments(db, { namespace: "projects/test" })[0].id;
+
+    syncCommitmentsForEntry(db, id, []);
+    expect(listCommitments(db, { namespace: "projects/test" }))
+      .toContainEqual(expect.objectContaining({ id: originalId, status: "done" }));
+
+    syncCommitmentsForEntry(db, id, [trackedStep("Publish the revised restore report (#222)")]);
+    const after = listCommitments(db, { namespace: "projects/test" });
+    expect(after).toHaveLength(2);
+    expect(after).toContainEqual(expect.objectContaining({ id: originalId, status: "done" }));
+    expect(after).toContainEqual(expect.objectContaining({
+      status: "open",
+      text: "Publish the revised restore report (#222)",
+    }));
   });
 
   it("still resolves a next step that genuinely disappears", () => {
@@ -857,9 +879,110 @@ describe("commitment revision identity (#253)", () => {
     expect(rows.filter((row) => row.status === "done")).toHaveLength(1);
     expect(rows.filter((row) => row.status === "open")).toHaveLength(1);
   });
+
+  it("does not pair explicit dated revisions when the orphan and fresh due dates conflict", () => {
+    const pairs = pairRevisedCommitments(
+      [{
+        id: "orphan",
+        source_type: "explicit_dated_commitment",
+        text: "We will publish the follow-up memo by 2026-09-20.",
+        due_at: "2026-09-20T23:59:59.000Z",
+      }],
+      [{
+        sourceType: "explicit_dated_commitment",
+        fingerprint: "explicit_dated_commitment:publish-follow-up-memo",
+        text: "We will publish the follow-up memo by 2026-09-21.",
+        dueAt: "2026-09-21T23:59:59.000Z",
+        confidence: 0.7,
+      }],
+    );
+
+    expect(pairs.size).toBe(0);
+  });
+
+  it("uses the orphan due date to disambiguate contained future clauses in a legacy whole-segment row", () => {
+    const publishDue = "2026-09-20T23:59:59.000Z";
+    const closureDue = "2026-09-21T23:59:59.000Z";
+    const orphanText =
+      "Yesterday we verified the backup restore on 2026-08-01, and will publish the follow-up memo by 2026-09-20, then we will file the closure summary by 2026-09-21.";
+    const pairs = pairRevisedCommitments(
+      [{
+        id: "orphan",
+        source_type: "explicit_dated_commitment",
+        text: orphanText,
+        due_at: publishDue,
+      }],
+      [
+        {
+          sourceType: "explicit_dated_commitment",
+          fingerprint: "explicit_dated_commitment:publish-follow-up-memo",
+          text: "We will publish the follow-up memo by 2026-09-20.",
+          dueAt: publishDue,
+          confidence: 0.7,
+        },
+        {
+          sourceType: "explicit_dated_commitment",
+          fingerprint: "explicit_dated_commitment:file-closure-summary",
+          text: "We will file the closure summary by 2026-09-21.",
+          dueAt: closureDue,
+          confidence: 0.7,
+        },
+      ],
+    );
+
+    expect(pairs.get("orphan")?.text).toBe("We will publish the follow-up memo by 2026-09-20.");
+  });
 });
 
 describe("commitment classification lifecycle", () => {
+  it("applies explicit statuses and the recent-done cutoff before pagination", () => {
+    const namespace = "projects/commitment-status-predicate";
+    const insert = db.prepare(
+      `INSERT INTO commitments
+         (id, namespace, source_entry_id, source_type, source_fingerprint, text, due_at, status, confidence, created_at, updated_at, resolved_at)
+       VALUES (?, ?, ?, 'explicit_commitment', ?, ?, ?, ?, 0.9, ?, ?, ?)`,
+    );
+    const seed = (
+      id: string,
+      status: "open" | "done" | "cancelled",
+      dueAt: string | null,
+      resolvedAt: string | null,
+    ) => {
+      const source = appendLog(db, namespace, `Source for ${id}`, []);
+      insert.run(
+        id,
+        namespace,
+        source.id,
+        `seeded:${id}`,
+        id,
+        dueAt,
+        status,
+        source.timestamp,
+        source.timestamp,
+        resolvedAt,
+      );
+    };
+
+    seed("cancelled", "cancelled", "2026-01-01T23:59:59.000Z", "2026-07-31T12:00:00.000Z");
+    seed("old-done", "done", "2026-01-02T23:59:59.000Z", "2026-06-01T12:00:00.000Z");
+    seed("open", "open", "2099-12-31T23:59:59.000Z", null);
+    seed("recent-done", "done", null, "2026-07-31T12:00:00.000Z");
+
+    const recentView = listCommitments(db, {
+      namespace,
+      statuses: ["open", "done"],
+      recentlyDoneSince: "2026-07-18T00:00:00.000Z",
+      limit: 2,
+    });
+    expect(recentView.map((row) => row.id)).toEqual(["open", "recent-done"]);
+
+    expect(listCommitments(db, {
+      namespace,
+      includeResolved: false,
+      statuses: ["done"],
+    }).map((row) => row.id)).toEqual(["old-done", "recent-done"]);
+  });
+
   it("propagates source classification and scrubs client-restricted derivatives", () => {
     const { id } = appendLog(
       db,
@@ -906,6 +1029,400 @@ describe("commitment classification lifecycle", () => {
     rows = listCommitments(db, { namespace: "projects/test" });
     expect(rows).toHaveLength(1);
     expect(rows[0].source_entry_id).toBe(id);
+  });
+
+  it("scrubs existing derivatives when their current source becomes client-restricted", () => {
+    const { id } = appendLog(
+      db,
+      "projects/reclassified-restricted-commitment",
+      "Will remove the restricted derivative by 2099-06-04.",
+      [],
+      "default",
+      { classification: "client-confidential" },
+    );
+    syncCommitmentsForEntry(db, id, [{
+      sourceType: "explicit_dated_commitment",
+      fingerprint: "reclassified-restricted",
+      text: "Will remove the restricted derivative by 2099-06-04.",
+      dueAt: "2099-06-04T23:59:59.000Z",
+      confidence: 0.8,
+    }]);
+
+    db.prepare("UPDATE entries SET classification = ? WHERE id = ?")
+      .run("client-restricted", id);
+    syncCommitmentsForEntry(db, id, []);
+
+    expect(db.prepare(
+      "SELECT COUNT(*) AS count FROM commitments WHERE source_entry_id = ?",
+    ).get(id)).toEqual({ count: 0 });
+  });
+
+  it("uses live source classification when a cached derivative is stale", () => {
+    const { id } = appendLog(
+      db,
+      "projects/live-classification",
+      "We will publish the report by 2099-06-01.",
+      [],
+      "default",
+      { classification: "internal" },
+    );
+    syncCommitmentsForEntry(db, id, [{
+      sourceType: "explicit_dated_commitment",
+      fingerprint: "live-classification-report",
+      text: "We will publish the report by 2099-06-01.",
+      dueAt: "2099-06-01T23:59:59.000Z",
+      confidence: 0.9,
+    }]);
+
+    db.prepare("UPDATE entries SET classification = ? WHERE id = ?")
+      .run("client-confidential", id);
+
+    expect(listCommitments(db, { namespace: "projects/live-classification" })).toContainEqual(
+      expect.objectContaining({ source_classification: "client-confidential" }),
+    );
+  });
+
+  it("preserves the stricter cached classification when a tracked step disappears", () => {
+    const namespace = "projects/missing-confidential-commitment";
+    const text = "Send the confidential client brief by 2099-06-01.";
+    const source = appendLog(
+      db,
+      namespace,
+      `Current work with ${text}`,
+      [],
+      "default",
+      { classification: "client-confidential" },
+    );
+    syncCommitmentsForEntry(db, source.id, [{
+      sourceType: "tracked_next_step",
+      fingerprint: `${CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX}confidential-brief`,
+      text,
+      dueAt: "2099-06-01T23:59:59.000Z",
+      confidence: 0.9,
+    }]);
+
+    db.prepare("UPDATE entries SET classification = ? WHERE id = ?")
+      .run("internal", source.id);
+    syncCommitmentsForEntry(db, source.id, []);
+
+    const stored = db.prepare(
+      "SELECT status, source_classification FROM commitments WHERE source_entry_id = ?",
+    ).get(source.id) as { status: string; source_classification: string };
+    expect(stored).toEqual({ status: "done", source_classification: "client-confidential" });
+    expect(listCommitments(db, { namespace })).toContainEqual(expect.objectContaining({
+      text,
+      source_classification: "client-confidential",
+    }));
+    expect(listCommitments(db, {
+      namespace,
+      classificationCeiling: "internal",
+    })).toHaveLength(0);
+  });
+
+  it("lowers cached classification only after same-fingerprint rederivation", () => {
+    const namespace = "projects/same-fingerprint-rederivation";
+    const source = appendLog(
+      db,
+      namespace,
+      "Will publish the report by 2099-06-02.",
+      [],
+      "default",
+      { classification: "client-confidential" },
+    );
+    const derived = {
+      sourceType: "explicit_dated_commitment",
+      fingerprint: "same-fingerprint-report",
+      text: "Will publish the report by 2099-06-02.",
+      dueAt: "2099-06-02T23:59:59.000Z",
+      confidence: 0.9,
+    };
+    syncCommitmentsForEntry(db, source.id, [derived]);
+
+    db.prepare("UPDATE entries SET classification = ? WHERE id = ?")
+      .run("internal", source.id);
+    syncCommitmentsForEntry(db, source.id, [derived]);
+
+    expect(listCommitments(db, { namespace })).toContainEqual(expect.objectContaining({
+      text: derived.text,
+      status: "open",
+      source_classification: "internal",
+    }));
+  });
+
+  it("lowers semantic updates and reactivations only when their text is rederived", () => {
+    const semanticNamespace = "projects/semantic-commitment-rederivation";
+    const semanticSource = appendLog(
+      db,
+      semanticNamespace,
+      "Original obligation",
+      [],
+      "default",
+      { classification: "client-confidential" },
+    );
+    syncCommitmentsForEntry(db, semanticSource.id, [{
+      sourceType: "explicit_commitment",
+      fingerprint: "semantic-obligation",
+      text: "Original obligation",
+      dueAt: null,
+      confidence: 0.8,
+    }]);
+    db.prepare("UPDATE entries SET classification = ? WHERE id = ?")
+      .run("internal", semanticSource.id);
+    syncCommitmentsForEntry(db, semanticSource.id, [{
+      sourceType: "explicit_commitment",
+      fingerprint: "semantic-obligation",
+      text: "Updated obligation",
+      dueAt: null,
+      confidence: 0.8,
+    }]);
+    expect(listCommitments(db, { namespace: semanticNamespace })).toContainEqual(expect.objectContaining({
+      text: "Updated obligation",
+      status: "open",
+      source_classification: "internal",
+    }));
+
+    const reactivationNamespace = "projects/reactivated-commitment";
+    const reactivationSource = appendLog(
+      db,
+      reactivationNamespace,
+      "Will reopen the obligation by 2099-06-03.",
+      [],
+      "default",
+      { classification: "client-confidential" },
+    );
+    const reactivated = {
+      sourceType: "explicit_dated_commitment",
+      fingerprint: "reactivated-obligation",
+      text: "Will reopen the obligation by 2099-06-03.",
+      dueAt: "2099-06-03T23:59:59.000Z",
+      confidence: 0.8,
+    };
+    syncCommitmentsForEntry(db, reactivationSource.id, [reactivated]);
+    db.prepare("UPDATE entries SET classification = ? WHERE id = ?")
+      .run("internal", reactivationSource.id);
+    syncCommitmentsForEntry(db, reactivationSource.id, []);
+    expect(listCommitments(db, { namespace: reactivationNamespace })).toContainEqual(expect.objectContaining({
+      status: "cancelled",
+      source_classification: "client-confidential",
+    }));
+
+    syncCommitmentsForEntry(db, reactivationSource.id, [reactivated]);
+    expect(listCommitments(db, { namespace: reactivationNamespace })).toContainEqual(expect.objectContaining({
+      text: reactivated.text,
+      status: "open",
+      source_classification: "internal",
+    }));
+  });
+
+  it("lowers a paired revision classification only for the rederived successor", () => {
+    const namespace = "projects/revision-classification";
+    const source = appendLog(
+      db,
+      namespace,
+      "Original privacy review next step",
+      [],
+      "default",
+      { classification: "client-confidential" },
+    );
+    const original = {
+      sourceType: "tracked_next_step",
+      fingerprint: `${CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX}original-privacy-review-274`,
+      text: "Publish the privacy review for #274",
+      dueAt: null,
+      confidence: 0.8,
+    };
+    const revision = {
+      sourceType: "tracked_next_step",
+      fingerprint: `${CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX}revised-privacy-review-274`,
+      text: "Publish the privacy review report for #274",
+      dueAt: null,
+      confidence: 0.8,
+    };
+    syncCommitmentsForEntry(db, source.id, [original]);
+    const originalId = listCommitments(db, { namespace })[0].id;
+
+    db.prepare("UPDATE entries SET classification = ? WHERE id = ?")
+      .run("internal", source.id);
+    syncCommitmentsForEntry(db, source.id, [revision]);
+
+    expect(listCommitments(db, { namespace })).toEqual([
+      expect.objectContaining({
+        id: originalId,
+        text: revision.text,
+        status: "open",
+        source_classification: "internal",
+      }),
+    ]);
+  });
+
+  it("preserves cached classification when supersession cancels a commitment", () => {
+    const namespace = "projects/supersession-classification";
+    const source = writeState(
+      db,
+      namespace,
+      "status",
+      "Original status",
+      [],
+      "default",
+      undefined,
+      undefined,
+      { classification: "client-confidential" },
+    );
+    syncCommitmentsForEntry(db, source.id, [{
+      sourceType: "explicit_commitment",
+      fingerprint: "superseded-commitment",
+      text: "Original confidential obligation",
+      dueAt: null,
+      confidence: 0.8,
+    }]);
+
+    db.prepare("UPDATE entries SET classification = ? WHERE id = ?")
+      .run("internal", source.id);
+    const current = getById(db, source.id)!;
+    expect(supersedeState(
+      db,
+      namespace,
+      "status",
+      source.id,
+      "Replacement status",
+      [],
+      "default",
+      current.updated_at,
+      current.valid_from,
+      undefined,
+      { classification: "internal" },
+    ).status).toBe("superseded");
+
+    expect(db.prepare(
+      "SELECT status, source_classification FROM commitments WHERE source_entry_id = ?",
+    ).get(source.id)).toEqual({
+      status: "cancelled",
+      source_classification: "client-confidential",
+    });
+  });
+
+  it("fails closed for null and invalid legacy classifications", () => {
+    const namespace = "projects/legacy-commitment-classification";
+    const source = appendLog(db, namespace, "Legacy commitment source", []);
+    syncCommitmentsForEntry(db, source.id, [{
+      sourceType: "explicit_commitment",
+      fingerprint: "legacy-classification",
+      text: "Legacy commitment",
+      dueAt: null,
+      confidence: 0.8,
+    }]);
+
+    db.prepare("UPDATE commitments SET source_classification = NULL WHERE source_entry_id = ?")
+      .run(source.id);
+    expect(listCommitments(db, { namespace })).toContainEqual(expect.objectContaining({
+      source_classification: "client-restricted",
+    }));
+    expect(listCommitments(db, {
+      namespace,
+      classificationCeiling: "client-confidential",
+    })).toHaveLength(0);
+
+    db.exec("PRAGMA ignore_check_constraints = ON");
+    db.prepare("UPDATE commitments SET source_classification = ? WHERE source_entry_id = ?")
+      .run("legacy-invalid", source.id);
+    db.exec("PRAGMA ignore_check_constraints = OFF");
+    expect(listCommitments(db, { namespace })).toContainEqual(expect.objectContaining({
+      source_classification: "client-restricted",
+    }));
+    expect(listCommitments(db, {
+      namespace,
+      classificationCeiling: "client-confidential",
+    })).toHaveLength(0);
+
+    db.prepare("UPDATE commitments SET source_classification = 'public' WHERE source_entry_id = ?")
+      .run(source.id);
+    db.exec("PRAGMA ignore_check_constraints = ON");
+    db.prepare("UPDATE entries SET classification = ? WHERE id = ?")
+      .run("legacy-invalid-source", source.id);
+    db.exec("PRAGMA ignore_check_constraints = OFF");
+    expect(listCommitments(db, { namespace })).toContainEqual(expect.objectContaining({
+      source_classification: "client-restricted",
+    }));
+    expect(listCommitments(db, {
+      namespace,
+      classificationCeiling: "client-confidential",
+    })).toHaveLength(0);
+  });
+
+  it("applies the effective stricter classification before the page limit", () => {
+    const namespace = "projects/effective-classification-page-cap";
+    const hidden = appendLog(
+      db,
+      namespace,
+      "Hidden historical commitment source",
+      [],
+      "default",
+      { classification: "client-confidential" },
+    );
+    syncCommitmentsForEntry(db, hidden.id, [{
+      sourceType: "explicit_dated_commitment",
+      fingerprint: "hidden-historical",
+      text: "Hidden historical commitment",
+      dueAt: "2099-01-01T23:59:59.000Z",
+      confidence: 0.8,
+    }]);
+    db.prepare("UPDATE entries SET classification = ? WHERE id = ?")
+      .run("internal", hidden.id);
+
+    const visible = appendLog(
+      db,
+      namespace,
+      "Visible current commitment source",
+      [],
+      "default",
+      { classification: "public", classificationOverride: true },
+    );
+    syncCommitmentsForEntry(db, visible.id, [{
+      sourceType: "explicit_dated_commitment",
+      fingerprint: "visible-current",
+      text: "Visible current commitment",
+      dueAt: "2099-02-01T23:59:59.000Z",
+      confidence: 0.8,
+    }]);
+
+    expect(listCommitments(db, {
+      namespace,
+      classificationCeiling: "internal",
+      limit: 1,
+    })).toEqual([
+      expect.objectContaining({
+        text: "Visible current commitment",
+        source_classification: "public",
+      }),
+    ]);
+  });
+
+  it("preserves exact, prefix, and subtree namespace semantics for commitment pages", () => {
+    const parent = appendLog(db, "projects/commitment-scope", "Parent commitment source", []);
+    syncCommitmentsForEntry(db, parent.id, [{
+      sourceType: "explicit_commitment",
+      fingerprint: "commitment-scope-parent",
+      text: "Parent commitment",
+      dueAt: null,
+      confidence: 0.8,
+    }]);
+    const child = appendLog(db, "projects/commitment-scope/child", "Child commitment source", []);
+    syncCommitmentsForEntry(db, child.id, [{
+      sourceType: "explicit_commitment",
+      fingerprint: "commitment-scope-child",
+      text: "Child commitment",
+      dueAt: null,
+      confidence: 0.8,
+    }]);
+
+    expect(listCommitments(db, { namespace: "projects/commitment-scope" }).map((row) => row.text))
+      .toEqual(["Parent commitment"]);
+    expect(listCommitments(db, { namespace: "projects/commitment-scope/" }).map((row) => row.text))
+      .toEqual(["Child commitment"]);
+    expect(listCommitments(db, {
+      namespace: "projects/commitment-scope",
+      namespaceMode: "subtree",
+    }).map((row) => row.text).sort()).toEqual(["Child commitment", "Parent commitment"]);
   });
 
   it("keeps a first stale-source derivation from gaining confidence on unchanged reconciliation", () => {

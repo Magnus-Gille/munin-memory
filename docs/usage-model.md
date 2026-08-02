@@ -74,6 +74,18 @@ literal prefix. Successful query responses echo this as `namespace_scope: "subtr
 `namespace_scope: "prefix"`; responses omit `namespace_scope` when no namespace filter
 was applied.
 
+`memory_commitments` derives tracked follow-through from canonical tracked-status
+`Next Steps`, dated future clauses in visible tracked-status prose, explicit
+`memory_log` commitment phrases such as `We agreed to: ...` or
+`I commit to: ...`, and future-dated `memory_log` phrases. Generic non-status
+state fields are not commitment sources. Legacy plain markdown status blobs with
+ad-hoc `Next Steps:` headings remain readable, but they do not become
+commitment rows until they are migrated to the canonical structure.
+Compatibility note: older derived rows from those legacy plain-status blocks
+are retired as non-completions during refresh, and older whole-segment dated
+rows are revised to the surviving future clause when that obligation is still
+present in the source.
+
 ---
 
 ## Broad handshake vs. targeted resume

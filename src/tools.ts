@@ -64,7 +64,6 @@ import {
   getStateAsOfCoverage,
   isExactCurrentStateBoundaryVisible,
   getCompletedTaskNamespaces,
-  getResolvedNamespaces,
   isEntryExpired,
   nowUTC,
   vecLoaded,
@@ -215,6 +214,7 @@ import type {
   RetrievalFeedbackParams,
   RetrievalAggregates,
   ClassificationLevel,
+  CommitmentStatus,
   IntakeResult,
 } from "./types.js";
 
@@ -1514,11 +1514,18 @@ import {
   REFERENCE_NAMESPACE_PATTERNS,
   detectUntrackedNamespaces,
   detectUntrackedNamespaceClusters,
+  namespaceMatchesQueryScope,
   canonicalizeTags,
   stripReservedTags,
   getLifecycleTags,
   boundarySerialize,
 } from "./internal/retrieval-shared.js";
+import {
+  CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX,
+  countLegacyPlainStatusNextStepsSections,
+  hasStructuredStatusNextStepsSection,
+  stripLegacyPlainStatusNextSteps,
+} from "./commitment-status.js";
 // The reranker pipeline lives in ./internal/reranker.js (issue #59).
 // tools.ts imports only the names it uses internally; the dedicated module
 // is the explicit public surface (benchmark/ imports from there directly).
@@ -1940,6 +1947,7 @@ function getVisibleTrackedStatusAssessments(
   ctx: AccessContext,
   toolName: string,
   sessionId?: string,
+  loggedEntryIds?: Set<string>,
 ): { allowed: TrackedStatusAssessment[]; redacted: RedactableEntryMetadata[] } {
   const patterns = resolveTrackedPatterns(db, ctx);
   const accessible = [...getTrackedStatusAssessments(db, patterns).values()]
@@ -1951,6 +1959,7 @@ function getVisibleTrackedStatusAssessments(
     toolName,
     (assessment) => buildRedactableEntryMetadata(parseEntry(assessment.entry)),
     sessionId,
+    loggedEntryIds,
   );
 }
 
@@ -3885,15 +3894,7 @@ function applyPreparedReviewOperation(
   persistIntakeAdvisory(db, result.id, intake, warnings);
   const writtenEntry = getById(db, result.id);
   if (writtenEntry) {
-    syncCommitmentsForEntry(
-      db,
-      writtenEntry.id,
-      extractCommitmentsFromEntry(
-        writtenEntry,
-        getResolvedNamespaces(db),
-        resolveTrackedPatterns(db, ctx),
-      ),
-    );
+    syncDerivedCommitmentsForEntry(db, writtenEntry, resolveTrackedPatterns(db, ctx));
   }
   return {
     outcome: "applied",
@@ -4264,18 +4265,98 @@ function buildNarrativeSources(
 
 const COMMITMENT_SOON_DAYS = 3;
 const COMMITMENT_COMPLETED_RECENT_DAYS = 14;
+
+function recentlyDoneCommitmentCutoff(now = Date.now()): string {
+  return new Date(now - COMMITMENT_COMPLETED_RECENT_DAYS * 24 * 60 * 60 * 1000).toISOString();
+}
+
 const COMMITMENT_ACTION_VERB =
-  /\b(send|ship|deliver|finish|complete|publish|deploy|update|write|call|review|rerun|check|prepare|create|build|submit|investigate|resolve|schedule|organize|migrate|refactor|test|validate|research|draft|design|implement|configure|setup|set up|run|file|fix|address|handle|ensure|confirm)\b/i;
+  /\b(send|ship|deliver|finish|complete|publish|deploy|update|write|call|review|rerun|check|prepare|create|build|submit|investigate|resolve|schedule|organize|migrate|refactor|test|validate|verify|research|draft|design|implement|configure|setup|set up|run|file|fix|address|handle|ensure|confirm)\b/i;
 const COMMITMENT_FORWARD_CUE =
   /\b(will|must|need to|needs to|plan to|planned|should|target(?:ing)?|aim to|by|due)\b/i;
+const COMMITMENT_MODAL_FUTURE_CUE =
+  /\b(will|must|need to|needs to|plan to|planned to|should|target(?:ing)?(?: to)?|aim to)\b/i;
 const COMMITMENT_IMPERATIVE_PREFIX =
   /^(?:next(?:\s+steps?)?:\s*)?(send|ship|deliver|finish|complete|publish|deploy|update|write|call|review|rerun|check)\b/i;
 const COMMITMENT_RETROSPECTIVE_CUE =
-  /\b(committed|completed|finished|pushed|shipped|delivered|published|deployed|resolved|closed|landed|wrapped up|done)\b/i;
+  /\b(committed|completed|finished|pushed|shipped|delivered|published|deployed|resolved|closed|landed|wrapped up|done|verified|validated|checked|tested|ran|reran)\b/i;
 const COMMITMENT_FUTURE_COMPLETION_PHRASE =
   /\b(must|need to|needs to|should|will|plan to|planned to|target(?:ing)? to|aim to)\s+(?:be\s+)?(completed|finished|shipped|delivered|published|deployed)\b/i;
+const COMMITMENT_PASSIVE_FUTURE_ACTION =
+  /\b(?:will|must|need to|needs to|plan to|planned to|should|target(?:ing)? to|aim to)\s+(?:be\s+)?(?:sent|shipped|delivered|finished|completed|published|deployed|updated|written|called|reviewed|rerun|checked|prepared|created|built|submitted|investigated|resolved|scheduled|organized|migrated|refactored|tested|validated|verified|researched|drafted|designed|implemented|configured|set up|run|filed|fixed|addressed|handled|ensured|confirmed)\b/i;
 const COMMITMENT_EXPLICIT_PREFIX =
   /^(?:commitment|i commit to|we (?:agreed|commit) to):\s*/i;
+const COMMITMENT_FUTURE_CLAUSE_BOUNDARY =
+  /\s*(?:,|;|\band\b|\bbut\b|\bthen\b)\s+(?=(?:[^.!?]*?\b(?:will|must|need to|needs to|plan to|planned to|should|target(?:ing)?(?: to)?|aim to)\b))/i;
+const COMMITMENT_SUBJECT_PREFIX = /^(I|We|They|It|This|That)\b/i;
+const COMMITMENT_CONTEXTUAL_SUBJECT_PREFIX =
+  /^(?:(?:yesterday|today|tomorrow|earlier|later|afterward|afterwards)\b[\s,:;-]*)+(I|We|They|It|This|That)\b/i;
+
+type CommitmentExclusionReason =
+  | "duplicate_within_entry"
+  | "legacy_plain_status_next_steps"
+  | "resolved_namespace"
+  | "retrospective_completion"
+  | "terminal_lifecycle";
+
+interface CommitmentExclusionDiagnostics {
+  matchedButExcluded: number;
+  reasonCounts: Partial<Record<CommitmentExclusionReason, number>>;
+}
+
+function createCommitmentExclusionDiagnostics(): CommitmentExclusionDiagnostics {
+  return {
+    matchedButExcluded: 0,
+    reasonCounts: {},
+  };
+}
+
+function noteCommitmentExclusion(
+  diagnostics: CommitmentExclusionDiagnostics | undefined,
+  reason: CommitmentExclusionReason,
+  count = 1,
+): void {
+  if (!diagnostics || count <= 0) return;
+  diagnostics.matchedButExcluded += count;
+  diagnostics.reasonCounts[reason] = (diagnostics.reasonCounts[reason] ?? 0) + count;
+}
+
+function serializeCommitmentExclusionDiagnostics(diagnostics: CommitmentExclusionDiagnostics): {
+  matched_but_excluded: number;
+  reason_counts: Record<string, number>;
+} | undefined {
+  if (diagnostics.matchedButExcluded === 0) return undefined;
+  return {
+    matched_but_excluded: diagnostics.matchedButExcluded,
+    reason_counts: Object.fromEntries(
+      Object.entries(diagnostics.reasonCounts)
+        .filter(([, count]) => typeof count === "number" && count > 0)
+        .sort(([a], [b]) => a.localeCompare(b)),
+    ),
+  };
+}
+
+const COMMITMENT_REASON_SUMMARY =
+  "Commitments are derived from canonical tracked-status content (including Next Steps and dated future clauses in visible tracked-status prose) and from visible `memory_log` phrases, including explicit `memory_log` commitment phrases such as 'We agreed to: ...' or 'I commit to: ...' and future-dated `memory_log` phrases like 'I will ... by YYYY-MM-DD', 'We will verify ... by YYYY-MM-DD', or 'I will run ... on YYYY-MM-DD'.";
+
+const COMMITMENT_DATA_REQUIREMENTS =
+  "Commitments are extracted from canonical tracked status entries (including `Next Steps` and dated future clauses in visible tracked-status prose, for example via `memory_update_status`) and from visible `memory_log` phrases, including explicit `memory_log` commitment phrases such as `We agreed to: ...` or `I commit to: ...` and future-dated `memory_log` phrases such as `I will ... by YYYY-MM-DD` or `I will ... on YYYY-MM-DD` (including verify/run/validate/check/test). Generic non-status state fields are not commitment sources. Legacy plain markdown status blobs with ad-hoc `Next Steps:` headings remain readable but are not commitment-eligible until migrated to the canonical structure. When visible matches are dropped, the response may include content-blind exclusion_diagnostics counts of matched candidate units (for example a legacy Next Steps block or a dated clause), not full entry bodies.";
+
+function buildEmptyCommitmentsReason(
+  visibleEntryCount: number,
+  diagnostics: CommitmentExclusionDiagnostics,
+): string {
+  if (visibleEntryCount === 0) {
+    return "Namespace has no status or log entries to scan";
+  }
+  if (diagnostics.matchedButExcluded > 0) {
+    const noun = diagnostics.matchedButExcluded === 1 ? "candidate was" : "candidates were";
+    const entryNoun = visibleEntryCount === 1 ? "entry" : "entries";
+    return `No open commitments were derived from ${visibleEntryCount} visible ${entryNoun}; ${diagnostics.matchedButExcluded} matched ${noun} excluded. ${COMMITMENT_REASON_SUMMARY}`;
+  }
+  const entryNoun = visibleEntryCount === 1 ? "entry" : "entries";
+  return `No commitment-like phrases detected in ${visibleEntryCount} visible ${entryNoun}. ${COMMITMENT_REASON_SUMMARY}`;
+}
 
 function mapTrackedStatusAssessmentsByNamespace(
   assessments: TrackedStatusAssessment[],
@@ -4285,6 +4366,16 @@ function mapTrackedStatusAssessmentsByNamespace(
     byNamespace.set(assessment.row.namespace, assessment);
   }
   return byNamespace;
+}
+
+function getVisibleResolvedNamespaces(
+  assessments: TrackedStatusAssessment[],
+): Set<string> {
+  return new Set(
+    assessments
+      .filter((assessment) => TERMINAL_LIFECYCLE_TAGS.has(assessment.lifecycle))
+      .map((assessment) => assessment.row.namespace),
+  );
 }
 
 function normalizeCommitmentText(text: string): string {
@@ -4316,14 +4407,148 @@ function extractCandidateSegments(content: string): string[] {
     .filter((line) => line.length > 0);
 }
 
-function looksLikeRetrospectiveCompletion(segment: string): boolean {
-  return COMMITMENT_RETROSPECTIVE_CUE.test(segment) && !COMMITMENT_FUTURE_COMPLETION_PHRASE.test(segment);
+function isTrackedStatusEntry(
+  entry: Entry,
+  trackedPatterns: string[] = [...DEFAULT_TRACKED_PATTERNS],
+): boolean {
+  return entry.entry_type === "state" && entry.key === "status" && isTrackedNamespace(entry.namespace, trackedPatterns);
 }
 
-function isForwardLookingDatedCommitment(segment: string): boolean {
-  if (!COMMITMENT_ACTION_VERB.test(segment)) return false;
-  if (looksLikeRetrospectiveCompletion(segment)) return false;
-  return COMMITMENT_FORWARD_CUE.test(segment) || COMMITMENT_IMPERATIVE_PREFIX.test(segment);
+function isCommitmentReadableSourceEntry(entry: Entry): boolean {
+  return entry.entry_type === "log" || (entry.entry_type === "state" && entry.key === "status");
+}
+
+function extractStatusContentOutsideNextSteps(content: string): string {
+  const strippedLegacyContent = stripLegacyPlainStatusNextSteps(content);
+  const cleanedContent = strippedLegacyContent
+    .split("\n")
+    .filter((line) => {
+      const inline = line.match(/^\*\*([^*]+)\*\*:\s*(.+)$/);
+      return !(inline && normalizeStatusLabel(inline[1]) === "next_steps");
+    })
+    .join("\n");
+  const headingMatches = [...cleanedContent.matchAll(/^##\s+(.+)$/gm)];
+  if (headingMatches.length > 0) {
+    const sections: string[] = [];
+    const prefix = cleanedContent.slice(0, headingMatches[0].index).trim();
+    if (prefix) sections.push(prefix);
+
+    for (let i = 0; i < headingMatches.length; i++) {
+      const match = headingMatches[i];
+      const rawTitle = match[1].trim();
+      const label = normalizeStatusLabel(rawTitle);
+      if (label === "next_steps") continue;
+      const sectionStart = match.index! + match[0].length;
+      const sectionEnd = i + 1 < headingMatches.length ? headingMatches[i + 1].index! : cleanedContent.length;
+      const raw = cleanedContent.slice(sectionStart, sectionEnd).trim();
+      if (raw.length > 0) sections.push(raw);
+    }
+
+    return sections.join("\n");
+  }
+
+  return cleanedContent;
+}
+
+function extractCandidateSegmentsFromEntry(
+  entry: Entry,
+  trackedPatterns: string[] = [...DEFAULT_TRACKED_PATTERNS],
+): string[] {
+  if (isTrackedStatusEntry(entry, trackedPatterns)) {
+    return extractCandidateSegments(extractStatusContentOutsideNextSteps(entry.content));
+  }
+  if (entry.entry_type === "log" && isTrackedNamespace(entry.namespace, trackedPatterns)) {
+    return extractCandidateSegments(entry.content);
+  }
+  return [];
+}
+
+function countEntryCommitmentLikeUnits(
+  entry: Entry,
+  trackedPatterns: string[] = [...DEFAULT_TRACKED_PATTERNS],
+): number {
+  let count = 0;
+  if (isTrackedStatusEntry(entry, trackedPatterns)) {
+    const structured = parseStructuredStatus(entry.content);
+    const visibleSteps = (structured.next_steps ?? []).filter((step) => !isNoneLikeStatusText(step));
+    const hasStructuredNextStepsSection = hasStructuredStatusNextStepsSection(entry.content);
+    count += visibleSteps.length;
+    if (visibleSteps.length === 0 && !hasStructuredNextStepsSection) {
+      count += countLegacyPlainStatusNextStepsSections(entry.content);
+    }
+  }
+  count += extractCandidateSegmentsFromEntry(entry, trackedPatterns)
+    .filter(segmentLooksLikeCommitmentCandidate)
+    .length;
+  return count;
+}
+
+function segmentLooksLikeCommitmentCandidate(segment: string): boolean {
+  if (COMMITMENT_EXPLICIT_PREFIX.test(segment)) return true;
+  if (!extractDueAtFromText(segment)) return false;
+  return COMMITMENT_ACTION_VERB.test(segment)
+    || COMMITMENT_RETROSPECTIVE_CUE.test(segment)
+    || COMMITMENT_PASSIVE_FUTURE_ACTION.test(segment);
+}
+
+function looksLikeRetrospectiveCompletion(segment: string): boolean {
+  return COMMITMENT_RETROSPECTIVE_CUE.test(segment)
+    && !COMMITMENT_FUTURE_COMPLETION_PHRASE.test(segment)
+    && !COMMITMENT_MODAL_FUTURE_CUE.test(segment)
+    && !COMMITMENT_PASSIVE_FUTURE_ACTION.test(segment);
+}
+
+function extractCommitmentSubject(segment: string): string | null {
+  const subject = segment.match(COMMITMENT_SUBJECT_PREFIX)?.[1]
+    ?? segment.match(COMMITMENT_CONTEXTUAL_SUBJECT_PREFIX)?.[1]
+    ?? null;
+  return subject
+    ? subject.charAt(0).toUpperCase() + subject.slice(1).toLowerCase()
+    : null;
+}
+
+function normalizeClauseText(segment: string, clause: string): string {
+  const trimmed = clause.trim().replace(/^[,;:\-)\]]+\s*/, "");
+  if (!COMMITMENT_MODAL_FUTURE_CUE.test(trimmed)) return trimmed;
+  if (COMMITMENT_SUBJECT_PREFIX.test(trimmed)) {
+    return trimmed.replace(COMMITMENT_SUBJECT_PREFIX, (subject) =>
+      subject.charAt(0).toUpperCase() + subject.slice(1).toLowerCase(),
+    );
+  }
+  const futureCue = trimmed.match(COMMITMENT_MODAL_FUTURE_CUE);
+  if (futureCue?.index !== undefined && futureCue.index > 0) {
+    return trimmed;
+  }
+  const subject = extractCommitmentSubject(segment);
+  return subject ? `${subject} ${trimmed}` : trimmed;
+}
+
+function extractDueAtFromFutureClause(clause: string): string | null {
+  const futureCue = clause.match(COMMITMENT_MODAL_FUTURE_CUE);
+  if (futureCue?.index !== undefined) {
+    const futureDate = clause.slice(futureCue.index).match(DATE_PATTERN)?.[0];
+    if (futureDate) return buildDueAtFromDateString(futureDate);
+    if (looksLikeRetrospectiveCompletion(clause.slice(0, futureCue.index))) return null;
+  }
+  return extractDueAtFromText(clause);
+}
+
+function extractForwardLookingClauses(segment: string): string[] {
+  const rawClauses = segment
+    .split(COMMITMENT_FUTURE_CLAUSE_BOUNDARY)
+    .map((clause) => normalizeClauseText(segment, clause))
+    .filter((clause) => clause.length > 0);
+  const futureClauses = rawClauses.some((clause) => COMMITMENT_MODAL_FUTURE_CUE.test(clause))
+    ? rawClauses.filter((clause) => COMMITMENT_MODAL_FUTURE_CUE.test(clause) || COMMITMENT_PASSIVE_FUTURE_ACTION.test(clause))
+    : rawClauses;
+
+  return futureClauses.filter((clause) => {
+    if (!extractDueAtFromFutureClause(clause)) return false;
+    if (COMMITMENT_PASSIVE_FUTURE_ACTION.test(clause)) return true;
+    if (!COMMITMENT_ACTION_VERB.test(clause)) return false;
+    if (looksLikeRetrospectiveCompletion(clause)) return false;
+    return COMMITMENT_FORWARD_CUE.test(clause) || COMMITMENT_IMPERATIVE_PREFIX.test(clause);
+  });
 }
 
 const TERMINAL_LIFECYCLE_TAGS = new Set(["completed", "archived", "stopped", "failed"]);
@@ -4336,39 +4561,55 @@ function entryHasTerminalLifecycle(entry: Entry): boolean {
 
 function extractCommitmentsFromEntry(
   entry: Entry,
-  resolvedNamespaces?: Set<string>,
   trackedPatterns: string[] = [...DEFAULT_TRACKED_PATTERNS],
+  diagnostics?: CommitmentExclusionDiagnostics,
 ): DerivedCommitmentInput[] {
   const commitments: DerivedCommitmentInput[] = [];
   const seenNormalized = new Set<string>();
+  let matchedUnitCount: number | undefined;
+  const getMatchedUnitCount = () => {
+    if (!diagnostics) return 0;
+    matchedUnitCount ??= countEntryCommitmentLikeUnits(entry, trackedPatterns);
+    return matchedUnitCount;
+  };
 
-  // Suppression rules: entries from resolved sources are historical records,
-  // not open commitments. Skip them entirely so existing commitments derived
-  // from the same entry get resolved on the next sync pass.
+  // Suppression rules: self-contained terminal sources are historical records,
+  // not open commitments. Namespace-level terminal status is handled only in
+  // the caller-scoped read layer so a broader-visibility caller cannot mutate
+  // shared derivation rows away for a narrower caller.
   //
   // 1. synthesis keys: already a distillation of the underlying logs/status.
   //    Re-extracting from synthesis double-counts and surfaces milestone
   //    labels like "Genesis (MVP Complete - 2026-03-21)" as commitments.
   // 2. entries whose own tags carry a terminal lifecycle (completed, archived,
   //    stopped, failed).
-  // 3. entries in a namespace whose status entry is terminal — catches task
-  //    result documents and post-mortems that don't carry lifecycle tags of
-  //    their own but live in a done namespace.
   if (entry.key === "synthesis") return commitments;
-  if (entryHasTerminalLifecycle(entry)) return commitments;
-  if (resolvedNamespaces?.has(entry.namespace)) return commitments;
+  if (entryHasTerminalLifecycle(entry)) {
+    noteCommitmentExclusion(diagnostics, "terminal_lifecycle", getMatchedUnitCount());
+    return commitments;
+  }
 
   const pushCommitment = (commitment: DerivedCommitmentInput, normalizedText: string) => {
-    if (seenNormalized.has(normalizedText)) return;
+    if (seenNormalized.has(normalizedText)) {
+      noteCommitmentExclusion(diagnostics, "duplicate_within_entry");
+      return;
+    }
     seenNormalized.add(normalizedText);
     commitments.push(commitment);
   };
 
-  pushTrackedNextStepCommitments(entry, pushCommitment, trackedPatterns);
-
-  for (const segment of extractCandidateSegments(entry.content)) {
-    const derived = buildSegmentCommitment(segment, entry.updated_at);
-    if (derived) pushCommitment(derived.commitment, derived.normalized);
+  pushTrackedNextStepCommitments(entry, pushCommitment, trackedPatterns, diagnostics);
+  for (const segment of extractCandidateSegmentsFromEntry(entry, trackedPatterns)) {
+    const derived = buildSegmentCommitments(segment, entry.updated_at);
+    if (derived.length > 0) {
+      for (const commitment of derived) {
+        pushCommitment(commitment.commitment, commitment.normalized);
+      }
+      continue;
+    }
+    if (segmentLooksLikeCommitmentCandidate(segment) && looksLikeRetrospectiveCompletion(segment)) {
+      noteCommitmentExclusion(diagnostics, "retrospective_completion");
+    }
   }
 
   return commitments;
@@ -4378,9 +4619,17 @@ function pushTrackedNextStepCommitments(
   entry: Entry,
   pushCommitment: (commitment: DerivedCommitmentInput, normalizedText: string) => void,
   trackedPatterns: string[] = [...DEFAULT_TRACKED_PATTERNS],
+  diagnostics?: CommitmentExclusionDiagnostics,
 ): void {
-  if (entry.entry_type === "state" && entry.key === "status" && isTrackedNamespace(entry.namespace, trackedPatterns)) {
+  if (isTrackedStatusEntry(entry, trackedPatterns)) {
     const structured = parseStructuredStatus(entry.content);
+    const visibleSteps = (structured.next_steps ?? []).filter((step) => !isNoneLikeStatusText(step));
+    const legacySections = visibleSteps.length === 0 && !hasStructuredStatusNextStepsSection(entry.content)
+      ? countLegacyPlainStatusNextStepsSections(entry.content)
+      : 0;
+    if (legacySections > 0) {
+      noteCommitmentExclusion(diagnostics, "legacy_plain_status_next_steps", legacySections);
+    }
     for (const step of structured.next_steps ?? []) {
       if (isNoneLikeStatusText(step)) continue;
       const normalized = normalizeCommitmentText(step);
@@ -4388,7 +4637,7 @@ function pushTrackedNextStepCommitments(
       const dueAtStep = extractDueAtFromText(step);
       pushCommitment({
         sourceType: "tracked_next_step",
-        fingerprint: `tracked_next_step:${normalized}`,
+        fingerprint: `${CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX}${normalized}`,
         text: step.trim(),
         dueAt: dueAtStep,
         confidence: computeCommitmentConfidence("tracked_next_step", entry.updated_at, !!dueAtStep, step.trim()),
@@ -4397,16 +4646,16 @@ function pushTrackedNextStepCommitments(
   }
 }
 
-function buildSegmentCommitment(
+function buildSegmentCommitments(
   segment: string,
   entryUpdatedAt: string,
-): { commitment: DerivedCommitmentInput; normalized: string } | null {
+): Array<{ commitment: DerivedCommitmentInput; normalized: string }> {
   if (COMMITMENT_EXPLICIT_PREFIX.test(segment)) {
-    if (looksLikeRetrospectiveCompletion(segment)) return null;
+    if (looksLikeRetrospectiveCompletion(segment)) return [];
     const normalized = normalizeCommitmentText(segment);
-    if (!normalized) return null;
+    if (!normalized) return [];
     const dueAt = extractDueAtFromText(segment);
-    return {
+    return [{
       commitment: {
         sourceType: "explicit_commitment",
         fingerprint: `explicit_commitment:${normalized}`,
@@ -4415,25 +4664,45 @@ function buildSegmentCommitment(
         confidence: computeCommitmentConfidence("explicit_commitment", entryUpdatedAt, !!dueAt, segment.trim()),
       },
       normalized,
-    };
+    }];
   }
 
-  const dueAt = extractDueAtFromText(segment);
-  if (!dueAt) return null;
-  if (!isForwardLookingDatedCommitment(segment)) return null;
+  return extractForwardLookingClauses(segment).flatMap((clause) => {
+    const dueAt = extractDueAtFromFutureClause(clause);
+    if (!dueAt) return [];
+    const normalized = normalizeCommitmentText(clause);
+    if (!normalized) return [];
+    return [{
+      commitment: {
+        sourceType: "explicit_dated_commitment",
+        fingerprint: `explicit_dated_commitment:${normalized}`,
+        text: clause.trim(),
+        dueAt,
+        confidence: computeCommitmentConfidence("explicit_dated_commitment", entryUpdatedAt, !!dueAt, clause.trim()),
+      },
+      normalized,
+    }];
+  });
+}
 
-  const normalized = normalizeCommitmentText(segment);
-  if (!normalized) return null;
-  return {
-    commitment: {
-      sourceType: "explicit_dated_commitment",
-      fingerprint: `explicit_dated_commitment:${normalized}`,
-      text: segment.trim(),
-      dueAt,
-      confidence: computeCommitmentConfidence("explicit_dated_commitment", entryUpdatedAt, !!dueAt, segment.trim()),
-    },
-    normalized,
-  };
+function shouldSyncCommitmentDerivationsForEntry(
+  entry: Entry,
+  trackedPatterns: string[] = [...DEFAULT_TRACKED_PATTERNS],
+): boolean {
+  return isTrackedNamespace(entry.namespace, trackedPatterns);
+}
+
+function syncDerivedCommitmentsForEntry(
+  db: Database.Database,
+  entry: Entry,
+  trackedPatterns: string[] = [...DEFAULT_TRACKED_PATTERNS],
+): void {
+  if (!shouldSyncCommitmentDerivationsForEntry(entry, trackedPatterns)) return;
+  syncCommitmentsForEntry(
+    db,
+    entry.id,
+    extractCommitmentsFromEntry(entry, trackedPatterns),
+  );
 }
 
 function syncCommitmentsForScope(
@@ -4444,7 +4713,9 @@ function syncCommitmentsForScope(
   since?: string,
   sessionId?: string,
   loggedEntryIds?: Set<string>,
-): RedactableEntryMetadata[] {
+  diagnostics?: CommitmentExclusionDiagnostics,
+  visibleResolvedNamespaces: Set<string> = new Set<string>(),
+): { redacted: RedactableEntryMetadata[]; visibleEntryCount: number; readableEntryCount: number } {
   const entries = listEntriesForDerivation(db, { namespace, since })
     .filter((entry) => canRead(ctx, entry.namespace));
   const filtered = filterDerivedSources(
@@ -4456,20 +4727,49 @@ function syncCommitmentsForScope(
     sessionId,
     loggedEntryIds,
   );
-
-  const resolvedNamespaces = getResolvedNamespaces(db);
   const trackedPatterns = resolveTrackedPatterns(db, ctx);
+  let visibleEntryCount = 0;
+  let readableEntryCount = 0;
   for (const entry of filtered.allowed) {
+    if (isCommitmentReadableSourceEntry(entry)) {
+      readableEntryCount += 1;
+    }
     // Only reconcile commitments for namespaces the caller actually tracks.
     // If the caller doesn't track the namespace, extractCommitmentsFromEntry
     // returns [] for tracked_next_step items, and syncCommitmentsForEntry would
     // then mark another principal's open commitment as done — silently corrupting
     // cross-principal commitment state. (#164 Codex Finding 1)
     if (!isTrackedNamespace(entry.namespace, trackedPatterns)) continue;
-    syncCommitmentsForEntry(db, entry.id, extractCommitmentsFromEntry(entry, resolvedNamespaces, trackedPatterns));
+    if (isCommitmentReadableSourceEntry(entry)) {
+      visibleEntryCount += 1;
+    }
+    const visibleResolvedNamespaceExclusion =
+      visibleResolvedNamespaces.has(entry.namespace)
+      && entry.key !== "synthesis"
+      && !entryHasTerminalLifecycle(entry);
+    if (visibleResolvedNamespaceExclusion) {
+      noteCommitmentExclusion(
+        diagnostics,
+        "resolved_namespace",
+        countEntryCommitmentLikeUnits(entry, trackedPatterns),
+      );
+    }
+    syncCommitmentsForEntry(
+      db,
+      entry.id,
+      extractCommitmentsFromEntry(
+        entry,
+        trackedPatterns,
+        visibleResolvedNamespaceExclusion ? undefined : diagnostics,
+      ),
+    );
   }
 
-  return filtered.redacted;
+  return {
+    redacted: filtered.redacted,
+    visibleEntryCount,
+    readableEntryCount,
+  };
 }
 
 function listFreshCommitmentRows(
@@ -4480,43 +4780,130 @@ function listFreshCommitmentRows(
     namespace?: string;
     since?: string;
     limit: number;
-    includeResolved?: boolean;
+    statuses?: readonly CommitmentStatus[];
+    recentlyDoneSince?: string;
+    /**
+     * Exhaust the SQL-eligible rows instead of stopping after pageLimit
+     * visible rows. The commitments view uses this so one classification
+     * bucket cannot consume a fixed shared cap.
+     */
+    exhaustEligible?: boolean;
   },
   sessionId?: string,
-): { rows: CommitmentRow[]; redacted: RedactableEntryMetadata[] } {
-  const { namespace, since, limit, includeResolved = true } = options;
-  const loggedEntryIds = new Set<string>();
-  const redactedSources = syncCommitmentsForScope(db, ctx, toolName, namespace, since, sessionId, loggedEntryIds);
-  const resolvedNamespaces = getResolvedNamespaces(db);
-  const trackedPatterns = resolveTrackedPatterns(db, ctx);
-
-  const refreshCandidates = listCommitments(db, {
+  visibleResolvedNamespaces: Set<string> = new Set<string>(),
+  loggedEntryIds: Set<string> = new Set<string>(),
+): {
+  rows: CommitmentRow[];
+  redacted: RedactableEntryMetadata[];
+  diagnostics: CommitmentExclusionDiagnostics;
+  visibleEntryCount: number;
+  readableEntryCount: number;
+} {
+  const {
     namespace,
     since,
     limit,
-    includeResolved: true,
-  }).filter((row) => canRead(ctx, row.namespace));
-
-  const allowedRefreshCandidates = filterDerivedSources(
+    statuses,
+    recentlyDoneSince,
+    exhaustEligible = false,
+  } = options;
+  const diagnostics = createCommitmentExclusionDiagnostics();
+  const syncResult = syncCommitmentsForScope(
     db,
     ctx,
-    refreshCandidates,
     toolName,
-    (row) => ({
-      id: row.source_entry_id,
-      namespace: row.namespace,
-      key: row.source_key,
-      classification: row.source_classification,
-    }),
+    namespace,
+    since,
     sessionId,
     loggedEntryIds,
+    diagnostics,
+    visibleResolvedNamespaces,
   );
+  const trackedPatterns = resolveTrackedPatterns(db, ctx);
+  const refreshSourceRedacted: RedactableEntryMetadata[] = [];
 
+  const listFilteredRows = (pageLimit: number, exhaust = false): {
+    rows: CommitmentRow[];
+    redacted: RedactableEntryMetadata[];
+    sourceEntryIds: Set<string>;
+  } => {
+    const rows: CommitmentRow[] = [];
+    const redacted: RedactableEntryMetadata[] = [];
+    const sourceEntryIds = new Set<string>();
+    const pageSize = Math.min(Math.max(pageLimit, 1), 200);
+    const sqlPageSize = exhaust ? 200 : pageSize;
+    const readableNamespaceSelectors = resolveReadableNamespaceSelectors(ctx);
+    const classificationCeiling = isLibrarianEnabled()
+      ? getContextMaxClassification(ctx)
+      : undefined;
+    // SQLite's historical variable limit is commonly 999. If a caller-visible
+    // terminal set is larger, keep the exact post-filter below and paginate
+    // rather than risk a query failure or a widened suppression predicate.
+    const sqlExcludedNamespaces = visibleResolvedNamespaces.size <= 900
+      ? [...visibleResolvedNamespaces]
+      : undefined;
+    let offset = 0;
+
+    // Each iteration consumes a disjoint, deterministic SQL page. Normal
+    // callers stop after their requested visible-row budget; the commitments
+    // multi-bucket view opts into full eligible-set exhaustion, which
+    // terminates only at an empty/short SQL page rather than at an arbitrary
+    // total cap.
+    while (exhaust || rows.length < pageSize) {
+      const page = listCommitments(db, {
+        namespace,
+        namespaceMode: "exact",
+        since,
+        limit: sqlPageSize,
+        offset,
+        statuses,
+        recentlyDoneSince,
+        namespaceSelectors: readableNamespaceSelectors,
+        trackedPatterns,
+        classificationCeiling,
+        excludeNamespaces: sqlExcludedNamespaces,
+      });
+      if (page.length === 0) break;
+
+      const scopedPage = page.filter(
+        (row) => canRead(ctx, row.namespace) && isTrackedNamespace(row.namespace, trackedPatterns),
+      );
+      const visiblePage = filterDerivedSources(
+        db,
+        ctx,
+        scopedPage,
+        toolName,
+        (row) => ({
+          id: row.source_entry_id,
+          namespace: row.namespace,
+          key: row.source_key,
+          classification: row.source_classification,
+        }),
+        sessionId,
+        loggedEntryIds,
+      );
+      redacted.push(...visiblePage.redacted);
+
+      for (const row of visiblePage.allowed) {
+        if (visibleResolvedNamespaces.has(row.namespace)) continue;
+        rows.push(row);
+        sourceEntryIds.add(row.source_entry_id);
+        if (!exhaust && rows.length >= pageSize) break;
+      }
+
+      offset += page.length;
+      if (page.length < sqlPageSize) break;
+    }
+
+    return { rows, redacted, sourceEntryIds };
+  };
+
+  const refreshCandidates = listFilteredRows(limit);
   const seenSourceEntries = new Set<string>();
-  for (const row of allowedRefreshCandidates.allowed) {
-    if (seenSourceEntries.has(row.source_entry_id)) continue;
-    seenSourceEntries.add(row.source_entry_id);
-    const entry = getById(db, row.source_entry_id);
+  for (const sourceEntryId of refreshCandidates.sourceEntryIds) {
+    if (seenSourceEntries.has(sourceEntryId)) continue;
+    seenSourceEntries.add(sourceEntryId);
+    const entry = getById(db, sourceEntryId);
     if (!entry || !canRead(ctx, entry.namespace)) continue;
     const entryFilter = filterDerivedSources(
       db,
@@ -4528,45 +4915,33 @@ function listFreshCommitmentRows(
       loggedEntryIds,
     );
     if (entryFilter.allowed.length === 0) {
-      redactedSources.push(...entryFilter.redacted);
+      refreshSourceRedacted.push(...entryFilter.redacted);
       continue;
     }
     // Same guard as syncCommitmentsForScope: skip entries the caller doesn't
     // track to avoid marking another principal's commitments as done.
     // (#164 Codex Finding 1)
     if (!isTrackedNamespace(entry.namespace, trackedPatterns)) continue;
-    syncCommitmentsForEntry(db, entry.id, extractCommitmentsFromEntry(entry, resolvedNamespaces, trackedPatterns));
+    syncCommitmentsForEntry(
+      db,
+      entry.id,
+      extractCommitmentsFromEntry(entry, trackedPatterns),
+    );
   }
 
-  const rows = listCommitments(db, {
-    namespace,
-    since,
-    limit,
-    includeResolved,
-  }).filter((row) => canRead(ctx, row.namespace));
-
-  const visibleRows = filterDerivedSources(
-    db,
-    ctx,
-    rows,
-    toolName,
-    (row) => ({
-      id: row.source_entry_id,
-      namespace: row.namespace,
-      key: row.source_key,
-      classification: row.source_classification,
-    }),
-    sessionId,
-    loggedEntryIds,
-  );
+  const visibleRows = listFilteredRows(limit, exhaustEligible);
 
   return {
-    rows: visibleRows.allowed,
+    rows: visibleRows.rows,
     redacted: combineRedactedSources(
-      redactedSources,
-      allowedRefreshCandidates.redacted,
+      syncResult.redacted,
+      refreshCandidates.redacted,
+      refreshSourceRedacted,
       visibleRows.redacted,
     ),
+    diagnostics,
+    visibleEntryCount: syncResult.visibleEntryCount,
+    readableEntryCount: syncResult.readableEntryCount,
   };
 }
 
@@ -4654,9 +5029,9 @@ function classifyCommitments(
   rows: CommitmentRow[],
   trackedStatusByNamespace: Map<string, TrackedStatusAssessment>,
   limit: number,
+  completedCutoff = recentlyDoneCommitmentCutoff(),
 ) {
   const now = nowUTC();
-  const completedCutoff = new Date(Date.now() - COMMITMENT_COMPLETED_RECENT_DAYS * 24 * 60 * 60 * 1000).toISOString();
 
   const open: CommitmentItem[] = [];
   const atRisk: CommitmentItem[] = [];
@@ -5731,7 +6106,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_commitments",
     description:
-      "Surface explicit commitments derived from tracked next steps and dated, attributable source text. Use this when you want to review open, at-risk, overdue, or recently completed follow-through items rather than rely on fuzzy prose search.\n\nRead-only: this tool derives and reports commitments from existing entries — it does not create, store, or modify commitments. To add a commitment, record it as a Next Step via `memory_update_status` (or in a `memory_log` entry); it will then surface here.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
+      "Surface explicit commitments derived from canonical tracked-status content and attributable source text. Use this when you want to review open, at-risk, overdue, or recently completed follow-through items rather than rely on fuzzy prose search.\n\nThis tool derives and reports commitments from existing entries; callers cannot write commitments directly. Canonical tracked-status Next Steps (for example via `memory_update_status`), dated future clauses in visible tracked-status prose, explicit `memory_log` commitment phrases such as `We agreed to: ...` or `I commit to: ...`, and future-dated `memory_log` phrases such as `I will ... by YYYY-MM-DD` or `I will ... on YYYY-MM-DD` can surface here. Generic non-status state fields are not commitment sources. Legacy plain markdown status blobs with ad-hoc `Next Steps:` headings remain readable but are not commitment-eligible until migrated to the canonical structure. When visible matches are dropped, the response may include content-blind `exclusion_diagnostics` counts of matched candidate units (for example a legacy Next Steps block or a dated clause), not full entry bodies.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -8303,17 +8678,33 @@ export function registerTools(
                 }
               }
 
-              const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_commitments", sessionId);
+              const loggedEntryIds = new Set<string>();
+              const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(
+                db,
+                ctx,
+                "memory_commitments",
+                sessionId,
+                loggedEntryIds,
+              );
               const trackedStatusByNamespace = mapTrackedStatusAssessmentsByNamespace(visibleTrackedStatuses.allowed);
-              const { rows, redacted } = listFreshCommitmentRows(db, ctx, "memory_commitments", {
+              const visibleResolvedNamespaces = getVisibleResolvedNamespaces(visibleTrackedStatuses.allowed);
+              // Use one cutoff for both SQL eligibility and response
+              // classification so a boundary row cannot move between
+              // completed_recently and the discarded set mid-request.
+              const completedCutoff = recentlyDoneCommitmentCutoff();
+              const { rows, redacted, diagnostics, visibleEntryCount, readableEntryCount } = listFreshCommitmentRows(db, ctx, "memory_commitments", {
                 namespace,
                 since: normalizedSince,
                 limit: Math.max(limit * 8, 80),
-                includeResolved: true,
-              }, sessionId);
+                statuses: ["open", "done"],
+                recentlyDoneSince: completedCutoff,
+                exhaustEligible: true,
+              }, sessionId, visibleResolvedNamespaces, loggedEntryIds);
 
-              const classified = classifyCommitments(db, rows, trackedStatusByNamespace, limit);
+              const classified = classifyCommitments(db, rows, trackedStatusByNamespace, limit, completedCutoff);
               const response: Record<string, unknown> = { ...classified };
+              const exclusionDiagnostics = serializeCommitmentExclusionDiagnostics(diagnostics);
+              if (exclusionDiagnostics) response.exclusion_diagnostics = exclusionDiagnostics;
 
               const allBucketsEmpty =
                 classified.open.length === 0 &&
@@ -8322,31 +8713,26 @@ export function registerTools(
                 classified.completed_recently.length === 0;
 
               if (allBucketsEmpty) {
-                const statusEntryCount = visibleTrackedStatuses.allowed.length;
+                const statusEntryCount = visibleTrackedStatuses.allowed.filter(
+                  (assessment) => namespaceMatchesQueryScope(assessment.row.namespace, namespace),
+                ).length;
                 if (statusEntryCount === 0) {
-                  const scopeEntries = listEntriesForDerivation(db, {
-                    namespace,
-                    since: normalizedSince,
-                  }).filter((entry) => canRead(ctx, entry.namespace));
-                  const totalEntryCount = scopeEntries.length;
-                  if (totalEntryCount === 0) {
-                    response.reason = `Namespace has no status or log entries to scan`;
-                    response.data_requirements = "Commitments are extracted from two sources: (1) status entries with a non-empty next_steps list, and (2) log entries containing commitment-like phrases such as 'I will...', 'We agreed to...', 'We will...', or 'Agreed: ...'. At least one status or log entry matching these patterns is required.";
+                  if (visibleEntryCount === 0 && readableEntryCount > 0) {
+                    response.reason = "Namespace has readable entries, but none are tracked for commitment scanning under your tracked patterns.";
+                    response.data_requirements = COMMITMENT_DATA_REQUIREMENTS;
+                    response.suggestion = "Use memory_read to check the status entry's next steps directly.";
+                  } else if (visibleEntryCount === 0) {
+                    response.reason = "Namespace has no status or log entries to scan";
+                    response.data_requirements = COMMITMENT_DATA_REQUIREMENTS;
                     response.suggestion = "Use memory_read to check the status entry's next steps directly.";
                   } else {
-                    response.reason = `No commitment-like phrases detected in ${totalEntryCount} scanned entries. Commitments are extracted from status next-steps and log entries containing phrases like 'I will...', 'We agreed to...'`;
-                    response.data_requirements = "Commitments are extracted from two sources: (1) status entries with a non-empty next_steps list, and (2) log entries containing commitment-like phrases such as 'I will...', 'We agreed to...', 'We will...', or 'Agreed: ...'. At least one status or log entry matching these patterns is required.";
+                    response.reason = buildEmptyCommitmentsReason(visibleEntryCount, diagnostics);
+                    response.data_requirements = COMMITMENT_DATA_REQUIREMENTS;
                     response.suggestion = "Use memory_read to check the status entry's next steps directly.";
                   }
                 } else {
-                  const scopeEntries = listEntriesForDerivation(db, {
-                    namespace,
-                    since: normalizedSince,
-                  }).filter((entry) => canRead(ctx, entry.namespace));
-                  const totalEntryCount = scopeEntries.length;
-                  response.reason =
-                    `No commitment-like phrases detected in ${totalEntryCount} scanned entries. Commitments are extracted from status next-steps and log entries containing phrases like 'I will...', 'We agreed to...'`;
-                  response.data_requirements = "Commitments are extracted from two sources: (1) status entries with a non-empty next_steps list, and (2) log entries containing commitment-like phrases such as 'I will...', 'We agreed to...', 'We will...', or 'Agreed: ...'. At least one status or log entry matching these patterns is required.";
+                  response.reason = buildEmptyCommitmentsReason(visibleEntryCount, diagnostics);
+                  response.data_requirements = COMMITMENT_DATA_REQUIREMENTS;
                   response.suggestion = "Use memory_read to check the status entry's next steps directly.";
                 }
               }
@@ -8396,6 +8782,7 @@ export function registerTools(
                 }
               }
 
+              const loggedEntryIds = new Set<string>();
               const topicNeedle = normalizeCompareText(topic ?? "");
               const rawEntries = listEntriesForDerivation(db, {
                 namespace,
@@ -8408,6 +8795,7 @@ export function registerTools(
                 "memory_patterns",
                 (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
                 sessionId,
+                loggedEntryIds,
               );
               const allEntries = filteredEntries.allowed;
 
@@ -8456,15 +8844,22 @@ export function registerTools(
                 });
               }
 
-              const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_patterns", sessionId);
+              const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(
+                db,
+                ctx,
+                "memory_patterns",
+                sessionId,
+                loggedEntryIds,
+              );
               const patternsTrackedPatterns = resolveTrackedPatterns(db, ctx);
               const trackedStatusByNamespace = mapTrackedStatusAssessmentsByNamespace(visibleTrackedStatuses.allowed);
+              const visibleResolvedNamespaces = getVisibleResolvedNamespaces(visibleTrackedStatuses.allowed);
               const { rows: commitmentRows, redacted: redactedCommitmentSources } = listFreshCommitmentRows(db, ctx, "memory_patterns", {
                 namespace,
                 since: normalizedSince,
                 limit: 200,
-                includeResolved: true,
-              }, sessionId);
+                statuses: ["open"],
+              }, sessionId, visibleResolvedNamespaces, loggedEntryIds);
 
               const undatedOpen = commitmentRows.filter((row) => row.status === "open" && !row.due_at);
               const undatedSources = new Set(undatedOpen.map((row) => row.source_entry_id));
@@ -8670,6 +9065,7 @@ export function registerTools(
                 });
               }
 
+              const loggedEntryIds = new Set<string>();
               const rawEntries = listEntriesForDerivation(db, {
                 namespace,
                 since: normalizedSince,
@@ -8681,6 +9077,7 @@ export function registerTools(
                 "memory_handoff",
                 (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
                 sessionId,
+                loggedEntryIds,
               );
               const allEntries = filteredEntries.allowed;
               const rawStatusEntry = resolveNarrativeStatusEntry(db, namespace);
@@ -8695,6 +9092,7 @@ export function registerTools(
                   "memory_handoff",
                   (entry) => buildRedactableEntryMetadata(parseEntry(entry)),
                   sessionId,
+                  loggedEntryIds,
                 )
                 : { allowed: [] as Entry[], redacted: [] as RedactableEntryMetadata[] };
               const visibleStatusEntry = filteredStatusEntry.allowed[0] ?? null;
@@ -8713,15 +9111,23 @@ export function registerTools(
                 "memory_handoff",
                 (entry) => buildAuditHistoryMetadata(db, entry),
                 sessionId,
+                loggedEntryIds,
               );
               const history = filteredHistory.allowed;
+              const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(
+                db,
+                ctx,
+                "memory_handoff",
+                sessionId,
+                loggedEntryIds,
+              );
+              const visibleResolvedNamespaces = getVisibleResolvedNamespaces(visibleTrackedStatuses.allowed);
               const { rows: commitmentRows, redacted: redactedCommitmentSources } = listFreshCommitmentRows(db, ctx, "memory_handoff", {
                 namespace,
                 since: normalizedSince,
                 limit: 200,
-                includeResolved: true,
-              }, sessionId);
-              const visibleTrackedStatuses = getVisibleTrackedStatusAssessments(db, ctx, "memory_handoff", sessionId);
+                statuses: ["open"],
+              }, sessionId, visibleResolvedNamespaces, loggedEntryIds);
               const trackedStatusByNamespace = mapTrackedStatusAssessmentsByNamespace(visibleTrackedStatuses.allowed);
               const currentState = buildHandoffCurrentState(namespace, visibleStatusEntry, allEntries);
 
@@ -8927,8 +9333,12 @@ export function registerTools(
                 // Pre-flight: reject patches that would create Librarian-orphaned entries
                 {
                   const existing = readState(db, namespace, key);
+                  const existingTags = existing ? parseTags(existing.tags) : [];
+                  const basePatchTags = classification !== undefined
+                    ? stripClassificationTags(existingTags)
+                    : existingTags;
                   const patchTags = existing
-                    ? [...parseTags(existing.tags), ...(patch.tags_add ?? [])].filter(t => !(patch.tags_remove ?? []).includes(t))
+                    ? [...basePatchTags, ...(patch.tags_add ?? [])].filter(t => !(patch.tags_remove ?? []).includes(t))
                     : (patch.tags_add ?? []);
                   const orphanError = preflightWriteClassification(
                     db, ctx, namespace, patchTags,
@@ -8978,7 +9388,7 @@ export function registerTools(
 
                 const patchedEntry = readState(db, namespace, key);
                 if (patchedEntry) {
-                  syncCommitmentsForEntry(db, patchedEntry.id, extractCommitmentsFromEntry(patchedEntry, getResolvedNamespaces(db), resolveTrackedPatterns(db, ctx)));
+                  syncDerivedCommitmentsForEntry(db, patchedEntry, resolveTrackedPatterns(db, ctx));
                 }
 
                 const patchedResponse: Record<string, unknown> = { status: "patched", id: patchResult.id, namespace, key, hint: hintPatch };
@@ -9204,7 +9614,7 @@ export function registerTools(
               if (result.id) {
                 const writtenEntry = getById(db, result.id);
                 if (writtenEntry) {
-                  syncCommitmentsForEntry(db, writtenEntry.id, extractCommitmentsFromEntry(writtenEntry, getResolvedNamespaces(db), resolveTrackedPatterns(db, ctx)));
+                  syncDerivedCommitmentsForEntry(db, writtenEntry, resolveTrackedPatterns(db, ctx));
                 }
               }
 
@@ -9403,7 +9813,11 @@ export function registerTools(
               const existingTags = existingParsed?.tags ?? [];
               const lifecycleTag = normalizedLifecycle ?? getLifecycleTags(existingTags)[0];
               const effectiveTags = isValidUntilOnlyUpdate
-                ? existingTags
+                // Classification tags are server-maintained metadata. Strip
+                // the old one even for a valid_until-only update so an
+                // explicit classification change is not rejected as a
+                // parameter/tag conflict.
+                ? stripClassificationTags(existingTags)
                 : (() => {
                     const retainedTags = stripClassificationTags(
                       existingTags.filter((tag) => !LIFECYCLE_TAGS.has(tag)),
@@ -9506,8 +9920,12 @@ export function registerTools(
               }
 
               const statusEntry = result.id ? getById(db, result.id) : undefined;
-              if (statusEntry && !isValidUntilOnlyUpdate) {
-                syncCommitmentsForEntry(db, statusEntry.id, extractCommitmentsFromEntry(statusEntry, getResolvedNamespaces(db), trackedPatterns));
+              // Classification and valid_until are part of the source truth
+              // for derived commitments. Reconcile even when the status prose
+              // itself did not change, so an open row cannot retain a stale
+              // classification cache across a metadata-only update.
+              if (statusEntry) {
+                syncDerivedCommitmentsForEntry(db, statusEntry, resolveTrackedPatterns(db, ctx));
               }
 
               const response: Record<string, unknown> = {
@@ -10515,7 +10933,7 @@ export function registerTools(
               persistIntakeAdvisory(db, result.id, logIntakeResult, logWarnings);
               const logEntry = getById(db, result.id);
               if (logEntry) {
-                syncCommitmentsForEntry(db, logEntry.id, extractCommitmentsFromEntry(logEntry, getResolvedNamespaces(db), resolveTrackedPatterns(db, ctx)));
+                syncDerivedCommitmentsForEntry(db, logEntry, resolveTrackedPatterns(db, ctx));
               }
               // Analytics: log log outcome correlated to prior retrieval in this session
               if (sessionId) {

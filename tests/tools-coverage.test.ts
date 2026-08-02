@@ -1398,7 +1398,17 @@ describe("memory_commitments edges", () => {
     }));
     expect(res.ok).toBe(true);
     expect(res.reason).toContain("No commitment-like phrases detected");
-    expect(res.data_requirements).toContain("status entries with a non-empty next_steps");
+    expect(res.reason).toContain("We agreed to: ...");
+    expect(res.reason).toContain("I commit to: ...");
+    expect(res.data_requirements).toContain("dated future clauses in visible tracked-status prose");
+    expect(res.data_requirements).toContain("explicit `memory_log` commitment phrases");
+    expect(res.data_requirements).toContain("We agreed to: ...");
+    expect(res.data_requirements).toContain("I commit to: ...");
+    expect(res.data_requirements).toContain("future-dated `memory_log` phrases");
+    expect(res.data_requirements).toContain(
+      "Legacy plain markdown status blobs with ad-hoc `Next Steps:` headings",
+    );
+    expect(res.data_requirements).toContain("memory_update_status");
     expect(res.suggestion).toContain("memory_read");
   });
 

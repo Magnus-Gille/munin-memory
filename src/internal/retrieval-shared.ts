@@ -157,6 +157,18 @@ export function namespaceMatchesAnyPattern(ns: string, patterns: readonly string
 }
 
 /**
+ * Match a concrete namespace against the exact-or-subtree scope semantics used
+ * by list/read derivation queries:
+ * - no scope: match everything
+ * - trailing slash: strict prefix match (`projects/x/` → descendants only)
+ * - no trailing slash: exact namespace or a direct subtree (`projects/x`)
+ */
+export function namespaceMatchesQueryScope(namespace: string, scope?: string): boolean {
+  if (!scope) return true;
+  if (scope.endsWith("/")) return namespace.startsWith(scope);
+  return namespace === scope || namespace.startsWith(`${scope}/`);
+}
+/**
  * Historical name preserved for compatibility. Translate tracked-namespace
  * glob patterns into a parameterized SQL boolean clause over `column`:
  *   - empty patterns → "0" (matches nothing)

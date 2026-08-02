@@ -66,6 +66,46 @@ changelog is the canonical record of what moved.
 
 ### Fixed
 
+- **Commitment-derived views no longer let resolved rows consume the page cap (#274).**
+  `memory_commitments` now paginates the SQL-eligible open and recently-done rows
+  to exhaustion before filling its independent output buckets, while
+  `memory_patterns` and `memory_handoff` prefilter to open rows. Cancelled and
+  old completed rows therefore cannot hide current obligations, and the
+  recent-completion cutoff is shared by query eligibility and classification.
+
+- **`memory_commitments` now recognizes future-dated verify/run forms and
+  explains conservative exclusions (#274).** The dated-action vocabulary now
+  includes `verify`, so future phrases such as `We will verify ... by
+  YYYY-MM-DD` and `I will run ... on YYYY-MM-DD` surface alongside existing
+  `validate`/`check`/`test` forms. The tool now also returns bounded,
+  content-blind `exclusion_diagnostics` when commitment-like syntax is matched
+  but deliberately dropped — for example retrospective dated logs, duplicates
+  inside one entry, terminal/resolved sources, or legacy plain-markdown status
+  blobs that use an ad-hoc `Next Steps:` heading. Public wording now matches the
+  real contract: canonical tracked-status `Next Steps`, dated future clauses in
+  visible tracked-status prose, explicit `memory_log` commitment phrases such as
+  `We agreed to: ...` or `I commit to: ...`, and future-dated `memory_log`
+  phrases can surface here. Generic non-status state fields are not commitment
+  sources. Legacy plain markdown status blobs with ad-hoc `Next Steps:`
+  headings remain readable but are not commitment-eligible until migrated to the
+  canonical structure. Refresh now keeps the compatibility boundary honest too:
+  legacy rows from those plain-status `Next Steps:` blocks retire through a
+  non-completion path, and older whole-segment dated rows revise in place to a
+  surviving future clause instead of reading as completed just because the
+  derived fingerprint changed. The parser now also keeps due dates local to the
+  actual future clause, so a retrospective date such as `completed ... on
+  2026-07-31` cannot be recycled into a new overdue commitment when a later
+  noun-subject clause says `the report should be filed later`. Legacy plain
+  `Next Steps:` blocks are stripped by the same structural matcher that powers
+  the exclusion diagnostics, which fixes three drift cases at once: a legacy
+  block before the first `##` heading no longer leaks commitments through the
+  preserved prefix, line-mode stripping stops at the real end of the block
+  instead of consuming unrelated later prose, and canonical extras headings
+  such as `## TODO` / `## Action Items` stay visible for dated obligation prose
+  even when another section contains a `Status:` line. Inline canonical
+  `**Next Steps**:` lines now normalize to the same single tracked-next-step
+  commitment as the `## Next Steps` form, and empty-namespace diagnostics use
+  the same exact-or-subtree namespace scope semantics as the derivation scan.
 - **Write-like responses now return only the settled stored classification
   (#263).** Investigation confirmed this branch resolves and persists entry
   classification synchronously before the write response and audit row are

@@ -5,6 +5,7 @@ import {
   REFERENCE_NAMESPACE_PATTERNS,
   UNTRACKED_NAMESPACE_MIN_ENTRIES,
   namespaceMatchesAnyPattern,
+  namespaceMatchesQueryScope,
   trackedPatternsToSqlLike,
   isTrackedNamespace,
   detectUntrackedNamespaces,
@@ -73,6 +74,15 @@ describe("namespaceMatchesAnyPattern / isTrackedNamespace", () => {
     expect(namespaceMatchesAnyPattern("a/b/c", ["a/b/*"])).toBe(true);
     expect(namespaceMatchesAnyPattern("a/b/c", ["a/b"])).toBe(false);
     expect(namespaceMatchesAnyPattern("x", [])).toBe(false);
+  });
+
+  it("matches namespace query scopes the same way derivation scans do", () => {
+    expect(namespaceMatchesQueryScope("projects/alpha", undefined)).toBe(true);
+    expect(namespaceMatchesQueryScope("projects/alpha", "projects/alpha")).toBe(true);
+    expect(namespaceMatchesQueryScope("projects/alpha/subtask", "projects/alpha")).toBe(true);
+    expect(namespaceMatchesQueryScope("projects/alphabet", "projects/alpha")).toBe(false);
+    expect(namespaceMatchesQueryScope("projects/alpha/subtask", "projects/alpha/")).toBe(true);
+    expect(namespaceMatchesQueryScope("projects/alpha", "projects/alpha/")).toBe(false);
   });
 });
 

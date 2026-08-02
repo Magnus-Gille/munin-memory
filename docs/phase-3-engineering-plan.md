@@ -193,7 +193,7 @@ This table should be populated only from explicit, attributable sources.
 Initial commitment sources:
 
 - tracked `next_steps`
-- explicit dated commitments in state or logs
+- explicit dated commitments in tracked status prose or logs
 - confirmed outputs from Phase 2 `memory_extract`
 
 ### Tool Surface

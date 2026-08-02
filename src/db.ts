@@ -28,19 +28,20 @@ import {
   matchesNamespaceSelectors,
   resolveNamespaceSelectorScope,
 } from "./internal/namespace-filter.js";
+import { CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX } from "./commitment-status.js";
 import { runMigrations } from "./migrations.js";
 import { resolveKnob } from "./profiles.js";
 import { scanForSecrets, validateWriteNamespace } from "./security.js";
 import {
   CLASSIFICATION_LEVELS,
   compareClassificationLevels,
-  FALLBACK_RESTRICTED_CLASSIFICATION,
   listNamespaceClassificationFloors as listNamespaceClassificationFloorsFromPolicy,
   normalizeStoredClassification,
   parseExplicitClassification,
   resolveNamespaceClassificationFloor,
   resolveNamespaceClassificationFloorFromRows,
   resolveStoredClassification,
+  stripClassificationTags,
   syncClassificationTag,
   validateClassificationPattern,
 } from "./librarian.js";
@@ -623,6 +624,14 @@ export function patchState(
     }
 
     let tags: string[] = JSON.parse(existing.tags) as string[];
+    // The stored classification tag is server-maintained metadata. When the
+    // caller supplies an explicit replacement, remove only the old tag before
+    // applying patch additions so the explicit value can be reconciled without
+    // a stale parameter/tag conflict. Newly added classification tags remain
+    // visible to resolveWriteClassification and still conflict if they differ.
+    if (classificationOptions?.classification !== undefined) {
+      tags = stripClassificationTags(tags);
+    }
     if (patch.tags_add && patch.tags_add.length > 0) {
       const existing_set = new Set(tags);
       for (const t of patch.tags_add) {
@@ -823,11 +832,28 @@ function cancelSupersededCommitments(
   predecessorId: string,
   now: string,
 ): void {
-  db.prepare(
-    `UPDATE commitments
-     SET status = 'cancelled', resolved_at = ?, updated_at = ?
+  const source = db.prepare(
+    "SELECT classification FROM entries WHERE id = ?",
+  ).get(predecessorId) as { classification: string | null } | undefined;
+  const sourceClassification = normalizeStoredClassification(source?.classification);
+  const commitments = db.prepare(
+    `SELECT id, source_classification
+     FROM commitments
      WHERE source_entry_id = ? AND status = 'open'`,
-  ).run(now, now, predecessorId);
+  ).all(predecessorId) as Array<{ id: string; source_classification: string | null }>;
+  const cancel = db.prepare(
+    `UPDATE commitments
+     SET status = 'cancelled', resolved_at = ?, updated_at = ?, source_classification = ?
+     WHERE id = ?`,
+  );
+  for (const commitment of commitments) {
+    cancel.run(
+      now,
+      now,
+      stricterClassification(commitment.source_classification, sourceClassification),
+      commitment.id,
+    );
+  }
 }
 
 export function supersedeState(
@@ -1584,14 +1610,91 @@ export interface DerivedCommitmentInput {
   confidence: number;
 }
 
+/**
+ * Treat malformed historical classifications as maximally restricted, then
+ * retain the stricter of the cached derivative and live source levels.
+ */
+function stricterClassification(left: unknown, right: unknown): ClassificationLevel {
+  const normalizedLeft = normalizeStoredClassification(left);
+  const normalizedRight = normalizeStoredClassification(right);
+  return compareClassificationLevels(normalizedLeft, normalizedRight) >= 0
+    ? normalizedLeft
+    : normalizedRight;
+}
+
+/**
+ * SQLite cannot use the TypeScript classification rank map. Keep this CASE in
+ * lockstep with stricterClassification so the effective level is selected and
+ * filtered before LIMIT/OFFSET pagination.
+ */
+const EFFECTIVE_COMMITMENT_CLASSIFICATION_SQL = `
+  CASE
+    WHEN COALESCE(c.source_classification, '') NOT IN ('public', 'internal', 'client-confidential', 'client-restricted')
+      OR COALESCE(e.classification, '') NOT IN ('public', 'internal', 'client-confidential', 'client-restricted')
+      THEN 'client-restricted'
+    WHEN c.source_classification = 'client-restricted'
+      OR e.classification = 'client-restricted'
+      THEN 'client-restricted'
+    WHEN c.source_classification = 'client-confidential'
+      OR e.classification = 'client-confidential'
+      THEN 'client-confidential'
+    WHEN c.source_classification = 'internal'
+      OR e.classification = 'internal'
+      THEN 'internal'
+    ELSE 'public'
+  END`;
+
 /** Minimum token overlap for two commitment texts to count as the same work. */
 const COMMITMENT_REVISION_SIMILARITY = 0.5;
+const COMMITMENT_SUBJECT_PREFIX = /^(?:i|we|they|it|this|that)\s+/i;
 
 /** Tokens for similarity comparison: words of 3+ chars, deduplicated. */
 function commitmentTokens(text: string): Set<string> {
   return new Set(
     text.toLowerCase().match(/[a-z0-9#][a-z0-9#_-]{2,}/g) ?? [],
   );
+}
+
+function normalizeCommitmentComparisonText(text: string): string {
+  return text.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function stripTrailingClausePunctuation(text: string): string {
+  return text.replace(/[.,;:!?]+$/, "");
+}
+
+function legacyWholeSegmentRevisionScore(
+  orphan: { source_type: string; text: string; due_at?: string | null },
+  commitment: DerivedCommitmentInput,
+): number {
+  if (orphan.source_type !== "explicit_dated_commitment" || commitment.sourceType !== "explicit_dated_commitment") {
+    return 0;
+  }
+  if (orphan.due_at && commitment.dueAt && orphan.due_at !== commitment.dueAt) {
+    return 0;
+  }
+
+  const normalizedOrphan = normalizeCommitmentComparisonText(orphan.text);
+  const normalizedFresh = stripTrailingClausePunctuation(normalizeCommitmentComparisonText(commitment.text));
+  if (normalizedFresh.length >= 12 && normalizedOrphan.includes(normalizedFresh)) return 1;
+
+  const withoutSubject = stripTrailingClausePunctuation(normalizedFresh.replace(COMMITMENT_SUBJECT_PREFIX, ""));
+  return withoutSubject.length >= 12 && normalizedOrphan.includes(withoutSubject)
+    ? 1
+    : 0;
+}
+
+function resolvedStatusForMissingCommitment(
+  existing: { source_type: string; source_fingerprint: string },
+): CommitmentStatus {
+  if (existing.source_type !== "tracked_next_step") return "cancelled";
+  // v2 fingerprints are written only by the canonical structured-status
+  // extractor. Old unversioned rows cannot prove that origin once an in-place
+  // status rewrite has removed the source text, so retire them conservatively
+  // instead of fabricating a completed commitment.
+  return existing.source_fingerprint.startsWith(
+    CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX,
+  ) ? "done" : "cancelled";
 }
 
 /** Issue-style references (`#248`) are a stable identity across rewording. */
@@ -1628,7 +1731,7 @@ function jaccard(a: Set<string>, b: Set<string>): number {
  * Exported for tests.
  */
 export function pairRevisedCommitments(
-  orphans: Array<{ id: string; source_type: string; text: string }>,
+  orphans: Array<{ id: string; source_type: string; text: string; due_at?: string | null }>,
   fresh: DerivedCommitmentInput[],
 ): Map<string, DerivedCommitmentInput> {
   const pairs = new Map<string, DerivedCommitmentInput>();
@@ -1642,12 +1745,21 @@ export function pairRevisedCommitments(
       // Never merge across derivation kinds: a tracked next step and an ad-hoc
       // dated commitment are different objects even when worded alike.
       if (commitment.sourceType !== orphan.source_type) continue;
+      if (
+        orphan.source_type === "explicit_dated_commitment"
+        && orphan.due_at
+        && commitment.dueAt
+        && orphan.due_at !== commitment.dueAt
+      ) continue;
       const freshIssues = issueReferences(commitment.text);
       // An issue reference is useful negative evidence, not a shortcut to
       // identity: multiple sequential tasks can legitimately share one issue.
       // If both sides name issue references, their sets must agree exactly.
       if (orphanIssues.size > 0 && freshIssues.size > 0 && !equalSets(orphanIssues, freshIssues)) continue;
-      const score = jaccard(orphanTokens, commitmentTokens(commitment.text));
+      const score = Math.max(
+        jaccard(orphanTokens, commitmentTokens(commitment.text)),
+        legacyWholeSegmentRevisionScore(orphan, commitment),
+      );
       if (score < COMMITMENT_REVISION_SIMILARITY) continue;
       scored.push({ score, orphanId: orphan.id, commitment });
     }
@@ -1758,9 +1870,32 @@ export interface CommitmentRow {
 export interface ListCommitmentsOptions {
   namespace?: string;
   namespaceMode?: BareNamespaceMode;
+  /** Lower bound on the commitment row's reconciliation/update timestamp. */
   since?: string;
   limit?: number;
+  offset?: number;
+  /**
+   * Legacy status convenience: false selects open rows only; true (the
+   * default) leaves all commitment statuses eligible. Prefer `statuses` for
+   * new callers that need a precise status set.
+   */
   includeResolved?: boolean;
+  /** Explicit status allow-list. Takes precedence over includeResolved. */
+  statuses?: readonly CommitmentStatus[];
+  /**
+   * Retain open rows and done rows resolved at or after this cutoff. This is
+   * intentionally a done-only time predicate, so cancelled and old done rows
+   * cannot enter a recent-completions view.
+   */
+  recentlyDoneSince?: string;
+  /** Optional SQL prefilter; canonical canRead remains authoritative in tools.ts. */
+  namespaceSelectors?: readonly NamespaceSelector[] | null;
+  /** Resolved tracked namespace patterns for pre-limit filtering. */
+  trackedPatterns?: readonly string[];
+  /** Effective cached/live source classification ceiling for fail-closed pagination. */
+  classificationCeiling?: ClassificationLevel;
+  /** Caller-visible terminal namespaces suppressed before pagination. */
+  excludeNamespaces?: readonly string[];
 }
 
 export function syncCommitmentsForEntry(
@@ -1769,12 +1904,13 @@ export function syncCommitmentsForEntry(
   derivedCommitments: DerivedCommitmentInput[],
 ): void {
   const source = db
-    .prepare("SELECT id, namespace, key, entry_type, classification, updated_at FROM entries WHERE id = ?")
+    .prepare("SELECT id, namespace, key, entry_type, content, classification, updated_at FROM entries WHERE id = ?")
     .get(entryId) as {
       id: string;
       namespace: string;
       key: string | null;
       entry_type: EntryType;
+      content: string;
       classification: string | null;
       updated_at: string;
     } | undefined;
@@ -1784,7 +1920,7 @@ export function syncCommitmentsForEntry(
 
   const existingRows = db
     .prepare(
-      `SELECT id, source_type, source_fingerprint, text, due_at, status, confidence, updated_at
+      `SELECT id, source_type, source_fingerprint, text, due_at, status, confidence, updated_at, source_classification
        FROM commitments
        WHERE source_entry_id = ?`,
     )
@@ -1797,6 +1933,7 @@ export function syncCommitmentsForEntry(
       status: CommitmentStatus;
       confidence: number;
       updated_at: string;
+      source_classification: string | null;
     }>;
 
   const existingByFingerprint = new Map(existingRows.map((row) => [row.source_fingerprint, row]));
@@ -1820,7 +1957,7 @@ export function syncCommitmentsForEntry(
   );
   const resolveCommitment = db.prepare(
     `UPDATE commitments
-     SET status = ?, updated_at = ?, resolved_at = COALESCE(resolved_at, ?)
+     SET status = ?, updated_at = ?, resolved_at = COALESCE(resolved_at, ?), source_classification = ?
      WHERE id = ? AND status = 'open'`,
   );
   // A rewording carries the row's identity forward: same id and created_at,
@@ -1836,7 +1973,17 @@ export function syncCommitmentsForEntry(
   // reworded, so an edit is a revision rather than a completion plus an insert.
   const revisionPairs = pairRevisedCommitments(
     existingRows.filter(
-      (row) => row.status === "open" && !nextFingerprints.has(row.source_fingerprint),
+      (row) => !nextFingerprints.has(row.source_fingerprint)
+        && (
+          row.status === "open"
+          || (
+            row.status === "cancelled"
+            && row.source_type === "tracked_next_step"
+            && !row.source_fingerprint.startsWith(
+              CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX,
+            )
+          )
+        ),
     ),
     derivedCommitments.filter((commitment) => !existingByFingerprint.has(commitment.fingerprint)),
   );
@@ -1931,10 +2078,14 @@ export function syncCommitmentsForEntry(
     for (const existing of existingRows) {
       if (nextFingerprints.has(existing.source_fingerprint)) continue;
       if (revisionPairs.has(existing.id)) continue;
-      const resolvedStatus: CommitmentStatus = existing.source_type === "tracked_next_step"
-        ? "done"
-        : "cancelled";
-      resolveCommitment.run(resolvedStatus, now, now, existing.id);
+      const resolvedStatus = resolvedStatusForMissingCommitment(existing);
+      resolveCommitment.run(
+        resolvedStatus,
+        now,
+        now,
+        stricterClassification(existing.source_classification, sourceClassification),
+        existing.id,
+      );
     }
   });
 
@@ -1945,33 +2096,93 @@ export function listCommitments(
   db: Database.Database,
   options: ListCommitmentsOptions = {},
 ): CommitmentRow[] {
-  const { namespace, namespaceMode = "exact", since, limit = 100, includeResolved = true } = options;
+  const {
+    namespace,
+    namespaceMode = "exact",
+    since,
+    limit = 100,
+    offset = 0,
+    includeResolved = true,
+    statuses,
+    recentlyDoneSince,
+    namespaceSelectors,
+    trackedPatterns,
+    classificationCeiling,
+    excludeNamespaces,
+  } = options;
   const clampedLimit = Math.min(Math.max(limit, 1), 200);
+  const clampedOffset = Number.isFinite(offset) ? Math.max(Math.floor(offset), 0) : 0;
+  const statusFilter = statuses !== undefined
+    ? [...new Set(statuses)]
+    : includeResolved
+      ? undefined
+      : (["open"] as const);
 
   let sql = `
     SELECT c.*,
            e.key AS source_key,
            substr(e.content, 1, 220) AS source_excerpt,
-           COALESCE(c.source_classification, e.classification, '${FALLBACK_RESTRICTED_CLASSIFICATION}') AS source_classification
+           ${EFFECTIVE_COMMITMENT_CLASSIFICATION_SQL} AS source_classification
     FROM commitments c
     JOIN entries e ON e.id = c.source_entry_id
     WHERE e.is_current = 1
   `;
   const params: unknown[] = [];
 
-  sql = appendNamespaceSqlFilter(sql, params, "c.namespace", namespace, namespaceMode);
+  sql = appendNamespaceSqlFilter(
+    sql,
+    params,
+    "c.namespace",
+    namespace,
+    namespaceMode,
+    namespaceSelectors,
+  );
+
+  if (trackedPatterns !== undefined) {
+    const trackedFilter = trackedPatternsToSqlLike(trackedPatterns, "c.namespace");
+    sql += ` AND ${trackedFilter.clause}`;
+    params.push(...trackedFilter.params);
+  }
+
+  if (classificationCeiling !== undefined) {
+    const allowedClassifications = CLASSIFICATION_LEVELS.filter((classification) =>
+      compareClassificationLevels(classification, classificationCeiling) <= 0,
+    );
+    if (allowedClassifications.length === 0) {
+      sql += " AND 0";
+    } else {
+      sql += ` AND ${EFFECTIVE_COMMITMENT_CLASSIFICATION_SQL} IN (${allowedClassifications.map(() => "?").join(", ")})`;
+      params.push(...allowedClassifications);
+    }
+  }
+
+  const excludedNamespaces = [...new Set(excludeNamespaces ?? [])];
+  if (excludedNamespaces.length > 0) {
+    sql += ` AND c.namespace NOT IN (${excludedNamespaces.map(() => "?").join(", ")})`;
+    params.push(...excludedNamespaces);
+  }
 
   if (since) {
     sql += " AND c.updated_at >= ?";
     params.push(since);
   }
 
-  if (!includeResolved) {
-    sql += " AND c.status = 'open'";
+  if (statusFilter !== undefined) {
+    if (statusFilter.length === 0) {
+      sql += " AND 0";
+    } else {
+      sql += " AND c.status IN (" + statusFilter.map(() => "?").join(", ") + ")";
+      params.push(...statusFilter);
+    }
   }
 
-  sql += " ORDER BY CASE WHEN c.due_at IS NULL THEN 1 ELSE 0 END, c.due_at ASC, c.updated_at DESC LIMIT ?";
-  params.push(clampedLimit);
+  if (recentlyDoneSince !== undefined) {
+    sql += " AND (c.status = 'open' OR (c.status = 'done' AND c.resolved_at >= ?))";
+    params.push(recentlyDoneSince);
+  }
+
+  sql += " ORDER BY CASE WHEN c.due_at IS NULL THEN 1 ELSE 0 END, c.due_at ASC, c.updated_at DESC, c.id ASC LIMIT ? OFFSET ?";
+  params.push(clampedLimit, clampedOffset);
 
   return db.prepare(sql).all(...params) as CommitmentRow[];
 }
