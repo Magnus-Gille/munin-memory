@@ -21,8 +21,7 @@ import {
   trackedPatternsToSqlLike,
 } from "./internal/retrieval-shared.js";
 import {
-  hasStructuredStatusNextStepsSection,
-  hasLegacyPlainStatusNextSteps,
+  CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX,
 } from "./commitment-status.js";
 import { runMigrations } from "./migrations.js";
 import { resolveKnob } from "./profiles.js";
@@ -1445,21 +1444,16 @@ function legacyWholeSegmentRevisionScore(
 }
 
 function resolvedStatusForMissingCommitment(
-  source: { entry_type: EntryType; key: string | null; content: string },
-  existing: { source_type: string },
+  existing: { source_type: string; source_fingerprint: string },
 ): CommitmentStatus {
-  if (
-    existing.source_type === "tracked_next_step"
-    && source.entry_type === "state"
-    && source.key === "status"
-    && !hasStructuredStatusNextStepsSection(source.content)
-    && hasLegacyPlainStatusNextSteps(source.content)
-  ) {
-    return "cancelled";
-  }
-  return existing.source_type === "tracked_next_step"
-    ? "done"
-    : "cancelled";
+  if (existing.source_type !== "tracked_next_step") return "cancelled";
+  // v2 fingerprints are written only by the canonical structured-status
+  // extractor. Old unversioned rows cannot prove that origin once an in-place
+  // status rewrite has removed the source text, so retire them conservatively
+  // instead of fabricating a completed commitment.
+  return existing.source_fingerprint.startsWith(
+    CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX,
+  ) ? "done" : "cancelled";
 }
 
 /** Issue-style references (`#248`) are a stable identity across rewording. */
@@ -1713,7 +1707,17 @@ export function syncCommitmentsForEntry(
   // reworded, so an edit is a revision rather than a completion plus an insert.
   const revisionPairs = pairRevisedCommitments(
     existingRows.filter(
-      (row) => row.status === "open" && !nextFingerprints.has(row.source_fingerprint),
+      (row) => !nextFingerprints.has(row.source_fingerprint)
+        && (
+          row.status === "open"
+          || (
+            row.status === "cancelled"
+            && row.source_type === "tracked_next_step"
+            && !row.source_fingerprint.startsWith(
+              CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX,
+            )
+          )
+        ),
     ),
     derivedCommitments.filter((commitment) => !existingByFingerprint.has(commitment.fingerprint)),
   );
@@ -1808,7 +1812,7 @@ export function syncCommitmentsForEntry(
     for (const existing of existingRows) {
       if (nextFingerprints.has(existing.source_fingerprint)) continue;
       if (revisionPairs.has(existing.id)) continue;
-      const resolvedStatus = resolvedStatusForMissingCommitment(source, existing);
+      const resolvedStatus = resolvedStatusForMissingCommitment(existing);
       resolveCommitment.run(resolvedStatus, now, now, existing.id);
     }
   });

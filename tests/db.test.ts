@@ -56,6 +56,7 @@ import {
   upsertConsolidationMetadata,
   countUnusedSurfaces,
 } from "../src/db.js";
+import { CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX } from "../src/commitment-status.js";
 import { embeddingToBuffer } from "../src/embeddings.js";
 
 const TEST_DB_PATH = "/tmp/munin-memory-test.db";
@@ -480,7 +481,7 @@ describe("appendLog", () => {
 describe("commitment revision identity (#253)", () => {
   const trackedStep = (text: string) => ({
     sourceType: "tracked_next_step",
-    fingerprint: `tracked_next_step:${text.toLowerCase()}`,
+    fingerprint: `${CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX}${text.toLowerCase()}`,
     text,
     dueAt: null,
     confidence: 0.8,
@@ -509,6 +510,26 @@ describe("commitment revision identity (#253)", () => {
     expect(after[0].text).toContain("restore evidence");
     // The bug this guards: live work reported as delivered.
     expect(after.some((row) => row.status === "done")).toBe(false);
+  });
+
+  it("does not reopen a completed canonical step when similar work appears later", () => {
+    const { id } = writeState(db, "projects/test", "status", "## Next Steps\n- placeholder", ["active"]);
+
+    syncCommitmentsForEntry(db, id, [trackedStep("Publish the restore report (#222)")]);
+    const originalId = listCommitments(db, { namespace: "projects/test" })[0].id;
+
+    syncCommitmentsForEntry(db, id, []);
+    expect(listCommitments(db, { namespace: "projects/test" }))
+      .toContainEqual(expect.objectContaining({ id: originalId, status: "done" }));
+
+    syncCommitmentsForEntry(db, id, [trackedStep("Publish the revised restore report (#222)")]);
+    const after = listCommitments(db, { namespace: "projects/test" });
+    expect(after).toHaveLength(2);
+    expect(after).toContainEqual(expect.objectContaining({ id: originalId, status: "done" }));
+    expect(after).toContainEqual(expect.objectContaining({
+      status: "open",
+      text: "Publish the revised restore report (#222)",
+    }));
   });
 
   it("still resolves a next step that genuinely disappears", () => {

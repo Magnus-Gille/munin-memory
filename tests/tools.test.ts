@@ -6024,6 +6024,59 @@ describe("memory_commitments", () => {
     expect(JSON.stringify(result.exclusion_diagnostics)).not.toContain("Run the canary");
   });
 
+  it.each([
+    {
+      name: "the legacy block precedes its plain status context",
+      lines: (dueDate: string) => [
+        "Next Steps:",
+        `- Verify the restore path by ${dueDate}`,
+        "",
+        "Phase: Build",
+        "Current Work: Stabilizing the rollout",
+        "Blockers: None.",
+      ],
+    },
+    {
+      name: "inline canonical context precedes a plain legacy block",
+      lines: (dueDate: string) => [
+        "**Phase**: Build",
+        "**Current Work**: Stabilizing the rollout",
+        "**Blockers**: None.",
+        "Next Steps:",
+        `- Verify the restore path by ${dueDate}`,
+      ],
+    },
+  ])("excludes unsupported Next Steps when $name", async ({ name, lines }) => {
+    const dueDate = commitmentTestDate(15);
+    const namespace = `projects/legacy-layout-${name.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}`;
+    await callTool("memory_write", {
+      namespace,
+      key: "status",
+      content: lines(dueDate).join("\n"),
+      tags: ["active"],
+    });
+
+    const result = parseToolResponse(await callTool("memory_commitments", {
+      namespace,
+    })) as {
+      open: Array<unknown>;
+      completed_recently: Array<unknown>;
+      exclusion_diagnostics?: {
+        matched_but_excluded: number;
+        reason_counts?: Record<string, number>;
+      };
+    };
+
+    expect(result.open).toHaveLength(0);
+    expect(result.completed_recently).toHaveLength(0);
+    expect(result.exclusion_diagnostics).toEqual(expect.objectContaining({
+      matched_but_excluded: 1,
+      reason_counts: expect.objectContaining({
+        legacy_plain_status_next_steps: 1,
+      }),
+    }));
+  });
+
   it("strips a legacy plain Next Steps block before the first canonical heading without leaking its commitments", async () => {
     const legacyDueDate = commitmentTestDate(16);
     await callTool("memory_write", {
@@ -6289,7 +6342,7 @@ describe("memory_commitments", () => {
     expect(row.status).toBe("done");
   });
 
-  it("does not treat a quoted Next Steps marker in free-form status prose as a legacy block", async () => {
+  it("conservatively retires an unversioned legacy row after its source block is rewritten away", async () => {
     const nextStepDueDate = commitmentTestDate(30);
     const nextStep = `Verify the restore path by ${nextStepDueDate}`;
     const namespace = "projects/free-form-quoted-next-steps";
@@ -6317,11 +6370,9 @@ describe("memory_commitments", () => {
       exclusion_diagnostics?: { reason_counts?: Record<string, number> };
     };
 
-    expect(result.completed_recently).toContainEqual(expect.objectContaining({
-      id: commitmentId,
-      status: "done",
-    }));
-    expect(result.exclusion_diagnostics?.reason_counts?.legacy_plain_status_next_steps ?? 0).toBe(0);
+    expect(result.completed_recently).toHaveLength(0);
+    expect(db.prepare("SELECT status FROM commitments WHERE id = ?").get(commitmentId))
+      .toEqual({ status: "cancelled" });
   });
 
   it("revises legacy whole-segment dated rows in place when the future clause still survives", async () => {

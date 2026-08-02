@@ -1477,6 +1477,7 @@ import {
   boundarySerialize,
 } from "./internal/retrieval-shared.js";
 import {
+  CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX,
   countLegacyPlainStatusNextStepsSections,
   hasStructuredStatusNextStepsSection,
   stripLegacyPlainStatusNextSteps,
@@ -4415,7 +4416,7 @@ function pushTrackedNextStepCommitments(
       const dueAtStep = extractDueAtFromText(step);
       pushCommitment({
         sourceType: "tracked_next_step",
-        fingerprint: `tracked_next_step:${normalized}`,
+        fingerprint: `${CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX}${normalized}`,
         text: step.trim(),
         dueAt: dueAtStep,
         confidence: computeCommitmentConfidence("tracked_next_step", entry.updated_at, !!dueAtStep, step.trim()),

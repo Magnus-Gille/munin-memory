@@ -78,14 +78,6 @@ function isCanonicalInlineStatusLine(line: string): boolean {
   return Boolean(inline && isCanonicalStatusLabel(inline[1]));
 }
 
-function hasCanonicalStructuredStatus(content: string): boolean {
-  const headingMatches = [...content.matchAll(/^##\s+(.+)$/gm)];
-  if (headingMatches.some((match) => isCanonicalStatusLabel(match[1].trim()))) {
-    return true;
-  }
-  return content.split("\n").some((line) => isCanonicalInlineStatusLine(line.trim()));
-}
-
 export function extractStructuredStatusNextSteps(content: string): string[] | undefined {
   return findStructuredStatusNextSteps(content).steps;
 }
@@ -97,14 +89,11 @@ export function hasStructuredStatusNextStepsSection(content: string): boolean {
 export const LEGACY_STATUS_NEXT_STEPS_HEADER =
   /^(?:#{1,6}\s+)?(?:next steps?|next|action items?|todo):?\s*$/i;
 
+export const CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX =
+  "tracked_next_step:v2:";
+
 const LEGACY_STATUS_CONTEXT_LINE =
   /^(?:phase|current work|blockers|status|lifecycle)\s*:\s*\S/i;
-
-function hasLegacyStatusContextBefore(lines: string[], headerIndex: number): boolean {
-  return lines
-    .slice(0, headerIndex)
-    .some((line) => LEGACY_STATUS_CONTEXT_LINE.test(line.trim()));
-}
 
 interface LegacyPlainStatusNextStepsBlock {
   startLine: number;
@@ -113,14 +102,21 @@ interface LegacyPlainStatusNextStepsBlock {
 
 function findLegacyPlainStatusNextStepsBlocks(content: string): LegacyPlainStatusNextStepsBlock[] {
   const lines = content.split("\n");
-  const hasCanonicalStructure = hasCanonicalStructuredStatus(content);
+  const firstCanonicalHeadingLine = lines.findIndex((line) => {
+    const heading = line.trim().match(/^##\s+(.+)$/);
+    return Boolean(heading && isCanonicalStatusLabel(heading[1]));
+  });
   const blocks: LegacyPlainStatusNextStepsBlock[] = [];
 
   for (let i = 0; i < lines.length; i++) {
     const trimmed = lines[i].trim();
     if (!trimmed || !LEGACY_STATUS_NEXT_STEPS_HEADER.test(trimmed)) continue;
-    if (!hasLegacyStatusContextBefore(lines, i)) continue;
-    if (hasCanonicalStructure && /^#{1,6}\s+/.test(trimmed)) continue;
+    // Once a canonical heading-based status begins, plain markers belong to
+    // that structured document (often copied text in Notes), not to the old
+    // top-level status grammar. Before that boundary—or in a wholly legacy or
+    // mixed inline status—any standalone ad-hoc marker is unsupported history
+    // and must be excluded regardless of where Phase/Blockers happen to sit.
+    if (firstCanonicalHeadingLine >= 0 && i >= firstCanonicalHeadingLine) continue;
 
     let endLineExclusive = i + 1;
     let sawBody = false;
