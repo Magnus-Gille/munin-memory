@@ -61,7 +61,10 @@ Status entries use lifecycle tags (`active`, `blocked`, `completed`, `stopped`,
 `memory_update_status` can also set or clear `valid_until` to declare when a tracked
 status should next be reviewed. Expired statuses remain directly readable, are surfaced
 by `memory_attention` when `include_expiring` is enabled, and are hidden from broad search
-by default.
+by default. For sandbox-safe rehearsals, `memory_update_status(validate_only:true)` runs
+the same namespace authorization, lifecycle/classification/CAS, and content validation
+logic without writing anything; that dry-run path may target any namespace the caller can
+write, while a real `memory_update_status` mutation remains restricted to tracked roots.
 
 ---
 
