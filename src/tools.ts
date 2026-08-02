@@ -1752,6 +1752,43 @@ function resolveProspectiveWriteClassification(
   }
 }
 
+function validateStatusPatchFields(
+  phase: unknown,
+  currentWork: unknown,
+  blockers: unknown,
+  notes: unknown,
+  nextSteps: unknown,
+): string | null {
+  if (nextSteps !== undefined && (!Array.isArray(nextSteps) || nextSteps.some((item) => typeof item !== "string"))) {
+    return "next_steps must be an array of strings.";
+  }
+
+  const nonStringField = (
+    [
+      ["phase", phase],
+      ["current_work", currentWork],
+      ["blockers", blockers],
+      ["notes", notes],
+    ] as const
+  ).find(([, value]) => value !== undefined && typeof value !== "string");
+  if (nonStringField) {
+    return `${nonStringField[0]} must be a string.`;
+  }
+
+  const pollutedField = detectParameterMarkup([
+    { name: "phase", value: phase as string | undefined },
+    { name: "current_work", value: currentWork as string | undefined },
+    { name: "blockers", value: blockers as string | undefined },
+    { name: "notes", value: notes as string | undefined },
+    { name: "next_steps", value: nextSteps as string[] | undefined },
+  ]);
+  if (pollutedField) {
+    return `Field "${pollutedField}" contains tool-call parameter markup (\`<parameter name=...>\` / \`</parameter>\`), which indicates the value was corrupted by the transport (a following field was likely swallowed). Nothing was written. Retry with one field per call, or re-send the corrected value(s).`;
+  }
+
+  return null;
+}
+
 function rejectUnknownArguments(args: unknown, allowed: readonly string[]): string | null {
   if (!args || typeof args !== "object" || Array.isArray(args)) {
     return "Tool arguments must be an object.";
@@ -8623,38 +8660,15 @@ export function registerTools(
                 }
                 normalizedValidUntil = timestampCheck.value;
               }
-              if (next_steps !== undefined && (!Array.isArray(next_steps) || next_steps.some((item) => typeof item !== "string"))) {
-                return errResult("update_status", "validation_error", "next_steps must be an array of strings.");
-              }
-              // Runtime type guard for the string fields (the schema is not
-              // enforced when the handler is called directly). A non-string here
-              // would otherwise skip the markup scan and crash later on `.trim()`.
-              const nonStringField = (
-                [
-                  ["phase", phase],
-                  ["current_work", current_work],
-                  ["blockers", blockers],
-                  ["notes", notes],
-                ] as const
-              ).find(([, value]) => value !== undefined && typeof value !== "string");
-              if (nonStringField) {
-                return errResult("update_status", "validation_error", `${nonStringField[0]} must be a string.`);
-              }
-
-              // #167: reject tool-call parameter markup leaked into string fields.
-              const pollutedField = detectParameterMarkup([
-                { name: "phase", value: phase },
-                { name: "current_work", value: current_work },
-                { name: "blockers", value: blockers },
-                { name: "notes", value: notes },
-                { name: "next_steps", value: next_steps },
-              ]);
-              if (pollutedField) {
-                return errResult(
-                  "update_status",
-                  "validation_error",
-                  `Field "${pollutedField}" contains tool-call parameter markup (\`<parameter name=...>\` / \`</parameter>\`), which indicates the value was corrupted by the transport (a following field was likely swallowed). Nothing was written. Retry with one field per call, or re-send the corrected value(s).`,
-                );
+              const statusFieldError = validateStatusPatchFields(
+                phase,
+                current_work,
+                blockers,
+                notes,
+                next_steps,
+              );
+              if (statusFieldError) {
+                return errResult("update_status", "validation_error", statusFieldError);
               }
 
               const existing = readState(db, namespace, "status");
