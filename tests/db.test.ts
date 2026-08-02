@@ -1654,7 +1654,7 @@ describe("queryEntriesByFilter (no FTS)", () => {
     expect(results.map((r) => r.namespace)).toEqual(["/legacy/rooted"]);
   });
 
-  it("treats percent and underscore as literal namespace characters", () => {
+  it("treats percent and underscore literally in the shared SQL helper for already-stored rows", () => {
     writeState(db, "legacy/pct-temp", "status", "legacy percent parent", ["active"]);
     writeState(db, "legacy/pct-temp/sub", "status", "legacy percent child", ["active"]);
     writeState(db, "legacy/us-temp", "status", "legacy underscore parent", ["active"]);

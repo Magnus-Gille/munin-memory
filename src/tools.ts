@@ -5521,14 +5521,14 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_history",
     description:
-      "View the chronological audit trail of changes to memory. Returns a timeline of writes, updates, corrections, deletes, namespace deletes, and log appends. Use this to answer 'what changed recently?' or 'what happened in this namespace?' — unlike memory_query (which is relevance-based search), this is a change feed ordered by time.\n\nCursor semantics (read carefully): a call WITHOUT `cursor` returns the most recent changes first (newest→oldest); its `next_cursor` is the audit id of the OLDEST row in that page. A call WITH `cursor` switches to ascending sync mode: it returns rows with `id > cursor` in ascending (oldest→newest) order, and `next_cursor` then advances to the NEWEST id seen. For forward polling of new mutations, do an initial cursorless call, then keep passing the latest `next_cursor` you have observed.",
+      "View the chronological audit trail of changes to memory. Returns a timeline of writes, updates, corrections, deletes, namespace deletes, and log appends. Use this to answer 'what changed recently?' or 'what happened in this namespace?' — unlike memory_query (which is relevance-based search), this is a change feed ordered by time. Namespace filters are literal and case-sensitive: bare `projects/foo` returns that namespace plus descendants, while trailing-slash `projects/foo/` returns only descendants under that literal prefix.\n\nCursor semantics (read carefully): a call WITHOUT `cursor` returns the most recent changes first (newest→oldest); its `next_cursor` is the audit id of the OLDEST row in that page. A call WITH `cursor` switches to ascending sync mode: it returns rows with `id > cursor` in ascending (oldest→newest) order, and `next_cursor` then advances to the NEWEST id seen. For forward polling of new mutations, do an initial cursorless call, then keep passing the latest `next_cursor` you have observed.",
     inputSchema: {
       type: "object" as const,
       properties: {
         namespace: {
           type: "string",
           description:
-            "Optional. Filter to a namespace or namespace prefix. E.g. 'projects/munin-memory' returns changes in that namespace and its children.",
+            "Optional. Filter to a literal, case-sensitive namespace scope. `projects/munin-memory` returns that namespace plus descendants; `projects/munin-memory/` returns only descendants under that literal prefix.",
         },
         since: {
           type: "string",

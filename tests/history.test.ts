@@ -378,6 +378,42 @@ describe("memory_history tool handler", () => {
     expect(result.entries[0].namespace).toBe("projects/alpha");
   });
 
+  it("trailing-slash namespace filters stay descendant-only through the tool handler", async () => {
+    writeState(db, "projects/root", "status", "parent", []);
+    writeState(db, "projects/root/sub", "status", "child", []);
+
+    const raw = await callTool(server, "memory_history", {
+      namespace: "projects/root/",
+    });
+    const result = parseToolResponse(raw) as {
+      count: number;
+      entries: Array<{ namespace: string }>;
+    };
+
+    expect(result.count).toBe(1);
+    expect(result.entries.map((entry) => entry.namespace)).toEqual(["projects/root/sub"]);
+  });
+
+  it("namespace filters stay case-sensitive through the tool handler", async () => {
+    writeState(db, "Projects/Alpha", "status", "upper parent", []);
+    writeState(db, "Projects/Alpha/Sub", "status", "upper child", []);
+    writeState(db, "projects/alpha/sub-lower", "status", "lower child", []);
+
+    const raw = await callTool(server, "memory_history", {
+      namespace: "Projects/Alpha",
+    });
+    const result = parseToolResponse(raw) as {
+      count: number;
+      entries: Array<{ namespace: string }>;
+    };
+
+    expect(result.count).toBe(2);
+    expect(result.entries.map((entry) => entry.namespace).sort()).toEqual([
+      "Projects/Alpha",
+      "Projects/Alpha/Sub",
+    ]);
+  });
+
   it("bare namespace filters keep emoji descendants through the tool handler", async () => {
     writeState(db, "projects/emoji", "status", "parent", []);
     writeState(db, "projects/emoji-child-temp", "status", "child", []);

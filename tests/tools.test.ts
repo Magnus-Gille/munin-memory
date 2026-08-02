@@ -6554,6 +6554,31 @@ describe("compare-and-swap (memory_write)", () => {
     });
   });
 
+  it("documents memory_history namespace semantics in the MCP metadata", async () => {
+    const handler = (
+      server as unknown as { _requestHandlers: Map<string, Function> }
+    )._requestHandlers?.get("tools/list");
+    const toolList = await handler!({ method: "tools/list", params: {} });
+    const memoryHistory = (
+      toolList as {
+        tools: Array<{
+          name: string;
+          description: string;
+          inputSchema: {
+            properties?: Record<string, { description?: string }>;
+          };
+        }>;
+      }
+    ).tools.find((tool) => tool.name === "memory_history");
+
+    expect(memoryHistory?.description).toContain("Namespace filters are literal and case-sensitive");
+    expect(memoryHistory?.description).toContain("bare `projects/foo` returns that namespace plus descendants");
+    expect(memoryHistory?.description).toContain("trailing-slash `projects/foo/` returns only descendants under that literal prefix");
+    expect(memoryHistory?.inputSchema.properties?.namespace?.description).toContain("literal, case-sensitive namespace scope");
+    expect(memoryHistory?.inputSchema.properties?.namespace?.description).toContain("returns that namespace plus descendants");
+    expect(memoryHistory?.inputSchema.properties?.namespace?.description).toContain("returns only descendants under that literal prefix");
+  });
+
   it("advertises closed argument objects for the #269 validated tools", async () => {
     const handler = (
       server as unknown as { _requestHandlers: Map<string, Function> }

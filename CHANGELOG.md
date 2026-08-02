@@ -48,7 +48,9 @@ changelog is the canonical record of what moved.
   filters now use exact equality plus a UTF-8-safe literal descendant range, so
   supplementary Unicode descendants stay inside scope, `Projects/Foo` no longer
   matches `projects/foo/...`, trailing-slash filters remain descendant-only, and
-  wildcard-looking bytes such as `_` and legacy `%` stay literal. For
+  the shared SQL helper treats wildcard-looking bytes literally instead of as
+  `LIKE` wildcards. Direct DB/helper coverage also verifies already-stored
+  legacy `%` bytes without expanding the public namespace-filter contract. For
   `memory_query`, non-owner reads now apply readable-namespace SQL selectors
   before `LIMIT` only when the caller's read rules are exactly representable;
   legacy or unsupported rule shapes fail open to broader SQL scanning while

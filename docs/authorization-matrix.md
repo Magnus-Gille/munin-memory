@@ -135,7 +135,7 @@ Invisible denial is critical: non-owner principals must not be able to distingui
 | Field | Rule |
 |-------|------|
 | **Who can call** | All principals |
-| **Namespace filter** | Only returns audit entries for caller's accessible namespaces |
+| **Namespace filter** | Literal and case-sensitive. Bare `projects/foo` means that namespace plus descendants; trailing-slash `projects/foo/` means descendants under that literal prefix only. Only returns audit entries for caller's accessible namespaces. |
 | **Without namespace** | Returns history across all accessible namespaces only |
 | **Unauthorized namespace** | Empty result set (not an error) |
 
