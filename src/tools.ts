@@ -8349,7 +8349,7 @@ export function registerTools(
                 classification_override,
               } = args as unknown as StatusUpdateParams;
 
-              const nsCheck = validateNamespace(namespace);
+              const nsCheck = validateWriteNamespace(namespace);
               if (!nsCheck.valid) {
                 return errResult("update_status", "validation_error", nsCheck.error!);
               }

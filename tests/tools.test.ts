@@ -6328,6 +6328,33 @@ describe("compare-and-swap (memory_write)", () => {
     expect(readSchema("memory_query", ["namespace"])?.description).toContain("Prefix filters may end with '/'");
   });
 
+  it("enforces the advertised write-target namespace grammar before unrelated field validation", async () => {
+    for (const namespace of ["projects/", "projects//bad"]) {
+      const res = parseToolResponse(await callTool("memory_update_status", {
+        namespace,
+        phase: "Build",
+        valid_until: "next tuesday",
+      })) as { ok?: boolean; error?: string; message?: string };
+      expect(res.ok).toBe(false);
+      expect(res.error).toBe("validation_error");
+      expect(res.message ?? "").toContain("write target");
+      expect(res.message ?? "").toMatch(/slash|empty/i);
+      expect(res.message ?? "").not.toContain('Invalid "valid_until" value');
+    }
+  });
+
+  it("keeps well-formed but non-tracked status targets on the tracked-namespace error path", async () => {
+    const res = parseToolResponse(await callTool("memory_update_status", {
+      namespace: "tasks/heartbeat",
+      phase: "Build",
+      valid_until: "next tuesday",
+    })) as { ok?: boolean; error?: string; message?: string };
+    expect(res.ok).toBe(false);
+    expect(res.error).toBe("validation_error");
+    expect(res.message).toContain("configured tracked namespaces");
+    expect(res.message).not.toContain('Invalid "valid_until" value');
+  });
+
   it("keeps tag schemas freeform while constraining item grammar", async () => {
     const handler = (
       server as unknown as { _requestHandlers: Map<string, Function> }
