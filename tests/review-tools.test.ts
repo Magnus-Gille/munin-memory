@@ -540,6 +540,124 @@ describe("memory_extract durable review proposals", () => {
     }
   });
 
+  it("keeps a months-stale proposal masked after the first non-preview prune persists expiry and purges payloads", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-01T12:00:00.000Z"));
+    const db = initDatabase(":memory:");
+    try {
+      const operationContent = "Months-stale review operation content";
+      const sourceExcerpt = "Months-stale review source excerpt";
+      const created = createReviewProposal(db, {
+        creatorPrincipalId: "owner",
+        operation: {
+          action: "memory_log",
+          namespace: "projects/munin-memory",
+          content: operationContent,
+        },
+        classification: "internal",
+        confidence: 1,
+        reasons: ["months-stale non-preview prune coverage"],
+        sourceRefs: [],
+        sourceExcerpt,
+        sourceHash: "months-stale-retention-hash",
+        createdAt: "2026-06-01T10:00:00.000Z",
+        expiresAt: "2026-06-02T10:00:00.000Z",
+      });
+
+      const firstList = await makeCall(db)("memory_review", {
+        action: "list",
+      }) as {
+        proposals: Array<{
+          id: string;
+          status: string;
+          current_operation: Record<string, unknown> | null;
+          source_excerpt: string | null;
+          persisted_status?: string;
+        }>;
+      };
+      const firstListedProposal = firstList.proposals.find((proposal) => proposal.id === created.id);
+
+      expect(db.prepare(
+        "SELECT status, terminal_at, payload_purged_at, current_operation, source_excerpt FROM review_proposals WHERE id = ?",
+      ).get(created.id)).toEqual({
+        status: "expired",
+        terminal_at: "2026-06-02T10:00:00.000Z",
+        payload_purged_at: expect.any(String),
+        current_operation: null,
+        source_excerpt: null,
+      });
+      expect(firstListedProposal).toMatchObject({
+        id: created.id,
+        status: "expired",
+        current_operation: null,
+        source_excerpt: null,
+      });
+      expect(firstListedProposal?.persisted_status).toBeUndefined();
+      expect(JSON.stringify(firstListedProposal)).not.toContain(operationContent);
+      expect(JSON.stringify(firstListedProposal)).not.toContain(sourceExcerpt);
+
+      const inspected = await makeCall(db)("memory_review", {
+        action: "get",
+        proposal_id: created.id,
+      }) as {
+        status: string;
+        current_operation: Record<string, unknown> | null;
+        source_excerpt: string | null;
+        persisted_status?: string;
+      };
+      expect(inspected).toMatchObject({
+        status: "expired",
+        current_operation: null,
+        source_excerpt: null,
+      });
+      expect(inspected.persisted_status).toBeUndefined();
+      expect(JSON.stringify(inspected)).not.toContain(operationContent);
+      expect(JSON.stringify(inspected)).not.toContain(sourceExcerpt);
+
+      const listedAgain = await makeCall(db)("memory_review", {
+        action: "list",
+      }) as {
+        proposals: Array<{
+          id: string;
+          current_operation: Record<string, unknown> | null;
+          source_excerpt: string | null;
+        }>;
+      };
+      expect(listedAgain.proposals.find((proposal) => proposal.id === created.id)).toMatchObject({
+        id: created.id,
+        current_operation: null,
+        source_excerpt: null,
+      });
+
+      const beforePreview = snapshotReviewDurability(db, created.id);
+      const preview = await makeCall(db)("memory_review", {
+        action: "preview",
+        proposal_id: created.id,
+      }) as {
+        status: string;
+        approval_status: string;
+        approval_error?: { code: string; message: string };
+      };
+      const afterPreview = snapshotReviewDurability(db, created.id);
+
+      expect(preview).toMatchObject({
+        status: "expired",
+        approval_status: "not_approvable",
+        approval_error: {
+          code: "review_expired",
+          message: "Proposal expired before review.",
+        },
+      });
+      expect(preview).not.toHaveProperty("exact_operation");
+      expect(JSON.stringify(preview)).not.toContain(operationContent);
+      expect(JSON.stringify(preview)).not.toContain(sourceExcerpt);
+      expect(afterPreview).toEqual(beforePreview);
+    } finally {
+      db.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("uses the same configured retention for terminal preview masking and maintenance pruning", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-01T12:00:00.000Z"));

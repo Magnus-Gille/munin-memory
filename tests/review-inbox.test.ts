@@ -601,6 +601,51 @@ describe("review proposal retention", () => {
     db.close();
   });
 
+  it("preserves expires_at as the terminal cutoff when first maintenance hits a months-stale proposal", () => {
+    const db = initDatabase(":memory:");
+    const created = createReviewProposal(db, {
+      creatorPrincipalId: "owner",
+      operation: writeOperation("months-stale pending payload"),
+      classification: "internal",
+      confidence: 0.92,
+      reasons: ["months-stale retention"],
+      sourceRefs: [],
+      sourceExcerpt: "Months-stale proposal source excerpt.",
+      sourceHash: "sha256:months-stale",
+      createdAt: "2026-06-01T10:00:00.000Z",
+      expiresAt: "2026-06-02T10:00:00.000Z",
+    });
+
+    const pruned = pruneReviewProposals(
+      db,
+      "2026-08-01T12:00:00.000Z",
+      { terminalPayloadDays: 7, approvedUndoDays: 30 },
+    );
+    const tombstone = getReviewProposal(db, created.id, "owner");
+
+    expect(pruned).toEqual({
+      expired: 1,
+      payloads_purged: 1,
+      undo_snapshots_purged: 0,
+    });
+    expect(tombstone).toMatchObject({
+      status: "expired",
+      terminal_at: "2026-06-02T10:00:00.000Z",
+      payload_purged_at: expect.any(String),
+      original_operation: null,
+      current_operation: null,
+      source_excerpt: null,
+      source_refs: [],
+    });
+    expect(listReviewProposalEvents(db, created.id, "owner")
+      .map((event) => event.event_type)).toEqual([
+      "created",
+      "expired",
+      "payload_purged",
+    ]);
+    db.close();
+  });
+
   it("purges approved proposal payloads after the reviewed-undo window", () => {
     const db = initDatabase(":memory:");
     const created = createPending(db);

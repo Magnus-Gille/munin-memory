@@ -645,12 +645,16 @@ function expireProposal(
   now: string,
   actorPrincipalId: string,
 ): boolean {
+  // Timeout expiry becomes effective at expires_at, not when maintenance or a
+  // later caller first notices it. Retention must count from that effective
+  // terminal timestamp so long-expired payloads do not reappear.
+  const terminalAt = row.expires_at;
   const updated = db.prepare(
     `UPDATE review_proposals
      SET status = 'expired', updated_at = ?, terminal_at = ?,
          terminal_code = 'review_expired', terminal_detail = ?
      WHERE id = ?`,
-  ).run(now, now, REVIEW_PROPOSAL_EXPIRY_DETAIL, row.id);
+  ).run(now, terminalAt, REVIEW_PROPOSAL_EXPIRY_DETAIL, row.id);
   if (updated.changes === 0) return false;
   insertEvent(
     db,
