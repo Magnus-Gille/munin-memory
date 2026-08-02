@@ -92,6 +92,7 @@ describe("runMigrations", () => {
     expect(names).toContain("idx_entries_ns_key");
     expect(names).toContain("idx_entries_ns_type_key");
     expect(names).toContain("idx_entries_ns_type_created");
+    expect(names).toContain("idx_entries_state_history");
     expect(names).toContain("idx_entries_created");
     expect(names).toContain("idx_entries_state_valid_until");
     expect(names).toContain("idx_commitments_namespace_status_due");

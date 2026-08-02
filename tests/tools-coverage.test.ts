@@ -711,6 +711,13 @@ describe("memory_query validation and filter-only", () => {
     expect(res.message).toContain("Provide either a 'query' string");
   });
 
+  it("returns namespace_scope for zero-result namespace-filtered browse responses", async () => {
+    const res = parseToolResponse(await callTool("memory_query", { namespace: "projects/no-match" }));
+    expect(res.ok).toBe(true);
+    expect(res.total).toBe(0);
+    expect(res.namespace_scope).toBe("subtree");
+  });
+
   it("records analytics for filter-only browsing when a session id is present", async () => {
     await callTool("memory_write", { namespace: "projects/browse", key: "notes", content: "hello browse" });
     const call = makeContextCallTool(ownerContext(), "session-filter-analytics");
@@ -970,6 +977,28 @@ describe("memory_resume edges", () => {
     });
     const maint = parseToolResponse(await callTool("memory_resume", { namespace: "projects/upkeep" }));
     expect(maint.items.some((i: ToolResponse) => i.namespace === "projects/upkeep")).toBe(true);
+  });
+
+  it("does not widen a bare namespace to child entries", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/resume-parent/sub",
+      phase: "Build",
+      lifecycle: "active",
+    });
+    await callTool("memory_log", {
+      namespace: "projects/resume-parent/sub",
+      content: "Child-only decision context.",
+      tags: ["decision"],
+    });
+
+    const res = parseToolResponse(await callTool("memory_resume", {
+      namespace: "projects/resume-parent",
+      include_history: true,
+    }));
+
+    expect(res.ok).toBe(true);
+    expect(res.items).toEqual([]);
+    expect(res.open_loops).toEqual([]);
   });
 
   it("includes scoped state entries and history items when include_history is set", async () => {
@@ -1295,6 +1324,22 @@ describe("memory_narrative edges", () => {
     const res = parseToolResponse(await callTool("memory_narrative", { namespace: "projects/narr/" }));
     expect(res.ok).toBe(true);
     expect(res.summary).not.toBe("No narrative context found.");
+  });
+
+  it("does not widen a bare namespace to child narrative context", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/narr-parent/sub",
+      phase: "Subtree work",
+      lifecycle: "active",
+    });
+
+    const res = parseToolResponse(await callTool("memory_narrative", {
+      namespace: "projects/narr-parent",
+    }));
+
+    expect(res.ok).toBe(true);
+    expect(res.summary).toBe("No narrative context found.");
+    expect(res.timeline).toEqual([]);
   });
 
   it("emits a long_gap signal when activity stalls on an active namespace", async () => {
@@ -1708,6 +1753,22 @@ describe("memory_handoff edges", () => {
     expect(stateOnly.recommended_next_actions).toEqual(
       expect.arrayContaining([expect.stringContaining("Refresh the tracked status")]),
     );
+  });
+
+  it("does not widen a bare namespace to child handoff context", async () => {
+    await callTool("memory_log", {
+      namespace: "projects/handoff-parent/sub",
+      content: "Child-only decision context.",
+      tags: ["decision"],
+    });
+
+    const res = parseToolResponse(await callTool("memory_handoff", {
+      namespace: "projects/handoff-parent",
+    }));
+
+    expect(res.ok).toBe(true);
+    expect(res.found).toBe(false);
+    expect(res.recent_decisions).toEqual([]);
   });
 });
 

@@ -21,8 +21,14 @@ import {
   trackedPatternsToSqlLike,
 } from "./internal/retrieval-shared.js";
 import {
-  CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX,
-} from "./commitment-status.js";
+  type BareNamespaceMode,
+  type NamespaceSelector,
+  buildNamespacePrefixRangeFilter,
+  buildNamespaceSelectorFilter,
+  matchesNamespaceSelectors,
+  resolveNamespaceSelectorScope,
+} from "./internal/namespace-filter.js";
+import { CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX } from "./commitment-status.js";
 import { runMigrations } from "./migrations.js";
 import { resolveKnob } from "./profiles.js";
 import { scanForSecrets, validateWriteNamespace } from "./security.js";
@@ -75,6 +81,27 @@ export function parsePragmaInt(raw: string, varName: string, { min = 0 }: { min?
 
 export function nowUTC(): string {
   return new Date().toISOString();
+}
+
+function nextStateMutationTimestamp(
+  existing: { updated_at: string; valid_from: string },
+  candidate = nowUTC(),
+): string {
+  const candidateMs = Date.parse(candidate);
+  const floorMs = Math.max(
+    Date.parse(existing.updated_at),
+    Date.parse(existing.valid_from),
+  );
+
+  if (!Number.isFinite(candidateMs) || !Number.isFinite(floorMs) || candidateMs > floorMs) {
+    return candidate;
+  }
+
+  // In-place state rewrites are not rewindable, so the replacement row must
+  // start strictly after the previous row's recorded boundary. Otherwise an
+  // as_of read at the prior millisecond can incorrectly return rewritten
+  // current content instead of an uncovered miss.
+  return new Date(floorMs + 1).toISOString();
 }
 
 export function resolveDbPath(configuredPath?: string): string {
@@ -356,7 +383,11 @@ function resolveWriteClassification(
   tags: string[],
   options: ClassificationWriteOptions | undefined,
   existingClassification?: string | null,
-): { classification: ClassificationLevel; tags: string[]; usedOverride: boolean } {
+): {
+  classification: ClassificationLevel;
+  tags: string[];
+  usedOverride: boolean;
+} {
   const explicitClassification = parseExplicitClassification({
     classification: options?.classification,
     tags,
@@ -369,12 +400,24 @@ function resolveWriteClassification(
     existingClassification,
     allowBelowFloorOverride: options?.classificationOverride === true,
   });
-
   return {
     classification: resolved.classification,
     tags: syncClassificationTag(tags, resolved.classification),
     usedOverride: resolved.usedOverride,
   };
+}
+
+function buildClassificationAuditSuffix(
+  resolvedClassification: {
+    classification: ClassificationLevel;
+    usedOverride: boolean;
+  },
+): string {
+  const suffixes: string[] = [];
+  if (resolvedClassification.usedOverride) {
+    suffixes.push(`classification_override ${resolvedClassification.classification}`);
+  }
+  return suffixes.length > 0 ? `; ${suffixes.join("; ")}` : "";
 }
 
 export function writeState(
@@ -402,11 +445,12 @@ export function writeState(
     // transaction. In WAL mode this serializes competing writers before either
     // can observe absence, so create-if-absent has one unambiguous winner.
     const existing = db.prepare(
-      "SELECT id, content, updated_at, valid_until, classification FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1",
+      "SELECT id, content, updated_at, valid_from, valid_until, classification FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1",
     ).get(namespace, key) as {
       id: string;
       content: string;
       updated_at: string;
+      valid_from: string;
       valid_until: string | null;
       classification: string | null;
     } | undefined;
@@ -444,6 +488,7 @@ export function writeState(
 
     if (existing) {
       const nextValidUntil = validUntil === undefined ? existing.valid_until : validUntil;
+      const mutationTime = nextStateMutationTimestamp(existing, now);
       db.prepare(
         `UPDATE entries SET content = ?, tags = ?, updated_at = ?, valid_from = ?, valid_until = ?, classification = ?, agent_id = ?,
          embedding_status = 'pending', embedding_model = NULL
@@ -451,8 +496,8 @@ export function writeState(
       ).run(
         content,
         tagsJson,
-        now,
-        now,
+        mutationTime,
+        mutationTime,
         nextValidUntil ?? null,
         resolvedClassification.classification,
         agentId,
@@ -460,16 +505,22 @@ export function writeState(
         key,
       );
 
-      const overrideSuffix = resolvedClassification.usedOverride
-        ? `; classification_override ${resolvedClassification.classification}`
-        : "";
-      const updateDetail = `updated (${existing.content.length} → ${content.length} chars)${overrideSuffix}`;
-      insertAuditRow(db, now, agentId, "update", namespace, key, updateDetail, existing.id);
+      const classificationSuffix = buildClassificationAuditSuffix(resolvedClassification);
+      insertAuditRow(
+        db,
+        now,
+        agentId,
+        "update",
+        namespace,
+        key,
+        `updated (${existing.content.length} → ${content.length} chars)${classificationSuffix}`,
+        existing.id,
+      );
 
       return {
         status: "updated" as const,
         id: existing.id,
-        updated_at: now,
+        updated_at: mutationTime,
         classification: resolvedClassification.classification,
         tags: resolvedClassification.tags,
       };
@@ -494,10 +545,8 @@ export function writeState(
       );
 
       const writePreview = content.length > 80 ? content.slice(0, 80) + "..." : content;
-      const overrideSuffix = resolvedClassification.usedOverride
-        ? `; classification_override ${resolvedClassification.classification}`
-        : "";
-      insertAuditRow(db, now, agentId, "write", namespace, key, `${writePreview}${overrideSuffix}`, id);
+      const classificationSuffix = buildClassificationAuditSuffix(resolvedClassification);
+      insertAuditRow(db, now, agentId, "write", namespace, key, `${writePreview}${classificationSuffix}`, id);
 
       return {
         status: "created" as const,
@@ -539,70 +588,70 @@ export function patchState(
     throw new Error(namespaceCheck.error);
   }
 
-  const existing = db.prepare(
-    "SELECT id, content, tags, updated_at, classification FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1",
-  ).get(namespace, key) as {
-    id: string;
-    content: string;
-    tags: string;
-    updated_at: string;
-    classification: string | null;
-  } | undefined;
+  const txn = db.transaction((): PatchStateResult => {
+    const existing = db.prepare(
+      "SELECT id, content, tags, updated_at, valid_from, classification FROM entries WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1",
+    ).get(namespace, key) as {
+      id: string;
+      content: string;
+      tags: string;
+      updated_at: string;
+      valid_from: string;
+      classification: string | null;
+    } | undefined;
 
-  if (!existing) {
-    return { status: "not_found" };
-  }
+    if (!existing) {
+      return { status: "not_found" };
+    }
 
-  // Compare-and-swap: reject if entry was modified since caller last read it
-  if (expectedUpdatedAt && existing.updated_at !== expectedUpdatedAt) {
-    return {
-      status: "conflict",
-      message: `Entry was updated at ${existing.updated_at}, expected ${expectedUpdatedAt}. Read the current version before overwriting.`,
-      current_updated_at: existing.updated_at,
-    };
-  }
+    // Compare-and-swap: reject if entry was modified since caller last read it.
+    // The read, CAS decision, and mutation boundary derivation must share one
+    // IMMEDIATE transaction so concurrent patches cannot branch from a stale row.
+    if (expectedUpdatedAt && existing.updated_at !== expectedUpdatedAt) {
+      return {
+        status: "conflict",
+        message: `Entry was updated at ${existing.updated_at}, expected ${expectedUpdatedAt}. Read the current version before overwriting.`,
+        current_updated_at: existing.updated_at,
+      };
+    }
 
-  // Apply content patches
-  let content = existing.content;
-  if (patch.content_prepend !== undefined) {
-    content = patch.content_prepend + "\n" + content;
-  }
-  if (patch.content_append !== undefined) {
-    content = content + "\n" + patch.content_append;
-  }
+    let content = existing.content;
+    if (patch.content_prepend !== undefined) {
+      content = patch.content_prepend + "\n" + content;
+    }
+    if (patch.content_append !== undefined) {
+      content = content + "\n" + patch.content_append;
+    }
 
-  // Apply tag patches
-  let tags: string[] = JSON.parse(existing.tags) as string[];
-  if (patch.tags_add && patch.tags_add.length > 0) {
-    const existing_set = new Set(tags);
-    for (const t of patch.tags_add) {
-      if (!existing_set.has(t)) {
-        tags.push(t);
+    let tags: string[] = JSON.parse(existing.tags) as string[];
+    if (patch.tags_add && patch.tags_add.length > 0) {
+      const existing_set = new Set(tags);
+      for (const t of patch.tags_add) {
+        if (!existing_set.has(t)) {
+          tags.push(t);
+        }
       }
     }
-  }
-  if (patch.tags_remove && patch.tags_remove.length > 0) {
-    const remove_set = new Set(patch.tags_remove);
-    tags = tags.filter((t) => !remove_set.has(t));
-  }
+    if (patch.tags_remove && patch.tags_remove.length > 0) {
+      const remove_set = new Set(patch.tags_remove);
+      tags = tags.filter((t) => !remove_set.has(t));
+    }
 
-  // Security check on final content
-  const secCheck = scanForSecrets(content);
-  if (!secCheck.valid) {
-    return { status: "secret_detected", error: secCheck.error! };
-  }
+    const secCheck = scanForSecrets(content);
+    if (!secCheck.valid) {
+      return { status: "secret_detected", error: secCheck.error! };
+    }
 
-  const now = nowUTC();
-  const resolvedClassification = resolveWriteClassification(
-    db,
-    namespace,
-    tags,
-    classificationOptions,
-    existing.classification,
-  );
-  const tagsJson = JSON.stringify(resolvedClassification.tags);
-
-  const txn = db.transaction(() => {
+    const now = nowUTC();
+    const resolvedClassification = resolveWriteClassification(
+      db,
+      namespace,
+      tags,
+      classificationOptions,
+      existing.classification,
+    );
+    const tagsJson = JSON.stringify(resolvedClassification.tags);
+    const mutationTime = nextStateMutationTimestamp(existing, now);
     db.prepare(
       `UPDATE entries SET content = ?, tags = ?, updated_at = ?, valid_from = ?, classification = ?, agent_id = ?,
        embedding_status = 'pending', embedding_model = NULL
@@ -610,8 +659,8 @@ export function patchState(
     ).run(
       content,
       tagsJson,
-      now,
-      now,
+      mutationTime,
+      mutationTime,
       resolvedClassification.classification,
       agentId,
       namespace,
@@ -630,7 +679,7 @@ export function patchState(
     return { status: "patched" as const, id: existing.id };
   });
 
-  return txn();
+  return txn.immediate();
 }
 
 export function readState(
@@ -661,6 +710,90 @@ export function readState(
       )
       .get(namespace, key) as Entry | undefined
   ) ?? null;
+}
+
+export interface StateAsOfCoverage {
+  historyAvailable: boolean;
+  currentExists: boolean;
+}
+
+export function getStateAsOfCoverage(
+  db: Database.Database,
+  namespace: string,
+  key: string,
+  asOf: string,
+  options: {
+    visible?: (row: {
+      created_at: string;
+      valid_from: string;
+      lineage_valid_from: string | null;
+      is_current: number;
+      classification: ClassificationLevel;
+    }) => boolean;
+  } = {},
+): StateAsOfCoverage {
+  const rows = db.prepare(
+    `SELECT e.created_at, e.valid_from, e.is_current, e.classification,
+            (SELECT MIN(s.effective_at)
+               FROM entry_supersessions s
+              WHERE s.successor_id = e.id) AS lineage_valid_from
+       FROM entries e
+      WHERE namespace = ? AND key = ? AND entry_type = 'state'
+      ORDER BY valid_from ASC, rowid ASC`,
+  ).all(namespace, key) as Array<{
+    created_at: string;
+    valid_from: string;
+    lineage_valid_from: string | null;
+    is_current: number;
+    classification: ClassificationLevel;
+  }>;
+  const { visible } = options;
+  const visibleRows = visible ? rows.filter((row) => visible(row)) : rows;
+
+  if (visibleRows.length === 0) {
+    return {
+      historyAvailable: true,
+      currentExists: false,
+    };
+  }
+
+  return {
+    historyAvailable: !visibleRows.some((row) => {
+      const recordedFrom = row.lineage_valid_from !== null
+        && row.lineage_valid_from < row.created_at
+        ? row.lineage_valid_from
+        : row.created_at;
+      return recordedFrom <= asOf && row.valid_from > asOf;
+    }),
+    currentExists: visibleRows.some((row) => row.is_current === 1),
+  };
+}
+
+export function isExactCurrentStateBoundaryVisible(
+  db: Database.Database,
+  namespace: string,
+  key: string,
+  asOf: string,
+  options: {
+    visible?: (row: {
+      valid_from: string;
+      classification: ClassificationLevel;
+    }) => boolean;
+  } = {},
+): boolean {
+  const row = db.prepare(
+    `SELECT valid_from, classification
+       FROM entries
+      WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1`,
+  ).get(namespace, key) as {
+    valid_from: string;
+    classification: ClassificationLevel;
+  } | undefined;
+  if (!row || row.valid_from !== asOf) {
+    return false;
+  }
+  const { visible } = options;
+  return visible ? visible(row) : true;
 }
 
 export function getById(db: Database.Database, id: string): Entry | null {
@@ -710,6 +843,7 @@ export function supersedeState(
   validFrom: string,
   validUntil: string | null | undefined,
   classificationOptions?: ClassificationWriteOptions,
+  allowExistingFutureBoundary = false,
 ): SupersedeEntryResult {
   const txn = db.transaction((): SupersedeEntryResult => {
     const existing = db.prepare(
@@ -740,7 +874,7 @@ export function supersedeState(
     if (validFrom < existing.valid_from) {
       throw new Error("valid_from cannot precede the correction target's valid_from timestamp.");
     }
-    if (validFrom > nowUTC()) {
+    if (validFrom > nowUTC() && !(allowExistingFutureBoundary && validFrom === existing.valid_from)) {
       throw new Error("valid_from cannot be in the future.");
     }
 
@@ -787,7 +921,16 @@ export function supersedeState(
        VALUES (?, ?, ?, ?, ?)`,
     ).run(predecessorId, id, validFrom, agentId, now);
     cancelSupersededCommitments(db, predecessorId, now);
-    insertAuditRow(db, now, agentId, "supersede", namespace, key, "state correction", id);
+    insertAuditRow(
+      db,
+      now,
+      agentId,
+      "supersede",
+      namespace,
+      key,
+      `state correction${buildClassificationAuditSuffix(resolved)}`,
+      id,
+    );
     return {
       status: "superseded",
       id,
@@ -810,7 +953,12 @@ export function appendLog(
   tags: string[],
   agentId = "default",
   classificationOptions?: ClassificationWriteOptions,
-): { id: string; timestamp: string; classification: ClassificationLevel; tags: string[] } {
+): {
+  id: string;
+  timestamp: string;
+  classification: ClassificationLevel;
+  tags: string[];
+} {
   const now = nowUTC();
   const id = randomUUID();
   const resolvedClassification = resolveWriteClassification(
@@ -839,10 +987,8 @@ export function appendLog(
     );
 
     const logPreview = content.length > 80 ? content.slice(0, 80) + "..." : content;
-    const overrideSuffix = resolvedClassification.usedOverride
-      ? `; classification_override ${resolvedClassification.classification}`
-      : "";
-    insertAuditRow(db, now, agentId, "log_append", namespace, null, `${logPreview}${overrideSuffix}`, id);
+    const classificationSuffix = buildClassificationAuditSuffix(resolvedClassification);
+    insertAuditRow(db, now, agentId, "log_append", namespace, null, `${logPreview}${classificationSuffix}`, id);
   });
 
   txn();
@@ -936,7 +1082,16 @@ export function supersedeLog(
        VALUES (?, ?, ?, ?, ?)`,
     ).run(predecessorId, id, validFrom, agentId, now);
     cancelSupersededCommitments(db, predecessorId, now);
-    insertAuditRow(db, now, agentId, "supersede", namespace, null, "log correction", id);
+    insertAuditRow(
+      db,
+      now,
+      agentId,
+      "supersede",
+      namespace,
+      null,
+      `log correction${buildClassificationAuditSuffix(resolved)}`,
+      id,
+    );
     return {
       status: "superseded",
       id,
@@ -979,14 +1134,13 @@ function escapeFtsQuery(query: string): string {
   return tokens.join(" AND ");
 }
 
-function escapeForLike(s: string): string {
-  // Debate resolution #10: escape LIKE wildcards
-  return s.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
-}
-
 export interface QueryOptions {
   query: string;
   namespace?: string;
+  /** Bare namespaces default to subtree matching; trailing-slash filters stay descendant-only. */
+  namespaceMode?: BareNamespaceMode;
+  /** Internal-only namespace prefilter, already intersected with access rules. */
+  namespaceSelectors?: readonly NamespaceSelector[] | null;
   entryType?: EntryType;
   tags?: string[];
   limit?: number;
@@ -1033,67 +1187,8 @@ export function queryEntriesLexicalScored(
   db: Database.Database,
   options: QueryOptions,
 ): LexicalQueryResult[] {
-  const { query, namespace, entryType, tags, limit = 10, includeExpired = false, since, until, rawFts5 = false } = options;
-  const clampedLimit = Math.min(Math.max(limit, 1), MAX_QUERY_LIMIT);
-  const now = nowUTC();
-
-  let sql = `
-    SELECT e.*, bm25(entries_fts) as lexical_score FROM entries e
-    JOIN entries_fts fts ON e.rowid = fts.rowid
-    WHERE entries_fts MATCH ? AND e.is_current = 1
-  `;
-  const params: unknown[] = [rawFts5 ? query : escapeFtsQuery(query)];
-
-  if (namespace) {
-    if (namespace.endsWith("/")) {
-      sql += " AND e.namespace LIKE ? ESCAPE '\\'";
-      params.push(escapeForLike(namespace) + "%");
-    } else {
-      sql += " AND e.namespace = ?";
-      params.push(namespace);
-    }
-  }
-
-  if (entryType) {
-    sql += " AND e.entry_type = ?";
-    params.push(entryType);
-  }
-
-  if (!includeExpired) {
-    sql += " AND (e.entry_type != 'state' OR e.valid_until IS NULL OR e.valid_until > ?)";
-    params.push(now);
-  }
-
-  // Apply tag filtering in SQL before LIMIT so that limit semantics
-  // are truthful — callers expect limit to apply to the filtered set,
-  // not to an internal candidate window that is post-filtered.
-  if (tags && tags.length > 0) {
-    for (const tag of tags) {
-      sql += " AND EXISTS (SELECT 1 FROM json_each(e.tags) WHERE value = ?)";
-      params.push(tag);
-    }
-  }
-
-  if (since) {
-    sql += " AND e.updated_at >= ?";
-    params.push(since);
-  }
-
-  if (until) {
-    sql += " AND e.updated_at <= ?";
-    params.push(until);
-  }
-
-  // Total order: bm25 ties are legal and SQL does not guarantee stable
-  // ordering for equal sort keys, which would make rank-sensitive consumers
-  // (e.g. the retrieval CI gate) non-deterministic across SQLite versions.
-  // `rowid` is insertion order — this codifies SQLite's existing de-facto
-  // tie-break (so prior ordering is unchanged) while making it explicit and
-  // total, instead of using the random UUID `e.id` which would reorder ties.
-  sql += " ORDER BY lexical_score, e.rowid LIMIT ?";
-  params.push(clampedLimit);
-
-  const rows = db.prepare(sql).all(...params) as Array<Entry & { lexical_score: number }>;
+  const statement = buildQueryEntriesLexicalStatement(options);
+  const rows = db.prepare(statement.sql).all(...statement.params) as Array<Entry & { lexical_score: number }>;
 
   return rows.map((row, index) => {
     const { lexical_score, ...entry } = row;
@@ -1138,6 +1233,10 @@ export function filterIdsMatchingFts(
 
 export interface FilterOptions {
   namespace?: string;
+  /** Bare namespaces default to subtree matching; trailing-slash filters stay descendant-only. */
+  namespaceMode?: BareNamespaceMode;
+  /** Internal-only namespace prefilter, already intersected with access rules. */
+  namespaceSelectors?: readonly NamespaceSelector[] | null;
   entryType?: EntryType;
   tags?: string[];
   limit?: number;
@@ -1146,30 +1245,50 @@ export interface FilterOptions {
   until?: string;
 }
 
-/**
- * Query entries by filters only (no FTS search text). Results ordered by updated_at DESC.
- * Used when memory_query is called without a query string — pure browse-by-filter.
- */
-export function queryEntriesByFilter(
-  db: Database.Database,
+function appendNamespaceSqlFilter(
+  sql: string,
+  params: unknown[],
+  column: string,
+  namespace?: string,
+  namespaceMode: BareNamespaceMode = "subtree",
+  namespaceSelectors?: readonly NamespaceSelector[] | null,
+): string {
+  const resolvedSelectors = resolveNamespaceSelectorScope(namespace, namespaceMode, namespaceSelectors);
+  if (resolvedSelectors === undefined || resolvedSelectors === null) {
+    return sql;
+  }
+  const filter = buildNamespaceSelectorFilter(column, resolvedSelectors);
+  sql += ` AND ${filter.clause}`;
+  params.push(...filter.params);
+  return sql;
+}
+
+export interface BuiltQueryStatement {
+  sql: string;
+  params: unknown[];
+}
+
+export function buildQueryEntriesByFilterStatement(
   options: FilterOptions,
-): Entry[] {
-  const { namespace, entryType, tags, limit = 10, includeExpired = false, since, until } = options;
+  now: string = nowUTC(),
+): BuiltQueryStatement {
+  const {
+    namespace,
+    namespaceMode = "subtree",
+    namespaceSelectors,
+    entryType,
+    tags,
+    limit = 10,
+    includeExpired = false,
+    since,
+    until,
+  } = options;
   const clampedLimit = Math.min(Math.max(limit, 1), MAX_QUERY_LIMIT);
-  const now = nowUTC();
 
   let sql = "SELECT * FROM entries WHERE is_current = 1";
   const params: unknown[] = [];
 
-  if (namespace) {
-    if (namespace.endsWith("/")) {
-      sql += " AND namespace LIKE ? ESCAPE '\\'";
-      params.push(escapeForLike(namespace) + "%");
-    } else {
-      sql += " AND namespace = ?";
-      params.push(namespace);
-    }
-  }
+  sql = appendNamespaceSqlFilter(sql, params, "namespace", namespace, namespaceMode, namespaceSelectors);
 
   if (entryType) {
     sql += " AND entry_type = ?";
@@ -1200,8 +1319,79 @@ export function queryEntriesByFilter(
 
   sql += " ORDER BY updated_at DESC LIMIT ?";
   params.push(clampedLimit);
+  return { sql, params };
+}
 
-  return db.prepare(sql).all(...params) as Entry[];
+export function buildQueryEntriesLexicalStatement(
+  options: QueryOptions,
+  now: string = nowUTC(),
+): BuiltQueryStatement {
+  const {
+    query,
+    namespace,
+    namespaceMode = "subtree",
+    namespaceSelectors,
+    entryType,
+    tags,
+    limit = 10,
+    includeExpired = false,
+    since,
+    until,
+    rawFts5 = false,
+  } = options;
+  const clampedLimit = Math.min(Math.max(limit, 1), MAX_QUERY_LIMIT);
+
+  let sql = `
+    SELECT e.*, bm25(entries_fts) as lexical_score FROM entries e
+    JOIN entries_fts fts ON e.rowid = fts.rowid
+    WHERE entries_fts MATCH ? AND e.is_current = 1
+  `;
+  const params: unknown[] = [rawFts5 ? query : escapeFtsQuery(query)];
+
+  sql = appendNamespaceSqlFilter(sql, params, "e.namespace", namespace, namespaceMode, namespaceSelectors);
+
+  if (entryType) {
+    sql += " AND e.entry_type = ?";
+    params.push(entryType);
+  }
+
+  if (!includeExpired) {
+    sql += " AND (e.entry_type != 'state' OR e.valid_until IS NULL OR e.valid_until > ?)";
+    params.push(now);
+  }
+
+  if (tags && tags.length > 0) {
+    for (const tag of tags) {
+      sql += " AND EXISTS (SELECT 1 FROM json_each(e.tags) WHERE value = ?)";
+      params.push(tag);
+    }
+  }
+
+  if (since) {
+    sql += " AND e.updated_at >= ?";
+    params.push(since);
+  }
+
+  if (until) {
+    sql += " AND e.updated_at <= ?";
+    params.push(until);
+  }
+
+  sql += " ORDER BY lexical_score, e.rowid LIMIT ?";
+  params.push(clampedLimit);
+  return { sql, params };
+}
+
+/**
+ * Query entries by filters only (no FTS search text). Results ordered by updated_at DESC.
+ * Used when memory_query is called without a query string — pure browse-by-filter.
+ */
+export function queryEntriesByFilter(
+  db: Database.Database,
+  options: FilterOptions,
+): Entry[] {
+  const statement = buildQueryEntriesByFilterStatement(options);
+  return db.prepare(statement.sql).all(...statement.params) as Entry[];
 }
 
 // --- List operations ---
@@ -1357,6 +1547,7 @@ export function listNamespaceContents(
 
 export interface DerivationEntryOptions {
   namespace?: string;
+  namespaceMode?: BareNamespaceMode;
   since?: string;
 }
 
@@ -1364,20 +1555,11 @@ export function listEntriesForDerivation(
   db: Database.Database,
   options: DerivationEntryOptions = {},
 ): Entry[] {
-  const { namespace, since } = options;
+  const { namespace, namespaceMode = "exact", since } = options;
   let sql = "SELECT * FROM entries WHERE is_current = 1";
   const params: unknown[] = [];
 
-  if (namespace) {
-    if (namespace.endsWith("/")) {
-      sql += " AND namespace LIKE ? ESCAPE '\\'";
-      params.push(escapeForLike(namespace) + "%");
-    } else {
-      sql += " AND (namespace = ? OR namespace LIKE ? ESCAPE '\\')";
-      params.push(namespace);
-      params.push(escapeForLike(namespace) + "/%");
-    }
-  }
+  sql = appendNamespaceSqlFilter(sql, params, "namespace", namespace, namespaceMode);
 
   if (since) {
     sql += " AND updated_at >= ?";
@@ -1628,6 +1810,7 @@ export interface CommitmentRow {
 
 export interface ListCommitmentsOptions {
   namespace?: string;
+  namespaceMode?: BareNamespaceMode;
   since?: string;
   limit?: number;
   includeResolved?: boolean;
@@ -1824,7 +2007,7 @@ export function listCommitments(
   db: Database.Database,
   options: ListCommitmentsOptions = {},
 ): CommitmentRow[] {
-  const { namespace, since, limit = 100, includeResolved = true } = options;
+  const { namespace, namespaceMode = "exact", since, limit = 100, includeResolved = true } = options;
   const clampedLimit = Math.min(Math.max(limit, 1), 200);
 
   let sql = `
@@ -1838,16 +2021,7 @@ export function listCommitments(
   `;
   const params: unknown[] = [];
 
-  if (namespace) {
-    if (namespace.endsWith("/")) {
-      sql += " AND c.namespace LIKE ? ESCAPE '\\'";
-      params.push(escapeForLike(namespace) + "%");
-    } else {
-      sql += " AND (c.namespace = ? OR c.namespace LIKE ? ESCAPE '\\')";
-      params.push(namespace);
-      params.push(escapeForLike(namespace) + "/%");
-    }
-  }
+  sql = appendNamespaceSqlFilter(sql, params, "c.namespace", namespace, namespaceMode);
 
   if (since) {
     sql += " AND c.updated_at >= ?";
@@ -1965,16 +2139,7 @@ export function listEntriesBelowNamespaceFloor(
   `;
   const params: unknown[] = [];
 
-  if (namespace) {
-    if (namespace.endsWith("/")) {
-      sql += " AND namespace LIKE ? ESCAPE '\\'";
-      params.push(escapeForLike(namespace) + "%");
-    } else {
-      sql += " AND (namespace = ? OR namespace LIKE ? ESCAPE '\\')";
-      params.push(namespace);
-      params.push(escapeForLike(namespace) + "/%");
-    }
-  }
+  sql = appendNamespaceSqlFilter(sql, params, "namespace", namespace, "exact");
 
   sql += " ORDER BY namespace ASC, key ASC, id ASC";
 
@@ -2509,6 +2674,15 @@ export function executeDelete(
 export interface SemanticQueryOptions {
   queryEmbedding: Buffer;
   namespace?: string;
+  /**
+   * Bare namespaces default to subtree matching for the normal production
+   * semantic path. The exactNamespaceScan benchmark path preserves its
+   * original exact-only bare-namespace semantics unless a caller explicitly
+   * opts back into subtree matching here.
+   */
+  namespaceMode?: BareNamespaceMode;
+  /** Internal-only namespace prefilter, already intersected with access rules. */
+  namespaceSelectors?: readonly NamespaceSelector[] | null;
   entryType?: EntryType;
   tags?: string[];
   limit?: number;
@@ -2557,7 +2731,7 @@ export function queryEntriesSemantic(
 }
 
 interface SemanticFilterOptions {
-  namespace?: string;
+  namespaceSelectors?: readonly NamespaceSelector[] | null;
   entryType?: EntryType;
   tags?: string[];
   includeExpired: boolean;
@@ -2566,14 +2740,11 @@ interface SemanticFilterOptions {
   now: string;
 }
 
-function entryMatchesNamespace(entryNamespace: string, filter: string): boolean {
-  if (filter.endsWith("/")) return entryNamespace.startsWith(filter);
-  return entryNamespace === filter;
-}
-
 function passesSemanticFilters(entry: Entry, opts: SemanticFilterOptions): boolean {
   if (entry.is_current !== 1) return false;
-  if (opts.namespace && !entryMatchesNamespace(entry.namespace, opts.namespace)) return false;
+  if (opts.namespaceSelectors !== undefined && opts.namespaceSelectors !== null) {
+    if (!matchesNamespaceSelectors(entry.namespace, opts.namespaceSelectors)) return false;
+  }
   if (opts.entryType && entry.entry_type !== opts.entryType) return false;
   if (!opts.includeExpired && isEntryExpired(entry, opts.now)) return false;
   if (opts.tags && opts.tags.length > 0) {
@@ -2589,9 +2760,28 @@ export function queryEntriesSemanticScored(
   db: Database.Database,
   options: SemanticQueryOptions,
 ): SemanticQueryResult[] {
-  const { queryEmbedding, namespace, entryType, tags, limit = 10, includeExpired = false, since, until, maxDistance, queryEmbeddingModel } = options;
+  const {
+    queryEmbedding,
+    namespace,
+    namespaceMode,
+    namespaceSelectors,
+    entryType,
+    tags,
+    limit = 10,
+    includeExpired = false,
+    since,
+    until,
+    maxDistance,
+    queryEmbeddingModel,
+  } = options;
   const clampedLimit = Math.min(Math.max(limit, 1), MAX_QUERY_LIMIT);
   const now = nowUTC();
+  const effectiveNamespaceMode = namespaceMode ?? (options.exactNamespaceScan === true ? "exact" : "subtree");
+  const resolvedNamespaceSelectors = resolveNamespaceSelectorScope(
+    namespace,
+    effectiveNamespaceMode,
+    namespaceSelectors,
+  );
 
   // Exact namespace-local scan (benchmark-only).
   // When exactNamespaceScan is true and a namespace is given, compute distances
@@ -2604,17 +2794,9 @@ export function queryEntriesSemanticScored(
       SELECT e.*, vec_distance_L2(v.embedding, ?) AS distance
       FROM entries_vec v
       JOIN entries e ON e.id = v.entry_id
-      WHERE `;
+      WHERE e.is_current = 1`;
     const params: unknown[] = [queryEmbedding];
-
-    if (namespace.endsWith("/")) {
-      sql += "e.namespace LIKE ? ESCAPE '\\'";
-      params.push(escapeForLike(namespace) + "%");
-    } else {
-      sql += "e.namespace = ?";
-      params.push(namespace);
-    }
-    sql += " AND e.is_current = 1";
+    sql = appendNamespaceSqlFilter(sql, params, "e.namespace", namespace, effectiveNamespaceMode, namespaceSelectors);
 
     // Mixed-space guard: only consider corpus entries generated by the same
     // model as the query embedding. Skipped when queryEmbeddingModel is unset
@@ -2628,7 +2810,15 @@ export function queryEntriesSemanticScored(
 
     const rows = db.prepare(sql).all(...params) as Array<Entry & { distance: number }>;
 
-    const filterOpts: SemanticFilterOptions = { namespace, entryType, tags, includeExpired, since, until, now };
+    const filterOpts: SemanticFilterOptions = {
+      namespaceSelectors: resolvedNamespaceSelectors,
+      entryType,
+      tags,
+      includeExpired,
+      since,
+      until,
+      now,
+    };
     const results: SemanticQueryResult[] = [];
 
     for (const row of rows) {
@@ -2663,21 +2853,20 @@ export function queryEntriesSemanticScored(
       WHERE e.embedding_model = ? AND e.is_current = 1`;
     const params: unknown[] = [queryEmbedding, queryEmbeddingModel];
 
-    // Inline namespace pre-filter to reduce scan rows when namespace is given.
-    if (namespace) {
-      if (namespace.endsWith("/")) {
-        sql += " AND e.namespace LIKE ? ESCAPE '\\'";
-        params.push(escapeForLike(namespace) + "%");
-      } else {
-        sql += " AND e.namespace = ?";
-        params.push(namespace);
-      }
-    }
+    sql = appendNamespaceSqlFilter(sql, params, "e.namespace", namespace, effectiveNamespaceMode, namespaceSelectors);
 
     sql += " ORDER BY distance";
 
     const rows = db.prepare(sql).all(...params) as Array<Entry & { distance: number }>;
-    const filterOpts: SemanticFilterOptions = { namespace, entryType, tags, includeExpired, since, until, now };
+    const filterOpts: SemanticFilterOptions = {
+      namespaceSelectors: resolvedNamespaceSelectors,
+      entryType,
+      tags,
+      includeExpired,
+      since,
+      until,
+      now,
+    };
     const results: SemanticQueryResult[] = [];
 
     for (const row of rows) {
@@ -2714,7 +2903,15 @@ export function queryEntriesSemanticScored(
   // Fetch full entries and apply ALL filters (namespace, type, tags).
   const getEntry = db.prepare("SELECT * FROM entries WHERE id = ? AND is_current = 1");
   const results: SemanticQueryResult[] = [];
-  const filterOpts: SemanticFilterOptions = { namespace, entryType, tags, includeExpired, since, until, now };
+  const filterOpts: SemanticFilterOptions = {
+    namespaceSelectors: resolvedNamespaceSelectors,
+    entryType,
+    tags,
+    includeExpired,
+    since,
+    until,
+    now,
+  };
 
   for (const { entry_id, distance } of vecResults) {
     if (results.length >= clampedLimit) break;
@@ -3150,8 +3347,9 @@ export function getInsightsByEntry(
   const nsParams: unknown[] = [];
   if (namespace) {
     if (namespace.endsWith("/")) {
-      nsFilter = "AND e.namespace LIKE ? ESCAPE '\\'";
-      nsParams.push(namespace.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_") + "%");
+      const filter = buildNamespacePrefixRangeFilter("e.namespace", namespace);
+      nsFilter = `AND ${filter.clause}`;
+      nsParams.push(...filter.params);
     } else {
       nsFilter = "AND e.namespace = ?";
       nsParams.push(namespace);
@@ -3658,7 +3856,8 @@ export function getRetrievalAggregates(
 // --- Audit history ---
 
 export interface AuditHistoryOptions {
-  namespace?: string;   // exact or prefix match (with trailing /)
+  namespace?: string;   // bare namespace uses namespaceMode; trailing / stays descendant-only
+  namespaceMode?: BareNamespaceMode;
   since?: string;       // ISO 8601 — filter timestamp >= since
   action?: string;      // filter by action type
   limit?: number;       // default 20, max 100
@@ -3699,7 +3898,7 @@ export function getAuditHistory(
   db: Database.Database,
   options: AuditHistoryOptions,
 ): AuditHistoryEntry[] {
-  const { namespace, since, action, limit = 20 } = options;
+  const { namespace, namespaceMode = "subtree", since, action, limit = 20 } = options;
 
   // Clamp limit to 1–100
   const clampedLimit = Math.min(Math.max(limit, 1), 100);
@@ -3715,18 +3914,7 @@ export function getAuditHistory(
   let sql = "SELECT id, timestamp, agent_id, action, namespace, key, detail, entry_id FROM audit_log WHERE 1=1";
   const params: unknown[] = [];
 
-  if (namespace !== undefined) {
-    if (namespace.endsWith("/")) {
-      // Prefix match: e.g. "projects/" → namespace LIKE 'projects/%'
-      sql += " AND (namespace LIKE ? ESCAPE '\\')";
-      params.push(escapeForLike(namespace) + "%");
-    } else {
-      // Exact OR prefix match: e.g. "projects/foo" → exact OR starts with 'projects/foo/'
-      sql += " AND (namespace = ? OR namespace LIKE ? ESCAPE '\\')";
-      params.push(namespace);
-      params.push(escapeForLike(namespace) + "/%");
-    }
-  }
+  sql = appendNamespaceSqlFilter(sql, params, "namespace", namespace, namespaceMode);
 
   if (since !== undefined) {
     sql += " AND timestamp >= ?";
@@ -3753,7 +3941,7 @@ export function getAuditHistoryPage(
   db: Database.Database,
   options: AuditHistoryOptions,
 ): AuditHistoryPage {
-  const { namespace, since, action, limit = 20, cursor } = options;
+  const { namespace, namespaceMode = "subtree", since, action, limit = 20, cursor } = options;
   const clampedLimit = Math.min(Math.max(limit, 1), 100);
 
   if (since !== undefined) {
@@ -3770,16 +3958,7 @@ export function getAuditHistoryPage(
   let sql = "SELECT id, timestamp, agent_id, action, namespace, key, detail, entry_id FROM audit_log WHERE 1=1";
   const params: unknown[] = [];
 
-  if (namespace !== undefined) {
-    if (namespace.endsWith("/")) {
-      sql += " AND (namespace LIKE ? ESCAPE '\\')";
-      params.push(escapeForLike(namespace) + "%");
-    } else {
-      sql += " AND (namespace = ? OR namespace LIKE ? ESCAPE '\\')";
-      params.push(namespace);
-      params.push(escapeForLike(namespace) + "/%");
-    }
-  }
+  sql = appendNamespaceSqlFilter(sql, params, "namespace", namespace, namespaceMode);
 
   if (since !== undefined) {
     sql += " AND timestamp >= ?";

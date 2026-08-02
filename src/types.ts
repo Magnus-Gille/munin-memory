@@ -3,7 +3,7 @@
 export type EntryType = "state" | "log";
 export type EmbeddingStatus = "pending" | "processing" | "generated" | "failed";
 export type SearchMode = "lexical" | "semantic" | "hybrid";
-export type OrientDetail = "compact" | "standard" | "full";
+export type OrientDetail = "beginner" | "compact" | "standard" | "full";
 export type AuditAction = "write" | "update" | "patch" | "supersede" | "delete" | "namespace_delete" | "log_append" | "cross_zone_block" | "access_denied";
 export type CommitmentStatus = "open" | "done" | "cancelled";
 export type ClassificationLevel =
@@ -68,6 +68,7 @@ export interface StatusUpdateParams {
   notes?: string;
   lifecycle?: "active" | "blocked" | "completed" | "stopped" | "maintenance" | "archived";
   valid_until?: string | null;
+  validate_only?: boolean;
   expected_updated_at?: string;
   classification?: ClassificationLevel;
   classification_override?: boolean;
@@ -123,6 +124,7 @@ export interface OrientParams extends ListParams {
   dashboard_limit_per_group?: number;
   namespace_limit?: number;
   include_namespaces?: boolean;
+  response_character_budget?: number;
 }
 
 export interface ResumeParams {
@@ -218,7 +220,7 @@ export interface AuditSyncParams {
 // Tool response types
 
 export interface WriteResponse {
-  status: "created" | "updated" | "superseded" | "conflict";
+  status: "created" | "updated" | "superseded" | "conflict" | "validated";
   id?: string;
   namespace: string;
   key: string;
@@ -228,11 +230,18 @@ export interface WriteResponse {
   updated_at?: string;
   valid_from?: string;
   supersedes?: string;
+  classification?: ClassificationLevel;
   warnings?: string[];
   intake?: IntakeResult;
 }
 
 export interface StatusUpdateResponse extends WriteResponse {
+  valid_until?: string | null;
+  classification?: ClassificationLevel;
+  provenance?: EntryProvenance;
+  validate_only?: boolean;
+  wrote?: boolean;
+  would_write?: "create" | "update";
   content?: string;
   updated_at?: string;
   structured_status?: {
@@ -242,6 +251,10 @@ export interface StatusUpdateResponse extends WriteResponse {
     next_steps: string[];
     notes?: string;
   };
+  /** Set when stored or previewed content is instruction-shaped or tagged `untrusted`/`source:external`. (#150) */
+  untrusted_content?: boolean;
+  /** Human-readable provenance notice when untrusted_content is true. (#150) */
+  content_provenance_notice?: string;
 }
 
 export interface DashboardSynthesis {
@@ -320,6 +333,8 @@ export interface ReadResponse {
   redaction_reason?: string;
   message?: string;
   hint?: string;
+  /** False when an as_of read falls into an authorized time gap that ordinary overwrites, patches, or legacy backfill did not preserve as rewindable revision history. Omitted for ordinary misses and when the caller is not authorized to know the gap exists. */
+  history_available?: boolean;
   supersedes?: string;
   superseded?: boolean;
   superseded_by?: string;
