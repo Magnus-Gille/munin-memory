@@ -76,7 +76,7 @@ Invisible denial is critical: non-owner principals must not be able to distingui
 | **Who can call** | All principals |
 | **Namespace check** | Caller must have read access to the target namespace |
 | **Unauthorized** | `{"found": false}` — identical to non-existent entry |
-| **as-of read** | `as_of` applies the same namespace, classification, and untrusted-content gates to the historical revision selected for that instant |
+| **as-of read** | `as_of` applies the same namespace, classification, and untrusted-content gates to the recorded historical revision selected for that instant; unreconstructible ordinary-overwrite/patch gaps return `{"found": false, "history_available": false}` with a non-contradictory explanatory hint only when the caller is authorized to know that history existed at all. Otherwise the miss stays indistinguishable from an ordinary not-found. |
 
 ### memory_read_batch
 

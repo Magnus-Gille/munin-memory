@@ -1044,6 +1044,69 @@ describe("memory_update_status valid_until (#217)", () => {
     expect(after.valid_until).toBe("2027-08-01T00:00:00.000Z");
   });
 
+  it("advances tracked-status validity past the prior boundary when updated in the same millisecond", async () => {
+    const boundary = "2026-07-20T10:00:00.000Z";
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(boundary));
+      const createdRaw = await callTool("memory_update_status", {
+        namespace: "projects/status-same-ms",
+        phase: "Active",
+        current_work: "Version 1",
+        blockers: "None.",
+        next_steps: ["Keep going"],
+        lifecycle: "active",
+      });
+      const created = parseToolResponse(createdRaw) as { updated_at: string };
+      expect(created.updated_at).toBe(boundary);
+
+      vi.setSystemTime(new Date(boundary));
+      const updatedRaw = await callTool("memory_update_status", {
+        namespace: "projects/status-same-ms",
+        current_work: "Version 2",
+      });
+      const updated = parseToolResponse(updatedRaw) as { status: string; updated_at: string };
+      expect(updated.status).toBe("updated");
+      expect(updated.updated_at).toBe("2026-07-20T10:00:00.001Z");
+
+      const gapRaw = await callTool("memory_read", {
+        namespace: "projects/status-same-ms",
+        key: "status",
+        as_of: boundary,
+      });
+      const gap = parseToolResponse(gapRaw) as {
+        found: boolean;
+        history_available?: boolean;
+        hint?: string;
+      };
+      expect(gap).toMatchObject({
+        found: false,
+        history_available: false,
+      });
+      expect(gap.hint).toContain("supersedes");
+
+      const currentRaw = await callTool("memory_read", {
+        namespace: "projects/status-same-ms",
+        key: "status",
+        as_of: updated.updated_at,
+      });
+      const current = parseToolResponse(currentRaw) as { found: boolean; content: string };
+      expect(current.found).toBe(true);
+      expect(current.content).toContain("Version 2");
+
+      const arbitraryFutureRaw = await callTool("memory_read", {
+        namespace: "projects/status-same-ms",
+        key: "status",
+        as_of: "2026-07-20T10:00:00.002Z",
+      });
+      const arbitraryFuture = parseToolResponse(arbitraryFutureRaw) as { ok: boolean; error: string };
+      expect(arbitraryFuture.ok).toBe(false);
+      expect(arbitraryFuture.error).toBe("validation_error");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("recomputes an eager derivative into at_risk after its semantic revision becomes stale", async () => {
     const written = parseToolResponse(await callTool("memory_log", {
       namespace: "projects/eager-stale-commitment",
@@ -1332,6 +1395,177 @@ describe("memory_read", () => {
     expect(result.found).toBe(true);
     expect(result.valid_until).toBe("2020-01-01T00:00:00.000Z");
     expect(result.expired).toBe(true);
+  });
+
+  it("treats pre-creation as an ordinary as-of miss", async () => {
+    const writeRaw = await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "status",
+      content: "All good",
+      tags: ["active"],
+    });
+    const writeResult = parseToolResponse(writeRaw) as { id: string };
+    const createdAt = "2026-07-20T10:00:00.000Z";
+    db.prepare("UPDATE entries SET created_at = ?, updated_at = ?, valid_from = ? WHERE id = ?")
+      .run(createdAt, createdAt, createdAt, writeResult.id);
+
+    const raw = await callTool("memory_read", {
+      namespace: "projects/test",
+      key: "status",
+      as_of: "2026-07-20T09:59:00.000Z",
+    });
+    const result = parseToolResponse(raw) as {
+      found: boolean;
+      history_available?: boolean;
+      hint: string;
+      message: string;
+    };
+    expect(result.found).toBe(false);
+    expect(result.history_available).toBeUndefined();
+    expect(result.message).toContain("2026-07-20T09:59:00.000Z");
+    expect(result.hint).not.toContain("status");
+  });
+
+  it("lists visible sibling keys while excluding the requested key on an as-of miss", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "architecture",
+      content: "Monolith",
+    });
+    const writeRaw = await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "status",
+      content: "All good",
+      tags: ["active"],
+    });
+    const writeResult = parseToolResponse(writeRaw) as { id: string };
+    const createdAt = "2026-07-20T10:00:00.000Z";
+    db.prepare("UPDATE entries SET created_at = ?, updated_at = ?, valid_from = ? WHERE id = ?")
+      .run(createdAt, createdAt, createdAt, writeResult.id);
+
+    const raw = await callTool("memory_read", {
+      namespace: "projects/test",
+      key: "status",
+      as_of: "2026-07-20T09:59:00.000Z",
+    });
+    const result = parseToolResponse(raw) as {
+      found: boolean;
+      history_available?: boolean;
+      hint: string;
+    };
+    expect(result.found).toBe(false);
+    expect(result.history_available).toBeUndefined();
+    expect(result.hint).toContain("architecture");
+    expect(result.hint).not.toContain("status");
+  });
+
+  it("round-trips the exact visible current boundary and rejects other future as_of timestamps", async () => {
+    const writeRaw = await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "boundary",
+      content: "Boundary state",
+    });
+    const writeResult = parseToolResponse(writeRaw) as { updated_at: string };
+
+    const atBoundaryRaw = await callTool("memory_read", {
+      namespace: "projects/test",
+      key: "boundary",
+      as_of: writeResult.updated_at,
+    });
+    const atBoundary = parseToolResponse(atBoundaryRaw) as { found: boolean; content: string };
+    expect(atBoundary.found).toBe(true);
+    expect(atBoundary.content).toBe("Boundary state");
+
+    const futureRaw = await callTool("memory_read", {
+      namespace: "projects/test",
+      key: "boundary",
+      as_of: "2999-01-01T00:00:00.000Z",
+    });
+    const future = parseToolResponse(futureRaw) as { ok: boolean; error: string };
+    expect(future.ok).toBe(false);
+    expect(future.error).toBe("validation_error");
+  });
+
+  it("rejects hidden future boundaries even when they match the current row's exact stored timestamp", async () => {
+    const boundary = "2026-07-20T10:00:00.000Z";
+    const previousLibrarianEnabled = process.env.MUNIN_LIBRARIAN_ENABLED;
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+    const restrictedCallTool = makeContextCallTool({
+      ...ownerContext(),
+      maxClassification: "internal",
+      transportType: "consumer",
+    });
+
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(boundary));
+      const createdRaw = await callTool("memory_write", {
+        namespace: "projects/hidden-boundary",
+        key: "status",
+        content: "Secret version 1",
+        classification: "client-confidential",
+      });
+      const created = parseToolResponse(createdRaw) as { updated_at: string };
+      expect(created.updated_at).toBe(boundary);
+
+      vi.setSystemTime(new Date(boundary));
+      const updatedRaw = await callTool("memory_write", {
+        namespace: "projects/hidden-boundary",
+        key: "status",
+        content: "Secret version 2",
+        classification: "client-confidential",
+      });
+      const updated = parseToolResponse(updatedRaw) as { updated_at: string };
+      expect(updated.updated_at).toBe("2026-07-20T10:00:00.001Z");
+
+      const raw = await restrictedCallTool("memory_read", {
+        namespace: "projects/hidden-boundary",
+        key: "status",
+        as_of: updated.updated_at,
+      });
+      const result = parseToolResponse(raw) as { ok: boolean; error: string; found?: boolean; hint?: string };
+      expect(result.ok).toBe(false);
+      expect(result.error).toBe("validation_error");
+      expect(result.found).toBeUndefined();
+      expect(result.hint).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+      if (previousLibrarianEnabled === undefined) {
+        delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      } else {
+        process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarianEnabled;
+      }
+    }
+  });
+
+  it("reports history_available false for legacy backfilled rows whose earlier wording is unrecoverable", async () => {
+    const writeRaw = await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "legacy",
+      content: "current wording",
+    });
+    const writeResult = parseToolResponse(writeRaw) as { id: string };
+    const createdAt = "2026-07-20T10:00:00.000Z";
+    const validFrom = "2026-07-21T10:00:00.000Z";
+    db.prepare("UPDATE entries SET created_at = ?, updated_at = ?, valid_from = ? WHERE id = ?")
+      .run(createdAt, validFrom, validFrom, writeResult.id);
+
+    const raw = await callTool("memory_read", {
+      namespace: "projects/test",
+      key: "legacy",
+      as_of: "2026-07-20T12:00:00.000Z",
+    });
+    const result = parseToolResponse(raw) as {
+      found: boolean;
+      history_available?: boolean;
+      hint: string;
+    };
+    expect(result).toMatchObject({
+      found: false,
+      history_available: false,
+    });
+    expect(result.hint).toContain("supersedes");
+    expect(result.hint).not.toContain("legacy");
   });
 });
 
@@ -6528,6 +6762,31 @@ describe("compare-and-swap (memory_write)", () => {
     for (const toolName of ["memory_write", "memory_update_status"]) {
       expect(toolsByName.get(toolName)?.inputSchema.properties?.valid_until?.type)
         .toEqual(expect.arrayContaining(["string", "null"]));
+    }
+  });
+
+  it("documents the exact visible boundary exception for temporal parameters", async () => {
+    const handler = (
+      server as unknown as { _requestHandlers: Map<string, Function> }
+    )._requestHandlers?.get("tools/list");
+    const toolList = await handler!({ method: "tools/list", params: {} });
+    const toolsByName = new Map(
+      (toolList as {
+        tools: Array<{
+          name: string;
+          inputSchema: { properties?: Record<string, { description?: string }> };
+        }>;
+      }).tools.map((tool) => [tool.name, tool]),
+    );
+
+    const asOfDescription = toolsByName.get("memory_read")?.inputSchema.properties?.as_of?.description ?? "";
+    expect(asOfDescription).toContain("exact visible current valid_from/updated_at boundary");
+    expect(asOfDescription).toContain("hidden boundaries");
+
+    for (const toolName of ["memory_write", "memory_log"]) {
+      const validFromDescription = toolsByName.get(toolName)?.inputSchema.properties?.valid_from?.description ?? "";
+      expect(validFromDescription).toContain("This write path rejects future timestamps");
+      expect(validFromDescription).toContain("memory_read(as_of)");
     }
   });
 

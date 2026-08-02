@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Database from "better-sqlite3";
 import { spawn } from "node:child_process";
 import { unlinkSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -256,6 +256,224 @@ describe("writeState + readState", () => {
     expect(entry!.classification).toBe("internal");
     expect(entry!.id).toBe(first.id);
   });
+
+  it("advances the current-row validity boundary on same-millisecond overwrites", () => {
+    const boundary = "2026-07-20T10:00:00.000Z";
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(boundary));
+      writeState(db, "projects/test", "status", "Version 1", []);
+
+      vi.setSystemTime(new Date(boundary));
+      const updated = writeState(db, "projects/test", "status", "Version 2", []);
+      expect(updated.status).toBe("updated");
+      expect(updated.updated_at).toBe("2026-07-20T10:00:00.001Z");
+
+      expect(readState(db, "projects/test", "status", boundary)).toBeNull();
+      const current = readState(db, "projects/test", "status", "2026-07-20T10:00:00.001Z");
+      expect(current?.content).toBe("Version 2");
+      expect(current?.valid_from).toBe("2026-07-20T10:00:00.001Z");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("advances the current-row validity boundary on same-millisecond patches", () => {
+    const boundary = "2026-07-20T10:00:00.000Z";
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(boundary));
+      writeState(db, "projects/test", "notes", "line one", []);
+
+      vi.setSystemTime(new Date(boundary));
+      const patched = patchState(db, "projects/test", "notes", { content_append: "line two" });
+      expect(patched.status).toBe("patched");
+
+      expect(readState(db, "projects/test", "notes", boundary)).toBeNull();
+      const current = readState(db, "projects/test", "notes", "2026-07-20T10:00:00.001Z");
+      expect(current?.content).toContain("line two");
+      expect(current?.updated_at).toBe("2026-07-20T10:00:00.001Z");
+      expect(current?.valid_from).toBe("2026-07-20T10:00:00.001Z");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("serializes concurrent patches so boundaries strictly advance without dropping either append", async () => {
+    const gateDir = mkdtempSync(join(tmpdir(), "munin-patch-race-"));
+    const goPath = join(gateDir, "go");
+    const readyPaths = [
+      join(gateDir, "ready-a"),
+      join(gateDir, "ready-b"),
+    ];
+    const fixturePath = fileURLToPath(
+      new URL("fixtures/patch-state-writer.ts", import.meta.url),
+    );
+    const futureFloor = "2099-01-01T00:00:00.000Z";
+    const expectedBoundary = "2099-01-01T00:00:00.002Z";
+
+    writeState(db, "projects/patch-race", "notes", "line one", []);
+    db.prepare(
+      "UPDATE entries SET created_at = ?, updated_at = ?, valid_from = ? WHERE namespace = ? AND key = ?",
+    ).run(futureFloor, futureFloor, futureFloor, "projects/patch-race", "notes");
+
+    const runWriter = (appendText: string, readyPath: string) =>
+      new Promise<ReturnType<typeof patchState>>((resolve, reject) => {
+        const child = spawn(
+          process.execPath,
+          [
+            "--import",
+            "tsx",
+            fixturePath,
+            TEST_DB_PATH,
+            goPath,
+            readyPath,
+            "projects/patch-race",
+            "notes",
+            appendText,
+          ],
+          { stdio: ["ignore", "pipe", "pipe"] },
+        );
+        let stdout = "";
+        let stderr = "";
+        child.stdout.setEncoding("utf8");
+        child.stderr.setEncoding("utf8");
+        child.stdout.on("data", (chunk: string) => {
+          stdout += chunk;
+        });
+        child.stderr.on("data", (chunk: string) => {
+          stderr += chunk;
+        });
+        child.once("error", reject);
+        child.once("exit", (code) => {
+          if (code !== 0) {
+            reject(new Error(`patch writer ${appendText} exited ${code}: ${stderr}`));
+            return;
+          }
+          resolve(JSON.parse(stdout.trim()) as ReturnType<typeof patchState>);
+        });
+      });
+
+    try {
+      const writers = readyPaths.map((readyPath, index) =>
+        runWriter(index === 0 ? "writer-a" : "writer-b", readyPath),
+      );
+      for (let attempt = 0; attempt < 1_000; attempt++) {
+        if (readyPaths.every((path) => existsSync(path))) break;
+        await delay(10);
+      }
+      const allWritersReady = readyPaths.every((path) => existsSync(path));
+      writeFileSync(goPath, "go", { mode: 0o600 });
+
+      const results = await Promise.all(writers);
+      expect(allWritersReady).toBe(true);
+      expect(results).toEqual([
+        expect.objectContaining({ status: "patched" }),
+        expect.objectContaining({ status: "patched" }),
+      ]);
+
+      expect(readState(db, "projects/patch-race", "notes", "2099-01-01T00:00:00.001Z")).toBeNull();
+
+      const current = readState(db, "projects/patch-race", "notes");
+      expect(current?.updated_at).toBe(expectedBoundary);
+      expect(current?.valid_from).toBe(expectedBoundary);
+
+      const lines = current?.content.split("\n") ?? [];
+      expect(lines[0]).toBe("line one");
+      expect(lines.slice(1).sort()).toEqual(["writer-a", "writer-b"]);
+    } finally {
+      rmSync(gateDir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("rejects a concurrent patch whose expected_updated_at went stale before it entered the transaction", async () => {
+    const gateDir = mkdtempSync(join(tmpdir(), "munin-patch-cas-race-"));
+    const goPath = join(gateDir, "go");
+    const readyPaths = [
+      join(gateDir, "ready-a"),
+      join(gateDir, "ready-b"),
+    ];
+    const fixturePath = fileURLToPath(
+      new URL("fixtures/patch-state-writer.ts", import.meta.url),
+    );
+    const futureFloor = "2099-02-01T00:00:00.000Z";
+    const winnerBoundary = "2099-02-01T00:00:00.001Z";
+
+    writeState(db, "projects/patch-race", "notes", "line one", []);
+    db.prepare(
+      "UPDATE entries SET created_at = ?, updated_at = ?, valid_from = ? WHERE namespace = ? AND key = ?",
+    ).run(futureFloor, futureFloor, futureFloor, "projects/patch-race", "notes");
+
+    const runWriter = (appendText: string, readyPath: string) =>
+      new Promise<ReturnType<typeof patchState>>((resolve, reject) => {
+        const child = spawn(
+          process.execPath,
+          [
+            "--import",
+            "tsx",
+            fixturePath,
+            TEST_DB_PATH,
+            goPath,
+            readyPath,
+            "projects/patch-race",
+            "notes",
+            appendText,
+            futureFloor,
+          ],
+          { stdio: ["ignore", "pipe", "pipe"] },
+        );
+        let stdout = "";
+        let stderr = "";
+        child.stdout.setEncoding("utf8");
+        child.stderr.setEncoding("utf8");
+        child.stdout.on("data", (chunk: string) => {
+          stdout += chunk;
+        });
+        child.stderr.on("data", (chunk: string) => {
+          stderr += chunk;
+        });
+        child.once("error", reject);
+        child.once("exit", (code) => {
+          if (code !== 0) {
+            reject(new Error(`patch writer ${appendText} exited ${code}: ${stderr}`));
+            return;
+          }
+          resolve(JSON.parse(stdout.trim()) as ReturnType<typeof patchState>);
+        });
+      });
+
+    try {
+      const writers = readyPaths.map((readyPath, index) =>
+        runWriter(index === 0 ? "writer-a" : "writer-b", readyPath),
+      );
+      for (let attempt = 0; attempt < 1_000; attempt++) {
+        if (readyPaths.every((path) => existsSync(path))) break;
+        await delay(10);
+      }
+      const allWritersReady = readyPaths.every((path) => existsSync(path));
+      writeFileSync(goPath, "go", { mode: 0o600 });
+
+      const results = await Promise.all(writers);
+      expect(allWritersReady).toBe(true);
+      expect(results.map((result) => result.status).sort()).toEqual([
+        "conflict",
+        "patched",
+      ]);
+
+      const conflict = results.find((result) => result.status === "conflict");
+      expect(conflict).toMatchObject({
+        status: "conflict",
+        current_updated_at: winnerBoundary,
+      });
+
+      const current = readState(db, "projects/patch-race", "notes");
+      expect(current?.updated_at).toBe(winnerBoundary);
+      expect(current?.valid_from).toBe(winnerBoundary);
+      expect(current?.content.split("\n")).toHaveLength(2);
+    } finally {
+      rmSync(gateDir, { recursive: true, force: true });
+    }
+  }, 20_000);
 
   it("creates only once when two independent writers race with create-if-absent", async () => {
     const gateDir = mkdtempSync(join(tmpdir(), "munin-create-if-absent-"));
