@@ -1700,20 +1700,14 @@ function normalizeLifecycleInput(
   lifecycle: unknown,
 ): { ok: true; value: StatusUpdateParams["lifecycle"] | undefined } | { ok: false; error: string } {
   if (lifecycle === undefined) return { ok: true, value: undefined };
-  if (typeof lifecycle !== "string") {
-    return { ok: false, error: "lifecycle must be a string." };
-  }
-
-  const { canonical } = canonicalizeTags([lifecycle]);
-  const normalized = getLifecycleTags(canonical);
-  if (normalized.length !== 1) {
+  if (typeof lifecycle !== "string" || !LIFECYCLE_TAGS.has(lifecycle)) {
     return {
       ok: false,
       error: `lifecycle must be one of: ${[...LIFECYCLE_TAGS].join(", ")}.`,
     };
   }
 
-  return { ok: true, value: normalized[0] as StatusUpdateParams["lifecycle"] };
+  return { ok: true, value: lifecycle as StatusUpdateParams["lifecycle"] };
 }
 
 function resolveProspectiveWriteClassification(
@@ -5311,7 +5305,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_update_status",
     description:
-      "Update a tracked status entry in `projects/*` or `clients/*` namespaces only. Uses a server-enforced structure with canonical sections: Phase, Current Work, Blockers, Next Steps, and optional Notes. Prefer this over `memory_write` for status updates — it supports reliable partial updates without read-modify-write on markdown blobs. Optional `valid_until` sets or clears a soft-expiry review horizon; expired statuses remain available to direct reads, are surfaced by `memory_attention` with `include_expiring`, and are hidden from broad search by default. For sandbox-safe dry runs, pass `validate_only:true`: Munin validates the full prospective status (including auth, CAS, classification, lifecycle, and content checks) and returns the normalized preview without writing anything; this mode may target any authorized namespace, while real mutations remain restricted to tracked namespaces.\n\nCall this only when the project's phase, current work, blockers, next steps, lifecycle, or review horizon actually changes — NOT after every `memory_log`. Logging a decision and updating the status are independent: log the decision (history), and separately update the status only if the change moves the project's current state. Every field is optional; supply just the sections that changed. Compare-and-swap (`expected_updated_at`) is optional — omit it for an unconditional update. Status changes are not auto-logged; call `memory_log` separately when recording a decision or milestone.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
+      "Update a tracked status entry in `projects/*` or `clients/*` namespaces only. Uses a server-enforced structure with canonical sections: Phase, Current Work, Blockers, Next Steps, and optional Notes. Prefer this over `memory_write` for status updates — it supports reliable partial updates without read-modify-write on markdown blobs. Optional `valid_until` sets or clears a soft-expiry review horizon; expired statuses remain available to direct reads, are surfaced by `memory_attention` with `include_expiring`, and are hidden from broad search by default. For sandbox-safe dry runs, pass `validate_only:true`: Munin validates the full prospective status (including auth, CAS, classification, lifecycle, and content checks) and returns the normalized preview without mutating memory state; this mode may target any authorized namespace, while real mutations remain restricted to tracked namespaces.\n\nCall this only when the project's phase, current work, blockers, next steps, lifecycle, or review horizon actually changes — NOT after every `memory_log`. Logging a decision and updating the status are independent: log the decision (history), and separately update the status only if the change moves the project's current state. Every field is optional; supply just the sections that changed. Compare-and-swap (`expected_updated_at`) is optional — omit it for an unconditional update. Status changes are not auto-logged; call `memory_log` separately when recording a decision or milestone.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -5353,7 +5347,7 @@ const TOOL_DEFINITIONS = [
         validate_only: {
           type: "boolean",
           description:
-            "Optional. When true, validate the full prospective status update and return the normalized preview without writing anything. This dry-run mode may target any namespace the caller can write, including sandbox/testing namespaces; omitting it preserves the normal tracked-namespace write restriction.",
+            "Optional. When true, validate the full prospective status update and return the normalized preview without mutating memory state. This dry-run mode may target any namespace the caller can write, including sandbox/testing namespaces; omitting it preserves the normal tracked-namespace write restriction.",
         },
         classification: {
           type: "string",
@@ -6149,13 +6143,6 @@ export function registerTools(
       const { name, arguments: args } = request.params;
       const maxContentSize = getMaxContentSize();
       const telemetryStart = performance.now();
-      const suppressToolCallTelemetry = (
-        name === "memory_update_status"
-        && !!args
-        && typeof args === "object"
-        && !Array.isArray(args)
-        && (args as Record<string, unknown>).validate_only === true
-      );
 
       try {
         const result = await (async () => { switch (name) {
@@ -8615,6 +8602,10 @@ export function registerTools(
                 classification_override,
               } = args as unknown as StatusUpdateParams;
 
+              const validateOnlyError = validateOptionalBoolean(validate_only, "validate_only");
+              if (validateOnlyError) {
+                return errResult("update_status", "validation_error", validateOnlyError);
+              }
               const nsCheck = validateNamespace(namespace);
               if (!nsCheck.valid) {
                 return errResult("update_status", "validation_error", nsCheck.error!);
@@ -10662,17 +10653,15 @@ export function registerTools(
             errorType = parsed.error ?? "unknown";
           }
         } catch { /* not JSON — treat as success */ }
-        if (!suppressToolCallTelemetry) {
-          logToolCall(db, {
-            sessionId,
-            principalId: ctx.principalId,
-            toolName: name ?? "unknown",
-            success: !isErr,
-            errorType,
-            responseSizeBytes: responseText.length,
-            durationMs,
-          });
-        }
+        logToolCall(db, {
+          sessionId,
+          principalId: ctx.principalId,
+          toolName: name ?? "unknown",
+          success: !isErr,
+          errorType,
+          responseSizeBytes: responseText.length,
+          durationMs,
+        });
         return result;
       } catch (err) {
         const durationMs = performance.now() - telemetryStart;
@@ -10684,17 +10673,15 @@ export function registerTools(
           }],
           isError: true,
         };
-        if (!suppressToolCallTelemetry) {
-          logToolCall(db, {
-            sessionId,
-            principalId: ctx.principalId,
-            toolName: name ?? "unknown",
-            success: false,
-            errorType: "internal_error",
-            responseSizeBytes: errorResponse.content[0].text.length,
-            durationMs,
-          });
-        }
+        logToolCall(db, {
+          sessionId,
+          principalId: ctx.principalId,
+          toolName: name ?? "unknown",
+          success: false,
+          errorType: "internal_error",
+          responseSizeBytes: errorResponse.content[0].text.length,
+          durationMs,
+        });
         return errorResponse;
       }
     },

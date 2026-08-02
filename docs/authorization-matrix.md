@@ -76,7 +76,7 @@ Invisible denial is critical: non-owner principals must not be able to distingui
 | **Who can call** | All principals |
 | **Real mutations** | `validate_only` omitted or false: restricted to the caller's tracked namespaces only (default `projects/*` and `clients/*`). |
 | **Sandbox validation** | `validate_only: true`: caller must still have write access, but the namespace does not need to be tracked. This allows authorized sandbox/testing namespaces to exercise the exact status-validation path without writing. |
-| **Unauthorized** | Real mutations use the normal invisible-denial contract. `validate_only: true` returns the same denial shape but creates no entry, audit, retrieval, commitment, or telemetry side effect. |
+| **Unauthorized** | Real mutations use the normal invisible-denial contract. `validate_only: true` returns the same denial shape and creates no entry, audit, retrieval, commitment, or access-denial event. Ordinary content-blind tool-call telemetry remains enabled. |
 | **compare-and-swap** | `expected_updated_at` keeps the same meaning in both modes: a mismatched current revision returns a typed conflict; an absent entry may still validate/create normally. |
 | **read echo** | Both modes may include `content` / `structured_status` only when the caller passes the same namespace and classification gates as `memory_read`; write-only callers receive normalized mutation metadata plus a generic withholding notice. |
 

@@ -81,8 +81,13 @@ function snapshotValidationSideEffects() {
     retrieval_outcomes: count("retrieval_outcomes"),
     entry_intake: count("entry_intake"),
     redaction_log: count("redaction_log"),
-    tool_calls: count("tool_calls"),
   };
+}
+
+function countToolCalls(): number {
+  return (
+    db.prepare("SELECT COUNT(*) AS count FROM tool_calls").get() as { count: number }
+  ).count;
 }
 
 function countDashboardEntries(dashboard: Record<string, unknown[]>): number {
@@ -1311,7 +1316,7 @@ describe("memory_update_status validate_only (#275)", () => {
     transportType: "consumer",
   };
 
-  it("keeps tracked-only writes but allows validate_only in an authorized sandbox namespace without side effects", async () => {
+  it("keeps tracked-only writes but allows validate_only in an authorized sandbox namespace without memory-state side effects", async () => {
     const sandboxCall = makeContextCallTool(sandboxCtx);
     const rejected = parseToolResponse(await sandboxCall("memory_update_status", {
       namespace: "testing/sandbox/issue-275",
@@ -1322,6 +1327,7 @@ describe("memory_update_status validate_only (#275)", () => {
     expect(rejected.message ?? "").toContain("configured tracked namespaces");
 
     const before = snapshotValidationSideEffects();
+    const telemetryBefore = countToolCalls();
     const raw = await sandboxCall("memory_update_status", {
       namespace: "testing/sandbox/issue-275",
       phase: "Active",
@@ -1356,6 +1362,7 @@ describe("memory_update_status validate_only (#275)", () => {
     expect(result.content).toContain("## Phase");
     expect(result.structured_status?.next_steps).toEqual(["Run the validator"]);
     expect(snapshotValidationSideEffects()).toEqual(before);
+    expect(countToolCalls()).toBe(telemetryBefore + 1);
 
     const read = parseToolResponse(await sandboxCall("memory_read", {
       namespace: "testing/sandbox/issue-275",
@@ -1400,9 +1407,10 @@ describe("memory_update_status validate_only (#275)", () => {
     expect(snapshotValidationSideEffects()).toEqual(before);
   });
 
-  it("enforces namespace authorization during validate_only without side effects or denial telemetry", async () => {
+  it("enforces namespace authorization without access-denial telemetry while retaining ordinary call telemetry", async () => {
     const sandboxCall = makeContextCallTool(sandboxCtx);
     const before = snapshotValidationSideEffects();
+    const telemetryBefore = countToolCalls();
     const raw = await sandboxCall("memory_update_status", {
       namespace: "testing/denied/issue-275",
       phase: "Active",
@@ -1412,6 +1420,23 @@ describe("memory_update_status validate_only (#275)", () => {
     const result = parseToolResponse(raw) as { found?: boolean; error?: string };
 
     expect(result).toEqual({ ok: true, action: "update_status", found: false });
+    expect(snapshotValidationSideEffects()).toEqual(before);
+    expect(countToolCalls()).toBe(telemetryBefore + 1);
+  });
+
+  it("rejects a non-boolean validate_only value instead of treating it as truthy", async () => {
+    const sandboxCall = makeContextCallTool(sandboxCtx);
+    const before = snapshotValidationSideEffects();
+    const raw = await sandboxCall("memory_update_status", {
+      namespace: "testing/sandbox/non-boolean",
+      phase: "Active",
+      lifecycle: "active",
+      validate_only: "false",
+    });
+    const result = parseToolResponse(raw) as { error?: string; message?: string };
+
+    expect(result.error).toBe("validation_error");
+    expect(result.message).toBe("validate_only must be a boolean.");
     expect(snapshotValidationSideEffects()).toEqual(before);
   });
 
