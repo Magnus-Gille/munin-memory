@@ -63,9 +63,10 @@ status should next be reviewed. Expired statuses remain directly readable, are s
 by `memory_attention` when `include_expiring` is enabled, and are hidden from broad search
 by default.
 
-`memory_commitments` derives tracked follow-through from the canonical `Next Steps`
-structure that Munin understands today (for example the markdown emitted by
-`memory_update_status`). Legacy free-form status blobs with ad-hoc `Next Steps:`
+`memory_commitments` derives tracked follow-through from canonical tracked-status
+`Next Steps`, dated future clauses in visible tracked-status prose, and
+future-dated `memory_log` phrases. Generic non-status state fields are not
+commitment sources. Legacy plain markdown status blobs with ad-hoc `Next Steps:`
 headings remain readable, but they do not become commitment rows until they are
 migrated to the canonical structure. Compatibility note: older derived rows from
 those legacy plain-status blocks are retired as non-completions during refresh,

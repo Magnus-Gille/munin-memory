@@ -48,10 +48,13 @@ changelog is the canonical record of what moved.
   content-blind `exclusion_diagnostics` when commitment-like syntax is matched
   but deliberately dropped — for example retrospective dated logs, duplicates
   inside one entry, terminal/resolved sources, or legacy plain-markdown status
-  blobs that use an ad-hoc `Next Steps:` heading. Public wording is narrowed to
-  the real contract: tracked-status commitments come from the canonical Next
-  Steps structure (for example via `memory_update_status`), not from arbitrary
-  status markdown. Refresh now keeps the compatibility boundary honest too:
+  blobs that use an ad-hoc `Next Steps:` heading. Public wording now matches the
+  real contract: canonical tracked-status `Next Steps`, dated future clauses in
+  visible tracked-status prose, and future-dated `memory_log` phrases can
+  surface here. Generic non-status state fields are not commitment sources.
+  Legacy plain markdown status blobs with ad-hoc `Next Steps:` headings remain
+  readable but are not commitment-eligible until migrated to the canonical
+  structure. Refresh now keeps the compatibility boundary honest too:
   legacy rows from those plain-status `Next Steps:` blocks retire through a
   non-completion path, and older whole-segment dated rows revise in place to a
   surviving future clause instead of reading as completed just because the
