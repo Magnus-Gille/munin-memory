@@ -1419,6 +1419,11 @@ function formatStructuredStatus(status: BuiltStructuredStatus): string {
   return sections.join("\n").trim();
 }
 
+function formatLegacyStatusReplacementWarning(validateOnly?: boolean): string {
+  const verb = validateOnly ? "would be" : "has been";
+  return `Existing status was in a legacy free-form format; it ${verb} replaced with the canonical structured format from the fields you supplied.`;
+}
+
 const VALID_AUDIT_ACTIONS: Array<AuditAction | "delete_namespace" | "log"> = [
   "write",
   "update",
@@ -5311,7 +5316,8 @@ const TOOL_DEFINITIONS = [
       properties: {
         namespace: {
           type: "string",
-          description: "Tracked namespace to update. Must be one of the caller's configured tracked namespaces (default `projects/` or `clients/`).",
+          description:
+            "Namespace to target. Real mutations require a tracked namespace from the caller's configured tracked roots (default `projects/*` or `clients/*`). With `validate_only:true`, this same validation path may preview against any writable namespace the caller is authorized to write, including sandbox/testing namespaces.",
         },
         phase: {
           type: "string",
@@ -8757,7 +8763,7 @@ export function registerTools(
 
               const warnings: string[] = [];
               if (existing && !hasExistingStructure && !isValidUntilOnlyUpdate) {
-                warnings.push("Existing status was in a legacy free-form format; it has been replaced with the canonical structured format from the fields you supplied.");
+                warnings.push(formatLegacyStatusReplacementWarning(validate_only));
               }
 
               const validation = validateWriteInput(namespace, "status", content, existingParsed?.tags, maxContentSize);

@@ -1544,6 +1544,53 @@ describe("memory_update_status validate_only (#275)", () => {
     })) as { content: string; updated_at: string };
     expect(after).toEqual(existing);
   });
+
+  it("uses preview-safe wording when validate_only would replace a legacy free-form status without mutating it", async () => {
+    const sandboxCall = makeContextCallTool(sandboxCtx);
+
+    await sandboxCall("memory_write", {
+      namespace: "testing/sandbox/legacy-preview",
+      key: "status",
+      content: "Legacy free-form sandbox status with no canonical sections.",
+      tags: ["active"],
+    });
+    const before = parseToolResponse(await sandboxCall("memory_read", {
+      namespace: "testing/sandbox/legacy-preview",
+      key: "status",
+    })) as { content: string; updated_at: string };
+
+    const raw = await sandboxCall("memory_update_status", {
+      namespace: "testing/sandbox/legacy-preview",
+      phase: "Active",
+      current_work: "Preview canonical replacement",
+      blockers: "None.",
+      next_steps: ["Verify preview wording"],
+      lifecycle: "active",
+      validate_only: true,
+    });
+    const result = parseToolResponse(raw) as {
+      status: string;
+      wrote: boolean;
+      warnings?: string[];
+      content?: string;
+    };
+
+    expect(result.status).toBe("validated");
+    expect(result.wrote).toBe(false);
+    expect(result.warnings).toContain(
+      "Existing status was in a legacy free-form format; it would be replaced with the canonical structured format from the fields you supplied.",
+    );
+    expect(result.warnings ?? []).not.toContain(
+      "Existing status was in a legacy free-form format; it has been replaced with the canonical structured format from the fields you supplied.",
+    );
+    expect(result.content).toContain("## Phase");
+
+    const after = parseToolResponse(await sandboxCall("memory_read", {
+      namespace: "testing/sandbox/legacy-preview",
+      key: "status",
+    })) as { content: string; updated_at: string };
+    expect(after).toEqual(before);
+  });
 });
 
 describe("memory_read", () => {
@@ -6811,6 +6858,28 @@ describe("compare-and-swap (memory_write)", () => {
 
     expect(toolsByName.get("memory_update_status")?.inputSchema.properties?.validate_only?.type)
       .toBe("boolean");
+  });
+
+  it("documents tracked-only mutation vs writable-namespace validate_only for memory_update_status", async () => {
+    const handler = (
+      server as unknown as { _requestHandlers: Map<string, Function> }
+    )._requestHandlers?.get("tools/list");
+    const toolList = await handler!({ method: "tools/list", params: {} });
+    const toolsByName = new Map(
+      (toolList as {
+        tools: Array<{
+          name: string;
+          inputSchema: { properties?: Record<string, { description?: string }> };
+        }>;
+      }).tools.map((tool) => [tool.name, tool]),
+    );
+
+    const namespaceDescription = toolsByName.get("memory_update_status")
+      ?.inputSchema.properties?.namespace?.description;
+    expect(namespaceDescription).toContain("Real mutations");
+    expect(namespaceDescription).toContain("validate_only:true");
+    expect(namespaceDescription).toContain("any writable namespace");
+    expect(namespaceDescription).toContain("tracked namespace");
   });
 
   it("provides an explicit create-if-absent contract and typed winner conflict", async () => {
