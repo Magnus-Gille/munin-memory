@@ -5365,6 +5365,22 @@ function projectConventions(
   return conv;
 }
 
+function attachOrientLibrarianSummary(
+  response: Record<string, unknown>,
+  ctx: AccessContext,
+  redactedSources: RedactableEntryMetadata[],
+  redactedDashboardCount?: number,
+): void {
+  const redactedSourcesSummary = summarizeRedactedSources(ctx, redactedSources);
+  response.librarian_summary = buildLibrarianRuntimeSummary(ctx, {
+    redactedDashboardCount,
+    redactedSourceCount: redactedSources.length,
+  });
+  if (redactedSourcesSummary) {
+    response.redacted_sources = redactedSourcesSummary;
+  }
+}
+
 const TOOL_DEFINITIONS = [
   {
     name: "memory_orient",
@@ -6622,6 +6638,7 @@ export function registerTools(
                 response.tool_index = orientBeginnerToolIndex();
                 response.common_workflows = orientBeginnerCommonWorkflows();
                 response.safe_write_examples = orientBeginnerSafeWriteExamples();
+                attachOrientLibrarianSummary(response, ctx, orientRedactedSources);
                 applyOrientResponseBudget(response, characterBudget, budgetSource);
 
                 // Analytics: log orient event (no result IDs — orient has no specific entries)
@@ -7095,15 +7112,12 @@ export function registerTools(
                 };
               }
 
-              const redactedSourcesSummary = summarizeRedactedSources(ctx, orientRedactedSources);
-              response.librarian_summary = buildLibrarianRuntimeSummary(ctx, {
-                redactedDashboardCount: visibleTrackedStatuses.redacted.length,
-                redactedSourceCount: orientRedactedSources.length,
-              });
-              if (redactedSourcesSummary) {
-                response.redacted_sources = redactedSourcesSummary;
-              }
-
+              attachOrientLibrarianSummary(
+                response,
+                ctx,
+                orientRedactedSources,
+                visibleTrackedStatuses.redacted.length,
+              );
               applyOrientResponseBudget(response, characterBudget, budgetSource);
 
               // Analytics: log orient event (no result IDs — orient has no specific entries)

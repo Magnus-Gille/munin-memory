@@ -4124,6 +4124,85 @@ describe("memory_orient", () => {
     expect(result.safe_write_examples.some((entry) => entry.tool === "memory_update_status")).toBe(true);
   });
 
+  it("beginner detail reports filtered personal conventions for a scoped principal", async () => {
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+    try {
+      await callTool("memory_write", {
+        namespace: "shared/family/alice/meta",
+        key: "conventions",
+        content: "# Private Conventions\nKeep this family guidance private.",
+        classification: "client-confidential",
+      });
+
+      const familyCall = makeContextCallTool(
+        {
+          principalId: "alice",
+          principalType: "family",
+          accessibleNamespaces: [{ pattern: "shared/family/alice/*", permissions: "rw" }],
+          transportType: "consumer",
+          maxClassification: "internal",
+        },
+        "beginner-family-redaction-session",
+      );
+
+      const raw = await familyCall("memory_orient", {
+        detail: "beginner",
+        include_namespaces: true,
+        response_character_budget: 12000,
+      });
+      const text = (raw as { content: Array<{ text: string }> }).content[0].text;
+      const result = JSON.parse(text) as {
+        dashboard?: unknown;
+        namespaces?: unknown;
+        notes?: unknown;
+        conventions: { source: string; compact: boolean; full_conventions_hint: string };
+        librarian_summary: {
+          enabled: boolean;
+          transport_type: string;
+          max_classification: string;
+          redacted_source_count?: number;
+        };
+        redacted_sources?: { count: number; reason: string; namespaces?: string[] };
+        response_budget_meta: {
+          character_budget: number;
+          response_characters: number;
+          budget_source: string;
+          applied: boolean;
+          adjustments: Array<unknown>;
+        };
+      };
+
+      expect(text).not.toContain("Keep this family guidance private.");
+      expect(result.dashboard).toBeUndefined();
+      expect(result.namespaces).toBeUndefined();
+      expect(result.notes).toBeUndefined();
+      expect(result.conventions).toMatchObject({
+        source: "default",
+        compact: true,
+      });
+      expect(result.conventions.full_conventions_hint).toContain("No personal conventions set");
+      expect(result.librarian_summary).toMatchObject({
+        enabled: true,
+        transport_type: "consumer",
+        max_classification: "internal",
+        redacted_source_count: 1,
+      });
+      expect(result.redacted_sources).toEqual({
+        count: 1,
+        reason: "Some sources exceeded your classification level.",
+      });
+      expect(result.response_budget_meta).toEqual({
+        character_budget: 12000,
+        response_characters: text.length,
+        budget_source: "requested",
+        applied: false,
+        adjustments: [],
+      });
+    } finally {
+      delete process.env.MUNIN_LIBRARIAN_ENABLED;
+    }
+  });
+
   it("keeps beginner mode within the minimum supported response budget", async () => {
     const raw = await callTool("memory_orient", {
       detail: "beginner",
