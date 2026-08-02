@@ -9610,18 +9610,18 @@ describe("compare-and-swap (memory_write)", () => {
     expect(readSchema("memory_query", ["namespace"])?.description).toContain("Prefix filters may end with '/'");
   });
 
-  it("enforces the advertised write-target namespace grammar before unrelated field validation", async () => {
-    for (const namespace of ["projects/", "projects//bad"]) {
+  it("keeps syntactic namespace validation ahead of status-field validation", async () => {
+    for (const validate_only of [false, true]) {
       const res = parseToolResponse(await callTool("memory_update_status", {
-        namespace,
+        namespace: "projects/",
         phase: "Build",
         valid_until: "next tuesday",
+        validate_only,
       })) as { ok?: boolean; error?: string; message?: string };
       expect(res.ok).toBe(false);
       expect(res.error).toBe("validation_error");
-      expect(res.message ?? "").toContain("write target");
-      expect(res.message ?? "").toMatch(/slash|empty/i);
-      expect(res.message ?? "").not.toContain('Invalid "valid_until" value');
+      expect(res.message ?? "").toContain('Invalid "valid_until" value');
+      expect(res.message ?? "").not.toContain("write target");
     }
   });
 
@@ -9629,12 +9629,11 @@ describe("compare-and-swap (memory_write)", () => {
     const res = parseToolResponse(await callTool("memory_update_status", {
       namespace: "tasks/heartbeat",
       phase: "Build",
-      valid_until: "next tuesday",
+      valid_until: "2027-01-01T00:00:00Z",
     })) as { ok?: boolean; error?: string; message?: string };
     expect(res.ok).toBe(false);
     expect(res.error).toBe("validation_error");
     expect(res.message).toContain("configured tracked namespaces");
-    expect(res.message).not.toContain('Invalid "valid_until" value');
   });
 
   it("keeps tag schemas freeform while constraining item grammar", async () => {

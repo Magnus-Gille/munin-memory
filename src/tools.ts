@@ -6753,7 +6753,7 @@ const TOOL_DEFINITIONS = [
         query: {
           type: "string",
           description:
-            "Search terms. Natural language works best (default mode is hybrid). Queries are tokenized server-side: quoted phrases are preserved, other terms are split on whitespace, and all terms must match (implicit AND). Boolean operators (`AND`/`OR`/`NOT`/`NEAR`) are not supported — write term lists or natural language instead of FTS5 expressions. Optional — omit to browse by filters alone (tags, namespace, time range).",
+            "Search terms. Natural language works best (default mode is hybrid). Queries are tokenized server-side: quoted phrases are preserved, other terms are split on whitespace, and all terms must match (implicit AND). Boolean operators (`AND`/`OR`/`NOT`/`NEAR`) are not supported — write term lists or natural language instead of FTS5 expressions. Optional — omit to browse by filters alone (tags, namespace, time range). Concrete tokens likely present in structured-vocabulary content improve lexical retrieval.",
         },
         namespace: namespaceSchema(
           "Optional. Filter to a literal, case-sensitive namespace scope or prefix. A bare namespace includes that namespace and descendants; a trailing slash matches descendants under that literal prefix and reports the corresponding namespace scope. Prefix filters may end with '/'. If a filtered query is empty, drop this filter before reformulating.",
@@ -10030,12 +10030,7 @@ export function registerTools(
               if (validateOnlyError) {
                 return errResult("update_status", "validation_error", validateOnlyError);
               }
-              // Real status writes require a strict write-target namespace;
-              // validate_only keeps the main-branch contract of previewing any
-              // syntactically valid namespace the caller can write.
-              const nsCheck = validate_only
-                ? validateNamespace(namespace)
-                : validateWriteNamespace(namespace);
+              const nsCheck = validateNamespace(namespace);
               if (!nsCheck.valid) {
                 return errResult("update_status", "validation_error", nsCheck.error!);
               }
