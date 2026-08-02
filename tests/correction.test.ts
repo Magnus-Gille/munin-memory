@@ -109,6 +109,182 @@ describe("state correction", () => {
     expect(results.map((entry) => entry.id)).toEqual([corrected.id]);
   });
 
+  it("returns a structured as-of miss for ordinary overwrites instead of inventing history", async () => {
+    const created = await call("memory_write", {
+      namespace: "projects/corrections",
+      key: "status",
+      content: "The launch is Friday",
+      tags: ["active"],
+    });
+    const originalTimestamp = "2026-07-20T10:00:00.000Z";
+    const gapTimestamp = "2026-07-20T10:30:00.000Z";
+    db.prepare(
+      "UPDATE entries SET created_at = ?, updated_at = ?, valid_from = ? WHERE id = ?",
+    ).run(originalTimestamp, originalTimestamp, originalTimestamp, created.id);
+
+    const updated = await call("memory_write", {
+      namespace: "projects/corrections",
+      key: "status",
+      content: "The launch is Monday",
+      expected_updated_at: originalTimestamp,
+    });
+
+    expect(updated.status).toBe("updated");
+
+    const missingHistory = await call("memory_read", {
+      namespace: "projects/corrections",
+      key: "status",
+      as_of: gapTimestamp,
+    });
+    expect(missingHistory).toMatchObject({
+      found: false,
+      history_available: false,
+    });
+    expect(missingHistory.message).toContain(gapTimestamp);
+    expect(missingHistory.hint).toContain("supersedes");
+    expect(missingHistory.hint).not.toContain("status");
+
+    const currentAtBoundary = await call("memory_read", {
+      namespace: "projects/corrections",
+      key: "status",
+      as_of: updated.updated_at as string,
+    });
+    expect(currentAtBoundary.content).toBe("The launch is Monday");
+
+    const future = await call("memory_read", {
+      namespace: "projects/corrections",
+      key: "status",
+      as_of: "2999-01-01T00:00:00.000Z",
+    });
+    expect(future.error).toBe("validation_error");
+  });
+
+  it("returns the same structured as-of miss for patch-only gaps", async () => {
+    const created = await call("memory_write", {
+      namespace: "projects/corrections",
+      key: "notes",
+      content: "line one",
+    });
+    const originalTimestamp = "2026-07-20T10:00:00.000Z";
+    const gapTimestamp = "2026-07-20T10:30:00.000Z";
+    db.prepare(
+      "UPDATE entries SET created_at = ?, updated_at = ?, valid_from = ? WHERE id = ?",
+    ).run(originalTimestamp, originalTimestamp, originalTimestamp, created.id);
+
+    const patched = await call("memory_write", {
+      namespace: "projects/corrections",
+      key: "notes",
+      expected_updated_at: originalTimestamp,
+      patch: { content_append: "line two" },
+    });
+
+    expect(patched.status).toBe("patched");
+
+    const missingHistory = await call("memory_read", {
+      namespace: "projects/corrections",
+      key: "notes",
+      as_of: gapTimestamp,
+    });
+    expect(missingHistory).toMatchObject({
+      found: false,
+      history_available: false,
+    });
+    expect(missingHistory.hint).toContain("supersedes");
+    expect(missingHistory.hint).not.toContain("notes");
+  });
+
+  it("reports a lost backdated-correction interval after a later ordinary overwrite", async () => {
+    const first = await call("memory_write", {
+      namespace: "projects/corrections",
+      key: "backdated-gap",
+      content: "v1",
+    });
+    const initial = "2026-07-20T10:00:00.000Z";
+    const correctedFrom = "2026-07-20T10:30:00.000Z";
+    const insideCorrectedInterval = "2026-07-20T10:45:00.000Z";
+    db.prepare(
+      "UPDATE entries SET created_at = ?, updated_at = ?, valid_from = ? WHERE id = ?",
+    ).run(initial, initial, initial, first.id);
+
+    const corrected = await call("memory_write", {
+      namespace: "projects/corrections",
+      key: "backdated-gap",
+      content: "v2",
+      supersedes: first.id,
+      expected_updated_at: initial,
+      valid_from: correctedFrom,
+    });
+    expect((await call("memory_read", {
+      namespace: "projects/corrections",
+      key: "backdated-gap",
+      as_of: insideCorrectedInterval,
+    })).content).toBe("v2");
+
+    const overwritten = await call("memory_write", {
+      namespace: "projects/corrections",
+      key: "backdated-gap",
+      content: "v3",
+      expected_updated_at: corrected.updated_at,
+    });
+    expect(overwritten.status).toBe("updated");
+
+    expect(await call("memory_read", {
+      namespace: "projects/corrections",
+      key: "backdated-gap",
+      as_of: insideCorrectedInterval,
+    })).toMatchObject({ found: false, history_available: false });
+  });
+
+  it("keeps an implicit correction at an existing future boundary during clock skew", async () => {
+    const first = await call("memory_write", {
+      namespace: "projects/corrections",
+      key: "clock-skew",
+      content: "v1",
+    });
+    const futureBoundary = "2999-01-01T00:00:00.000Z";
+    db.prepare("UPDATE entries SET valid_from = ? WHERE id = ?")
+      .run(futureBoundary, first.id);
+
+    const corrected = await call("memory_write", {
+      namespace: "projects/corrections",
+      key: "clock-skew",
+      content: "v2",
+      supersedes: first.id,
+      expected_updated_at: first.updated_at,
+    });
+
+    expect(corrected).toMatchObject({
+      status: "superseded",
+      valid_from: futureBoundary,
+    });
+  });
+
+  it("uses the real read gate for exact future boundaries when Librarian is disabled", async () => {
+    const created = await call("memory_write", {
+      namespace: "users/alice/notes",
+      key: "future-visible",
+      content: "visible without librarian",
+      classification: "client-confidential",
+    });
+    const futureBoundary = "2999-01-01T00:00:00.000Z";
+    db.prepare("UPDATE entries SET valid_from = ? WHERE id = ?")
+      .run(futureBoundary, created.id);
+    const familyRead = callAs({
+      principalId: "alice",
+      principalType: "family",
+      accessibleNamespaces: [{ pattern: "users/alice/*", permissions: "read" }],
+    });
+
+    expect(await familyRead("memory_read", {
+      namespace: "users/alice/notes",
+      key: "future-visible",
+      as_of: futureBoundary,
+    })).toMatchObject({
+      found: true,
+      content: "visible without librarian",
+    });
+  });
+
   it("requires exact CAS and rejects attempts to branch from an old revision", async () => {
     const created = await call("memory_write", {
       namespace: "projects/corrections",
@@ -238,7 +414,11 @@ describe("state correction", () => {
       namespace: "projects/corrections",
       key: "deletable",
     });
-    expect((preview.will_delete as { state_count: number }).state_count).toBe(1);
+    // A key delete removes the complete correction lineage, not only the current
+    // revision surfaced by ordinary reads. The preview must disclose that scope.
+    expect((preview.will_delete as { state_count: number; current_state_count: number; historical_state_count: number }).state_count).toBe(2);
+    expect((preview.will_delete as { current_state_count: number }).current_state_count).toBe(1);
+    expect((preview.will_delete as { historical_state_count: number }).historical_state_count).toBe(1);
     const deleted = await call("memory_delete", {
       namespace: "projects/corrections",
       key: "deletable",

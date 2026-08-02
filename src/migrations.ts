@@ -980,6 +980,52 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 23,
+    description: "Add key-aligned state-history index for as-of reads (#273)",
+    up: (db) => {
+      const entriesTableExists = db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'entries'",
+      ).get();
+      if (!entriesTableExists) return;
+
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_entries_state_history
+          ON entries(namespace, key, valid_from)
+          WHERE entry_type = 'state';
+      `);
+    },
+  },
+  {
+    version: 24,
+    description: "Index review retention, backfill timeout terminals, and reconcile state-history indexes (#300)",
+    up: (db) => {
+      const entriesTableExists = db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'entries'",
+      ).get();
+      if (entriesTableExists) {
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS idx_entries_state_history
+            ON entries(namespace, key, valid_from)
+            WHERE entry_type = 'state';
+        `);
+      }
+
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_review_proposals_terminal_retention
+          ON review_proposals(status, payload_purged_at, terminal_at, id);
+
+        -- Old-main timeout handling recorded the observation time as terminal_at.
+        -- Timeout retention is effective from expires_at, but leave every other
+        -- terminal cause, timestamp, and append-only event untouched.
+        UPDATE review_proposals
+        SET terminal_at = expires_at
+        WHERE status = 'expired'
+          AND terminal_code = 'review_expired'
+          AND (terminal_at IS NULL OR terminal_at <> expires_at);
+      `);
+    },
+  },
 ];
 
 /**

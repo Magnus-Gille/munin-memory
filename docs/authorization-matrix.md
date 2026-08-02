@@ -69,6 +69,17 @@ Invisible denial is critical: non-owner principals must not be able to distingui
 | **correction** | `supersedes` requires read + write access, exact CAS, and source ownership for non-owner principals. Classification cannot be lowered. Explicit `valid_from` backdating is owner-only. |
 | **intake advisory** | Related-entry checks are computed only from current entries the caller can read at its classification ceiling. A write-only caller receives intrinsic checks only; hidden entries cannot affect returned identifiers, keys, counts, or scores. Intake failure never blocks the write. |
 
+### memory_update_status
+
+| Field | Rule |
+|-------|------|
+| **Who can call** | All principals |
+| **Real mutations** | `validate_only` omitted or false: restricted to the caller's tracked namespaces only (default `projects/*` and `clients/*`). |
+| **Sandbox validation** | `validate_only: true`: caller must still have write access, but the namespace does not need to be tracked. This allows authorized sandbox/testing namespaces to exercise the exact status-validation path without writing. |
+| **Unauthorized** | Real mutations use the normal invisible-denial contract. `validate_only: true` returns the same denial shape and creates no entry, audit, retrieval, commitment, or access-denial event. Ordinary content-blind tool-call telemetry remains enabled. |
+| **compare-and-swap** | `expected_updated_at` keeps the same meaning in both modes: a mismatched current revision returns a typed conflict; an absent entry may still validate/create normally. |
+| **read echo** | Both modes may include `content` / `structured_status` only when the caller passes the same namespace and classification gates as `memory_read`; write-only callers receive normalized mutation metadata plus a generic withholding notice. |
+
 ### memory_read
 
 | Field | Rule |
@@ -76,7 +87,7 @@ Invisible denial is critical: non-owner principals must not be able to distingui
 | **Who can call** | All principals |
 | **Namespace check** | Caller must have read access to the target namespace |
 | **Unauthorized** | `{"found": false}` — identical to non-existent entry |
-| **as-of read** | `as_of` applies the same namespace, classification, and untrusted-content gates to the historical revision selected for that instant |
+| **as-of read** | `as_of` applies the same namespace, classification, and untrusted-content gates to the recorded historical revision selected for that instant; unreconstructible ordinary-overwrite/patch gaps return `{"found": false, "history_available": false}` with a non-contradictory explanatory hint only when the caller is authorized to know that history existed at all. Otherwise the miss stays indistinguishable from an ordinary not-found. |
 
 ### memory_read_batch
 
@@ -99,8 +110,9 @@ Invisible denial is critical: non-owner principals must not be able to distingui
 | Field | Rule |
 |-------|------|
 | **Who can call** | All principals |
-| **Result filtering** | Results filtered post-query to caller's accessible namespaces |
-| **namespace param** | If caller specifies a namespace they can't access, return empty results (not an error) |
+| **Result filtering** | Results are always post-filtered with canonical `canRead`. When the caller's readable rules map cleanly to exact/prefix SQL selectors, `memory_query` may also intersect the request with a safe prefilter before retrieval to avoid hidden rows consuming candidate slots. Unsupported or legacy rule shapes deliberately fail open to broader SQL scanning rather than narrowing incorrectly. |
+| **namespace param** | Literal and case-sensitive. Bare `projects/foo` means that namespace plus descendants; trailing-slash `projects/` means descendants under that prefix only. If caller specifies an inaccessible namespace, return empty results (not an error) |
+| **namespace_scope** | Returned only when a real namespace filter was applied: `subtree` for bare namespaces, `prefix` for trailing-slash filters |
 | **Result count** | `total` reflects only accessible results (don't leak hidden count) |
 
 ### memory_attention
@@ -134,7 +146,7 @@ Invisible denial is critical: non-owner principals must not be able to distingui
 | Field | Rule |
 |-------|------|
 | **Who can call** | All principals |
-| **Namespace filter** | Only returns audit entries for caller's accessible namespaces |
+| **Namespace filter** | Literal and case-sensitive. Bare `projects/foo` means that namespace plus descendants; trailing-slash `projects/foo/` means descendants under that literal prefix only. Only returns audit entries for caller's accessible namespaces. |
 | **Without namespace** | Returns history across all accessible namespaces only |
 | **Unauthorized namespace** | Empty result set (not an error) |
 
@@ -152,6 +164,7 @@ Invisible denial is critical: non-owner principals must not be able to distingui
 | Field | Rule |
 |-------|------|
 | **Who can call** | Owner only |
+| **namespace param** | Literal and case-sensitive. A bare namespace is exact-only here; a trailing-slash prefix such as `projects/` matches descendants under that literal prefix. |
 | **Non-owner** | Return empty results (not an error). Insights expose retrieval patterns that could leak information about hidden namespaces. |
 
 ### memory_consolidate
@@ -160,6 +173,9 @@ Invisible denial is critical: non-owner principals must not be able to distingui
 |-------|------|
 | **Who can call** | Owner only |
 | **Non-owner** | Invisible denial (`access_denied` for agents) |
+| **Manual persistence** | First call is preview-only. A 10-minute, single-use `confirm_token` persists exactly that reviewed preview; restart, expiry, source mismatch, or token reuse fails closed. |
+| **Grounding** | Manual previews require verbatim claims with source-log UUID links. Server rendering strips lifecycle tags and cannot overwrite the human `status` entry. |
+| **Eligible roots** | Manual calls accept only `projects/*` and `clients/*`; `testing/*` and other ephemeral/untracked roots are rejected before an LLM call. |
 | **Cross-zone guard (#96)** | The derived `cross_references` are floor-bounded: a reference for a source namespace whose classification floor is `F_S` may only point at a target whose floor is `≤ F_S`. The orphan scanner prunes out-of-zone targets before reading their content; an authoritative chokepoint drops any remaining out-of-zone reference (LLM- or scanner-sourced) and records a `cross_zone_block` event in `audit_log`. This is a **blanket floor independent of the requester** (it also protects the autonomous background worker) and is enforced regardless of `MUNIN_LIBRARIAN_ENABLED`. When invoked via the tool, the requester's `AccessContext` ceiling (`canRead` + `maxClassification`) applies as additional defense-in-depth. |
 
 ### memory_history (admin view)

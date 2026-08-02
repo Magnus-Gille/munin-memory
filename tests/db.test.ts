@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Database from "better-sqlite3";
 import { spawn } from "node:child_process";
 import { unlinkSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -19,7 +19,11 @@ import {
   appendLog,
   computeCommitmentConfidence,
   syncCommitmentsForEntry,
+  buildQueryEntriesByFilterStatement,
+  buildQueryEntriesLexicalStatement,
   listCommitments,
+  pairRevisedCommitments,
+  listEntriesForDerivation,
   queryEntries,
   queryEntriesByFilter,
   filterIdsMatchingFts,
@@ -28,6 +32,7 @@ import {
   previewDelete,
   DeletePreviewStaleError,
   executeDelete,
+  supersedeState,
   getOtherKeysInNamespace,
   getNamespaceStateEntries,
   getNamespaceTagVocabulary,
@@ -54,7 +59,9 @@ import {
   upsertConsolidationMetadata,
   countUnusedSurfaces,
 } from "../src/db.js";
+import { CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX } from "../src/commitment-status.js";
 import { embeddingToBuffer } from "../src/embeddings.js";
+import { namespacePrefixSuccessor } from "../src/internal/namespace-filter.js";
 
 const TEST_DB_PATH = "/tmp/munin-memory-test.db";
 const VEC_PROBE_PATH = "/tmp/munin-memory-test-vec-probe.db";
@@ -86,6 +93,17 @@ beforeEach(() => {
 afterEach(() => {
   db.close();
   cleanupTestDb();
+});
+
+describe("namespacePrefixSuccessor", () => {
+  it("advances supplementary-plane code points without using U+FFFF sentinels", () => {
+    expect(namespacePrefixSuccessor("projects/emoji/😀")).toBe("projects/emoji/😁");
+  });
+
+  it("returns null when every code point is already maximal", () => {
+    const max = String.fromCodePoint(0x10FFFF);
+    expect(namespacePrefixSuccessor(max.repeat(2))).toBeNull();
+  });
 });
 
 describe("initDatabase", () => {
@@ -225,6 +243,22 @@ describe("getTrackedStatuses ordering (#74)", () => {
     expect(second).toEqual(expected);
     expect(third).toEqual(expected);
   });
+
+  it("matches tracked namespace prefixes case-sensitively", () => {
+    writeState(db, "Projects/MixedCase", "status", "Upper-case project root.", ["active"]);
+
+    const namespaces = getTrackedStatuses(db).map((row) => row.namespace);
+
+    expect(namespaces).not.toContain("Projects/MixedCase");
+  });
+});
+
+describe("namespacePrefixSuccessor", () => {
+  it("steps from U+D7FF to U+E000 without entering the surrogate block", () => {
+    const boundary = `projects/boundary/${String.fromCodePoint(0xD7FF)}`;
+
+    expect(namespacePrefixSuccessor(boundary)).toBe(`projects/boundary/${String.fromCodePoint(0xE000)}`);
+  });
 });
 
 describe("writeState + readState", () => {
@@ -255,6 +289,224 @@ describe("writeState + readState", () => {
     expect(entry!.classification).toBe("internal");
     expect(entry!.id).toBe(first.id);
   });
+
+  it("advances the current-row validity boundary on same-millisecond overwrites", () => {
+    const boundary = "2026-07-20T10:00:00.000Z";
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(boundary));
+      writeState(db, "projects/test", "status", "Version 1", []);
+
+      vi.setSystemTime(new Date(boundary));
+      const updated = writeState(db, "projects/test", "status", "Version 2", []);
+      expect(updated.status).toBe("updated");
+      expect(updated.updated_at).toBe("2026-07-20T10:00:00.001Z");
+
+      expect(readState(db, "projects/test", "status", boundary)).toBeNull();
+      const current = readState(db, "projects/test", "status", "2026-07-20T10:00:00.001Z");
+      expect(current?.content).toBe("Version 2");
+      expect(current?.valid_from).toBe("2026-07-20T10:00:00.001Z");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("advances the current-row validity boundary on same-millisecond patches", () => {
+    const boundary = "2026-07-20T10:00:00.000Z";
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(boundary));
+      writeState(db, "projects/test", "notes", "line one", []);
+
+      vi.setSystemTime(new Date(boundary));
+      const patched = patchState(db, "projects/test", "notes", { content_append: "line two" });
+      expect(patched.status).toBe("patched");
+
+      expect(readState(db, "projects/test", "notes", boundary)).toBeNull();
+      const current = readState(db, "projects/test", "notes", "2026-07-20T10:00:00.001Z");
+      expect(current?.content).toContain("line two");
+      expect(current?.updated_at).toBe("2026-07-20T10:00:00.001Z");
+      expect(current?.valid_from).toBe("2026-07-20T10:00:00.001Z");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("serializes concurrent patches so boundaries strictly advance without dropping either append", async () => {
+    const gateDir = mkdtempSync(join(tmpdir(), "munin-patch-race-"));
+    const goPath = join(gateDir, "go");
+    const readyPaths = [
+      join(gateDir, "ready-a"),
+      join(gateDir, "ready-b"),
+    ];
+    const fixturePath = fileURLToPath(
+      new URL("fixtures/patch-state-writer.ts", import.meta.url),
+    );
+    const futureFloor = "2099-01-01T00:00:00.000Z";
+    const expectedBoundary = "2099-01-01T00:00:00.002Z";
+
+    writeState(db, "projects/patch-race", "notes", "line one", []);
+    db.prepare(
+      "UPDATE entries SET created_at = ?, updated_at = ?, valid_from = ? WHERE namespace = ? AND key = ?",
+    ).run(futureFloor, futureFloor, futureFloor, "projects/patch-race", "notes");
+
+    const runWriter = (appendText: string, readyPath: string) =>
+      new Promise<ReturnType<typeof patchState>>((resolve, reject) => {
+        const child = spawn(
+          process.execPath,
+          [
+            "--import",
+            "tsx",
+            fixturePath,
+            TEST_DB_PATH,
+            goPath,
+            readyPath,
+            "projects/patch-race",
+            "notes",
+            appendText,
+          ],
+          { stdio: ["ignore", "pipe", "pipe"] },
+        );
+        let stdout = "";
+        let stderr = "";
+        child.stdout.setEncoding("utf8");
+        child.stderr.setEncoding("utf8");
+        child.stdout.on("data", (chunk: string) => {
+          stdout += chunk;
+        });
+        child.stderr.on("data", (chunk: string) => {
+          stderr += chunk;
+        });
+        child.once("error", reject);
+        child.once("exit", (code) => {
+          if (code !== 0) {
+            reject(new Error(`patch writer ${appendText} exited ${code}: ${stderr}`));
+            return;
+          }
+          resolve(JSON.parse(stdout.trim()) as ReturnType<typeof patchState>);
+        });
+      });
+
+    try {
+      const writers = readyPaths.map((readyPath, index) =>
+        runWriter(index === 0 ? "writer-a" : "writer-b", readyPath),
+      );
+      for (let attempt = 0; attempt < 1_000; attempt++) {
+        if (readyPaths.every((path) => existsSync(path))) break;
+        await delay(10);
+      }
+      const allWritersReady = readyPaths.every((path) => existsSync(path));
+      writeFileSync(goPath, "go", { mode: 0o600 });
+
+      const results = await Promise.all(writers);
+      expect(allWritersReady).toBe(true);
+      expect(results).toEqual([
+        expect.objectContaining({ status: "patched" }),
+        expect.objectContaining({ status: "patched" }),
+      ]);
+
+      expect(readState(db, "projects/patch-race", "notes", "2099-01-01T00:00:00.001Z")).toBeNull();
+
+      const current = readState(db, "projects/patch-race", "notes");
+      expect(current?.updated_at).toBe(expectedBoundary);
+      expect(current?.valid_from).toBe(expectedBoundary);
+
+      const lines = current?.content.split("\n") ?? [];
+      expect(lines[0]).toBe("line one");
+      expect(lines.slice(1).sort()).toEqual(["writer-a", "writer-b"]);
+    } finally {
+      rmSync(gateDir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("rejects a concurrent patch whose expected_updated_at went stale before it entered the transaction", async () => {
+    const gateDir = mkdtempSync(join(tmpdir(), "munin-patch-cas-race-"));
+    const goPath = join(gateDir, "go");
+    const readyPaths = [
+      join(gateDir, "ready-a"),
+      join(gateDir, "ready-b"),
+    ];
+    const fixturePath = fileURLToPath(
+      new URL("fixtures/patch-state-writer.ts", import.meta.url),
+    );
+    const futureFloor = "2099-02-01T00:00:00.000Z";
+    const winnerBoundary = "2099-02-01T00:00:00.001Z";
+
+    writeState(db, "projects/patch-race", "notes", "line one", []);
+    db.prepare(
+      "UPDATE entries SET created_at = ?, updated_at = ?, valid_from = ? WHERE namespace = ? AND key = ?",
+    ).run(futureFloor, futureFloor, futureFloor, "projects/patch-race", "notes");
+
+    const runWriter = (appendText: string, readyPath: string) =>
+      new Promise<ReturnType<typeof patchState>>((resolve, reject) => {
+        const child = spawn(
+          process.execPath,
+          [
+            "--import",
+            "tsx",
+            fixturePath,
+            TEST_DB_PATH,
+            goPath,
+            readyPath,
+            "projects/patch-race",
+            "notes",
+            appendText,
+            futureFloor,
+          ],
+          { stdio: ["ignore", "pipe", "pipe"] },
+        );
+        let stdout = "";
+        let stderr = "";
+        child.stdout.setEncoding("utf8");
+        child.stderr.setEncoding("utf8");
+        child.stdout.on("data", (chunk: string) => {
+          stdout += chunk;
+        });
+        child.stderr.on("data", (chunk: string) => {
+          stderr += chunk;
+        });
+        child.once("error", reject);
+        child.once("exit", (code) => {
+          if (code !== 0) {
+            reject(new Error(`patch writer ${appendText} exited ${code}: ${stderr}`));
+            return;
+          }
+          resolve(JSON.parse(stdout.trim()) as ReturnType<typeof patchState>);
+        });
+      });
+
+    try {
+      const writers = readyPaths.map((readyPath, index) =>
+        runWriter(index === 0 ? "writer-a" : "writer-b", readyPath),
+      );
+      for (let attempt = 0; attempt < 1_000; attempt++) {
+        if (readyPaths.every((path) => existsSync(path))) break;
+        await delay(10);
+      }
+      const allWritersReady = readyPaths.every((path) => existsSync(path));
+      writeFileSync(goPath, "go", { mode: 0o600 });
+
+      const results = await Promise.all(writers);
+      expect(allWritersReady).toBe(true);
+      expect(results.map((result) => result.status).sort()).toEqual([
+        "conflict",
+        "patched",
+      ]);
+
+      const conflict = results.find((result) => result.status === "conflict");
+      expect(conflict).toMatchObject({
+        status: "conflict",
+        current_updated_at: winnerBoundary,
+      });
+
+      const current = readState(db, "projects/patch-race", "notes");
+      expect(current?.updated_at).toBe(winnerBoundary);
+      expect(current?.valid_from).toBe(winnerBoundary);
+      expect(current?.content.split("\n")).toHaveLength(2);
+    } finally {
+      rmSync(gateDir, { recursive: true, force: true });
+    }
+  }, 20_000);
 
   it("creates only once when two independent writers race with create-if-absent", async () => {
     const gateDir = mkdtempSync(join(tmpdir(), "munin-create-if-absent-"));
@@ -412,6 +664,44 @@ describe("writeState + readState", () => {
     expect(JSON.parse(entry!.tags)).toContain("classification:client-confidential");
   });
 
+  it("returns the settled stored classification without a provisional audit suffix (#263)", () => {
+    const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+    try {
+      const result = writeState(
+        db,
+        "projects/test",
+        "status",
+        "Settled classification",
+        ["active"],
+      ) as {
+        status: string;
+        id?: string;
+        classification?: string;
+      };
+
+      expect(result).toMatchObject({
+        status: "created",
+        classification: "internal",
+      });
+      expect(result).not.toHaveProperty("classification_provisional");
+
+      const stored = readState(db, "projects/test", "status");
+      expect(stored?.classification).toBe("internal");
+
+      const audit = db.prepare(
+        "SELECT detail FROM audit_log WHERE entry_id = ?",
+      ).get(result.id) as { detail: string };
+      expect(audit.detail).not.toContain("classification_provisional");
+    } finally {
+      if (previousLibrarian === undefined) {
+        delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      } else {
+        process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
+      }
+    }
+  });
+
   it("defaults client namespaces to client-confidential", () => {
     writeState(db, "clients/acme", "notes", "hello", []);
     const entry = readState(db, "clients/acme", "notes");
@@ -475,7 +765,224 @@ describe("appendLog", () => {
   });
 });
 
+describe("commitment revision identity (#253)", () => {
+  const trackedStep = (text: string) => ({
+    sourceType: "tracked_next_step",
+    fingerprint: `${CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX}${text.toLowerCase()}`,
+    text,
+    dueAt: null,
+    confidence: 0.8,
+  });
+
+  it("treats a reworded next step as the same commitment, not a completion plus a twin", () => {
+    const { id } = writeState(db, "projects/test", "status", "## Next Steps\n- placeholder", ["active"]);
+
+    syncCommitmentsForEntry(db, id, [
+      trackedStep("Produce the privacy-safe dogfood/TCO case study (#222)"),
+    ]);
+    const before = listCommitments(db, { namespace: "projects/test" });
+    expect(before).toHaveLength(1);
+    const originalId = before[0].id;
+
+    // Same work item, reworded — exactly what happens when a status is edited.
+    syncCommitmentsForEntry(db, id, [
+      trackedStep("Produce the privacy-safe dogfood and TCO case study (#222), including restore evidence"),
+    ]);
+
+    const after = listCommitments(db, { namespace: "projects/test" });
+    expect(after).toHaveLength(1);
+    expect(after[0].id).toBe(originalId);
+    expect(after[0].status).toBe("open");
+    expect(after[0].resolved_at).toBeNull();
+    expect(after[0].text).toContain("restore evidence");
+    // The bug this guards: live work reported as delivered.
+    expect(after.some((row) => row.status === "done")).toBe(false);
+  });
+
+  it("does not reopen a completed canonical step when similar work appears later", () => {
+    const { id } = writeState(db, "projects/test", "status", "## Next Steps\n- placeholder", ["active"]);
+
+    syncCommitmentsForEntry(db, id, [trackedStep("Publish the restore report (#222)")]);
+    const originalId = listCommitments(db, { namespace: "projects/test" })[0].id;
+
+    syncCommitmentsForEntry(db, id, []);
+    expect(listCommitments(db, { namespace: "projects/test" }))
+      .toContainEqual(expect.objectContaining({ id: originalId, status: "done" }));
+
+    syncCommitmentsForEntry(db, id, [trackedStep("Publish the revised restore report (#222)")]);
+    const after = listCommitments(db, { namespace: "projects/test" });
+    expect(after).toHaveLength(2);
+    expect(after).toContainEqual(expect.objectContaining({ id: originalId, status: "done" }));
+    expect(after).toContainEqual(expect.objectContaining({
+      status: "open",
+      text: "Publish the revised restore report (#222)",
+    }));
+  });
+
+  it("still resolves a next step that genuinely disappears", () => {
+    const { id } = writeState(db, "projects/gone", "status", "## Next Steps\n- placeholder", ["active"]);
+
+    syncCommitmentsForEntry(db, id, [trackedStep("Ship the release notes")]);
+    syncCommitmentsForEntry(db, id, [trackedStep("Investigate an entirely unrelated telemetry regression")]);
+
+    const rows = listCommitments(db, { namespace: "projects/gone" });
+    const shipped = rows.find((row) => row.text === "Ship the release notes");
+    expect(shipped?.status).toBe("done");
+    expect(shipped?.resolved_at).not.toBeNull();
+    expect(rows.filter((row) => row.status === "open")).toHaveLength(1);
+  });
+
+  it("never reports one commitment as both open and recently resolved", () => {
+    const { id } = writeState(db, "projects/dual", "status", "## Next Steps\n- placeholder", ["active"]);
+
+    syncCommitmentsForEntry(db, id, [trackedStep("Run the second-principal household onboarding pilot (#5)")]);
+    syncCommitmentsForEntry(db, id, [trackedStep("Run the real second-principal household pilot (#5)")]);
+
+    const rows = listCommitments(db, { namespace: "projects/dual" });
+    const open = rows.filter((row) => row.status === "open");
+    const done = rows.filter((row) => row.status === "done");
+    expect(open).toHaveLength(1);
+    expect(done).toHaveLength(0);
+  });
+
+  it("does not conflate distinct sequential steps that share an issue reference", () => {
+    const { id } = writeState(db, "projects/shared-issue", "status", "## Next Steps\n- placeholder", ["active"]);
+    syncCommitmentsForEntry(db, id, [trackedStep("Write the incident recovery runbook for #222")]);
+    syncCommitmentsForEntry(db, id, [trackedStep("Run the production restore exercise for #222")]);
+
+    const rows = listCommitments(db, { namespace: "projects/shared-issue" });
+    expect(rows.find((row) => row.text.includes("recovery runbook"))?.status).toBe("done");
+    expect(rows.find((row) => row.text.includes("production restore exercise"))?.status).toBe("open");
+    expect(rows).toHaveLength(2);
+  });
+
+  it("leaves ambiguous multiple rewording candidates unpaired instead of guessing", () => {
+    const { id } = writeState(db, "projects/ambiguous", "status", "## Next Steps\n- placeholder", ["active"]);
+    syncCommitmentsForEntry(db, id, [
+      trackedStep("Draft the migration plan for the platform"),
+      trackedStep("Draft the migration plan for the database"),
+    ]);
+    syncCommitmentsForEntry(db, id, [trackedStep("Draft the migration plan for the service")]);
+
+    const rows = listCommitments(db, { namespace: "projects/ambiguous" });
+    expect(rows.filter((row) => row.status === "done")).toHaveLength(2);
+    expect(rows.filter((row) => row.status === "open")).toHaveLength(1);
+    expect(rows.find((row) => row.status === "open")?.text).toContain("service");
+  });
+
+  it("does not pair steps with different nonempty issue-reference sets", () => {
+    const { id } = writeState(db, "projects/different-issues", "status", "## Next Steps\n- placeholder", ["active"]);
+    syncCommitmentsForEntry(db, id, [trackedStep("Draft the recovery plan for #222")]);
+    syncCommitmentsForEntry(db, id, [trackedStep("Draft the recovery plan for #223")]);
+
+    const rows = listCommitments(db, { namespace: "projects/different-issues" });
+    expect(rows.filter((row) => row.status === "done")).toHaveLength(1);
+    expect(rows.filter((row) => row.status === "open")).toHaveLength(1);
+  });
+
+  it("does not pair explicit dated revisions when the orphan and fresh due dates conflict", () => {
+    const pairs = pairRevisedCommitments(
+      [{
+        id: "orphan",
+        source_type: "explicit_dated_commitment",
+        text: "We will publish the follow-up memo by 2026-09-20.",
+        due_at: "2026-09-20T23:59:59.000Z",
+      }],
+      [{
+        sourceType: "explicit_dated_commitment",
+        fingerprint: "explicit_dated_commitment:publish-follow-up-memo",
+        text: "We will publish the follow-up memo by 2026-09-21.",
+        dueAt: "2026-09-21T23:59:59.000Z",
+        confidence: 0.7,
+      }],
+    );
+
+    expect(pairs.size).toBe(0);
+  });
+
+  it("uses the orphan due date to disambiguate contained future clauses in a legacy whole-segment row", () => {
+    const publishDue = "2026-09-20T23:59:59.000Z";
+    const closureDue = "2026-09-21T23:59:59.000Z";
+    const orphanText =
+      "Yesterday we verified the backup restore on 2026-08-01, and will publish the follow-up memo by 2026-09-20, then we will file the closure summary by 2026-09-21.";
+    const pairs = pairRevisedCommitments(
+      [{
+        id: "orphan",
+        source_type: "explicit_dated_commitment",
+        text: orphanText,
+        due_at: publishDue,
+      }],
+      [
+        {
+          sourceType: "explicit_dated_commitment",
+          fingerprint: "explicit_dated_commitment:publish-follow-up-memo",
+          text: "We will publish the follow-up memo by 2026-09-20.",
+          dueAt: publishDue,
+          confidence: 0.7,
+        },
+        {
+          sourceType: "explicit_dated_commitment",
+          fingerprint: "explicit_dated_commitment:file-closure-summary",
+          text: "We will file the closure summary by 2026-09-21.",
+          dueAt: closureDue,
+          confidence: 0.7,
+        },
+      ],
+    );
+
+    expect(pairs.get("orphan")?.text).toBe("We will publish the follow-up memo by 2026-09-20.");
+  });
+});
+
 describe("commitment classification lifecycle", () => {
+  it("applies explicit statuses and the recent-done cutoff before pagination", () => {
+    const namespace = "projects/commitment-status-predicate";
+    const insert = db.prepare(
+      `INSERT INTO commitments
+         (id, namespace, source_entry_id, source_type, source_fingerprint, text, due_at, status, confidence, created_at, updated_at, resolved_at)
+       VALUES (?, ?, ?, 'explicit_commitment', ?, ?, ?, ?, 0.9, ?, ?, ?)`,
+    );
+    const seed = (
+      id: string,
+      status: "open" | "done" | "cancelled",
+      dueAt: string | null,
+      resolvedAt: string | null,
+    ) => {
+      const source = appendLog(db, namespace, `Source for ${id}`, []);
+      insert.run(
+        id,
+        namespace,
+        source.id,
+        `seeded:${id}`,
+        id,
+        dueAt,
+        status,
+        source.timestamp,
+        source.timestamp,
+        resolvedAt,
+      );
+    };
+
+    seed("cancelled", "cancelled", "2026-01-01T23:59:59.000Z", "2026-07-31T12:00:00.000Z");
+    seed("old-done", "done", "2026-01-02T23:59:59.000Z", "2026-06-01T12:00:00.000Z");
+    seed("open", "open", "2099-12-31T23:59:59.000Z", null);
+    seed("recent-done", "done", null, "2026-07-31T12:00:00.000Z");
+
+    const recentView = listCommitments(db, {
+      namespace,
+      statuses: ["open", "done"],
+      recentlyDoneSince: "2026-07-18T00:00:00.000Z",
+      limit: 2,
+    });
+    expect(recentView.map((row) => row.id)).toEqual(["open", "recent-done"]);
+
+    expect(listCommitments(db, {
+      namespace,
+      includeResolved: false,
+      statuses: ["done"],
+    }).map((row) => row.id)).toEqual(["old-done", "recent-done"]);
+  });
+
   it("propagates source classification and scrubs client-restricted derivatives", () => {
     const { id } = appendLog(
       db,
@@ -522,6 +1029,400 @@ describe("commitment classification lifecycle", () => {
     rows = listCommitments(db, { namespace: "projects/test" });
     expect(rows).toHaveLength(1);
     expect(rows[0].source_entry_id).toBe(id);
+  });
+
+  it("scrubs existing derivatives when their current source becomes client-restricted", () => {
+    const { id } = appendLog(
+      db,
+      "projects/reclassified-restricted-commitment",
+      "Will remove the restricted derivative by 2099-06-04.",
+      [],
+      "default",
+      { classification: "client-confidential" },
+    );
+    syncCommitmentsForEntry(db, id, [{
+      sourceType: "explicit_dated_commitment",
+      fingerprint: "reclassified-restricted",
+      text: "Will remove the restricted derivative by 2099-06-04.",
+      dueAt: "2099-06-04T23:59:59.000Z",
+      confidence: 0.8,
+    }]);
+
+    db.prepare("UPDATE entries SET classification = ? WHERE id = ?")
+      .run("client-restricted", id);
+    syncCommitmentsForEntry(db, id, []);
+
+    expect(db.prepare(
+      "SELECT COUNT(*) AS count FROM commitments WHERE source_entry_id = ?",
+    ).get(id)).toEqual({ count: 0 });
+  });
+
+  it("uses live source classification when a cached derivative is stale", () => {
+    const { id } = appendLog(
+      db,
+      "projects/live-classification",
+      "We will publish the report by 2099-06-01.",
+      [],
+      "default",
+      { classification: "internal" },
+    );
+    syncCommitmentsForEntry(db, id, [{
+      sourceType: "explicit_dated_commitment",
+      fingerprint: "live-classification-report",
+      text: "We will publish the report by 2099-06-01.",
+      dueAt: "2099-06-01T23:59:59.000Z",
+      confidence: 0.9,
+    }]);
+
+    db.prepare("UPDATE entries SET classification = ? WHERE id = ?")
+      .run("client-confidential", id);
+
+    expect(listCommitments(db, { namespace: "projects/live-classification" })).toContainEqual(
+      expect.objectContaining({ source_classification: "client-confidential" }),
+    );
+  });
+
+  it("preserves the stricter cached classification when a tracked step disappears", () => {
+    const namespace = "projects/missing-confidential-commitment";
+    const text = "Send the confidential client brief by 2099-06-01.";
+    const source = appendLog(
+      db,
+      namespace,
+      `Current work with ${text}`,
+      [],
+      "default",
+      { classification: "client-confidential" },
+    );
+    syncCommitmentsForEntry(db, source.id, [{
+      sourceType: "tracked_next_step",
+      fingerprint: `${CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX}confidential-brief`,
+      text,
+      dueAt: "2099-06-01T23:59:59.000Z",
+      confidence: 0.9,
+    }]);
+
+    db.prepare("UPDATE entries SET classification = ? WHERE id = ?")
+      .run("internal", source.id);
+    syncCommitmentsForEntry(db, source.id, []);
+
+    const stored = db.prepare(
+      "SELECT status, source_classification FROM commitments WHERE source_entry_id = ?",
+    ).get(source.id) as { status: string; source_classification: string };
+    expect(stored).toEqual({ status: "done", source_classification: "client-confidential" });
+    expect(listCommitments(db, { namespace })).toContainEqual(expect.objectContaining({
+      text,
+      source_classification: "client-confidential",
+    }));
+    expect(listCommitments(db, {
+      namespace,
+      classificationCeiling: "internal",
+    })).toHaveLength(0);
+  });
+
+  it("lowers cached classification only after same-fingerprint rederivation", () => {
+    const namespace = "projects/same-fingerprint-rederivation";
+    const source = appendLog(
+      db,
+      namespace,
+      "Will publish the report by 2099-06-02.",
+      [],
+      "default",
+      { classification: "client-confidential" },
+    );
+    const derived = {
+      sourceType: "explicit_dated_commitment",
+      fingerprint: "same-fingerprint-report",
+      text: "Will publish the report by 2099-06-02.",
+      dueAt: "2099-06-02T23:59:59.000Z",
+      confidence: 0.9,
+    };
+    syncCommitmentsForEntry(db, source.id, [derived]);
+
+    db.prepare("UPDATE entries SET classification = ? WHERE id = ?")
+      .run("internal", source.id);
+    syncCommitmentsForEntry(db, source.id, [derived]);
+
+    expect(listCommitments(db, { namespace })).toContainEqual(expect.objectContaining({
+      text: derived.text,
+      status: "open",
+      source_classification: "internal",
+    }));
+  });
+
+  it("lowers semantic updates and reactivations only when their text is rederived", () => {
+    const semanticNamespace = "projects/semantic-commitment-rederivation";
+    const semanticSource = appendLog(
+      db,
+      semanticNamespace,
+      "Original obligation",
+      [],
+      "default",
+      { classification: "client-confidential" },
+    );
+    syncCommitmentsForEntry(db, semanticSource.id, [{
+      sourceType: "explicit_commitment",
+      fingerprint: "semantic-obligation",
+      text: "Original obligation",
+      dueAt: null,
+      confidence: 0.8,
+    }]);
+    db.prepare("UPDATE entries SET classification = ? WHERE id = ?")
+      .run("internal", semanticSource.id);
+    syncCommitmentsForEntry(db, semanticSource.id, [{
+      sourceType: "explicit_commitment",
+      fingerprint: "semantic-obligation",
+      text: "Updated obligation",
+      dueAt: null,
+      confidence: 0.8,
+    }]);
+    expect(listCommitments(db, { namespace: semanticNamespace })).toContainEqual(expect.objectContaining({
+      text: "Updated obligation",
+      status: "open",
+      source_classification: "internal",
+    }));
+
+    const reactivationNamespace = "projects/reactivated-commitment";
+    const reactivationSource = appendLog(
+      db,
+      reactivationNamespace,
+      "Will reopen the obligation by 2099-06-03.",
+      [],
+      "default",
+      { classification: "client-confidential" },
+    );
+    const reactivated = {
+      sourceType: "explicit_dated_commitment",
+      fingerprint: "reactivated-obligation",
+      text: "Will reopen the obligation by 2099-06-03.",
+      dueAt: "2099-06-03T23:59:59.000Z",
+      confidence: 0.8,
+    };
+    syncCommitmentsForEntry(db, reactivationSource.id, [reactivated]);
+    db.prepare("UPDATE entries SET classification = ? WHERE id = ?")
+      .run("internal", reactivationSource.id);
+    syncCommitmentsForEntry(db, reactivationSource.id, []);
+    expect(listCommitments(db, { namespace: reactivationNamespace })).toContainEqual(expect.objectContaining({
+      status: "cancelled",
+      source_classification: "client-confidential",
+    }));
+
+    syncCommitmentsForEntry(db, reactivationSource.id, [reactivated]);
+    expect(listCommitments(db, { namespace: reactivationNamespace })).toContainEqual(expect.objectContaining({
+      text: reactivated.text,
+      status: "open",
+      source_classification: "internal",
+    }));
+  });
+
+  it("lowers a paired revision classification only for the rederived successor", () => {
+    const namespace = "projects/revision-classification";
+    const source = appendLog(
+      db,
+      namespace,
+      "Original privacy review next step",
+      [],
+      "default",
+      { classification: "client-confidential" },
+    );
+    const original = {
+      sourceType: "tracked_next_step",
+      fingerprint: `${CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX}original-privacy-review-274`,
+      text: "Publish the privacy review for #274",
+      dueAt: null,
+      confidence: 0.8,
+    };
+    const revision = {
+      sourceType: "tracked_next_step",
+      fingerprint: `${CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX}revised-privacy-review-274`,
+      text: "Publish the privacy review report for #274",
+      dueAt: null,
+      confidence: 0.8,
+    };
+    syncCommitmentsForEntry(db, source.id, [original]);
+    const originalId = listCommitments(db, { namespace })[0].id;
+
+    db.prepare("UPDATE entries SET classification = ? WHERE id = ?")
+      .run("internal", source.id);
+    syncCommitmentsForEntry(db, source.id, [revision]);
+
+    expect(listCommitments(db, { namespace })).toEqual([
+      expect.objectContaining({
+        id: originalId,
+        text: revision.text,
+        status: "open",
+        source_classification: "internal",
+      }),
+    ]);
+  });
+
+  it("preserves cached classification when supersession cancels a commitment", () => {
+    const namespace = "projects/supersession-classification";
+    const source = writeState(
+      db,
+      namespace,
+      "status",
+      "Original status",
+      [],
+      "default",
+      undefined,
+      undefined,
+      { classification: "client-confidential" },
+    );
+    syncCommitmentsForEntry(db, source.id, [{
+      sourceType: "explicit_commitment",
+      fingerprint: "superseded-commitment",
+      text: "Original confidential obligation",
+      dueAt: null,
+      confidence: 0.8,
+    }]);
+
+    db.prepare("UPDATE entries SET classification = ? WHERE id = ?")
+      .run("internal", source.id);
+    const current = getById(db, source.id)!;
+    expect(supersedeState(
+      db,
+      namespace,
+      "status",
+      source.id,
+      "Replacement status",
+      [],
+      "default",
+      current.updated_at,
+      current.valid_from,
+      undefined,
+      { classification: "internal" },
+    ).status).toBe("superseded");
+
+    expect(db.prepare(
+      "SELECT status, source_classification FROM commitments WHERE source_entry_id = ?",
+    ).get(source.id)).toEqual({
+      status: "cancelled",
+      source_classification: "client-confidential",
+    });
+  });
+
+  it("fails closed for null and invalid legacy classifications", () => {
+    const namespace = "projects/legacy-commitment-classification";
+    const source = appendLog(db, namespace, "Legacy commitment source", []);
+    syncCommitmentsForEntry(db, source.id, [{
+      sourceType: "explicit_commitment",
+      fingerprint: "legacy-classification",
+      text: "Legacy commitment",
+      dueAt: null,
+      confidence: 0.8,
+    }]);
+
+    db.prepare("UPDATE commitments SET source_classification = NULL WHERE source_entry_id = ?")
+      .run(source.id);
+    expect(listCommitments(db, { namespace })).toContainEqual(expect.objectContaining({
+      source_classification: "client-restricted",
+    }));
+    expect(listCommitments(db, {
+      namespace,
+      classificationCeiling: "client-confidential",
+    })).toHaveLength(0);
+
+    db.exec("PRAGMA ignore_check_constraints = ON");
+    db.prepare("UPDATE commitments SET source_classification = ? WHERE source_entry_id = ?")
+      .run("legacy-invalid", source.id);
+    db.exec("PRAGMA ignore_check_constraints = OFF");
+    expect(listCommitments(db, { namespace })).toContainEqual(expect.objectContaining({
+      source_classification: "client-restricted",
+    }));
+    expect(listCommitments(db, {
+      namespace,
+      classificationCeiling: "client-confidential",
+    })).toHaveLength(0);
+
+    db.prepare("UPDATE commitments SET source_classification = 'public' WHERE source_entry_id = ?")
+      .run(source.id);
+    db.exec("PRAGMA ignore_check_constraints = ON");
+    db.prepare("UPDATE entries SET classification = ? WHERE id = ?")
+      .run("legacy-invalid-source", source.id);
+    db.exec("PRAGMA ignore_check_constraints = OFF");
+    expect(listCommitments(db, { namespace })).toContainEqual(expect.objectContaining({
+      source_classification: "client-restricted",
+    }));
+    expect(listCommitments(db, {
+      namespace,
+      classificationCeiling: "client-confidential",
+    })).toHaveLength(0);
+  });
+
+  it("applies the effective stricter classification before the page limit", () => {
+    const namespace = "projects/effective-classification-page-cap";
+    const hidden = appendLog(
+      db,
+      namespace,
+      "Hidden historical commitment source",
+      [],
+      "default",
+      { classification: "client-confidential" },
+    );
+    syncCommitmentsForEntry(db, hidden.id, [{
+      sourceType: "explicit_dated_commitment",
+      fingerprint: "hidden-historical",
+      text: "Hidden historical commitment",
+      dueAt: "2099-01-01T23:59:59.000Z",
+      confidence: 0.8,
+    }]);
+    db.prepare("UPDATE entries SET classification = ? WHERE id = ?")
+      .run("internal", hidden.id);
+
+    const visible = appendLog(
+      db,
+      namespace,
+      "Visible current commitment source",
+      [],
+      "default",
+      { classification: "public", classificationOverride: true },
+    );
+    syncCommitmentsForEntry(db, visible.id, [{
+      sourceType: "explicit_dated_commitment",
+      fingerprint: "visible-current",
+      text: "Visible current commitment",
+      dueAt: "2099-02-01T23:59:59.000Z",
+      confidence: 0.8,
+    }]);
+
+    expect(listCommitments(db, {
+      namespace,
+      classificationCeiling: "internal",
+      limit: 1,
+    })).toEqual([
+      expect.objectContaining({
+        text: "Visible current commitment",
+        source_classification: "public",
+      }),
+    ]);
+  });
+
+  it("preserves exact, prefix, and subtree namespace semantics for commitment pages", () => {
+    const parent = appendLog(db, "projects/commitment-scope", "Parent commitment source", []);
+    syncCommitmentsForEntry(db, parent.id, [{
+      sourceType: "explicit_commitment",
+      fingerprint: "commitment-scope-parent",
+      text: "Parent commitment",
+      dueAt: null,
+      confidence: 0.8,
+    }]);
+    const child = appendLog(db, "projects/commitment-scope/child", "Child commitment source", []);
+    syncCommitmentsForEntry(db, child.id, [{
+      sourceType: "explicit_commitment",
+      fingerprint: "commitment-scope-child",
+      text: "Child commitment",
+      dueAt: null,
+      confidence: 0.8,
+    }]);
+
+    expect(listCommitments(db, { namespace: "projects/commitment-scope" }).map((row) => row.text))
+      .toEqual(["Parent commitment"]);
+    expect(listCommitments(db, { namespace: "projects/commitment-scope/" }).map((row) => row.text))
+      .toEqual(["Child commitment"]);
+    expect(listCommitments(db, {
+      namespace: "projects/commitment-scope",
+      namespaceMode: "subtree",
+    }).map((row) => row.text).sort()).toEqual(["Child commitment", "Parent commitment"]);
   });
 
   it("keeps a first stale-source derivation from gaining confidence on unchanged reconciliation", () => {
@@ -622,6 +1523,39 @@ describe("queryEntries (FTS5)", () => {
   it("filters by namespace", () => {
     const results = queryEntries(db, { query: "SQLite", namespace: "projects/hugin-munin" });
     expect(results.every((r) => r.namespace === "projects/hugin-munin")).toBe(true);
+  });
+
+  it("treats a bare namespace as a subtree filter", () => {
+    writeState(db, "projects/hugin-munin/sub", "child-note", "Child namespace decision", ["decision"]);
+
+    const results = queryEntries(db, { query: "Child", namespace: "projects/hugin-munin" });
+
+    expect(results.map((r) => r.namespace)).toContain("projects/hugin-munin/sub");
+    expect(results.every((r) => r.namespace === "projects/hugin-munin" || r.namespace.startsWith("projects/hugin-munin/"))).toBe(true);
+  });
+
+  it("finds emoji descendants under a bare subtree namespace filter", () => {
+    writeState(db, "projects/emoji", "status", "emoji search parent", ["active"]);
+    writeState(db, "projects/emoji-child-temp", "status", "emoji search child", ["active"]);
+    writeState(db, "projects/emoji-grandchild-temp", "status", "emoji search grandchild", ["active"]);
+    db.prepare("UPDATE entries SET namespace = ? WHERE namespace = ? AND key = ?").run(
+      "projects/emoji/😀",
+      "projects/emoji-child-temp",
+      "status",
+    );
+    db.prepare("UPDATE entries SET namespace = ? WHERE namespace = ? AND key = ?").run(
+      "projects/emoji/😀/deep",
+      "projects/emoji-grandchild-temp",
+      "status",
+    );
+
+    const results = queryEntries(db, { query: "emoji", namespace: "projects/emoji" });
+
+    expect(results.map((r) => r.namespace).sort()).toEqual([
+      "projects/emoji",
+      "projects/emoji/😀",
+      "projects/emoji/😀/deep",
+    ]);
   });
 
   it("filters by namespace prefix", () => {
@@ -948,6 +1882,27 @@ describe("previewDelete + executeDelete", () => {
     const preview = previewDelete(db, "projects/test");
     expect(preview.stateCount).toBe(2);
     expect(preview.logCount).toBe(1);
+  });
+
+  it("counts and fingerprints every correction revision a key delete removes (#281)", () => {
+    writeState(db, "projects/fp", "corrected", "original", []);
+    const original = readState(db, "projects/fp", "corrected")!;
+    const corrected = supersedeState(
+      db, "projects/fp", "corrected", original.id, "corrected", [], "default",
+      original.updated_at, original.valid_from, undefined,
+    );
+    expect(corrected.status).toBe("superseded");
+
+    const preview = previewDelete(db, "projects/fp", "corrected");
+    expect(preview).toMatchObject({ stateCount: 2, currentStateCount: 1, historicalStateCount: 1 });
+
+    // The historical row is just as destructive a target as current truth.
+    // Hold its timestamp fixed to prove the full-row digest, not the clock,
+    // blocks a confirmation that no longer matches the preview.
+    db.prepare("UPDATE entries SET tags = '[\"changed-history\"]' WHERE id = ?").run(original.id);
+    expect(() => executeDelete(db, "projects/fp", "corrected", "default", false, preview.fingerprint))
+      .toThrow(DeletePreviewStaleError);
+    expect(readState(db, "projects/fp", "corrected")?.content).toBe("corrected");
   });
 
   // The delete-token fingerprint must notice any caller-visible mutation, not
@@ -1326,6 +2281,10 @@ describe("getToolCallAggregates p95_response_size_bytes", () => {
 });
 
 describe("queryEntriesByFilter (no FTS)", () => {
+  function rewriteNamespace(oldNamespace: string, key: string, nextNamespace: string) {
+    db.prepare("UPDATE entries SET namespace = ? WHERE namespace = ? AND key = ?").run(nextNamespace, oldNamespace, key);
+  }
+
   beforeEach(() => {
     writeState(db, "projects/a", "status", "active project alpha", ["active"]);
     writeState(db, "projects/a", "notes", "some notes", ["decision"]);
@@ -1345,10 +2304,173 @@ describe("queryEntriesByFilter (no FTS)", () => {
     expect(results.length).toBe(3); // status, notes, log
   });
 
+  it("treats a bare namespace as a subtree filter", () => {
+    writeState(db, "projects/a/sub", "status", "nested child", ["active"]);
+
+    const results = queryEntriesByFilter(db, { namespace: "projects/a" });
+
+    expect(results.map((r) => r.namespace)).toContain("projects/a/sub");
+    expect(results.every((r) => r.namespace === "projects/a" || r.namespace.startsWith("projects/a/"))).toBe(true);
+  });
+
   it("filters by namespace prefix (trailing slash)", () => {
     const results = queryEntriesByFilter(db, { namespace: "projects/" });
     expect(results.every((r) => r.namespace.startsWith("projects/"))).toBe(true);
     expect(results.length).toBe(4); // projects/a and projects/b entries
+  });
+
+  it("treats a trailing slash as descendant-only, excluding the exact namespace", () => {
+    writeState(db, "projects/a/sub", "status", "nested child", ["active"]);
+
+    const results = queryEntriesByFilter(db, { namespace: "projects/a/" });
+
+    expect(results.map((r) => r.namespace)).toEqual(["projects/a/sub"]);
+  });
+
+  it("matches bare subtree filters case-sensitively", () => {
+    writeState(db, "Projects/Case", "status", "mixed case parent", ["active"]);
+    writeState(db, "Projects/Case/Sub", "status", "mixed case child", ["active"]);
+    writeState(db, "projects/case/sub", "status", "lower case child", ["active"]);
+
+    const results = queryEntriesByFilter(db, { namespace: "Projects/Case" });
+
+    expect(results.map((r) => r.namespace).sort()).toEqual(["Projects/Case", "Projects/Case/Sub"]);
+  });
+
+  it("treats an empty namespace filter as no filter", () => {
+    const unfiltered = queryEntriesByFilter(db, {});
+    const empty = queryEntriesByFilter(db, { namespace: "" });
+
+    expect(empty.map((r) => r.id).sort()).toEqual(unfiltered.map((r) => r.id).sort());
+  });
+
+  it("supports explicit exact bare-namespace filters", () => {
+    writeState(db, "projects/a/sub", "status", "nested child", ["active"]);
+
+    const results = queryEntriesByFilter(db, {
+      namespace: "projects/a",
+      namespaceMode: "exact",
+    });
+
+    expect(results.every((r) => r.namespace === "projects/a")).toBe(true);
+    expect(results.map((r) => r.namespace)).not.toContain("projects/a/sub");
+  });
+
+  it("keeps supplementary-plane descendants inside a bare subtree filter", () => {
+    writeState(db, "projects/emoji", "status", "emoji parent", ["active"]);
+    writeState(db, "projects/emoji-child-temp", "status", "emoji child", ["active"]);
+    writeState(db, "projects/emoji-grandchild-temp", "status", "emoji grandchild", ["active"]);
+    writeState(db, "projects/emoji-sibling-temp", "status", "other emoji sibling", ["active"]);
+    writeState(db, "projects/emoji-outside-temp", "status", "outside subtree", ["active"]);
+    rewriteNamespace("projects/emoji-child-temp", "status", "projects/emoji/😀");
+    rewriteNamespace("projects/emoji-grandchild-temp", "status", "projects/emoji/😀/deep");
+    rewriteNamespace("projects/emoji-sibling-temp", "status", "projects/emoji/😁");
+    rewriteNamespace("projects/emoji-outside-temp", "status", "projects/emojiish/😀");
+
+    const results = queryEntriesByFilter(db, { namespace: "projects/emoji" });
+
+    expect(results.map((r) => r.namespace).sort()).toEqual([
+      "projects/emoji",
+      "projects/emoji/😀",
+      "projects/emoji/😀/deep",
+      "projects/emoji/😁",
+    ]);
+  });
+
+  it("keeps supplementary-plane descendants inside a trailing-slash prefix filter", () => {
+    writeState(db, "projects/emoji-child-temp", "status", "emoji child", ["active"]);
+    writeState(db, "projects/emoji-grandchild-temp", "status", "emoji grandchild", ["active"]);
+    writeState(db, "projects/emoji-outside-temp", "status", "outside subtree", ["active"]);
+    rewriteNamespace("projects/emoji-child-temp", "status", "projects/emoji/😀");
+    rewriteNamespace("projects/emoji-grandchild-temp", "status", "projects/emoji/😀/deep");
+    rewriteNamespace("projects/emoji-outside-temp", "status", "projects/emojiish/😀");
+
+    const results = queryEntriesByFilter(db, { namespace: "projects/emoji/" });
+
+    expect(results.map((r) => r.namespace).sort()).toEqual([
+      "projects/emoji/😀",
+      "projects/emoji/😀/deep",
+    ]);
+  });
+
+  it("does not widen a U+D7FF subtree range when SQLite replaces a lone surrogate", () => {
+    const boundary = `projects/boundary/${String.fromCodePoint(0xD7FF)}`;
+    const afterBoundary = `projects/boundary/${String.fromCodePoint(0xE000)}`;
+    const loneSurrogateChild = `projects/boundary/${String.fromCharCode(0xD800)}/deep`;
+    writeState(db, "projects/boundary-parent-temp", "status", "boundary parent", ["active"]);
+    writeState(db, "projects/boundary-child-temp", "status", "boundary child", ["active"]);
+    writeState(db, "projects/boundary-after-temp", "status", "after boundary", ["active"]);
+    writeState(db, "projects/boundary-surrogate-temp", "surrogate", "surrogate child", ["active"]);
+    rewriteNamespace("projects/boundary-parent-temp", "status", boundary);
+    rewriteNamespace("projects/boundary-child-temp", "status", `${boundary}/deep`);
+    rewriteNamespace("projects/boundary-after-temp", "status", `${afterBoundary}/deep`);
+    rewriteNamespace("projects/boundary-surrogate-temp", "surrogate", loneSurrogateChild);
+
+    const storedSurrogate = db
+      .prepare("SELECT namespace FROM entries WHERE key = 'surrogate'")
+      .get() as { namespace: string };
+    const results = queryEntriesByFilter(db, { namespace: boundary });
+
+    expect(storedSurrogate.namespace).toMatch(/^projects\/boundary\/\uFFFD+\/deep$/u);
+    expect(results.map((r) => r.namespace).sort()).toEqual([
+      boundary,
+      `${boundary}/deep`,
+    ]);
+  });
+
+  it("treats slash-root-like namespace filters literally", () => {
+    writeState(db, "legacy/rooted", "status", "legacy rooted row", ["active"]);
+    rewriteNamespace("legacy/rooted", "status", "/legacy/rooted");
+
+    const results = queryEntriesByFilter(db, { namespace: "/" });
+
+    expect(results.map((r) => r.namespace)).toEqual(["/legacy/rooted"]);
+  });
+
+  it("treats percent and underscore literally in the shared SQL helper for already-stored rows", () => {
+    writeState(db, "legacy/pct-temp", "status", "legacy percent parent", ["active"]);
+    writeState(db, "legacy/pct-temp/sub", "status", "legacy percent child", ["active"]);
+    writeState(db, "legacy/us-temp", "status", "legacy underscore parent", ["active"]);
+    writeState(db, "legacy/us-temp/sub", "status", "legacy underscore child", ["active"]);
+    writeState(db, "legacy/pctXtemp/sub", "status", "wrong percent sibling", ["active"]);
+    writeState(db, "legacy/usXtemp/sub", "status", "wrong underscore sibling", ["active"]);
+    rewriteNamespace("legacy/pct-temp", "status", "legacy/p%ct");
+    rewriteNamespace("legacy/pct-temp/sub", "status", "legacy/p%ct/sub");
+    rewriteNamespace("legacy/us-temp", "status", "legacy/u_score");
+    rewriteNamespace("legacy/us-temp/sub", "status", "legacy/u_score/sub");
+    rewriteNamespace("legacy/pctXtemp/sub", "status", "legacy/pXct/sub");
+    rewriteNamespace("legacy/usXtemp/sub", "status", "legacy/uXscore/sub");
+
+    const percentResults = queryEntriesByFilter(db, { namespace: "legacy/p%ct" });
+    const underscoreResults = queryEntriesByFilter(db, { namespace: "legacy/u_score" });
+
+    expect(percentResults.map((r) => r.namespace).sort()).toEqual(["legacy/p%ct", "legacy/p%ct/sub"]);
+    expect(underscoreResults.map((r) => r.namespace).sort()).toEqual(["legacy/u_score", "legacy/u_score/sub"]);
+  });
+
+  it("uses namespace equality-plus-range predicates for bare-subtree browse queries", () => {
+    const statement = buildQueryEntriesByFilterStatement({ namespace: "projects/a" });
+    const plan = db.prepare(`EXPLAIN QUERY PLAN ${statement.sql}`)
+      .all(...statement.params) as Array<{ detail: string }>;
+
+    expect(plan.map((row) => row.detail)).toEqual(expect.arrayContaining([
+      "SEARCH entries USING INDEX idx_entries_temporal (namespace=?)",
+      "SEARCH entries USING INDEX idx_entries_temporal (namespace>? AND namespace<?)",
+    ]));
+  });
+
+  it("keeps lexical subtree queries on the FTS-plus-rowid plan", () => {
+    const statement = buildQueryEntriesLexicalStatement({
+      query: "project",
+      namespace: "projects/a",
+    });
+    const plan = db.prepare(`EXPLAIN QUERY PLAN ${statement.sql}`)
+      .all(...statement.params) as Array<{ detail: string }>;
+
+    expect(plan.map((row) => row.detail)).toEqual(expect.arrayContaining([
+      expect.stringContaining("SCAN fts VIRTUAL TABLE INDEX"),
+      "SEARCH e USING INTEGER PRIMARY KEY (rowid=?)",
+    ]));
   });
 
   it("filters by entry type", () => {
@@ -1455,6 +2577,16 @@ describe("getAuditHistoryPage", () => {
     expect(page.entries.length).toBeGreaterThan(0);
   });
 
+  it("supports explicit exact namespace mode without widening to child namespaces", () => {
+    writeState(db, "projects/test/sub", "notes", "subproject notes", []);
+    const page = getAuditHistoryPage(db, {
+      namespace: "projects/test",
+      namespaceMode: "exact",
+    });
+
+    expect(page.entries.every((e) => e.namespace === "projects/test")).toBe(true);
+  });
+
   it("filters by since timestamp", () => {
     const since = new Date(Date.now() - 1000).toISOString();
     const page = getAuditHistoryPage(db, { since });
@@ -1501,6 +2633,17 @@ describe("getAuditHistoryPage", () => {
     }
     const page = getAuditHistoryPage(db, { limit: 2 });
     expect(page.hasMore).toBe(true);
+  });
+});
+
+describe("listEntriesForDerivation", () => {
+  it("treats a bare namespace as exact by default", () => {
+    writeState(db, "projects/derive", "status", "root", []);
+    writeState(db, "projects/derive/sub", "status", "child", []);
+
+    const entries = listEntriesForDerivation(db, { namespace: "projects/derive" });
+
+    expect(entries.every((entry) => entry.namespace === "projects/derive")).toBe(true);
   });
 });
 
@@ -1600,6 +2743,25 @@ describe.skipIf(!vecAvailableForDbTest)(
       // modelA entries must NOT appear (different embedding space)
       expect(returnedIds).not.toContain(aId1);
       expect(returnedIds).not.toContain(aId2);
+    });
+
+    it("treats a bare namespace as a subtree filter when queryEmbeddingModel is set", () => {
+      const { id: childId } = writeState(db, "test/tree/sub", "child", "subtree child", []);
+      const { id: otherId } = writeState(db, "test/elsewhere", "other", "other branch", []);
+
+      storeEmbedding(db, childId, embeddingToBuffer(makeTestEmbedding(7)), "activeModel");
+      storeEmbedding(db, otherId, embeddingToBuffer(makeTestEmbedding(8)), "activeModel");
+
+      const results = queryEntriesSemanticScored(db, {
+        queryEmbedding: embeddingToBuffer(makeTestEmbedding(7)),
+        queryEmbeddingModel: "activeModel",
+        namespace: "test/tree",
+        limit: 10,
+        includeExpired: true,
+      });
+
+      expect(results.map((r) => r.entry.namespace)).toContain("test/tree/sub");
+      expect(results.every((r) => r.entry.namespace === "test/tree" || r.entry.namespace.startsWith("test/tree/"))).toBe(true);
     });
 
     it("returns all entries when queryEmbeddingModel is not provided (backward compat)", () => {

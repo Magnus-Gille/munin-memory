@@ -8,7 +8,172 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Changed
+
+- **`memory_update_status` now supports non-mutating sandbox validation via `validate_only: true` (#275).**
+  The normal mutation path is unchanged: real `memory_update_status` writes still require one
+  of the caller's tracked namespaces and still create the usual state/audit/commitment effects.
+  The new dry-run mode executes the same namespace authorization, lifecycle normalization,
+  classification floor/visibility checks, secret and parameter-markup scans, `valid_until`
+  normalization, legacy-status guards, and CAS/create-vs-update preconditions, but it never
+  writes an entry, audit row, commitment, retrieval outcome, intake row, redaction row,
+  or access-denied telemetry. Ordinary content-blind tool-call telemetry remains enabled so
+  dry-run use and failures stay observable. Successful dry runs return
+  `status: "validated"`, `wrote: false`,
+  `would_write: "create" | "update"`, and the normalized prospective metadata. Read-visible
+  callers also receive the previewed `content` / `structured_status`; write-only callers get
+  the same generic withholding notice used by the real mutation response.
+- **`memory_orient` now has a total response budget, a beginner mode, and an
+  explicit response marker (#277).** The per-group dashboard caps from #254
+  still left `standard` responses large enough to blow past host output limits
+  on mature estates. `memory_orient` now applies a deterministic
+  `response_character_budget` on the final JSON payload in every detail mode,
+  preserving the core handshake and reporting every budget-driven omission or
+  truncation in `response_budget_meta.adjustments` instead of failing
+  silently. Every orient response also includes `generated_at` so callers can
+  identify the specific handshake they are looking at without pretending it is
+  a transactional snapshot across later `memory_list` calls. A new
+  `detail:"beginner"` mode returns the mental model, starter tool index,
+  three common workflows, and safe write examples with no live dashboard or
+  namespace-estate data, while `compact` remains the default first call.
+- **Manual `memory_consolidate` is now a reviewed, source-grounded flow (#270).**
+  The first targeted call returns a non-persisting preview and a short-lived,
+  one-use confirmation token; only confirmation writes that exact reviewed
+  payload. The token fingerprints the whole unincorporated log window, so a
+  newer log makes confirmation stale rather than being silently consumed.
+  Preview claims must carry source-log UUIDs and be verbatim excerpts
+  of every cited log, so unsupported teams, deadlines, risks, plans, or named
+  entities are rejected instead of becoming durable synthesis. The server
+  renders source links itself and strips model-supplied lifecycle tags, so a
+  consolidation cannot assert or overwrite human-maintained status truth.
+  Manual invocations now require an eligible `projects/*` or `clients/*`
+  namespace; `testing/*` and other ephemeral/untracked roots fail closed.
+  The preview discloses model, actual duration, completion-token count, the
+  historical duration average when available, and explicitly reports when no
+  provider-pricing estimate is configured. The prior unscoped, immediate-write
+  manual invocation is intentionally retired; the background worker remains
+  separately configured and retains its existing operational behavior.
+
+- **External backup requirements now have a public-safe, versioned v1 consumer
+  contract (#235).** The contract binds a stable logical near-site target,
+  owner-overlay authentication boundary, capacity/write guarantees, SQLite
+  snapshot cadence/timeout, and a measured transfer-window preflight. It fails
+  closed for offline, stale, interrupted, timed-out, or relocated targets.
+  Verified copy/integrity evidence is distinct from periodic representative
+  restore evidence, and encrypted offsite backup remains independent. The
+  published schema and fixtures contain no deployment endpoint, private path,
+  or credential.
+
+- **`memory_review` preview response shape changed (#272).** The legacy
+  `writes_memory` field is removed. Preview now reports its own side effects
+  with `preview_wrote_memory:false` and the current approval consequence with
+  `approval_would_write_memory:true|false`. When retention has already purged a
+  terminal proposal payload, preview still returns the truthful non-writing
+  terminal outcome but omits `exact_operation` because no retained payload
+  remains to display.
+
 ### Fixed
+
+- **`memory_review` preview now reports approval write effects truthfully (#272).**
+  Preview previously dry-ran terminal status, validation, source freshness, and
+  target freshness through separate logic from the real approve path, so
+  purged-terminal previews could collapse to `payload_expired`, preview catch
+  paths could skip internal-error telemetry, and the exact approval outcome
+  could drift across duplicate, expired, failed, or superseded proposals.
+  Preview and approve now share one precondition evaluation, the same inclusive
+  expiry boundary, and the same retention masking rules. Successful previews
+  stay pure-read and metering-free; unexpected preview exceptions still emit
+  `internal_error` telemetry. Terminal proposals whose payload has already been
+  purged still return the truthful non-writing outcome instead of claiming the
+  payload state blocked the answer. A real approval attempted after expiry still
+  returns the same machine-readable `review_expired` code and message
+  advertised by preview through the stable `ok:false` rejection envelope.
+  Non-terminal approve-time rejections now run through the transactional
+  approval path, append one durable `approval_conflict` event per rejected
+  attempt, and restore the indexed `expires_at <= ?` prune range instead of
+  scanning every pending or edited proposal row.
+
+- **Commitment-derived views no longer let resolved rows consume the page cap (#274).**
+  `memory_commitments` now paginates the SQL-eligible open and recently-done rows
+  to exhaustion before filling its independent output buckets, while
+  `memory_patterns` and `memory_handoff` prefilter to open rows. Cancelled and
+  old completed rows therefore cannot hide current obligations, and the
+  recent-completion cutoff is shared by query eligibility and classification.
+
+- **`memory_commitments` now recognizes future-dated verify/run forms and
+  explains conservative exclusions (#274).** The dated-action vocabulary now
+  includes `verify`, so future phrases such as `We will verify ... by
+  YYYY-MM-DD` and `I will run ... on YYYY-MM-DD` surface alongside existing
+  `validate`/`check`/`test` forms. The tool now also returns bounded,
+  content-blind `exclusion_diagnostics` when commitment-like syntax is matched
+  but deliberately dropped — for example retrospective dated logs, duplicates
+  inside one entry, terminal/resolved sources, or legacy plain-markdown status
+  blobs that use an ad-hoc `Next Steps:` heading. Public wording now matches the
+  real contract: canonical tracked-status `Next Steps`, dated future clauses in
+  visible tracked-status prose, explicit `memory_log` commitment phrases such as
+  `We agreed to: ...` or `I commit to: ...`, and future-dated `memory_log`
+  phrases can surface here. Generic non-status state fields are not commitment
+  sources. Legacy plain markdown status blobs with ad-hoc `Next Steps:`
+  headings remain readable but are not commitment-eligible until migrated to the
+  canonical structure. Refresh now keeps the compatibility boundary honest too:
+  legacy rows from those plain-status `Next Steps:` blocks retire through a
+  non-completion path, and older whole-segment dated rows revise in place to a
+  surviving future clause instead of reading as completed just because the
+  derived fingerprint changed. The parser now also keeps due dates local to the
+  actual future clause, so a retrospective date such as `completed ... on
+  2026-07-31` cannot be recycled into a new overdue commitment when a later
+  noun-subject clause says `the report should be filed later`. Legacy plain
+  `Next Steps:` blocks are stripped by the same structural matcher that powers
+  the exclusion diagnostics, which fixes three drift cases at once: a legacy
+  block before the first `##` heading no longer leaks commitments through the
+  preserved prefix, line-mode stripping stops at the real end of the block
+  instead of consuming unrelated later prose, and canonical extras headings
+  such as `## TODO` / `## Action Items` stay visible for dated obligation prose
+  even when another section contains a `Status:` line. Inline canonical
+  `**Next Steps**:` lines now normalize to the same single tracked-next-step
+  commitment as the `## Next Steps` form, and empty-namespace diagnostics use
+  the same exact-or-subtree namespace scope semantics as the derivation scan.
+- **Write-like responses now return only the settled stored classification
+  (#263).** Investigation confirmed this branch resolves and persists entry
+  classification synchronously before the write response and audit row are
+  emitted, and no per-entry pending/settlement path exists. `memory_write`,
+  `memory_update_status`, and `memory_log` therefore no longer emit the fake
+  `classification_provisional` field, and audit rows no longer stamp a
+  provisional classification suffix. The response, stored entry, and
+  `memory_history` now report the same effective classification without
+  pretending an asynchronous settlement flow exists. Optional background work
+  remains non-blocking.
+- **Namespace subtree filters are now literal and case-sensitive across query paths (#267).**
+  The shared SQL matcher behind `memory_query`, semantic exact-namespace scans,
+  audit history, commitments, and adjacent namespace-filtered reads previously
+  used SQLite `LIKE`, which is ASCII case-insensitive by default and could drift
+  from the server's case-sensitive `startsWith` checks. Namespace subtree
+  filters now use exact equality plus a UTF-8-safe literal descendant range, so
+  supplementary Unicode descendants stay inside scope, `Projects/Foo` no longer
+  matches `projects/foo/...`, trailing-slash filters remain descendant-only, and
+  the shared SQL helper treats wildcard-looking bytes literally instead of as
+  `LIKE` wildcards. Direct DB/helper coverage also verifies already-stored
+  legacy `%` bytes without expanding the public namespace-filter contract. For
+  `memory_query`, non-owner reads now apply readable-namespace SQL selectors
+  before `LIMIT` only when the caller's read rules are exactly representable;
+  legacy or unsupported rule shapes fail open to broader SQL scanning while
+  canonical post-query authorization remains authoritative. `memory_query` now
+  reports `namespace_scope: "subtree"` for bare namespace filters,
+  `namespace_scope: "prefix"` for trailing-slash filters, and omits the field
+  when no real namespace filter was applied.
+
+- **`memory_read(as_of)` no longer leaks hidden history and ordinary rewrites now advance their own time boundary strictly (#273).** The tool description promised the state revision valid at any past instant, but ordinary overwrites and patches mutate the current row in place and migration v20 backfilled legacy state `valid_from` from the last `updated_at`, so uncovered times could return `found:false` with a contradictory hint listing the same key. Worse, the miss-coverage probe reasoned over raw rows, so a caller below the classification ceiling could learn that hidden history or a hidden current row existed via `history_available:false` or the "Read the current entry" hint. `memory_read(as_of)` now treats explicit correction lineage as the only rewindable history *and* only reports uncovered-gap metadata when the caller is authorized to know that recorded gap exists at all; otherwise the result stays indistinguishable from an ordinary miss while still listing any visible sibling keys. Ordinary in-place state rewrites also advance `valid_from` strictly past the prior row boundary even when two writes land in the same millisecond, so past `as_of` reads cannot return rewritten current content. Pre-creation timestamps remain ordinary misses. The exact visible current `valid_from`/`updated_at` boundary can be round-tripped even when a same-millisecond monotonic timestamp is narrowly ahead of the server clock; arbitrary future timestamps and hidden future boundaries remain rejected. Explicit `supersedes` chains keep their half-open boundary semantics.
+
+- **`memory_delete` previews disclose and bind the full correction lineage
+  they will remove (#281).** A delete of a corrected state entry removes its
+  current revision *and* superseded revisions, but the preview previously
+  reported and fingerprinted only the current row. `state_count` now includes
+  every state revision that confirmation can delete, with
+  `current_state_count` and `historical_state_count` making that scope explicit;
+  the token fingerprint covers the same complete set. A classification- or
+  owner-scoped delete that would cut through a correction chain now fails
+  closed with `partial_lineage` before it issues a token, rather than presenting
+  a misleading partial preview and failing only at confirmation.
 
 - **`memory_delete` preview tokens are bound to the entries they previewed
   (#266).** A token carried only `{namespace, key, expiresAt}`, so a preview
@@ -32,6 +197,15 @@ changelog is the canonical record of what moved.
   *inside* the delete transaction rather than just before it, so a second
   connection committing between check and DELETE cannot reopen the same
   window.
+
+- **A reworded next step no longer reads as a completed commitment (#253).** A
+  commitment's identity was its normalized text, so editing a `## Next Steps`
+  line changed its fingerprint. Reconciliation then resolved the old row
+  `done` while inserting the reworded successor as `open`, so one live item
+  appeared in both buckets. An unambiguous, meaningfully similar rewording now
+  revises the existing row in place; issue references constrain matches but
+  cannot alone identify a step, and different non-empty reference sets never
+  pair. A genuinely removed step still resolves.
 
 ## [0.6.1] — 2026-07-25
 

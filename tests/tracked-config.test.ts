@@ -1,9 +1,11 @@
 import { describe, it, expect } from "vitest";
+import { namespacePrefixSuccessor } from "../src/internal/namespace-filter.js";
 import {
   DEFAULT_TRACKED_PATTERNS,
   REFERENCE_NAMESPACE_PATTERNS,
   UNTRACKED_NAMESPACE_MIN_ENTRIES,
   namespaceMatchesAnyPattern,
+  namespaceMatchesQueryScope,
   trackedPatternsToSqlLike,
   isTrackedNamespace,
   detectUntrackedNamespaces,
@@ -16,8 +18,13 @@ import {
 describe("trackedPatternsToSqlLike", () => {
   it("default patterns reproduce the historical projects/clients filter", () => {
     const { clause, params } = trackedPatternsToSqlLike(DEFAULT_TRACKED_PATTERNS, "namespace");
-    expect(clause).toBe("(namespace LIKE ? ESCAPE '\\' OR namespace LIKE ? ESCAPE '\\')");
-    expect(params).toEqual(["projects/%", "clients/%"]);
+    expect(clause).toBe("((namespace >= ? AND namespace < ?) OR (namespace >= ? AND namespace < ?))");
+    expect(params).toEqual([
+      "projects/",
+      namespacePrefixSuccessor("projects/")!,
+      "clients/",
+      namespacePrefixSuccessor("clients/")!,
+    ]);
   });
 
   it("empty patterns match nothing", () => {
@@ -34,14 +41,14 @@ describe("trackedPatternsToSqlLike", () => {
     expect(params).toEqual(["home/today"]);
   });
 
-  it("escapes LIKE metacharacters in a prefix", () => {
+  it("treats underscore literally in a prefix range", () => {
     const { params } = trackedPatternsToSqlLike(["a_b/*"], "namespace");
-    expect(params).toEqual(["a\\_b/%"]);
+    expect(params).toEqual(["a_b/", namespacePrefixSuccessor("a_b/")!]);
   });
 
   it("interpolates the caller-supplied column verbatim", () => {
     const { clause } = trackedPatternsToSqlLike(["projects/*"], "e.namespace");
-    expect(clause).toBe("(e.namespace LIKE ? ESCAPE '\\')");
+    expect(clause).toBe("((e.namespace >= ? AND e.namespace < ?))");
   });
 });
 
@@ -67,6 +74,15 @@ describe("namespaceMatchesAnyPattern / isTrackedNamespace", () => {
     expect(namespaceMatchesAnyPattern("a/b/c", ["a/b/*"])).toBe(true);
     expect(namespaceMatchesAnyPattern("a/b/c", ["a/b"])).toBe(false);
     expect(namespaceMatchesAnyPattern("x", [])).toBe(false);
+  });
+
+  it("matches namespace query scopes the same way derivation scans do", () => {
+    expect(namespaceMatchesQueryScope("projects/alpha", undefined)).toBe(true);
+    expect(namespaceMatchesQueryScope("projects/alpha", "projects/alpha")).toBe(true);
+    expect(namespaceMatchesQueryScope("projects/alpha/subtask", "projects/alpha")).toBe(true);
+    expect(namespaceMatchesQueryScope("projects/alphabet", "projects/alpha")).toBe(false);
+    expect(namespaceMatchesQueryScope("projects/alpha/subtask", "projects/alpha/")).toBe(true);
+    expect(namespaceMatchesQueryScope("projects/alpha", "projects/alpha/")).toBe(false);
   });
 });
 

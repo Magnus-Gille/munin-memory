@@ -55,7 +55,9 @@ The quick start generates four artifacts:
 
 Do not replace a client's entire existing configuration with an example. Merge
 only the Munin entry, restart the client, call `memory_orient`, and then inspect
-`onboarding/quickstart` with `memory_resume` or `memory_list`.
+`onboarding/quickstart` with `memory_resume` or `memory_list`. For a first-ever
+session on a tight host, start with `memory_orient(detail:"beginner")`; for a
+normal handshake, keep the default compact first call.
 
 ## Optional modes
 

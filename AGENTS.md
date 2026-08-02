@@ -39,6 +39,7 @@ Prefer these over expanding this file:
 - `memory_health` contract: `docs/memory-health-spec.md` and `docs/memory-health.schema.json`.
 - Hardware profile evidence: `docs/appliance-profiles.md` and `benchmark/ramfit/FINDINGS.md`.
 - Offsite backup and restore: `docs/offsite-backup.md`.
+- Public-safe near-site backup dependency contract and hermetic gate: `docs/backup-dependency-contract.md`.
 - Released behavior and migration notes: `CHANGELOG.md`.
 - Historical pre-pivot specs: `docs/archive/`; do not treat them as current direction.
 
@@ -96,7 +97,7 @@ All 24 names registered in `TOOL_DEFINITIONS` must appear exactly once in this t
 | `memory_orient` | Broad session handshake: dashboard, conventions, maintenance, namespace overview. |
 | `memory_resume` | Targeted continuation pack for a namespace or opener. |
 | `memory_extract` | Propose operations and optionally persist them to the principal-scoped review inbox; never approves them. |
-| `memory_review` | List, inspect, edit, approve, decline, or prepare reviewed undo for durable proposals. |
+| `memory_review` | List, inspect, preview, edit, decline, approve, or prepare reviewed undo for durable proposals. Successful preview responses expose optional `persisted_status`, `preview_wrote_memory:false`, `approval_would_write_memory`, `approval_status` (`would_write`/`would_conflict`/`duplicate_noop`/`not_approvable`), and optional `approval_error`; request-level preview errors such as `validation_error`, `not_found`, or `payload_expired` omit those effect fields. `approve` is the only memory-truth mutation. |
 | `memory_narrative` | Source-backed narrative and momentum view. |
 | `memory_commitments` | Surface open, at-risk, overdue, and completed commitments. |
 | `memory_patterns` | Derive reviewable patterns from decisions and outcomes. |

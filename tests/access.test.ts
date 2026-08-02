@@ -11,11 +11,21 @@ import {
   filterByAccess,
   principalHomePrefix,
   principalMetaNamespace,
+  resolveReadableNamespaceSelectors,
   resolveAccessContext,
   ownerContext,
   type AccessContext,
   type NamespaceRule,
 } from "../src/access.js";
+import {
+  intersectNamespaceSelectors,
+  matchesNamespaceSelectors,
+  matchesNamespaceSubtree,
+  namespaceFilterToSelectors,
+  normalizeNamespaceSelectors,
+  resolveNamespaceSelectorScope,
+  type NamespaceSelector,
+} from "../src/internal/namespace-filter.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -335,7 +345,254 @@ describe("filterByAccess", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 6. resolveAccessContext (DB fixture)
+// 6. namespace selector helpers
+// ---------------------------------------------------------------------------
+
+describe("namespace selector helpers", () => {
+  it("normalizes duplicates and exact selectors already covered by a prefix", () => {
+    expect(normalizeNamespaceSelectors([
+      { kind: "prefix", value: "projects/reports/" },
+      { kind: "exact", value: "projects/reports/child" },
+      { kind: "exact", value: "projects/reports" },
+      { kind: "exact", value: "projects/reports" },
+    ])).toEqual([
+      { kind: "prefix", value: "projects/reports/" },
+      { kind: "exact", value: "projects/reports" },
+    ]);
+  });
+
+  it("intersects exact, prefix, unrestricted, and empty selector sets deterministically", () => {
+    expect(intersectNamespaceSelectors(
+      [{ kind: "exact", value: "users/alice/meta" }],
+      [{ kind: "prefix", value: "users/alice/" }],
+    )).toEqual([{ kind: "exact", value: "users/alice/meta" }]);
+    expect(intersectNamespaceSelectors(
+      [{ kind: "prefix", value: "projects/reports/" }],
+      [{ kind: "exact", value: "projects/secret" }],
+    )).toEqual([]);
+    expect(intersectNamespaceSelectors(
+      null,
+      [{ kind: "exact", value: "users/alice/meta" }],
+    )).toEqual([{ kind: "exact", value: "users/alice/meta" }]);
+  });
+
+  it("resolves namespace and selector inputs by explicit intersection", () => {
+    expect(resolveNamespaceSelectorScope(
+      "projects/reports",
+      "subtree",
+      [{ kind: "prefix", value: "projects/" }],
+    )).toEqual([
+      { kind: "prefix", value: "projects/reports/" },
+      { kind: "exact", value: "projects/reports" },
+    ]);
+    expect(resolveNamespaceSelectorScope(
+      "projects/reports",
+      "exact",
+      null,
+    )).toEqual([{ kind: "exact", value: "projects/reports" }]);
+    expect(resolveNamespaceSelectorScope(
+      undefined,
+      "subtree",
+      [],
+    )).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. resolveReadableNamespaceSelectors
+// ---------------------------------------------------------------------------
+
+describe("resolveReadableNamespaceSelectors", () => {
+  const namespaceUniverse = [
+    "projects/reports",
+    "projects/reports/q1",
+    "projects/reports/private",
+    "projects/secret",
+    "shared/family/calendar",
+    "users/alice",
+    "users/alice/home",
+    "users/alice/home/today",
+    "users/alice/meta",
+    "users/alice/meta/config",
+    "users/bob",
+    "users/bob/meta",
+  ];
+
+  function applySelectorPrefilter(
+    selectors: NamespaceSelector[] | null,
+    namespaces: string[],
+  ): string[] {
+    return selectors === null
+      ? namespaces
+      : namespaces.filter((namespace) => matchesNamespaceSelectors(namespace, selectors));
+  }
+
+  function canonicalRequestedMatches(
+    ctx: AccessContext,
+    requestedNamespace: string | undefined,
+    namespaces: string[],
+  ): string[] {
+    return namespaces.filter((namespace) =>
+      canRead(ctx, namespace)
+      && (requestedNamespace === undefined || matchesNamespaceSubtree(namespace, requestedNamespace)),
+    );
+  }
+
+  it("owner resolves a bare namespace to exact-plus-descendants selectors", () => {
+    expect(resolveReadableNamespaceSelectors(ownerContext(), "projects/reports")).toEqual(
+      namespaceFilterToSelectors("projects/reports", "subtree"),
+    );
+  });
+
+  it.each([
+    {
+      name: "wildcard grants preserve the requested subtree exactly",
+      ctx: {
+        principalId: "agent",
+        principalType: "agent",
+        accessibleNamespaces: [{ pattern: "*", permissions: "read" }],
+      } satisfies AccessContext,
+      requestedNamespace: "projects/reports",
+      expectedSelectors: [
+        { kind: "prefix", value: "projects/reports/" },
+        { kind: "exact", value: "projects/reports" },
+      ] satisfies NamespaceSelector[],
+    },
+    {
+      name: "subtree grants keep bare-namespace requests descendant-only",
+      ctx: {
+        principalId: "alice",
+        principalType: "family",
+        accessibleNamespaces: [{ pattern: "users/alice/*", permissions: "rw" }],
+      } satisfies AccessContext,
+      requestedNamespace: "users/alice",
+      expectedSelectors: [
+        { kind: "prefix", value: "users/alice/" },
+      ] satisfies NamespaceSelector[],
+    },
+    {
+      name: "exact grants keep only the exact parent namespace",
+      ctx: {
+        principalId: "auditor",
+        principalType: "family",
+        accessibleNamespaces: [{ pattern: "projects/reports", permissions: "read" }],
+      } satisfies AccessContext,
+      requestedNamespace: "projects/reports",
+      expectedSelectors: [
+        { kind: "exact", value: "projects/reports" },
+      ] satisfies NamespaceSelector[],
+    },
+    {
+      name: "exact child grants survive a broader requested prefix",
+      ctx: {
+        principalId: "meta-reader",
+        principalType: "family",
+        accessibleNamespaces: [{ pattern: "users/alice/meta", permissions: "read" }],
+      } satisfies AccessContext,
+      requestedNamespace: "users/",
+      expectedSelectors: [
+        { kind: "exact", value: "users/alice/meta" },
+      ] satisfies NamespaceSelector[],
+    },
+    {
+      name: "home and meta grants stay representable together",
+      ctx: {
+        principalId: "alice",
+        principalType: "family",
+        accessibleNamespaces: [
+          { pattern: "users/alice", permissions: "read" },
+          { pattern: "users/alice/meta", permissions: "read" },
+          { pattern: "users/alice/home/*", permissions: "rw" },
+        ],
+      } satisfies AccessContext,
+      requestedNamespace: "users/",
+      expectedSelectors: [
+        { kind: "prefix", value: "users/alice/home/" },
+        { kind: "exact", value: "users/alice" },
+        { kind: "exact", value: "users/alice/meta" },
+      ] satisfies NamespaceSelector[],
+    },
+    {
+      name: "unsupported wildcard forms fail open to the requested subtree",
+      ctx: {
+        principalId: "legacy",
+        principalType: "external",
+        accessibleNamespaces: [{ pattern: "users/alice*", permissions: "read" }],
+      } satisfies AccessContext,
+      requestedNamespace: "users/alice",
+      expectedSelectors: [
+        { kind: "prefix", value: "users/alice/" },
+        { kind: "exact", value: "users/alice" },
+      ] satisfies NamespaceSelector[],
+    },
+    {
+      name: "write-only rules do not contribute readable selectors",
+      ctx: {
+        principalId: "writer",
+        principalType: "agent",
+        accessibleNamespaces: [{ pattern: "users/alice/*", permissions: "write" }],
+      } satisfies AccessContext,
+      requestedNamespace: "users/alice",
+      expectedSelectors: [] satisfies NamespaceSelector[],
+    },
+  ])("$name", ({ ctx, requestedNamespace, expectedSelectors }) => {
+    const selectors = resolveReadableNamespaceSelectors(ctx, requestedNamespace);
+    const prefiltered = applySelectorPrefilter(selectors, namespaceUniverse);
+    const canonical = canonicalRequestedMatches(ctx, requestedNamespace, namespaceUniverse);
+
+    expect(selectors).toEqual(expectedSelectors);
+    expect(prefiltered).toEqual(expect.arrayContaining(canonical));
+  });
+
+  it("fails open to unrestricted SQL narrowing when an unsupported readable rule is queried without a namespace", () => {
+    const ctx: AccessContext = {
+      principalId: "legacy",
+      principalType: "external",
+      accessibleNamespaces: [{ pattern: "users/alice*", permissions: "read" }],
+    };
+
+    const selectors = resolveReadableNamespaceSelectors(ctx);
+
+    expect(selectors).toBeNull();
+    expect(applySelectorPrefilter(selectors, namespaceUniverse)).toEqual(namespaceUniverse);
+  });
+
+  it("preserves representable home/meta grants on an unscoped read", () => {
+    const ctx: AccessContext = {
+      principalId: "alice",
+      principalType: "family",
+      accessibleNamespaces: [
+        { pattern: "users/alice", permissions: "read" },
+        { pattern: "users/alice/meta", permissions: "read" },
+        { pattern: "users/alice/home/*", permissions: "rw" },
+      ],
+    };
+
+    const selectors = resolveReadableNamespaceSelectors(ctx);
+    const prefiltered = applySelectorPrefilter(selectors, namespaceUniverse);
+    const canonical = canonicalRequestedMatches(ctx, undefined, namespaceUniverse);
+
+    expect(selectors).toEqual([
+      { kind: "prefix", value: "users/alice/home/" },
+      { kind: "exact", value: "users/alice" },
+      { kind: "exact", value: "users/alice/meta" },
+    ]);
+    expect(prefiltered).toEqual(expect.arrayContaining(canonical));
+  });
+
+  it("returns an empty selector set when there is no readable overlap", () => {
+    const ctx: AccessContext = {
+      principalId: "nobody",
+      principalType: "external",
+      accessibleNamespaces: [{ pattern: "users/alice/*", permissions: "read" }],
+    };
+
+    expect(resolveReadableNamespaceSelectors(ctx, "projects/secret")).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 8. resolveAccessContext (DB fixture)
 // ---------------------------------------------------------------------------
 
 describe("resolveAccessContext", () => {
