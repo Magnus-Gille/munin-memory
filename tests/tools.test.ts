@@ -73,6 +73,31 @@ function parseToolResponse(response: unknown): unknown {
   return JSON.parse(resp.content[0].text);
 }
 
+function snapshotValidationSideEffects() {
+  const count = (table: string) => (
+    db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }
+  ).count;
+
+  return {
+    entries: count("entries"),
+    audit_log: count("audit_log"),
+    commitments: count("commitments"),
+    retrieval_outcomes: count("retrieval_outcomes"),
+    entry_intake: count("entry_intake"),
+    redaction_log: count("redaction_log"),
+  };
+}
+
+function countToolCalls(): number {
+  return (
+    db.prepare("SELECT COUNT(*) AS count FROM tool_calls").get() as { count: number }
+  ).count;
+}
+
+function countDashboardEntries(dashboard: Record<string, unknown[]>): number {
+  return Object.values(dashboard).reduce((sum, entries) => sum + entries.length, 0);
+}
+
 async function seedRetrospectiveCommitmentRow(namespace: string, content: string, suffix: string) {
   const logRaw = await callTool("memory_log", {
     namespace,
@@ -1441,6 +1466,324 @@ describe("memory_update_status valid_until (#217)", () => {
     const entry = parseToolResponse(readRaw) as { content: string; valid_until?: string };
     expect(entry.content).toContain("Starting with a review horizon");
     expect(entry.valid_until).toBe("2028-01-15T00:00:00.000Z");
+  });
+});
+
+describe("memory_update_status validate_only (#275)", () => {
+  const sandboxCtx: AccessContext = {
+    principalId: "principal:sandbox",
+    principalType: "family",
+    accessibleNamespaces: [{ pattern: "testing/sandbox/*", permissions: "rw" }],
+    maxClassification: "internal",
+    transportType: "consumer",
+  };
+
+  it("keeps tracked-only writes but allows validate_only in an authorized sandbox namespace without memory-state side effects", async () => {
+    const sandboxCall = makeContextCallTool(sandboxCtx);
+    const rejected = parseToolResponse(await sandboxCall("memory_update_status", {
+      namespace: "testing/sandbox/issue-275",
+      phase: "Active",
+      lifecycle: "active",
+    })) as { error?: string; message?: string };
+    expect(rejected.error).toBe("validation_error");
+    expect(rejected.message ?? "").toContain("configured tracked namespaces");
+
+    const before = snapshotValidationSideEffects();
+    const telemetryBefore = countToolCalls();
+    const raw = await sandboxCall("memory_update_status", {
+      namespace: "testing/sandbox/issue-275",
+      phase: "Active",
+      current_work: "Validate sandbox status updates",
+      blockers: "None.",
+      next_steps: ["Run the validator"],
+      lifecycle: "active",
+      valid_until: "2027-01-15T09:00:00+01:00",
+      validate_only: true,
+    });
+    const result = parseToolResponse(raw) as {
+      status: string;
+      validate_only: boolean;
+      wrote: boolean;
+      would_write: string;
+      key: string;
+      classification: string;
+      valid_until?: string | null;
+      content?: string;
+      structured_status?: { next_steps: string[] };
+    };
+
+    expect(result).toMatchObject({
+      status: "validated",
+      validate_only: true,
+      wrote: false,
+      would_write: "create",
+      key: "status",
+      classification: "internal",
+      valid_until: "2027-01-15T08:00:00.000Z",
+    });
+    expect(result.content).toContain("## Phase");
+    expect(result.structured_status?.next_steps).toEqual(["Run the validator"]);
+    expect(snapshotValidationSideEffects()).toEqual(before);
+    expect(countToolCalls()).toBe(telemetryBefore + 1);
+
+    const read = parseToolResponse(await sandboxCall("memory_read", {
+      namespace: "testing/sandbox/issue-275",
+      key: "status",
+    })) as { found: boolean };
+    expect(read.found).toBe(false);
+
+    const orient = parseToolResponse(await sandboxCall("memory_orient", {})) as {
+      dashboard: Record<string, unknown[]>;
+    };
+    expect(countDashboardEntries(orient.dashboard)).toBe(0);
+  });
+
+  it("withholds preview content during validate_only when the caller cannot read the namespace", async () => {
+    const writeOnlyCall = makeContextCallTool({
+      ...sandboxCtx,
+      principalId: "principal:write-only",
+      accessibleNamespaces: [{ pattern: "testing/write-only/*", permissions: "write" }],
+    });
+
+    const before = snapshotValidationSideEffects();
+    const raw = await writeOnlyCall("memory_update_status", {
+      namespace: "testing/write-only/issue-275",
+      phase: "Active",
+      current_work: "Do not leak this preview",
+      lifecycle: "active",
+      validate_only: true,
+    });
+    const result = parseToolResponse(raw) as {
+      status: string;
+      wrote: boolean;
+      message?: string;
+      content?: string;
+      structured_status?: unknown;
+    };
+
+    expect(result.status).toBe("validated");
+    expect(result.wrote).toBe(false);
+    expect(result.content).toBeUndefined();
+    expect(result.structured_status).toBeUndefined();
+    expect(result.message).toBe("Content was withheld per read authorization.");
+    expect(snapshotValidationSideEffects()).toEqual(before);
+  });
+
+  it("enforces namespace authorization without access-denial telemetry while retaining ordinary call telemetry", async () => {
+    const sandboxCall = makeContextCallTool(sandboxCtx);
+    const before = snapshotValidationSideEffects();
+    const telemetryBefore = countToolCalls();
+    const raw = await sandboxCall("memory_update_status", {
+      namespace: "testing/denied/issue-275",
+      phase: "Active",
+      lifecycle: "active",
+      validate_only: true,
+    });
+    const result = parseToolResponse(raw) as { found?: boolean; error?: string };
+
+    expect(result).toEqual({ ok: true, action: "update_status", found: false });
+    expect(snapshotValidationSideEffects()).toEqual(before);
+    expect(countToolCalls()).toBe(telemetryBefore + 1);
+  });
+
+  it("rejects a non-boolean validate_only value instead of treating it as truthy", async () => {
+    const sandboxCall = makeContextCallTool(sandboxCtx);
+    const before = snapshotValidationSideEffects();
+    const raw = await sandboxCall("memory_update_status", {
+      namespace: "testing/sandbox/non-boolean",
+      phase: "Active",
+      lifecycle: "active",
+      validate_only: "false",
+    });
+    const result = parseToolResponse(raw) as { error?: string; message?: string };
+
+    expect(result.error).toBe("validation_error");
+    expect(result.message).toBe("validate_only must be a boolean.");
+    expect(snapshotValidationSideEffects()).toEqual(before);
+  });
+
+  it("rejects malformed lifecycle during validate_only without writing", async () => {
+    const sandboxCall = makeContextCallTool(sandboxCtx);
+    const before = snapshotValidationSideEffects();
+    const raw = await sandboxCall("memory_update_status", {
+      namespace: "testing/sandbox/invalid-lifecycle",
+      phase: "Active",
+      lifecycle: "banana",
+      validate_only: true,
+    });
+    const result = parseToolResponse(raw) as { error?: string; message?: string };
+
+    expect(result.error).toBe("validation_error");
+    expect(result.message ?? "").toContain("lifecycle");
+    expect(snapshotValidationSideEffects()).toEqual(before);
+  });
+
+  it("rejects malformed valid_until during validate_only without writing", async () => {
+    const sandboxCall = makeContextCallTool(sandboxCtx);
+    const before = snapshotValidationSideEffects();
+    const raw = await sandboxCall("memory_update_status", {
+      namespace: "testing/sandbox/invalid-valid-until",
+      phase: "Active",
+      lifecycle: "active",
+      valid_until: "next tuesday",
+      validate_only: true,
+    });
+    const result = parseToolResponse(raw) as { error?: string; message?: string };
+
+    expect(result.error).toBe("validation_error");
+    expect(result.message ?? "").toContain("valid_until");
+    expect(snapshotValidationSideEffects()).toEqual(before);
+  });
+
+  it("preserves create/update CAS semantics during validate_only without writing", async () => {
+    const sandboxCall = makeContextCallTool(sandboxCtx);
+
+    const createBefore = snapshotValidationSideEffects();
+    const createRaw = await sandboxCall("memory_update_status", {
+      namespace: "testing/sandbox/cas-preview",
+      phase: "Active",
+      lifecycle: "active",
+      expected_updated_at: "2026-01-01T00:00:00.000Z",
+      validate_only: true,
+    });
+    const createResult = parseToolResponse(createRaw) as {
+      status: string;
+      wrote: boolean;
+      would_write: string;
+    };
+    expect(createResult).toMatchObject({
+      status: "validated",
+      wrote: false,
+      would_write: "create",
+    });
+    expect(snapshotValidationSideEffects()).toEqual(createBefore);
+
+    await sandboxCall("memory_write", {
+      namespace: "testing/sandbox/cas-preview",
+      key: "status",
+      content: "## Phase\nActive\n\n## Current Work\nStored status",
+      tags: ["active"],
+    });
+    const existing = parseToolResponse(await sandboxCall("memory_read", {
+      namespace: "testing/sandbox/cas-preview",
+      key: "status",
+    })) as { updated_at: string; content: string };
+
+    const updateBefore = snapshotValidationSideEffects();
+    const updateRaw = await sandboxCall("memory_update_status", {
+      namespace: "testing/sandbox/cas-preview",
+      current_work: "Previewed update",
+      expected_updated_at: existing.updated_at,
+      validate_only: true,
+    });
+    const updateResult = parseToolResponse(updateRaw) as {
+      status: string;
+      wrote: boolean;
+      would_write: string;
+    };
+    expect(updateResult).toMatchObject({
+      status: "validated",
+      wrote: false,
+      would_write: "update",
+    });
+    expect(snapshotValidationSideEffects()).toEqual(updateBefore);
+
+    const conflictBefore = snapshotValidationSideEffects();
+    const conflictRaw = await sandboxCall("memory_update_status", {
+      namespace: "testing/sandbox/cas-preview",
+      current_work: "Must conflict",
+      expected_updated_at: "2020-01-01T00:00:00.000Z",
+      validate_only: true,
+    });
+    const conflict = parseToolResponse(conflictRaw) as { error?: string; conflict_reason?: string };
+    expect(conflict.error).toBe("conflict");
+    expect(conflict.conflict_reason).toBe("version_mismatch");
+    expect(snapshotValidationSideEffects()).toEqual(conflictBefore);
+
+    const after = parseToolResponse(await sandboxCall("memory_read", {
+      namespace: "testing/sandbox/cas-preview",
+      key: "status",
+    })) as { content: string; updated_at: string };
+    expect(after).toEqual(existing);
+  });
+
+  it("uses preview-safe wording when validate_only would replace a legacy free-form status without mutating it", async () => {
+    const sandboxCall = makeContextCallTool(sandboxCtx);
+
+    await sandboxCall("memory_write", {
+      namespace: "testing/sandbox/legacy-preview",
+      key: "status",
+      content: "Legacy free-form sandbox status with no canonical sections.",
+      tags: ["active"],
+    });
+    const before = parseToolResponse(await sandboxCall("memory_read", {
+      namespace: "testing/sandbox/legacy-preview",
+      key: "status",
+    })) as { content: string; updated_at: string };
+
+    const raw = await sandboxCall("memory_update_status", {
+      namespace: "testing/sandbox/legacy-preview",
+      phase: "Active",
+      current_work: "Preview canonical replacement",
+      blockers: "None.",
+      next_steps: ["Verify preview wording"],
+      lifecycle: "active",
+      validate_only: true,
+    });
+    const result = parseToolResponse(raw) as {
+      status: string;
+      wrote: boolean;
+      warnings?: string[];
+      content?: string;
+    };
+
+    expect(result.status).toBe("validated");
+    expect(result.wrote).toBe(false);
+    expect(result.warnings).toContain(
+      "Existing status was in a legacy free-form format; it would be replaced with the canonical structured format from the fields you supplied.",
+    );
+    expect(result.warnings ?? []).not.toContain(
+      "Existing status was in a legacy free-form format; it has been replaced with the canonical structured format from the fields you supplied.",
+    );
+    expect(result.content).toContain("## Phase");
+
+    const after = parseToolResponse(await sandboxCall("memory_read", {
+      namespace: "testing/sandbox/legacy-preview",
+      key: "status",
+    })) as { content: string; updated_at: string };
+    expect(after).toEqual(before);
+  });
+
+  it("uses past-tense wording when a real tracked-namespace update replaces a legacy free-form status", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/legacy-live",
+      key: "status",
+      content: "Legacy free-form tracked status with no canonical sections.",
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_update_status", {
+      namespace: "projects/legacy-live",
+      phase: "Active",
+      current_work: "Apply canonical replacement",
+      blockers: "None.",
+      next_steps: ["Verify mutation wording"],
+      lifecycle: "active",
+    });
+    const result = parseToolResponse(raw) as {
+      status: string;
+      warnings?: string[];
+      content?: string;
+    };
+
+    expect(result.status).toBe("updated");
+    expect(result.warnings).toContain(
+      "Existing status was in a legacy free-form format; it has been replaced with the canonical structured format from the fields you supplied.",
+    );
+    expect(result.warnings ?? []).not.toContain(
+      "Existing status was in a legacy free-form format; it would be replaced with the canonical structured format from the fields you supplied.",
+    );
+    expect(result.content).toContain("## Phase");
   });
 });
 
@@ -7176,6 +7519,54 @@ describe("compare-and-swap (memory_write)", () => {
       expect(toolsByName.get(toolName)?.inputSchema.properties?.valid_until?.type)
         .toEqual(expect.arrayContaining(["string", "null"]));
     }
+  });
+
+  it("advertises validate_only as a boolean for memory_update_status", async () => {
+    const handler = (
+      server as unknown as { _requestHandlers: Map<string, Function> }
+    )._requestHandlers?.get("tools/list");
+    const toolList = await handler!({ method: "tools/list", params: {} });
+    const toolsByName = new Map(
+      (toolList as {
+        tools: Array<{
+          name: string;
+          inputSchema: { properties?: Record<string, { type?: string | string[] }> };
+        }>;
+      }).tools.map((tool) => [tool.name, tool]),
+    );
+
+    expect(toolsByName.get("memory_update_status")?.inputSchema.properties?.validate_only?.type)
+      .toBe("boolean");
+  });
+
+  it("documents tracked-only mutation vs writable-namespace validate_only for memory_update_status", async () => {
+    const handler = (
+      server as unknown as { _requestHandlers: Map<string, Function> }
+    )._requestHandlers?.get("tools/list");
+    const toolList = await handler!({ method: "tools/list", params: {} });
+    const toolsByName = new Map(
+      (toolList as {
+        tools: Array<{
+          name: string;
+          inputSchema: { properties?: Record<string, { description?: string }> };
+        }>;
+      }).tools.map((tool) => [tool.name, tool]),
+    );
+
+    const toolDescription = toolsByName.get("memory_update_status")?.description;
+    expect(toolDescription).toContain("validate_only:true");
+    expect(toolDescription).toContain("may target any authorized namespace");
+    expect(toolDescription).toContain("real mutations remain restricted to tracked namespaces");
+    expect(toolDescription).not.toContain(
+      "Update a tracked status entry in `projects/*` or `clients/*` namespaces only.",
+    );
+
+    const namespaceDescription = toolsByName.get("memory_update_status")
+      ?.inputSchema.properties?.namespace?.description;
+    expect(namespaceDescription).toContain("Real mutations");
+    expect(namespaceDescription).toContain("validate_only:true");
+    expect(namespaceDescription).toContain("any writable namespace");
+    expect(namespaceDescription).toContain("tracked namespace");
   });
 
   it("documents the exact visible boundary exception for temporal parameters", async () => {

@@ -68,6 +68,7 @@ export interface StatusUpdateParams {
   notes?: string;
   lifecycle?: "active" | "blocked" | "completed" | "stopped" | "maintenance" | "archived";
   valid_until?: string | null;
+  validate_only?: boolean;
   expected_updated_at?: string;
   classification?: ClassificationLevel;
   classification_override?: boolean;
@@ -219,7 +220,7 @@ export interface AuditSyncParams {
 // Tool response types
 
 export interface WriteResponse {
-  status: "created" | "updated" | "superseded" | "conflict";
+  status: "created" | "updated" | "superseded" | "conflict" | "validated";
   id?: string;
   namespace: string;
   key: string;
@@ -235,6 +236,12 @@ export interface WriteResponse {
 }
 
 export interface StatusUpdateResponse extends WriteResponse {
+  valid_until?: string | null;
+  classification?: ClassificationLevel;
+  provenance?: EntryProvenance;
+  validate_only?: boolean;
+  wrote?: boolean;
+  would_write?: "create" | "update";
   content?: string;
   updated_at?: string;
   structured_status?: {
@@ -244,6 +251,10 @@ export interface StatusUpdateResponse extends WriteResponse {
     next_steps: string[];
     notes?: string;
   };
+  /** Set when stored or previewed content is instruction-shaped or tagged `untrusted`/`source:external`. (#150) */
+  untrusted_content?: boolean;
+  /** Human-readable provenance notice when untrusted_content is true. (#150) */
+  content_provenance_notice?: string;
 }
 
 export interface DashboardSynthesis {

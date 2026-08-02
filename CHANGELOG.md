@@ -10,6 +10,19 @@ changelog is the canonical record of what moved.
 
 ### Changed
 
+- **`memory_update_status` now supports non-mutating sandbox validation via `validate_only: true` (#275).**
+  The normal mutation path is unchanged: real `memory_update_status` writes still require one
+  of the caller's tracked namespaces and still create the usual state/audit/commitment effects.
+  The new dry-run mode executes the same namespace authorization, lifecycle normalization,
+  classification floor/visibility checks, secret and parameter-markup scans, `valid_until`
+  normalization, legacy-status guards, and CAS/create-vs-update preconditions, but it never
+  writes an entry, audit row, commitment, retrieval outcome, intake row, redaction row,
+  or access-denied telemetry. Ordinary content-blind tool-call telemetry remains enabled so
+  dry-run use and failures stay observable. Successful dry runs return
+  `status: "validated"`, `wrote: false`,
+  `would_write: "create" | "update"`, and the normalized prospective metadata. Read-visible
+  callers also receive the previewed `content` / `structured_status`; write-only callers get
+  the same generic withholding notice used by the real mutation response.
 - **`memory_orient` now has a total response budget, a beginner mode, and an
   explicit response marker (#277).** The per-group dashboard caps from #254
   still left `standard` responses large enough to blow past host output limits
