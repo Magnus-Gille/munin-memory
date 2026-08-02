@@ -228,6 +228,8 @@ export interface WriteResponse {
   updated_at?: string;
   valid_from?: string;
   supersedes?: string;
+  classification?: ClassificationLevel;
+  classification_provisional?: boolean;
   warnings?: string[];
   intake?: IntakeResult;
 }
@@ -419,6 +421,7 @@ export interface LogResponse {
   valid_from?: string;
   supersedes?: string;
   classification?: ClassificationLevel;
+  classification_provisional?: boolean;
   provenance?: EntryProvenance;
   warnings?: string[];
   intake?: IntakeResult;

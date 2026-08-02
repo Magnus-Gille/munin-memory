@@ -5101,7 +5101,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_write",
     description:
-      "Successful full writes return a local, bounded, authorization-filtered advisory `intake` report for duplicate keys, overlap/consolidation candidates, sparse content, tag drift, and deep namespaces. Intake never blocks the write.\n\n" +
+      "Successful full writes return a local, bounded, authorization-filtered advisory `intake` report for duplicate keys, overlap/consolidation candidates, sparse content, tag drift, and deep namespaces. Intake never blocks the write. The response also returns the stored `classification`; if `classification_provisional: true`, that value may still be raised later by optional Librarian classification work, and the write intentionally did not wait for it.\n\n" +
       "Store or update a state entry in memory. If an entry with the same namespace+key exists, it will be overwritten. Use this for mutable facts and non-tracked state. For `status` entries under `projects/*` or `clients/*`, prefer `memory_update_status`. A full write of an existing tracked status preserves its lifecycle if you omit lifecycle tags; supply one lifecycle tag to change it. `tags: []` cannot remove an existing tracked lifecycle. Optional `valid_until` adds soft expiry for temporary state; direct reads still work after expiry, but broad search hides expired state by default. To preserve a wrong or outdated value as historical evidence, pass its UUID in `supersedes` together with its exact `expected_updated_at`; Munin creates a new revision and normal retrieval hides the predecessor.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.\n\nNamespace conventions: projects/<name> for project state, people/<name> for context about people, decisions/<topic> for cross-cutting decisions, meta/<topic> for system notes.\n\nKey conventions: 'status' = compact resumption summary (Phase / Current work / Blockers / Next — keep brief, move details to other keys like 'architecture', 'workflow', 'research'). 'index' = directory of important keys in this namespace and their purpose.\n\nTag vocabulary: Use canonical lifecycle tags on status entries: active, blocked, completed, stopped, maintenance, archived. Aliases are auto-normalized (done→completed, paused→stopped, inactive→archived). Category tags: decision, architecture, preference, milestone, convention. Type tags: bug, feature, research. Prefixed tags for cross-referencing: client:<name>, person:<name>, topic:<topic>, type:<artifact> (pdf, presentation, meeting-notes), source:external/internal.\n\nThe project dashboard is computed automatically from status entries with lifecycle tags. No manual workbench maintenance needed. Compare-and-swap via expected_updated_at is OPTIONAL and supported for any state write (all namespaces), not only 'status' in projects/* or clients/*; omit it for a plain write — only pass it when you want the write to fail if the entry changed since your last read. For an atomic first write, pass create_if_absent:true instead: exactly one competing writer creates the key, while losers receive error:'conflict', conflict_reason:'already_exists', and current_updated_at. Do not combine create_if_absent:true with expected_updated_at or patch.\n\nTo start a new project: (1) write projects/<name>/status with a lifecycle tag (e.g. 'active'), (2) optionally write projects/<name>/index listing the keys.",
     inputSchema: {
       type: "object" as const,
@@ -5182,7 +5182,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_update_status",
     description:
-      "Update a tracked status entry in `projects/*` or `clients/*` namespaces only. Uses a server-enforced structure with canonical sections: Phase, Current Work, Blockers, Next Steps, and optional Notes. Prefer this over `memory_write` for status updates — it supports reliable partial updates without read-modify-write on markdown blobs. Optional `valid_until` sets or clears a soft-expiry review horizon; expired statuses remain available to direct reads, are surfaced by `memory_attention` with `include_expiring`, and are hidden from broad search by default.\n\nCall this only when the project's phase, current work, blockers, next steps, lifecycle, or review horizon actually changes — NOT after every `memory_log`. Logging a decision and updating the status are independent: log the decision (history), and separately update the status only if the change moves the project's current state. Every field is optional; supply just the sections that changed. Compare-and-swap (`expected_updated_at`) is optional — omit it for an unconditional update. Status changes are not auto-logged; call `memory_log` separately when recording a decision or milestone.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
+      "Update a tracked status entry in `projects/*` or `clients/*` namespaces only. Uses a server-enforced structure with canonical sections: Phase, Current Work, Blockers, Next Steps, and optional Notes. Prefer this over `memory_write` for status updates — it supports reliable partial updates without read-modify-write on markdown blobs. Optional `valid_until` sets or clears a soft-expiry review horizon; expired statuses remain available to direct reads, are surfaced by `memory_attention` with `include_expiring`, and are hidden from broad search by default. The response returns the stored `classification`; if `classification_provisional: true`, that value may still be raised later by optional Librarian classification work, and the update intentionally did not wait for it.\n\nCall this only when the project's phase, current work, blockers, next steps, lifecycle, or review horizon actually changes — NOT after every `memory_log`. Logging a decision and updating the status are independent: log the decision (history), and separately update the status only if the change moves the project's current state. Every field is optional; supply just the sections that changed. Compare-and-swap (`expected_updated_at`) is optional — omit it for an unconditional update. Status changes are not auto-logged; call `memory_log` separately when recording a decision or milestone.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -5430,7 +5430,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_log",
     description:
-      "Successful log writes return the same non-blocking, authorization-filtered advisory `intake` report as full state writes.\n\n" +
+      "Successful log writes return the same non-blocking, authorization-filtered advisory `intake` report as full state writes. The response also returns the stored `classification`; if `classification_provisional: true`, that value may still be raised later by optional Librarian classification work, and the append intentionally did not wait for it.\n\n" +
       "Append a chronological log entry. Log entries are immutable and timestamped. Use for decisions, events, and milestones with rationale. To correct a log without editing it, pass its UUID in `supersedes` with its exact `expected_updated_at`; Munin appends a successor and hides the predecessor from normal retrieval while preserving direct historical access. Status changes do NOT auto-log — log explicitly when decisions are made. Pair with memory_write: state entries hold current truth, log entries hold the history of how you got there.\n\nTag vocabulary: Use canonical tags — decision, milestone, blocker, discovery, correction. Add at most one freeform tag when it clearly improves retrieval.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
@@ -8256,7 +8256,6 @@ export function registerTools(
 
               const isTrackedStatus = key === "status" && isTrackedNamespace(namespace, resolveTrackedPatterns(db, ctx));
               const existing = readState(db, namespace, key);
-
               // #167: memory_write is a documented migration path for tracked
               // status entries, so apply the same parameter-markup guard here —
               // otherwise leaked `</parameter>` markup in `content` could swallow
@@ -8408,6 +8407,7 @@ export function registerTools(
                 key,
                 updated_at: result.updated_at,
                 classification: result.classification,
+                classification_provisional: result.classification_provisional || undefined,
                 valid_from: result.status === "superseded" ? result.valid_from : undefined,
                 supersedes: result.status === "superseded" ? result.supersedes : undefined,
                 intake: intakeResult,
@@ -8715,6 +8715,7 @@ export function registerTools(
                 updated_at: result.updated_at,
                 valid_until: statusEntry?.valid_until ?? null,
                 classification: result.classification,
+                classification_provisional: result.classification_provisional || undefined,
                 warnings: warnings.length > 0 ? warnings : undefined,
                 provenance: buildProvenance(ctx.principalId, ctx.principalId),
               };
@@ -9661,6 +9662,7 @@ export function registerTools(
                 timestamp: "timestamp" in result ? result.timestamp : result.updated_at,
                 timestamp_local: toLocalDisplay("timestamp" in result ? result.timestamp : result.updated_at),
                 classification: result.classification,
+                classification_provisional: result.classification_provisional || undefined,
                 valid_from: "valid_from" in result ? result.valid_from : undefined,
                 supersedes: "supersedes" in result ? result.supersedes : undefined,
                 intake: logIntakeResult,

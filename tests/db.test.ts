@@ -413,6 +413,42 @@ describe("writeState + readState", () => {
     expect(JSON.parse(entry!.tags)).toContain("classification:client-confidential");
   });
 
+  it("marks floor-defaulted classifications as provisional without blocking the write (#263)", () => {
+    const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+    try {
+      const result = writeState(
+        db,
+        "projects/test",
+        "status",
+        "default floor classification",
+        ["active"],
+      ) as {
+        status: string;
+        id?: string;
+        classification?: string;
+        classification_provisional?: boolean;
+      };
+
+      expect(result).toMatchObject({
+        status: "created",
+        classification: "internal",
+        classification_provisional: true,
+      });
+
+      const audit = db.prepare(
+        "SELECT detail FROM audit_log WHERE entry_id = ?",
+      ).get(result.id) as { detail: string };
+      expect(audit.detail).toContain("classification_provisional internal");
+    } finally {
+      if (previousLibrarian === undefined) {
+        delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      } else {
+        process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
+      }
+    }
+  });
+
   it("defaults client namespaces to client-confidential", () => {
     writeState(db, "clients/acme", "notes", "hello", []);
     const entry = readState(db, "clients/acme", "notes");

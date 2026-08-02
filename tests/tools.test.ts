@@ -259,6 +259,113 @@ describe("memory_write", () => {
     expect(entry.tags).toContain("classification:client-confidential");
   });
 
+  it("marks floor-defaulted write classifications as provisional without blocking the write (#263)", async () => {
+    const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+    try {
+      const raw = await callTool("memory_write", {
+        namespace: "projects/classification-response",
+        key: "notes",
+        content: "Returned classification is a floor default until the optional classifier settles.",
+        tags: ["active"],
+      });
+      const result = parseToolResponse(raw) as {
+        status: string;
+        id: string;
+        classification: string;
+        classification_provisional?: boolean;
+      };
+
+      expect(result).toMatchObject({
+        status: "created",
+        classification: "internal",
+        classification_provisional: true,
+      });
+
+      const stored = db.prepare(
+        "SELECT classification FROM entries WHERE id = ?",
+      ).get(result.id) as { classification: string };
+      expect(stored.classification).toBe("internal");
+
+      const audit = db.prepare(
+        "SELECT detail FROM audit_log WHERE entry_id = ?",
+      ).get(result.id) as { detail: string };
+      expect(audit.detail).toContain("classification_provisional internal");
+    } finally {
+      if (previousLibrarian === undefined) {
+        delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      } else {
+        process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
+      }
+    }
+  });
+
+  it("keeps caller-set classifications provisional when the Librarian can still escalate them (#263)", async () => {
+    const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+    try {
+      const raw = await callTool("memory_write", {
+        namespace: "projects/classification-explicit",
+        key: "notes",
+        content: "Caller-selected classification may still be raised by content classification.",
+        classification: "client-confidential",
+      });
+      const result = parseToolResponse(raw) as {
+        status: string;
+        id: string;
+        classification: string;
+        classification_provisional?: boolean;
+      };
+
+      expect(result).toMatchObject({
+        status: "created",
+        classification: "client-confidential",
+        classification_provisional: true,
+      });
+
+      const audit = db.prepare(
+        "SELECT detail FROM audit_log WHERE entry_id = ?",
+      ).get(result.id) as { detail: string };
+      expect(audit.detail).toContain("classification_provisional client-confidential");
+    } finally {
+      if (previousLibrarian === undefined) {
+        delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      } else {
+        process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
+      }
+    }
+  });
+
+  it("does not mark the top classification as provisional because it cannot escalate (#263)", async () => {
+    const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+    try {
+      const raw = await callTool("memory_write", {
+        namespace: "projects/classification-settled",
+        key: "notes",
+        content: "Already at the top of the classification lattice.",
+        classification: "client-restricted",
+      });
+      const result = parseToolResponse(raw) as {
+        status: string;
+        classification: string;
+        classification_provisional?: boolean;
+      };
+
+      expect(result).toMatchObject({
+        status: "created",
+        classification: "client-restricted",
+      });
+      expect(result.classification_provisional).toBeUndefined();
+    } finally {
+      if (previousLibrarian === undefined) {
+        delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      } else {
+        process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
+      }
+    }
+  });
+
   it("rejects writes below the namespace floor without override", async () => {
     const raw = await callTool("memory_write", {
       namespace: "clients/acme",
@@ -585,6 +692,44 @@ describe("memory_update_status", () => {
     const entry = parseToolResponse(readRaw) as { classification: string; tags: string[] };
     expect(entry.classification).toBe("client-confidential");
     expect(entry.tags).toContain("classification:client-confidential");
+  });
+
+  it("marks tracked-status classifications as provisional when classification is not explicit (#263)", async () => {
+    const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+    try {
+      const raw = await callTool("memory_update_status", {
+        namespace: "projects/status-provisional",
+        phase: "Active",
+        current_work: "Waiting for optional classification settlement.",
+        blockers: "None.",
+        next_steps: ["Keep the write non-blocking"],
+        lifecycle: "active",
+      });
+      const result = parseToolResponse(raw) as {
+        status: string;
+        id: string;
+        classification: string;
+        classification_provisional?: boolean;
+      };
+
+      expect(result).toMatchObject({
+        status: "created",
+        classification: "internal",
+        classification_provisional: true,
+      });
+
+      const audit = db.prepare(
+        "SELECT detail FROM audit_log WHERE entry_id = ?",
+      ).get(result.id) as { detail: string };
+      expect(audit.detail).toContain("classification_provisional internal");
+    } finally {
+      if (previousLibrarian === undefined) {
+        delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      } else {
+        process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
+      }
+    }
   });
 
   it("preserves non-canonical sections (Vision, Roadmap, Milestones) across patches (#44)", async () => {
@@ -3368,6 +3513,46 @@ describe("memory_log", () => {
     const entry = parseToolResponse(getRaw) as { classification: string; tags: string[] };
     expect(entry.classification).toBe("client-confidential");
     expect(entry.tags).toContain("classification:client-confidential");
+  });
+
+  it("marks floor-defaulted log classifications as provisional without blocking the write (#263)", async () => {
+    const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+    try {
+      const raw = await callTool("memory_log", {
+        namespace: "projects/log-provisional",
+        content: "Classification may still be raised by the optional Librarian worker.",
+        tags: ["decision"],
+      });
+      const result = parseToolResponse(raw) as {
+        status: string;
+        id: string;
+        classification: string;
+        classification_provisional?: boolean;
+      };
+
+      expect(result).toMatchObject({
+        status: "logged",
+        classification: "internal",
+        classification_provisional: true,
+      });
+
+      const stored = db.prepare(
+        "SELECT classification FROM entries WHERE id = ?",
+      ).get(result.id) as { classification: string };
+      expect(stored.classification).toBe("internal");
+
+      const audit = db.prepare(
+        "SELECT detail FROM audit_log WHERE entry_id = ?",
+      ).get(result.id) as { detail: string };
+      expect(audit.detail).toContain("classification_provisional internal");
+    } finally {
+      if (previousLibrarian === undefined) {
+        delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      } else {
+        process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
+      }
+    }
   });
 
   it("rejects invalid namespace", async () => {
