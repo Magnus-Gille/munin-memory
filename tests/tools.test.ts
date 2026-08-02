@@ -1591,6 +1591,38 @@ describe("memory_update_status validate_only (#275)", () => {
     })) as { content: string; updated_at: string };
     expect(after).toEqual(before);
   });
+
+  it("uses past-tense wording when a real tracked-namespace update replaces a legacy free-form status", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/legacy-live",
+      key: "status",
+      content: "Legacy free-form tracked status with no canonical sections.",
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_update_status", {
+      namespace: "projects/legacy-live",
+      phase: "Active",
+      current_work: "Apply canonical replacement",
+      blockers: "None.",
+      next_steps: ["Verify mutation wording"],
+      lifecycle: "active",
+    });
+    const result = parseToolResponse(raw) as {
+      status: string;
+      warnings?: string[];
+      content?: string;
+    };
+
+    expect(result.status).toBe("updated");
+    expect(result.warnings).toContain(
+      "Existing status was in a legacy free-form format; it has been replaced with the canonical structured format from the fields you supplied.",
+    );
+    expect(result.warnings ?? []).not.toContain(
+      "Existing status was in a legacy free-form format; it would be replaced with the canonical structured format from the fields you supplied.",
+    );
+    expect(result.content).toContain("## Phase");
+  });
 });
 
 describe("memory_read", () => {
@@ -6872,6 +6904,14 @@ describe("compare-and-swap (memory_write)", () => {
           inputSchema: { properties?: Record<string, { description?: string }> };
         }>;
       }).tools.map((tool) => [tool.name, tool]),
+    );
+
+    const toolDescription = toolsByName.get("memory_update_status")?.description;
+    expect(toolDescription).toContain("validate_only:true");
+    expect(toolDescription).toContain("may target any authorized namespace");
+    expect(toolDescription).toContain("real mutations remain restricted to tracked namespaces");
+    expect(toolDescription).not.toContain(
+      "Update a tracked status entry in `projects/*` or `clients/*` namespaces only.",
     );
 
     const namespaceDescription = toolsByName.get("memory_update_status")
