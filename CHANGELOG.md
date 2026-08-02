@@ -8,6 +8,22 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Changed
+
+- **`memory_orient` now has a total response budget, a beginner mode, and an
+  explicit response marker (#277).** The per-group dashboard caps from #254
+  still left `standard` responses large enough to blow past host output limits
+  on mature estates. `memory_orient` now applies a deterministic
+  `response_character_budget` on the final JSON payload in every detail mode,
+  preserving the core handshake and reporting every budget-driven omission or
+  truncation in `response_budget_meta.adjustments` instead of failing
+  silently. Every orient response also includes `generated_at` so callers can
+  identify the specific handshake they are looking at without pretending it is
+  a transactional snapshot across later `memory_list` calls. A new
+  `detail:"beginner"` mode returns the mental model, starter tool index,
+  three common workflows, and safe write examples with no live dashboard or
+  namespace-estate data, while `compact` remains the default first call.
+
 ### Fixed
 
 - **`memory_delete` preview tokens are bound to the entries they previewed
