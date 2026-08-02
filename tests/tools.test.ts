@@ -3271,6 +3271,78 @@ describe("Librarian Pattern B enforcement for derived tools", () => {
     }
   });
 
+  it("does not return a removed confidential next step over a downgraded consumer transport", async () => {
+    const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+
+    try {
+      const namespace = "projects/commitment-confidential-downgrade";
+      const confidentialText = "CONFIDENTIAL_REMOVED_NEXT_STEP: send the private client brief by 2099-12-31";
+      const confidentialMarker = "CONFIDENTIAL_REMOVED_STATUS_DETAILS";
+
+      await callTool("memory_update_status", {
+        namespace,
+        phase: "Active",
+        current_work: confidentialMarker,
+        blockers: "None.",
+        next_steps: [confidentialText],
+        lifecycle: "active",
+        classification: "client-confidential",
+      });
+
+      await callTool("memory_update_status", {
+        namespace,
+        phase: "Active",
+        current_work: "Safe current work",
+        blockers: "None.",
+        next_steps: ["None."],
+        lifecycle: "active",
+        classification: "internal",
+      });
+
+      const ownerCommitments = parseToolResponse(await callTool("memory_commitments", {
+        namespace,
+      })) as {
+        completed_recently: Array<{
+          text: string;
+          source_excerpt?: string;
+          source_classification: string;
+        }>;
+      };
+      expect(ownerCommitments.completed_recently).toContainEqual(expect.objectContaining({
+        text: confidentialText,
+        source_classification: "client-confidential",
+      }));
+      expect(JSON.stringify(ownerCommitments.completed_recently)).toContain(confidentialText);
+      expect(JSON.stringify(ownerCommitments.completed_recently)).not.toContain(confidentialMarker);
+
+      const consumerOwnerCall = makeContextCallTool({
+        ...ownerContext(),
+        transportType: "consumer",
+        maxClassification: "internal",
+      });
+      const downgraded = parseToolResponse(await consumerOwnerCall("memory_commitments", {})) as {
+        open: Array<unknown>;
+        at_risk: Array<unknown>;
+        overdue: Array<unknown>;
+        completed_recently: Array<unknown>;
+      };
+      const serialized = JSON.stringify(downgraded);
+
+      expect(serialized).not.toContain(confidentialText);
+      expect(serialized).not.toContain(confidentialMarker);
+      expect(serialized).not.toContain(namespace);
+      expect(serialized).not.toContain("source_excerpt");
+      expect(downgraded.open).toHaveLength(0);
+      expect(downgraded.at_risk).toHaveLength(0);
+      expect(downgraded.overdue).toHaveLength(0);
+      expect(downgraded.completed_recently).toHaveLength(0);
+    } finally {
+      if (previousLibrarian === undefined) delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      else process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
+    }
+  });
+
   it("refreshes classification on a valid_until-only update and preserves a later downgrade", async () => {
     const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
     process.env.MUNIN_LIBRARIAN_ENABLED = "true";

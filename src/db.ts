@@ -35,7 +35,6 @@ import { scanForSecrets, validateWriteNamespace } from "./security.js";
 import {
   CLASSIFICATION_LEVELS,
   compareClassificationLevels,
-  FALLBACK_RESTRICTED_CLASSIFICATION,
   listNamespaceClassificationFloors as listNamespaceClassificationFloorsFromPolicy,
   normalizeStoredClassification,
   parseExplicitClassification,
@@ -837,11 +836,24 @@ function cancelSupersededCommitments(
     "SELECT classification FROM entries WHERE id = ?",
   ).get(predecessorId) as { classification: string | null } | undefined;
   const sourceClassification = normalizeStoredClassification(source?.classification);
-  db.prepare(
+  const commitments = db.prepare(
+    `SELECT id, source_classification
+     FROM commitments
+     WHERE source_entry_id = ? AND status = 'open'`,
+  ).all(predecessorId) as Array<{ id: string; source_classification: string | null }>;
+  const cancel = db.prepare(
     `UPDATE commitments
      SET status = 'cancelled', resolved_at = ?, updated_at = ?, source_classification = ?
-     WHERE source_entry_id = ? AND status = 'open'`,
-  ).run(now, now, sourceClassification, predecessorId);
+     WHERE id = ?`,
+  );
+  for (const commitment of commitments) {
+    cancel.run(
+      now,
+      now,
+      stricterClassification(commitment.source_classification, sourceClassification),
+      commitment.id,
+    );
+  }
 }
 
 export function supersedeState(
@@ -1598,6 +1610,40 @@ export interface DerivedCommitmentInput {
   confidence: number;
 }
 
+/**
+ * Treat malformed historical classifications as maximally restricted, then
+ * retain the stricter of the cached derivative and live source levels.
+ */
+function stricterClassification(left: unknown, right: unknown): ClassificationLevel {
+  const normalizedLeft = normalizeStoredClassification(left);
+  const normalizedRight = normalizeStoredClassification(right);
+  return compareClassificationLevels(normalizedLeft, normalizedRight) >= 0
+    ? normalizedLeft
+    : normalizedRight;
+}
+
+/**
+ * SQLite cannot use the TypeScript classification rank map. Keep this CASE in
+ * lockstep with stricterClassification so the effective level is selected and
+ * filtered before LIMIT/OFFSET pagination.
+ */
+const EFFECTIVE_COMMITMENT_CLASSIFICATION_SQL = `
+  CASE
+    WHEN COALESCE(c.source_classification, '') NOT IN ('public', 'internal', 'client-confidential', 'client-restricted')
+      OR COALESCE(e.classification, '') NOT IN ('public', 'internal', 'client-confidential', 'client-restricted')
+      THEN 'client-restricted'
+    WHEN c.source_classification = 'client-restricted'
+      OR e.classification = 'client-restricted'
+      THEN 'client-restricted'
+    WHEN c.source_classification = 'client-confidential'
+      OR e.classification = 'client-confidential'
+      THEN 'client-confidential'
+    WHEN c.source_classification = 'internal'
+      OR e.classification = 'internal'
+      THEN 'internal'
+    ELSE 'public'
+  END`;
+
 /** Minimum token overlap for two commitment texts to count as the same work. */
 const COMMITMENT_REVISION_SIMILARITY = 0.5;
 const COMMITMENT_SUBJECT_PREFIX = /^(?:i|we|they|it|this|that)\s+/i;
@@ -1846,7 +1892,7 @@ export interface ListCommitmentsOptions {
   namespaceSelectors?: readonly NamespaceSelector[] | null;
   /** Resolved tracked namespace patterns for pre-limit filtering. */
   trackedPatterns?: readonly string[];
-  /** Live source classification ceiling for fail-closed pagination. */
+  /** Effective cached/live source classification ceiling for fail-closed pagination. */
   classificationCeiling?: ClassificationLevel;
   /** Caller-visible terminal namespaces suppressed before pagination. */
   excludeNamespaces?: readonly string[];
@@ -1874,7 +1920,7 @@ export function syncCommitmentsForEntry(
 
   const existingRows = db
     .prepare(
-      `SELECT id, source_type, source_fingerprint, text, due_at, status, confidence, updated_at
+      `SELECT id, source_type, source_fingerprint, text, due_at, status, confidence, updated_at, source_classification
        FROM commitments
        WHERE source_entry_id = ?`,
     )
@@ -1887,6 +1933,7 @@ export function syncCommitmentsForEntry(
       status: CommitmentStatus;
       confidence: number;
       updated_at: string;
+      source_classification: string | null;
     }>;
 
   const existingByFingerprint = new Map(existingRows.map((row) => [row.source_fingerprint, row]));
@@ -2032,7 +2079,13 @@ export function syncCommitmentsForEntry(
       if (nextFingerprints.has(existing.source_fingerprint)) continue;
       if (revisionPairs.has(existing.id)) continue;
       const resolvedStatus = resolvedStatusForMissingCommitment(existing);
-      resolveCommitment.run(resolvedStatus, now, now, sourceClassification, existing.id);
+      resolveCommitment.run(
+        resolvedStatus,
+        now,
+        now,
+        stricterClassification(existing.source_classification, sourceClassification),
+        existing.id,
+      );
     }
   });
 
@@ -2069,11 +2122,7 @@ export function listCommitments(
     SELECT c.*,
            e.key AS source_key,
            substr(e.content, 1, 220) AS source_excerpt,
-           CASE
-             WHEN e.classification IN ('public', 'internal', 'client-confidential', 'client-restricted')
-               THEN e.classification
-             ELSE '${FALLBACK_RESTRICTED_CLASSIFICATION}'
-           END AS source_classification
+           ${EFFECTIVE_COMMITMENT_CLASSIFICATION_SQL} AS source_classification
     FROM commitments c
     JOIN entries e ON e.id = c.source_entry_id
     WHERE e.is_current = 1
@@ -2102,7 +2151,7 @@ export function listCommitments(
     if (allowedClassifications.length === 0) {
       sql += " AND 0";
     } else {
-      sql += ` AND e.classification IN (${allowedClassifications.map(() => "?").join(", ")})`;
+      sql += ` AND ${EFFECTIVE_COMMITMENT_CLASSIFICATION_SQL} IN (${allowedClassifications.map(() => "?").join(", ")})`;
       params.push(...allowedClassifications);
     }
   }
