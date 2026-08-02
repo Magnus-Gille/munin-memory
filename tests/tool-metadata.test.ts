@@ -16,6 +16,8 @@ describe("MCP tool metadata discovery contract", () => {
       "deferred tool discovery",
       "memory_status",
       "memory_resume",
+      "compact",
+      "beginner",
     ]) {
       expect(description).toContain(phrase);
     }

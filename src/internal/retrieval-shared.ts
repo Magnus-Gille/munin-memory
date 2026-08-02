@@ -6,6 +6,8 @@
  * These are pure-utility declarations with no dependency on tools.ts.
  */
 
+import { buildNamespacePrefixRangeFilter } from "./namespace-filter.js";
+
 
 // --- Staleness / recency thresholds ---
 
@@ -154,20 +156,18 @@ export function namespaceMatchesAnyPattern(ns: string, patterns: readonly string
   return false;
 }
 
-function escapeLikePattern(s: string): string {
-  return s.replace(/[\\%_]/g, (c) => "\\" + c);
-}
-
 /**
- * Translate tracked-namespace glob patterns into a parameterized SQL boolean
- * clause over `column`:
+ * Historical name preserved for compatibility. Translate tracked-namespace
+ * glob patterns into a parameterized SQL boolean clause over `column`:
  *   - empty patterns → "0" (matches nothing)
  *   - a "*" pattern  → "1" (matches everything)
- *   - "prefix/*"     → `column LIKE 'prefix/%' ESCAPE '\\'`
+ *   - "prefix/*"     → a case-sensitive literal prefix range over "prefix/"
  *   - exact          → `column = ?`
- * Returns the clause text and ordered bind params. `column` MUST be a trusted
- * literal (caller-supplied, never user input); only the pattern VALUES are
- * parameterized.
+ *
+ * Prefix patterns deliberately use the same case-sensitive literal range
+ * semantics as namespace query filters instead of SQLite LIKE's default
+ * ASCII-folding, so dashboard tracking and namespace-filtered queries agree on
+ * what "projects/*" means.
  */
 export function trackedPatternsToSqlLike(
   patterns: readonly string[],
@@ -179,8 +179,9 @@ export function trackedPatternsToSqlLike(
   for (const p of patterns) {
     if (p === "*") return { clause: "1", params: [] };
     if (p.endsWith("/*")) {
-      ors.push(`${column} LIKE ? ESCAPE '\\'`);
-      params.push(escapeLikePattern(p.slice(0, -1)) + "%");
+      const filter = buildNamespacePrefixRangeFilter(column, p.slice(0, -1));
+      ors.push(filter.clause);
+      params.push(...filter.params);
     } else {
       ors.push(`${column} = ?`);
       params.push(p);

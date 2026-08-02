@@ -87,7 +87,7 @@ Invisible denial is critical: non-owner principals must not be able to distingui
 | **Who can call** | All principals |
 | **Namespace check** | Caller must have read access to the target namespace |
 | **Unauthorized** | `{"found": false}` — identical to non-existent entry |
-| **as-of read** | `as_of` applies the same namespace, classification, and untrusted-content gates to the historical revision selected for that instant |
+| **as-of read** | `as_of` applies the same namespace, classification, and untrusted-content gates to the recorded historical revision selected for that instant; unreconstructible ordinary-overwrite/patch gaps return `{"found": false, "history_available": false}` with a non-contradictory explanatory hint only when the caller is authorized to know that history existed at all. Otherwise the miss stays indistinguishable from an ordinary not-found. |
 
 ### memory_read_batch
 
@@ -110,8 +110,9 @@ Invisible denial is critical: non-owner principals must not be able to distingui
 | Field | Rule |
 |-------|------|
 | **Who can call** | All principals |
-| **Result filtering** | Results filtered post-query to caller's accessible namespaces |
-| **namespace param** | If caller specifies a namespace they can't access, return empty results (not an error) |
+| **Result filtering** | Results are always post-filtered with canonical `canRead`. When the caller's readable rules map cleanly to exact/prefix SQL selectors, `memory_query` may also intersect the request with a safe prefilter before retrieval to avoid hidden rows consuming candidate slots. Unsupported or legacy rule shapes deliberately fail open to broader SQL scanning rather than narrowing incorrectly. |
+| **namespace param** | Literal and case-sensitive. Bare `projects/foo` means that namespace plus descendants; trailing-slash `projects/` means descendants under that prefix only. If caller specifies an inaccessible namespace, return empty results (not an error) |
+| **namespace_scope** | Returned only when a real namespace filter was applied: `subtree` for bare namespaces, `prefix` for trailing-slash filters |
 | **Result count** | `total` reflects only accessible results (don't leak hidden count) |
 
 ### memory_attention
@@ -145,7 +146,7 @@ Invisible denial is critical: non-owner principals must not be able to distingui
 | Field | Rule |
 |-------|------|
 | **Who can call** | All principals |
-| **Namespace filter** | Only returns audit entries for caller's accessible namespaces |
+| **Namespace filter** | Literal and case-sensitive. Bare `projects/foo` means that namespace plus descendants; trailing-slash `projects/foo/` means descendants under that literal prefix only. Only returns audit entries for caller's accessible namespaces. |
 | **Without namespace** | Returns history across all accessible namespaces only |
 | **Unauthorized namespace** | Empty result set (not an error) |
 
@@ -163,6 +164,7 @@ Invisible denial is critical: non-owner principals must not be able to distingui
 | Field | Rule |
 |-------|------|
 | **Who can call** | Owner only |
+| **namespace param** | Literal and case-sensitive. A bare namespace is exact-only here; a trailing-slash prefix such as `projects/` matches descendants under that literal prefix. |
 | **Non-owner** | Return empty results (not an error). Insights expose retrieval patterns that could leak information about hidden namespaces. |
 
 ### memory_consolidate

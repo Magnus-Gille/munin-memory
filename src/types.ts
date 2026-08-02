@@ -3,7 +3,7 @@
 export type EntryType = "state" | "log";
 export type EmbeddingStatus = "pending" | "processing" | "generated" | "failed";
 export type SearchMode = "lexical" | "semantic" | "hybrid";
-export type OrientDetail = "compact" | "standard" | "full";
+export type OrientDetail = "beginner" | "compact" | "standard" | "full";
 export type AuditAction = "write" | "update" | "patch" | "supersede" | "delete" | "namespace_delete" | "log_append" | "cross_zone_block" | "access_denied";
 export type CommitmentStatus = "open" | "done" | "cancelled";
 export type ClassificationLevel =
@@ -124,6 +124,7 @@ export interface OrientParams extends ListParams {
   dashboard_limit_per_group?: number;
   namespace_limit?: number;
   include_namespaces?: boolean;
+  response_character_budget?: number;
 }
 
 export interface ResumeParams {
@@ -229,6 +230,7 @@ export interface WriteResponse {
   updated_at?: string;
   valid_from?: string;
   supersedes?: string;
+  classification?: ClassificationLevel;
   warnings?: string[];
   intake?: IntakeResult;
 }
@@ -331,6 +333,8 @@ export interface ReadResponse {
   redaction_reason?: string;
   message?: string;
   hint?: string;
+  /** False when an as_of read falls into an authorized time gap that ordinary overwrites, patches, or legacy backfill did not preserve as rewindable revision history. Omitted for ordinary misses and when the caller is not authorized to know the gap exists. */
+  history_available?: boolean;
   supersedes?: string;
   superseded?: boolean;
   superseded_by?: string;

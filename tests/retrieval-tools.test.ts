@@ -310,6 +310,61 @@ describe("memory_insights tool", () => {
     }
   });
 
+  it("treats a bare namespace as exact-only in the production memory_insights path", async () => {
+    writeState(db, "Projects/ExactCase", "status", "upper root insight", ["active"]);
+    writeState(db, "Projects/ExactCase/Sub", "status", "upper child insight", ["active"]);
+    writeState(db, "projects/exactcase", "status", "lower root insight", ["active"]);
+
+    await makeCallTool(db, ownerCtx(), "insights-exact-root")("memory_query", {
+      query: "upper root insight",
+      namespace: "Projects/ExactCase",
+      search_mode: "lexical",
+    });
+    await makeCallTool(db, ownerCtx(), "insights-exact-child")("memory_query", {
+      query: "upper child insight",
+      namespace: "Projects/ExactCase/Sub",
+      search_mode: "lexical",
+    });
+    await makeCallTool(db, ownerCtx(), "insights-exact-lower")("memory_query", {
+      query: "lower root insight",
+      namespace: "projects/exactcase",
+      search_mode: "lexical",
+    });
+
+    const raw = await callTool("memory_insights", {
+      namespace: "Projects/ExactCase",
+      min_impressions: 1,
+    });
+    const result = parseToolResponse(raw) as { entries: Array<{ namespace: string }> };
+
+    expect(result.entries.map((entry) => entry.namespace)).toEqual(["Projects/ExactCase"]);
+  });
+
+  it("treats prefix filters case-sensitively in the production memory_insights path", async () => {
+    writeState(db, "Projects/PrefixCase/Sub", "status", "upper prefix insight", ["active"]);
+    writeState(db, "projects/prefixcase/sub", "status", "lower prefix insight", ["active"]);
+
+    await makeCallTool(db, ownerCtx(), "insights-prefix-upper")("memory_query", {
+      query: "upper prefix insight",
+      namespace: "Projects/PrefixCase/Sub",
+      search_mode: "lexical",
+    });
+    await makeCallTool(db, ownerCtx(), "insights-prefix-lower")("memory_query", {
+      query: "lower prefix insight",
+      namespace: "projects/prefixcase/sub",
+      search_mode: "lexical",
+    });
+
+    const raw = await callTool("memory_insights", {
+      namespace: "Projects/",
+      min_impressions: 1,
+    });
+    const result = parseToolResponse(raw) as { entries: Array<{ namespace: string }> };
+
+    expect(result.entries.map((entry) => entry.namespace)).toContain("Projects/PrefixCase/Sub");
+    expect(result.entries.map((entry) => entry.namespace)).not.toContain("projects/prefixcase/sub");
+  });
+
   it("respects min_impressions parameter", async () => {
     const raw = await callTool("memory_insights", { min_impressions: 999 });
     const result = parseToolResponse(raw) as { entries: unknown[]; min_impressions: number };
