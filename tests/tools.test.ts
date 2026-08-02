@@ -2754,11 +2754,13 @@ describe("memory_query", () => {
     const result = parseToolResponse(raw) as {
       results: Array<{ id: string; provenance: { principal_id: string } }>;
       total: number;
+      namespace_scope?: string;
       search_mode: string;
     };
     expect(result.total).toBeGreaterThanOrEqual(2);
     expect(result.results[0].id).toBeTruthy();
     expect(result.results[0].provenance.principal_id).toBe("owner");
+    expect(result.namespace_scope).toBeUndefined();
   });
 
   it.each(["yesterday", "not-a-date"])("rejects malformed since timestamps (%s) (#269)", async (since) => {
@@ -3031,9 +3033,24 @@ describe("memory_query", () => {
 
   it("accepts a valid namespace prefix filter (trailing slash)", async () => {
     const raw = await callTool("memory_query", { query: "SQLite", namespace: "projects/" });
-    const result = parseToolResponse(raw) as { error?: string; total?: number };
+    const result = parseToolResponse(raw) as { error?: string; total?: number; namespace_scope?: string };
     expect(result.error).toBeUndefined();
     expect(result.total).toBeGreaterThanOrEqual(1);
+    expect(result.namespace_scope).toBe("prefix");
+  });
+
+  it("rejects an empty namespace filter", async () => {
+    const raw = await callTool("memory_query", { query: "SQLite", namespace: "" });
+    const result = parseToolResponse(raw) as { ok: boolean; error?: string };
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("validation_error");
+  });
+
+  it("rejects slash-root-like namespace filters", async () => {
+    const raw = await callTool("memory_query", { query: "SQLite", namespace: "/" });
+    const result = parseToolResponse(raw) as { ok: boolean; error?: string };
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("validation_error");
   });
 
   it("defaults search_mode to hybrid (degrades to lexical in test env)", async () => {
@@ -3055,13 +3072,59 @@ describe("memory_query", () => {
     }
   });
 
-  it("filters by namespace", async () => {
+  it("treats a bare namespace filter as a subtree match", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/alpha/sub",
+      key: "child-note",
+      content: "SQLite child namespace note",
+      tags: ["active"],
+    });
+
     const raw = await callTool("memory_query", {
       query: "SQLite",
       namespace: "projects/alpha",
     });
     const result = parseToolResponse(raw) as { results: Array<{ namespace: string }> };
-    expect(result.results.every((r) => r.namespace === "projects/alpha")).toBe(true);
+    expect(result.results.map((r) => r.namespace)).toContain("projects/alpha/sub");
+    expect(result.results.every((r) => r.namespace === "projects/alpha" || r.namespace.startsWith("projects/alpha/"))).toBe(true);
+  });
+
+  it("returns namespace_scope for successful namespace-filtered ranked queries", async () => {
+    const raw = await callTool("memory_query", {
+      query: "SQLite",
+      namespace: "projects/alpha",
+    });
+    const result = parseToolResponse(raw) as {
+      total: number;
+      namespace_scope?: string;
+      results: Array<{ namespace: string }>;
+    };
+    expect(result.total).toBeGreaterThanOrEqual(1);
+    expect(result.namespace_scope).toBe("subtree");
+    expect(result.results.every((r) => r.namespace === "projects/alpha" || r.namespace.startsWith("projects/alpha/"))).toBe(true);
+  });
+
+  it("returns namespace_scope for zero-result ranked subtree queries", async () => {
+    const raw = await callTool("memory_query", {
+      query: "xyznonexistent",
+      namespace: "projects/alpha",
+    });
+    const result = parseToolResponse(raw) as {
+      total: number;
+      namespace_scope?: string;
+    };
+    expect(result.total).toBe(0);
+    expect(result.namespace_scope).toBe("subtree");
+  });
+
+  it("labels filter-only trailing-slash namespace filters as prefix", async () => {
+    const raw = await callTool("memory_query", { namespace: "projects/" });
+    const result = parseToolResponse(raw) as {
+      total: number;
+      namespace_scope?: string;
+    };
+    expect(result.total).toBeGreaterThanOrEqual(1);
+    expect(result.namespace_scope).toBe("prefix");
   });
 
   it("filters by entry type", async () => {
@@ -6914,6 +6977,31 @@ describe("compare-and-swap (memory_write)", () => {
     expect(memoryWrite?.inputSchema.properties).toMatchObject({
       create_if_absent: { type: "boolean" },
     });
+  });
+
+  it("documents memory_history namespace semantics in the MCP metadata", async () => {
+    const handler = (
+      server as unknown as { _requestHandlers: Map<string, Function> }
+    )._requestHandlers?.get("tools/list");
+    const toolList = await handler!({ method: "tools/list", params: {} });
+    const memoryHistory = (
+      toolList as {
+        tools: Array<{
+          name: string;
+          description: string;
+          inputSchema: {
+            properties?: Record<string, { description?: string }>;
+          };
+        }>;
+      }
+    ).tools.find((tool) => tool.name === "memory_history");
+
+    expect(memoryHistory?.description).toContain("Namespace filters are literal and case-sensitive");
+    expect(memoryHistory?.description).toContain("bare `projects/foo` returns that namespace plus descendants");
+    expect(memoryHistory?.description).toContain("trailing-slash `projects/foo/` returns only descendants under that literal prefix");
+    expect(memoryHistory?.inputSchema.properties?.namespace?.description).toContain("literal, case-sensitive namespace scope");
+    expect(memoryHistory?.inputSchema.properties?.namespace?.description).toContain("returns that namespace plus descendants");
+    expect(memoryHistory?.inputSchema.properties?.namespace?.description).toContain("returns only descendants under that literal prefix");
   });
 
   it("advertises closed argument objects for the #269 validated tools", async () => {

@@ -20,8 +20,10 @@ import {
   homePrefixFromRules,
   getContextMaxClassification,
   getContextTransportType,
+  resolveReadableNamespaceSelectors,
 } from "./access.js";
 import { createHash, randomBytes } from "node:crypto";
+import { namespaceFilterScope } from "./internal/namespace-filter.js";
 import {
   writeState,
   patchState,
@@ -2639,6 +2641,7 @@ function buildExtractRelatedEntries(
 
   for (const entry of queryEntriesByFilter(db, {
     namespace,
+    namespaceMode: "exact",
     entryType: "log",
     limit: 2,
   })) {
@@ -2647,6 +2650,7 @@ function buildExtractRelatedEntries(
 
   for (const entry of queryEntriesByFilter(db, {
     namespace,
+    namespaceMode: "exact",
     entryType: "state",
     includeExpired: true,
     limit: 3,
@@ -5884,7 +5888,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_query",
     description:
-      "Search and filter memories. Supports lexical (keyword), semantic (vector similarity), and hybrid (RRF fusion of both) search modes, selected with the `search_mode` parameter (`\"lexical\"` | `\"semantic\"` | `\"hybrid\"`; default `\"hybrid\"`). Note it is `search_mode: \"semantic\"`, not a `semantic: true` flag. Filters by namespace prefix, entry type, tags, time range (since/until), and optional expiry handling. Can be used without a query to browse by filters alone (e.g. all entries with a specific tag, or all entries updated today). `limit` caps results (default 10, max 50); narrow with filters or `since`/`until` rather than paging if 50 is not enough. Broad retrieval hides expired state entries by default; use `include_expired: true` to include them. Pass `explain: true` to include retrieval metadata and per-result match explanations.\n\nRetrieval tips (the most common formulation failures):\n- **If you get zero results, widen before giving up.** Drop the `namespace` filter first, then drop `tags`, then try different phrasing. Tight namespace filters pointed at the wrong tier (e.g. `meta/` when the entry is in `decisions/`) are the #1 cause of false-negative searches.\n- **Prefer natural-language phrasing.** Default `search_mode` is hybrid, so semantic recall bridges vocabulary gaps — you do not need to guess exact tokens.\n- **Lexical queries are tokenized, not raw FTS5.** The server splits your query into terms, preserves quoted phrases, and requires all terms to match (implicit AND). Boolean operators like `AND`, `OR`, `NOT`, and `NEAR` are not supported in user queries — write term lists or natural language, not FTS5 expressions.\n- **Use concrete tokens likely present in the entry**, not abstract paraphrase (\"explored\", \"examined\") — lexical still wins on structured-vocabulary content like research notes.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
+      "Search and filter memories. Supports lexical (keyword), semantic (vector similarity), and hybrid (RRF fusion of both) search modes, selected with the `search_mode` parameter (`\"lexical\"` | `\"semantic\"` | `\"hybrid\"`; default `\"hybrid\"`). Note it is `search_mode: \"semantic\"`, not a `semantic: true` flag. Filters by namespace subtree, entry type, tags, time range (since/until), and optional expiry handling. Namespace filters are literal and case-sensitive: a bare namespace such as `projects/munin-memory` matches that namespace and its descendants and reports `namespace_scope: \"subtree\"`; a trailing-slash prefix such as `projects/` matches only descendants under that literal prefix and reports `namespace_scope: \"prefix\"`. Responses omit `namespace_scope` when no namespace filter is applied. Can be used without a query to browse by filters alone (e.g. all entries with a specific tag, or all entries updated today). `limit` caps results (default 10, max 50); narrow with filters or `since`/`until` rather than paging if 50 is not enough. Broad retrieval hides expired state entries by default; use `include_expired: true` to include them. Pass `explain: true` to include retrieval metadata and per-result match explanations.\n\nRetrieval tips (the most common formulation failures):\n- **If you get zero results, widen before giving up.** Drop the `namespace` filter first, then drop `tags`, then try different phrasing. Tight namespace filters pointed at the wrong tier (e.g. `meta/` when the entry is in `decisions/`) are the #1 cause of false-negative searches.\n- **Prefer natural-language phrasing.** Default `search_mode` is hybrid, so semantic recall bridges vocabulary gaps — you do not need to guess exact tokens.\n- **Lexical queries are tokenized, not raw FTS5.** The server splits your query into terms, preserves quoted phrases, and requires all terms to match (implicit AND). Boolean operators like `AND`, `OR`, `NOT`, and `NEAR` are not supported in user queries — write term lists or natural language, not FTS5 expressions.\n- **Use concrete tokens likely present in the entry**, not abstract paraphrase (\"explored\", \"examined\") — lexical still wins on structured-vocabulary content like research notes.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -5896,7 +5900,7 @@ const TOOL_DEFINITIONS = [
         namespace: {
           type: "string",
           description:
-            "Optional. Filter to a namespace or namespace prefix (e.g. 'projects/' matches all project namespaces). Use sparingly — a wrong-tier filter (e.g. `meta/` when the entry is in `decisions/`) silently returns zero results. If a query with a namespace filter yields nothing, retry without it before reformulating.",
+            "Optional. Filter to a literal, case-sensitive namespace scope. `projects/munin-memory` matches that namespace and its descendants and yields `namespace_scope: \"subtree\"`; `projects/` matches only descendants under that literal prefix and yields `namespace_scope: \"prefix\"`. Responses omit `namespace_scope` when no namespace filter is applied. Use sparingly — a wrong-tier filter (e.g. `meta/` when the entry is in `decisions/`) silently returns zero results. If a query with a namespace filter yields nothing, retry without it before reformulating.",
         },
         entry_type: {
           type: "string",
@@ -6096,14 +6100,14 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_history",
     description:
-      "View the chronological audit trail of changes to memory. Returns a timeline of writes, updates, corrections, deletes, namespace deletes, and log appends. Use this to answer 'what changed recently?' or 'what happened in this namespace?' — unlike memory_query (which is relevance-based search), this is a change feed ordered by time.\n\nCursor semantics (read carefully): a call WITHOUT `cursor` returns the most recent changes first (newest→oldest); its `next_cursor` is the audit id of the OLDEST row in that page. A call WITH `cursor` switches to ascending sync mode: it returns rows with `id > cursor` in ascending (oldest→newest) order, and `next_cursor` then advances to the NEWEST id seen. For forward polling of new mutations, do an initial cursorless call, then keep passing the latest `next_cursor` you have observed.",
+      "View the chronological audit trail of changes to memory. Returns a timeline of writes, updates, corrections, deletes, namespace deletes, and log appends. Use this to answer 'what changed recently?' or 'what happened in this namespace?' — unlike memory_query (which is relevance-based search), this is a change feed ordered by time. Namespace filters are literal and case-sensitive: bare `projects/foo` returns that namespace plus descendants, while trailing-slash `projects/foo/` returns only descendants under that literal prefix.\n\nCursor semantics (read carefully): a call WITHOUT `cursor` returns the most recent changes first (newest→oldest); its `next_cursor` is the audit id of the OLDEST row in that page. A call WITH `cursor` switches to ascending sync mode: it returns rows with `id > cursor` in ascending (oldest→newest) order, and `next_cursor` then advances to the NEWEST id seen. For forward polling of new mutations, do an initial cursorless call, then keep passing the latest `next_cursor` you have observed.",
     inputSchema: {
       type: "object" as const,
       properties: {
         namespace: {
           type: "string",
           description:
-            "Optional. Filter to a namespace or namespace prefix. E.g. 'projects/munin-memory' returns changes in that namespace and its children.",
+            "Optional. Filter to a literal, case-sensitive namespace scope. `projects/munin-memory` returns that namespace plus descendants; `projects/munin-memory/` returns only descendants under that literal prefix.",
         },
         since: {
           type: "string",
@@ -6162,7 +6166,7 @@ const TOOL_DEFINITIONS = [
         namespace: {
           type: "string",
           description:
-            "Optional. Restrict results to a specific namespace or namespace prefix (e.g. 'projects/' for all project namespaces).",
+            "Optional. Restrict results to a literal, case-sensitive namespace scope. A bare namespace is exact-only here; a trailing-slash prefix such as `projects/` matches descendants under that literal prefix.",
         },
         min_impressions: {
           type: "integer",
@@ -7182,6 +7186,7 @@ export function registerTools(
 
               const rawLogPool = queryEntriesByFilter(db, {
                 namespace: scope,
+                namespaceMode: "exact",
                 entryType: "log",
                 limit: scope ? Math.max(limit, 4) : Math.max(limit * 2, 8),
               }).filter((entry) => canRead(ctx, entry.namespace));
@@ -7207,6 +7212,7 @@ export function registerTools(
               if (scope) {
                 const rawScopedStateEntries = queryEntriesByFilter(db, {
                   namespace: scope,
+                  namespaceMode: "exact",
                   entryType: "state",
                   includeExpired: true,
                   limit: 4,
@@ -7229,7 +7235,11 @@ export function registerTools(
               }
 
               if (includeHistory && scope) {
-                const historyPage = getAuditHistoryPage(db, { namespace: scope, limit: 3 });
+                const historyPage = getAuditHistoryPage(db, {
+                  namespace: scope,
+                  namespaceMode: "exact",
+                  limit: 3,
+                });
                 const filteredHistory = filterDerivedSources(
                   db,
                   ctx,
@@ -8038,6 +8048,7 @@ export function registerTools(
                 : { allowed: [] as Entry[], redacted: [] as RedactableEntryMetadata[] };
               const rawLogs = queryEntriesByFilter(db, {
                 namespace: narrativeArgs.namespace,
+                namespaceMode: "exact",
                 entryType: "log",
                 limit: Math.max(limit, 12),
                 since: normalizedSince,
@@ -8052,6 +8063,7 @@ export function registerTools(
               );
               const rawHistory = getAuditHistoryPage(db, {
                 namespace: narrativeArgs.namespace,
+                namespaceMode: "exact",
                 since: normalizedSince,
                 limit: Math.max(limit * 2, 12),
               }).entries.filter((entry) => canRead(ctx, entry.namespace));
@@ -8554,6 +8566,7 @@ export function registerTools(
                 ctx,
                 getAuditHistoryPage(db, {
                   namespace,
+                  namespaceMode: "exact",
                   since: normalizedSince,
                   limit: Math.max(limit * 4, 20),
                 }).entries.filter((entry) => canRead(ctx, entry.namespace)),
@@ -9639,6 +9652,8 @@ export function registerTools(
                   return errResult("query", "validation_error", nsCheck.error!);
                 }
               }
+              const appliedNamespaceScope = namespaceFilterScope(namespace);
+              const readableNamespaceSelectors = resolveReadableNamespaceSelectors(ctx, namespace);
 
               // Filter-only mode: no query text, just browse by filters
               if (!query || typeof query !== "string") {
@@ -9649,7 +9664,7 @@ export function registerTools(
                 const requestedLimit = limitResolution.applied;
                 const internalFilterLimit = Math.min(requestedLimit * QUERY_RERANK_OVERFETCH_MULTIPLIER, 50);
                 let filterResults = queryEntriesByFilter(db, {
-                  namespace,
+                  namespaceSelectors: readableNamespaceSelectors,
                   entryType: entry_type,
                   tags,
                   limit: internalFilterLimit,
@@ -9698,6 +9713,7 @@ export function registerTools(
                   total: formatted.length,
                   redacted_count: redactedCount,
                   search_mode: "filter",
+                  ...(appliedNamespaceScope ? { namespace_scope: appliedNamespaceScope } : {}),
                   ...(limitResolution.warning ? {
                     requested_limit: limitResolution.requested,
                     limit_applied: limitResolution.applied,
@@ -9771,7 +9787,7 @@ export function registerTools(
                   semanticResults = queryEntriesSemanticScored(db, {
                     queryEmbedding: buf,
                     queryEmbeddingModel: getActiveEmbeddingModel(),
-                    namespace,
+                    namespaceSelectors: readableNamespaceSelectors,
                     entryType: entry_type,
                     tags,
                     limit: internalLimit,
@@ -9797,10 +9813,40 @@ export function registerTools(
                   const buf = embeddingToBuffer(queryEmb);
                   const relaxedQuery = buildRelaxedLexicalQuery(query);
                   const hybridScored = queryEntriesHybridScored(db, {
-                    ftsOptions: { query, namespace, entryType: entry_type, tags, limit: internalLimit, includeExpired: true, since, until },
-                    semanticOptions: { queryEmbedding: buf, queryEmbeddingModel: getActiveEmbeddingModel(), namespace, entryType: entry_type, tags, limit: internalLimit, includeExpired: true, since, until, maxDistance: getSemanticMaxDistance() },
+                    ftsOptions: {
+                      query,
+                      namespaceSelectors: readableNamespaceSelectors,
+                      entryType: entry_type,
+                      tags,
+                      limit: internalLimit,
+                      includeExpired: true,
+                      since,
+                      until,
+                    },
+                    semanticOptions: {
+                      queryEmbedding: buf,
+                      queryEmbeddingModel: getActiveEmbeddingModel(),
+                      namespaceSelectors: readableNamespaceSelectors,
+                      entryType: entry_type,
+                      tags,
+                      limit: internalLimit,
+                      includeExpired: true,
+                      since,
+                      until,
+                      maxDistance: getSemanticMaxDistance(),
+                    },
                     ftsFallbackOptions: relaxedQuery
-                      ? { query: relaxedQuery, namespace, entryType: entry_type, tags, limit: internalLimit, includeExpired: true, since, until, rawFts5: true }
+                      ? {
+                        query: relaxedQuery,
+                        namespaceSelectors: readableNamespaceSelectors,
+                        entryType: entry_type,
+                        tags,
+                        limit: internalLimit,
+                        includeExpired: true,
+                        since,
+                        until,
+                        rawFts5: true,
+                      }
                       : undefined,
                   });
                   hybridResults = hybridScored.results;
@@ -9821,7 +9867,7 @@ export function registerTools(
               if (actualMode === "lexical") {
                 lexicalResults = queryEntriesLexicalScored(db, {
                   query,
-                  namespace,
+                  namespaceSelectors: readableNamespaceSelectors,
                   entryType: entry_type,
                   tags,
                   limit: internalLimit,
@@ -9839,7 +9885,7 @@ export function registerTools(
                   if (relaxedQuery) {
                     lexicalResults = queryEntriesLexicalScored(db, {
                       query: relaxedQuery,
-                      namespace,
+                      namespaceSelectors: readableNamespaceSelectors,
                       entryType: entry_type,
                       tags,
                       limit: internalLimit,
@@ -9956,6 +10002,7 @@ export function registerTools(
                 redacted_count: redactedCount,
                 query,
                 search_mode: requestedMode,
+                ...(appliedNamespaceScope ? { namespace_scope: appliedNamespaceScope } : {}),
                 ...(limitResolution.warning ? {
                   requested_limit: limitResolution.requested,
                   limit_applied: limitResolution.applied,

@@ -53,6 +53,25 @@ changelog is the canonical record of what moved.
 
 ### Fixed
 
+- **Namespace subtree filters are now literal and case-sensitive across query paths (#267).**
+  The shared SQL matcher behind `memory_query`, semantic exact-namespace scans,
+  audit history, commitments, and adjacent namespace-filtered reads previously
+  used SQLite `LIKE`, which is ASCII case-insensitive by default and could drift
+  from the server's case-sensitive `startsWith` checks. Namespace subtree
+  filters now use exact equality plus a UTF-8-safe literal descendant range, so
+  supplementary Unicode descendants stay inside scope, `Projects/Foo` no longer
+  matches `projects/foo/...`, trailing-slash filters remain descendant-only, and
+  the shared SQL helper treats wildcard-looking bytes literally instead of as
+  `LIKE` wildcards. Direct DB/helper coverage also verifies already-stored
+  legacy `%` bytes without expanding the public namespace-filter contract. For
+  `memory_query`, non-owner reads now apply readable-namespace SQL selectors
+  before `LIMIT` only when the caller's read rules are exactly representable;
+  legacy or unsupported rule shapes fail open to broader SQL scanning while
+  canonical post-query authorization remains authoritative. `memory_query` now
+  reports `namespace_scope: "subtree"` for bare namespace filters,
+  `namespace_scope: "prefix"` for trailing-slash filters, and omits the field
+  when no real namespace filter was applied.
+
 - **`memory_read(as_of)` no longer leaks hidden history and ordinary rewrites now advance their own time boundary strictly (#273).** The tool description promised the state revision valid at any past instant, but ordinary overwrites and patches mutate the current row in place and migration v20 backfilled legacy state `valid_from` from the last `updated_at`, so uncovered times could return `found:false` with a contradictory hint listing the same key. Worse, the miss-coverage probe reasoned over raw rows, so a caller below the classification ceiling could learn that hidden history or a hidden current row existed via `history_available:false` or the "Read the current entry" hint. `memory_read(as_of)` now treats explicit correction lineage as the only rewindable history *and* only reports uncovered-gap metadata when the caller is authorized to know that recorded gap exists at all; otherwise the result stays indistinguishable from an ordinary miss while still listing any visible sibling keys. Ordinary in-place state rewrites also advance `valid_from` strictly past the prior row boundary even when two writes land in the same millisecond, so past `as_of` reads cannot return rewritten current content. Pre-creation timestamps remain ordinary misses. The exact visible current `valid_from`/`updated_at` boundary can be round-tripped even when a same-millisecond monotonic timestamp is narrowly ahead of the server clock; arbitrary future timestamps and hidden future boundaries remain rejected. Explicit `supersedes` chains keep their half-open boundary semantics.
 
 - **`memory_delete` previews disclose and bind the full correction lineage
