@@ -4,6 +4,7 @@ import {
   approveReviewProposal,
   createReviewProposal,
   createUndoReviewProposal,
+  deriveReviewProposalStatus,
   declineReviewProposal,
   editReviewProposal,
   getReviewProposal,
@@ -485,6 +486,19 @@ describe("review proposal lifecycle", () => {
     db.close();
   });
 
+  it("uses the same inclusive expiry boundary for derived status and maintenance prune", () => {
+    const db = initDatabase(":memory:");
+    const created = createPending(db);
+
+    expect(deriveReviewProposalStatus(
+      getReviewProposal(db, created.id, "owner")!,
+      EXPIRES_AT,
+    )).toBe("expired");
+    expect(pruneReviewProposals(db, EXPIRES_AT)).toMatchObject({ expired: 1 });
+    expect(getReviewProposal(db, created.id, "owner")?.status).toBe("expired");
+    db.close();
+  });
+
   it("creates and attributes a reviewed undo proposal before superseding the original", () => {
     const db = initDatabase(":memory:");
     const created = createPending(db);
@@ -587,6 +601,51 @@ describe("review proposal retention", () => {
     db.close();
   });
 
+  it("preserves expires_at as the terminal cutoff when first maintenance hits a months-stale proposal", () => {
+    const db = initDatabase(":memory:");
+    const created = createReviewProposal(db, {
+      creatorPrincipalId: "owner",
+      operation: writeOperation("months-stale pending payload"),
+      classification: "internal",
+      confidence: 0.92,
+      reasons: ["months-stale retention"],
+      sourceRefs: [],
+      sourceExcerpt: "Months-stale proposal source excerpt.",
+      sourceHash: "sha256:months-stale",
+      createdAt: "2026-06-01T10:00:00.000Z",
+      expiresAt: "2026-06-02T10:00:00.000Z",
+    });
+
+    const pruned = pruneReviewProposals(
+      db,
+      "2026-08-01T12:00:00.000Z",
+      { terminalPayloadDays: 7, approvedUndoDays: 30 },
+    );
+    const tombstone = getReviewProposal(db, created.id, "owner");
+
+    expect(pruned).toEqual({
+      expired: 1,
+      payloads_purged: 1,
+      undo_snapshots_purged: 0,
+    });
+    expect(tombstone).toMatchObject({
+      status: "expired",
+      terminal_at: "2026-06-02T10:00:00.000Z",
+      payload_purged_at: expect.any(String),
+      original_operation: null,
+      current_operation: null,
+      source_excerpt: null,
+      source_refs: [],
+    });
+    expect(listReviewProposalEvents(db, created.id, "owner")
+      .map((event) => event.event_type)).toEqual([
+      "created",
+      "expired",
+      "payload_purged",
+    ]);
+    db.close();
+  });
+
   it("purges approved proposal payloads after the reviewed-undo window", () => {
     const db = initDatabase(":memory:");
     const created = createPending(db);
@@ -628,6 +687,170 @@ describe("review proposal retention", () => {
     expect(tombstone?.applied_entry_id).toBe("entry-id");
     expect(listReviewProposalEvents(db, created.id, "owner").at(-1))
       .toMatchObject({ event_type: "payload_purged", to_status: "approved" });
+    db.close();
+  });
+
+  it("counts only the stale proposals that actually expire or purge in mixed-age sets", () => {
+    const db = initDatabase(":memory:");
+    const expiring = createPending(db);
+    const freshPending = createReviewProposal(db, {
+      creatorPrincipalId: "owner",
+      operation: writeOperation("fresh pending"),
+      classification: "internal",
+      confidence: 0.92,
+      reasons: ["still reviewable"],
+      sourceRefs: [],
+      sourceExcerpt: "still reviewable",
+      sourceHash: "sha256:fresh-pending",
+      createdAt: "2026-07-31T10:00:00.000Z",
+      expiresAt: "2026-08-31T10:00:00.000Z",
+    });
+
+    const purgeDeclined = createPending(db);
+    declineReviewProposal(
+      db,
+      purgeDeclined.id,
+      "owner",
+      "old decline",
+      "2026-07-23T10:05:00.000Z",
+    );
+    const freshDeclined = createReviewProposal(db, {
+      creatorPrincipalId: "owner",
+      operation: writeOperation("fresh declined"),
+      classification: "internal",
+      confidence: 0.92,
+      reasons: ["recent decline"],
+      sourceRefs: [],
+      sourceExcerpt: "recent decline",
+      sourceHash: "sha256:fresh-declined",
+      createdAt: "2026-07-31T10:00:00.000Z",
+      expiresAt: "2026-08-31T10:00:00.000Z",
+    });
+    declineReviewProposal(
+      db,
+      freshDeclined.id,
+      "owner",
+      "recent decline",
+      "2026-08-20T10:05:00.000Z",
+    );
+
+    const purgeApproved = createPending(db);
+    approveReviewProposal(
+      db,
+      purgeApproved.id,
+      "owner",
+      () => ({
+        outcome: "applied",
+        entryId: "entry-old",
+        entryUpdatedAt: "2026-07-23T10:05:00.000Z",
+        priorEntrySnapshot: {
+          content: "sensitive prior truth",
+          tags: ["active"],
+          classification: "internal",
+        },
+      }),
+      "2026-07-23T10:05:00.000Z",
+    );
+    const freshApproved = createReviewProposal(db, {
+      creatorPrincipalId: "owner",
+      operation: writeOperation("fresh approved"),
+      classification: "internal",
+      confidence: 0.92,
+      reasons: ["recent approval"],
+      sourceRefs: [],
+      sourceExcerpt: "recent approval",
+      sourceHash: "sha256:fresh-approved",
+      createdAt: "2026-07-31T10:00:00.000Z",
+      expiresAt: "2026-08-31T10:00:00.000Z",
+    });
+    approveReviewProposal(
+      db,
+      freshApproved.id,
+      "owner",
+      () => ({
+        outcome: "applied",
+        entryId: "entry-fresh",
+        entryUpdatedAt: "2026-07-31T10:05:00.000Z",
+        priorEntrySnapshot: {
+          content: "recent prior truth",
+          tags: ["active"],
+          classification: "internal",
+        },
+      }),
+      "2026-07-31T10:05:00.000Z",
+    );
+
+    const pruned = pruneReviewProposals(
+      db,
+      "2026-08-23T10:06:00.000Z",
+      { terminalPayloadDays: 7, approvedUndoDays: 30 },
+    );
+
+    expect(pruned).toEqual({
+      expired: 1,
+      payloads_purged: 2,
+      undo_snapshots_purged: 1,
+    });
+    expect(getReviewProposal(db, expiring.id, "owner")?.status).toBe("expired");
+    expect(getReviewProposal(db, freshPending.id, "owner")?.status).toBe("pending");
+    expect(getReviewProposal(db, purgeDeclined.id, "owner")).toMatchObject({
+      status: "declined",
+      current_operation: null,
+      payload_purged_at: expect.any(String),
+    });
+    expect(getReviewProposal(db, freshDeclined.id, "owner")).toMatchObject({
+      status: "declined",
+      payload_purged_at: null,
+    });
+    expect(getReviewProposal(db, purgeApproved.id, "owner")).toMatchObject({
+      status: "approved",
+      current_operation: null,
+      prior_entry_snapshot: null,
+      payload_purged_at: expect.any(String),
+    });
+    expect(getReviewProposal(db, freshApproved.id, "owner")).toMatchObject({
+      status: "approved",
+      payload_purged_at: null,
+      prior_entry_snapshot: expect.objectContaining({
+        content: "recent prior truth",
+      }),
+    });
+    db.close();
+  });
+
+  it("uses the indexed expiry range when pruning actionable proposals", () => {
+    const db = initDatabase(":memory:");
+
+    const plan = db.prepare(
+      `EXPLAIN QUERY PLAN
+       SELECT * FROM review_proposals
+       WHERE status IN ('pending', 'edited') AND expires_at <= ?
+       ORDER BY expires_at, id`,
+    ).all("2026-08-23T10:06:00.000Z") as Array<{ detail: string }>;
+
+    expect(plan.some(({ detail }) => detail.includes("idx_review_proposals_expiry"))).toBe(true);
+    expect(plan.some(({ detail }) => /^SCAN review_proposals\b/.test(detail))).toBe(false);
+    db.close();
+  });
+
+  it.each([
+    "declined",
+    "approved",
+  ] as const)("uses the indexed terminal retention range when pruning %s payloads", (status) => {
+    const db = initDatabase(":memory:");
+
+    const plan = db.prepare(
+      `EXPLAIN QUERY PLAN
+       SELECT * FROM review_proposals
+       WHERE status = ?
+         AND payload_purged_at IS NULL
+         AND terminal_at IS NOT NULL
+         AND terminal_at <= ?
+       ORDER BY terminal_at, id`,
+    ).all(status, "2026-08-23T10:06:00.000Z") as Array<{ detail: string }>;
+
+    expect(plan.some(({ detail }) => detail.includes("idx_review_proposals_terminal_retention"))).toBe(true);
+    expect(plan.some(({ detail }) => /^SCAN review_proposals\b/.test(detail))).toBe(false);
     db.close();
   });
 });

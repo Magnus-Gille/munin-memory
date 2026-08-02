@@ -64,7 +64,34 @@ changelog is the canonical record of what moved.
   published schema and fixtures contain no deployment endpoint, private path,
   or credential.
 
+- **`memory_review` preview response shape changed (#272).** The legacy
+  `writes_memory` field is removed. Preview now reports its own side effects
+  with `preview_wrote_memory:false` and the current approval consequence with
+  `approval_would_write_memory:true|false`. When retention has already purged a
+  terminal proposal payload, preview still returns the truthful non-writing
+  terminal outcome but omits `exact_operation` because no retained payload
+  remains to display.
+
 ### Fixed
+
+- **`memory_review` preview now reports approval write effects truthfully (#272).**
+  Preview previously dry-ran terminal status, validation, source freshness, and
+  target freshness through separate logic from the real approve path, so
+  purged-terminal previews could collapse to `payload_expired`, preview catch
+  paths could skip internal-error telemetry, and the exact approval outcome
+  could drift across duplicate, expired, failed, or superseded proposals.
+  Preview and approve now share one precondition evaluation, the same inclusive
+  expiry boundary, and the same retention masking rules. Successful previews
+  stay pure-read and metering-free; unexpected preview exceptions still emit
+  `internal_error` telemetry. Terminal proposals whose payload has already been
+  purged still return the truthful non-writing outcome instead of claiming the
+  payload state blocked the answer. A real approval attempted after expiry still
+  returns the same machine-readable `review_expired` code and message
+  advertised by preview through the stable `ok:false` rejection envelope.
+  Non-terminal approve-time rejections now run through the transactional
+  approval path, append one durable `approval_conflict` event per rejected
+  attempt, and restore the indexed `expires_at <= ?` prune range instead of
+  scanning every pending or edited proposal row.
 
 - **Commitment-derived views no longer let resolved rows consume the page cap (#274).**
   `memory_commitments` now paginates the SQL-eligible open and recently-done rows

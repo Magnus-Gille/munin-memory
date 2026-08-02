@@ -1,7 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
 import * as sqliteVec from "sqlite-vec";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { ownerContext } from "../src/access.js";
 import {
   runMigrations,
   getSchemaVersion,
@@ -10,6 +12,11 @@ import {
   splitCamelCaseTokens,
 } from "../src/migrations.js";
 import { initDatabase, writeState, readState, queryEntries } from "../src/db.js";
+import { registerTools } from "../src/tools.js";
+import {
+  createReviewProposal,
+  pruneReviewProposals,
+} from "../src/review-inbox.js";
 
 const TEST_DB_PATH = "/tmp/munin-memory-migrations-test.db";
 
@@ -25,6 +32,24 @@ function openRawDb(): Database.Database {
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
   return db;
+}
+
+function makeReviewCall(db: Database.Database) {
+  const server = new Server(
+    { name: "migration-review-test", version: "0.0.1" },
+    { capabilities: { tools: {} } },
+  );
+  registerTools(server, db, undefined, ownerContext());
+  return async (name: string, args: Record<string, unknown> = {}) => {
+    const handler = (
+      server as unknown as { _requestHandlers: Map<string, Function> }
+    )._requestHandlers.get("tools/call");
+    const response = await handler!({
+      method: "tools/call",
+      params: { name, arguments: args },
+    });
+    return JSON.parse((response as { content: Array<{ text: string }> }).content[0].text) as Record<string, unknown>;
+  };
 }
 
 beforeEach(() => {
@@ -102,6 +127,7 @@ describe("runMigrations", () => {
     expect(names).toContain("idx_audit_entry_id");
     expect(names).toContain("idx_review_proposals_creator_status_updated");
     expect(names).toContain("idx_review_proposals_expiry");
+    expect(names).toContain("idx_review_proposals_terminal_retention");
     expect(names).toContain("idx_review_proposal_events_proposal_created");
     db.close();
   });
@@ -133,6 +159,254 @@ describe("runMigrations", () => {
       .all() as Array<{ version: number }>;
     expect(records).toHaveLength(migrations.length);
     db.close();
+  });
+
+  it("reconciles the pre-merge v23 histories without losing either index", () => {
+    const db = openRawDb();
+    registerMuninUDFs(db);
+    db.exec(`
+      CREATE TABLE schema_version (
+        version INTEGER PRIMARY KEY,
+        applied_at TEXT NOT NULL
+      );
+    `);
+    for (const migration of migrations.filter(({ version }) => version <= 22)) {
+      migration.up(db);
+      db.prepare("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)")
+        .run(migration.version, new Date().toISOString());
+    }
+
+    // The pre-merge #300 branch used v23 for this index before #299 occupied
+    // v23 on main. Mark that history as applied, then let v24 repair the
+    // state-history index while remaining idempotent for the review index.
+    db.exec(`
+      CREATE INDEX idx_review_proposals_terminal_retention
+        ON review_proposals(status, payload_purged_at, terminal_at, id);
+    `);
+    db.prepare("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)")
+      .run(23, new Date().toISOString());
+
+    runMigrations(db);
+
+    const indexes = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'index'")
+      .all() as Array<{ name: string }>;
+    const names = indexes.map(({ name }) => name);
+    expect(names).toEqual(expect.arrayContaining([
+      "idx_entries_state_history",
+      "idx_review_proposals_terminal_retention",
+    ]));
+    expect(getSchemaVersion(db)).toBe(24);
+    db.close();
+  });
+
+  it("backfills old-main timeout terminals before expiry-based review retention", async () => {
+    const db = openRawDb();
+    registerMuninUDFs(db);
+    db.exec(`
+      CREATE TABLE schema_version (
+        version INTEGER PRIMARY KEY,
+        applied_at TEXT NOT NULL
+      );
+    `);
+    for (const migration of migrations.filter(({ version }) => version <= 23)) {
+      migration.up(db);
+      db.prepare("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)")
+        .run(migration.version, new Date().toISOString());
+    }
+
+    const expiresAt = "2026-06-02T10:00:00.000Z";
+    const lateTerminalAt = "2026-07-31T12:00:00.000Z";
+    const operationContent = "Legacy timeout operation that must be purged";
+    const sourceExcerpt = "Legacy timeout source excerpt that must be purged";
+    const createLegacyTerminal = (
+      status: "approved" | "declined" | "expired" | "failed" | "superseded",
+      terminalCode: string,
+    ) => {
+      const created = createReviewProposal(db, {
+        creatorPrincipalId: "owner",
+        operation: {
+          action: "memory_log",
+          namespace: `projects/legacy-upgrade/${status}`,
+          content: `${operationContent} (${status})`,
+        },
+        classification: "internal",
+        confidence: 1,
+        reasons: [`legacy ${status} proposal`],
+        sourceRefs: [],
+        sourceExcerpt: `${sourceExcerpt} (${status})`,
+        sourceHash: `legacy-${status}-hash`,
+        createdAt: "2026-06-01T10:00:00.000Z",
+        expiresAt,
+      });
+      db.prepare(
+        `UPDATE review_proposals
+         SET status = ?, terminal_code = ?, terminal_detail = ?,
+             updated_at = ?, terminal_at = ?
+         WHERE id = ?`,
+      ).run(status, terminalCode, `legacy ${status} terminal`, lateTerminalAt, lateTerminalAt, created.id);
+      return created.id;
+    };
+
+    const timeoutId = createLegacyTerminal("expired", "review_expired");
+    db.prepare(
+      `INSERT INTO review_proposal_events
+         (proposal_id, actor_principal_id, event_type, from_status, to_status, detail, created_at)
+       VALUES (?, ?, 'expired', 'pending', 'expired', ?, ?)`,
+    ).run(
+      timeoutId,
+      "system:maintenance",
+      JSON.stringify({ reason: "legacy maintenance observed timeout" }),
+      lateTerminalAt,
+    );
+    const protectedIds = [
+      createLegacyTerminal("declined", "review_declined"),
+      createLegacyTerminal("failed", "application_error"),
+      createLegacyTerminal("approved", "review_approved"),
+      createLegacyTerminal("superseded", "review_superseded"),
+      createLegacyTerminal("expired", "manual_expired"),
+    ];
+    const beforeEvents = db.prepare(
+      `SELECT id, proposal_id, actor_principal_id, event_type, from_status,
+              to_status, detail, created_at
+       FROM review_proposal_events
+       WHERE proposal_id = ? ORDER BY id`,
+    ).all(timeoutId);
+    const beforeProtected = protectedIds.map((id) => db.prepare(
+      `SELECT id, status, terminal_code, terminal_at, updated_at
+       FROM review_proposals WHERE id = ?`,
+    ).get(id));
+
+    runMigrations(db);
+
+    const normalized = db.prepare(
+      `SELECT status, terminal_code, terminal_at, updated_at,
+              expires_at, current_operation, source_excerpt, payload_purged_at
+       FROM review_proposals WHERE id = ?`,
+    ).get(timeoutId) as {
+      status: string;
+      terminal_code: string;
+      terminal_at: string;
+      updated_at: string;
+      expires_at: string;
+      current_operation: string | null;
+      source_excerpt: string | null;
+      payload_purged_at: string | null;
+    };
+    expect(normalized).toMatchObject({
+      status: "expired",
+      terminal_code: "review_expired",
+      terminal_at: expiresAt,
+      updated_at: lateTerminalAt,
+      expires_at: expiresAt,
+      current_operation: expect.stringContaining(operationContent),
+      source_excerpt: `${sourceExcerpt} (expired)`,
+      payload_purged_at: null,
+    });
+    expect(db.prepare(
+      `SELECT id, proposal_id, actor_principal_id, event_type, from_status,
+              to_status, detail, created_at
+       FROM review_proposal_events
+       WHERE proposal_id = ? ORDER BY id`,
+    ).all(timeoutId)).toEqual(beforeEvents);
+    expect(protectedIds.map((id) => db.prepare(
+      `SELECT id, status, terminal_code, terminal_at, updated_at
+       FROM review_proposals WHERE id = ?`,
+    ).get(id))).toEqual(beforeProtected);
+
+    const migration24 = migrations.find(({ version }) => version === 24);
+    expect(migration24).toBeDefined();
+    const beforeIdempotent = db.prepare(
+      `SELECT status, terminal_code, terminal_at, updated_at,
+              current_operation, source_excerpt, payload_purged_at
+       FROM review_proposals WHERE id = ?`,
+    ).get(timeoutId);
+    migration24!.up(db);
+    expect(db.prepare(
+      `SELECT status, terminal_code, terminal_at, updated_at,
+              current_operation, source_excerpt, payload_purged_at
+       FROM review_proposals WHERE id = ?`,
+    ).get(timeoutId)).toEqual(beforeIdempotent);
+    expect(db.prepare(
+      `SELECT id, proposal_id, actor_principal_id, event_type, from_status,
+              to_status, detail, created_at
+       FROM review_proposal_events
+       WHERE proposal_id = ? ORDER BY id`,
+    ).all(timeoutId)).toEqual(beforeEvents);
+
+    const pruned = pruneReviewProposals(db, "2026-08-01T12:00:00.000Z");
+    expect(pruned).toEqual({
+      expired: 0,
+      payloads_purged: 1,
+      undo_snapshots_purged: 0,
+    });
+    expect(db.prepare(
+      `SELECT terminal_at, current_operation, source_excerpt, payload_purged_at
+       FROM review_proposals WHERE id = ?`,
+    ).get(timeoutId)).toEqual({
+      terminal_at: expiresAt,
+      current_operation: null,
+      source_excerpt: null,
+      payload_purged_at: expect.any(String),
+    });
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-01T12:00:00.000Z"));
+    try {
+      const call = makeReviewCall(db);
+      const listed = await call("memory_review", { action: "list" }) as {
+        proposals: Array<Record<string, unknown>>;
+      };
+      const listedTimeout = listed.proposals.find(({ id }) => id === timeoutId);
+      expect(listedTimeout).toMatchObject({
+        id: timeoutId,
+        status: "expired",
+        current_operation: null,
+        source_excerpt: null,
+      });
+      expect(JSON.stringify(listedTimeout)).not.toContain(operationContent);
+      expect(JSON.stringify(listedTimeout)).not.toContain(sourceExcerpt);
+
+      const inspected = await call("memory_review", {
+        action: "get",
+        proposal_id: timeoutId,
+      });
+      expect(inspected).toMatchObject({
+        id: timeoutId,
+        status: "expired",
+        current_operation: null,
+        source_excerpt: null,
+      });
+      expect(JSON.stringify(inspected)).not.toContain(operationContent);
+      expect(JSON.stringify(inspected)).not.toContain(sourceExcerpt);
+
+      const beforePreview = db.prepare(
+        `SELECT status, terminal_at, updated_at, payload_purged_at,
+                current_operation, source_excerpt
+         FROM review_proposals WHERE id = ?`,
+      ).get(timeoutId);
+      const preview = await call("memory_review", {
+        action: "preview",
+        proposal_id: timeoutId,
+      });
+      expect(preview).toMatchObject({
+        proposal_id: timeoutId,
+        status: "expired",
+        preview_wrote_memory: false,
+        approval_would_write_memory: false,
+      });
+      expect(preview).not.toHaveProperty("exact_operation");
+      expect(JSON.stringify(preview)).not.toContain(operationContent);
+      expect(JSON.stringify(preview)).not.toContain(sourceExcerpt);
+      expect(db.prepare(
+        `SELECT status, terminal_at, updated_at, payload_purged_at,
+                current_operation, source_excerpt
+         FROM review_proposals WHERE id = ?`,
+      ).get(timeoutId)).toEqual(beforePreview);
+    } finally {
+      vi.useRealTimers();
+      db.close();
+    }
   });
 
   it("skips already-applied migrations", () => {

@@ -142,10 +142,27 @@ memory:
 1. Call `memory_extract` with `persist:true`. It returns suggestions and durable
    proposal IDs, but does not change state or append logs.
 2. Call `memory_review` with `action:"preview"` for the exact operation, source
-   references, and freshness/CAS preconditions. Use `edit` or `decline` as needed.
+   references, freshness/CAS preconditions, and separate preview-vs-approval
+   write effects. Successful preview responses are metering-free pure reads:
+   they return `preview_wrote_memory:false`, `approval_would_write_memory:true|false`,
+   `approval_status` in `would_write | would_conflict | duplicate_noop | not_approvable`,
+   optional `approval_error { code, message }`, and optional `persisted_status`
+   when Munin is showing a derived effective status such as `expired` without
+   mutating the stored row. Request-level preview errors such as
+   `validation_error`, `not_found`, and `payload_expired` omit those effect
+   fields because no preview payload is available. Preview no longer returns the
+   old ambiguous `writes_memory` field. Use `edit` or `decline` while reviewing.
 3. Call `memory_review` with `action:"approve"` only after review. Approval
    re-runs the ordinary write gates and applies the operation atomically with the
-   proposal transition.
+   proposal transition. Approval remains the only step that can change memory
+   truth. When approval rejects without applying, it returns the same
+   machine-readable code preview advertised; for example, an expired proposal
+   rejects with `ok:false`, `error/code:"review_expired"`, and
+   `status:"expired"`. Non-terminal approve-time precondition rejections also
+   append a durable `approval_conflict` event that `memory_review get` exposes.
+   After an approval, `prepare_undo` can create a second review proposal
+   that restores prior state or withdraws a reviewed log without mutating memory
+   until that new proposal is approved.
 4. Call `memory_resume` or `memory_read` to verify the accepted memory in normal
    retrieval.
 
