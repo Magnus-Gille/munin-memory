@@ -101,6 +101,7 @@ describe("runMigrations", () => {
     expect(names).toContain("idx_audit_entry_id");
     expect(names).toContain("idx_review_proposals_creator_status_updated");
     expect(names).toContain("idx_review_proposals_expiry");
+    expect(names).toContain("idx_review_proposals_terminal_retention");
     expect(names).toContain("idx_review_proposal_events_proposal_created");
     db.close();
   });

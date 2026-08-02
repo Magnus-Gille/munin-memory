@@ -787,4 +787,25 @@ describe("review proposal retention", () => {
     expect(plan.some(({ detail }) => /^SCAN review_proposals\b/.test(detail))).toBe(false);
     db.close();
   });
+
+  it.each([
+    "declined",
+    "approved",
+  ] as const)("uses the indexed terminal retention range when pruning %s payloads", (status) => {
+    const db = initDatabase(":memory:");
+
+    const plan = db.prepare(
+      `EXPLAIN QUERY PLAN
+       SELECT * FROM review_proposals
+       WHERE status = ?
+         AND payload_purged_at IS NULL
+         AND terminal_at IS NOT NULL
+         AND terminal_at <= ?
+       ORDER BY terminal_at, id`,
+    ).all(status, "2026-08-23T10:06:00.000Z") as Array<{ detail: string }>;
+
+    expect(plan.some(({ detail }) => detail.includes("idx_review_proposals_terminal_retention"))).toBe(true);
+    expect(plan.some(({ detail }) => /^SCAN review_proposals\b/.test(detail))).toBe(false);
+    db.close();
+  });
 });

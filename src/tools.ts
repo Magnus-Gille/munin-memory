@@ -3943,7 +3943,22 @@ function deriveReadableReviewProposal(
   retention: ReviewProposalRetentionPolicy = {},
 ): { proposal: ReviewProposal; persistedStatus?: ReviewProposalStatus } {
   const effectiveStatus = deriveReviewProposalStatus(proposal, now);
-  const payloadPurged = reviewProposalPayloadPurgedOrDue(proposal, now, retention);
+  const payloadPurged = reviewProposalPayloadPurgedOrDue(
+    {
+      status: effectiveStatus,
+      terminal_at:
+        proposal.terminal_at
+        ?? (
+          effectiveStatus === "expired"
+          && (proposal.status === "pending" || proposal.status === "edited")
+            ? proposal.expires_at
+            : null
+        ),
+      payload_purged_at: proposal.payload_purged_at,
+    },
+    now,
+    retention,
+  );
   let derived = proposal;
 
   if (effectiveStatus !== proposal.status) {

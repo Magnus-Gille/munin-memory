@@ -9,6 +9,8 @@ export const REVIEW_PROPOSAL_EXPIRY_DETAIL = "Proposal expired before review.";
 export const REVIEW_SOURCE_EXCERPT_MAX_CHARS = 500;
 export const REVIEW_SOURCE_REF_MAX_COUNT = 10;
 export const REVIEW_REASON_MAX_COUNT = 10;
+const REVIEW_TERMINAL_PAYLOAD_STATUSES = ["declined", "expired", "failed"] as const;
+const REVIEW_APPROVED_UNDO_PAYLOAD_STATUSES = ["approved", "superseded"] as const;
 
 export type ReviewProposalStatus =
   | "pending"
@@ -774,6 +776,25 @@ function subtractDays(iso: string, days: number): string {
   return new Date(new Date(iso).getTime() - days * 24 * 60 * 60 * 1000).toISOString();
 }
 
+function reviewProposalPayloadRetentionCutoff(
+  status: ReviewProposalStatus,
+  now: string,
+  retention: ReviewProposalRetentionPolicy = {},
+): string | null {
+  const policy = resolveReviewProposalRetentionPolicy(retention);
+  switch (status) {
+    case "declined":
+    case "expired":
+    case "failed":
+      return subtractDays(now, policy.terminalPayloadDays);
+    case "approved":
+    case "superseded":
+      return subtractDays(now, policy.approvedUndoDays);
+    default:
+      return null;
+  }
+}
+
 function reviewProposalExpiredAtOrBefore(
   proposal: Pick<ReviewProposalRow | ReviewProposal, "status" | "expires_at">,
   now: string,
@@ -835,24 +856,24 @@ export function reviewProposalPayloadPurgedOrDue(
 ): boolean {
   if (proposal.payload_purged_at !== null) return true;
   if (proposal.terminal_at === null) return false;
+  const cutoff = reviewProposalPayloadRetentionCutoff(proposal.status, now, retention);
+  return cutoff !== null && proposal.terminal_at <= cutoff;
+}
 
-  const policy = resolveReviewProposalRetentionPolicy(retention);
-  const terminalCutoff = subtractDays(now, policy.terminalPayloadDays);
-  const undoCutoff = subtractDays(now, policy.approvedUndoDays);
-
-  if (
-    (proposal.status === "declined" || proposal.status === "expired" || proposal.status === "failed")
-    && proposal.terminal_at <= terminalCutoff
-  ) {
-    return true;
-  }
-  if (
-    (proposal.status === "approved" || proposal.status === "superseded")
-    && proposal.terminal_at <= undoCutoff
-  ) {
-    return true;
-  }
-  return false;
+function listReviewProposalPayloadPurgeCandidates(
+  db: Database.Database,
+  status: (typeof REVIEW_TERMINAL_PAYLOAD_STATUSES)[number]
+    | (typeof REVIEW_APPROVED_UNDO_PAYLOAD_STATUSES)[number],
+  terminalAtCutoff: string,
+): ReviewProposalRow[] {
+  return db.prepare(
+    `SELECT * FROM review_proposals
+     WHERE status = ?
+       AND payload_purged_at IS NULL
+       AND terminal_at IS NOT NULL
+       AND terminal_at <= ?
+     ORDER BY terminal_at, id`,
+  ).all(status, terminalAtCutoff) as ReviewProposalRow[];
 }
 
 export function pruneReviewProposals(
@@ -861,6 +882,7 @@ export function pruneReviewProposals(
   retention: ReviewProposalRetentionPolicy = {},
 ): { expired: number; payloads_purged: number; undo_snapshots_purged: number } {
   const txn = db.transaction(() => {
+    const policy = resolveReviewProposalRetentionPolicy(retention);
     const expiring = db.prepare(
       `SELECT * FROM review_proposals
        WHERE status IN ('pending', 'edited')
@@ -873,16 +895,19 @@ export function pruneReviewProposals(
       if (expireProposal(db, row, now, "system:maintenance")) expired += 1;
     }
 
-    const purgeable = db.prepare(
-      `SELECT * FROM review_proposals
-       WHERE payload_purged_at IS NULL
-         AND status IN ('declined', 'expired', 'failed', 'approved', 'superseded')
-       ORDER BY terminal_at, id`,
-    ).all() as ReviewProposalRow[];
+    const terminalCutoff = subtractDays(now, policy.terminalPayloadDays);
+    const undoCutoff = subtractDays(now, policy.approvedUndoDays);
+    const purgeable = [
+      ...REVIEW_TERMINAL_PAYLOAD_STATUSES.flatMap((status) =>
+        listReviewProposalPayloadPurgeCandidates(db, status, terminalCutoff)
+      ),
+      ...REVIEW_APPROVED_UNDO_PAYLOAD_STATUSES.flatMap((status) =>
+        listReviewProposalPayloadPurgeCandidates(db, status, undoCutoff)
+      ),
+    ];
     let payloadsPurged = 0;
     let undoSnapshotsPurged = 0;
     for (const row of purgeable) {
-      if (!reviewProposalPayloadPurgedOrDue(row, now, retention)) continue;
       const updated = db.prepare(
         `UPDATE review_proposals
          SET reasons = '[]', source_refs = '[]', source_excerpt = NULL,

@@ -472,6 +472,74 @@ describe("memory_extract durable review proposals", () => {
     }
   });
 
+  it("masks long-expired preview payloads using the derived expiry timestamp without mutating the proposal", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-01T12:00:00.000Z"));
+    const db = initDatabase(":memory:");
+    try {
+      const operationContent = "Long-expired review operation content";
+      const sourceExcerpt = "Long-expired review source excerpt";
+      const created = createReviewProposal(db, {
+        creatorPrincipalId: "owner",
+        operation: {
+          action: "memory_log",
+          namespace: "projects/munin-memory",
+          content: operationContent,
+        },
+        classification: "internal",
+        confidence: 1,
+        reasons: ["derived expiry retention coverage"],
+        sourceRefs: [],
+        sourceExcerpt,
+        sourceHash: "derived-expiry-retention-hash",
+        createdAt: "2026-06-01T10:00:00.000Z",
+        expiresAt: "2026-06-02T10:00:00.000Z",
+      });
+      const beforePreview = snapshotReviewDurability(db, created.id);
+
+      const preview = await makeCall(db)("memory_review", {
+        action: "preview",
+        proposal_id: created.id,
+      }) as {
+        status: string;
+        persisted_status?: string;
+        preview_wrote_memory: boolean;
+        approval_would_write_memory: boolean;
+        approval_status: string;
+        approval_error?: { code: string; message: string };
+      };
+      const afterPreview = snapshotReviewDurability(db, created.id);
+
+      expect(preview).toMatchObject({
+        status: "expired",
+        persisted_status: "pending",
+        preview_wrote_memory: false,
+        approval_would_write_memory: false,
+        approval_status: "not_approvable",
+        approval_error: {
+          code: "review_expired",
+          message: "Proposal expired before review.",
+        },
+      });
+      expect(preview).not.toHaveProperty("exact_operation");
+      expect(JSON.stringify(preview)).not.toContain(operationContent);
+      expect(JSON.stringify(preview)).not.toContain(sourceExcerpt);
+      expect(afterPreview).toEqual(beforePreview);
+      expect(db.prepare(
+        "SELECT status, terminal_at, payload_purged_at, current_operation, source_excerpt FROM review_proposals WHERE id = ?",
+      ).get(created.id)).toEqual({
+        status: "pending",
+        terminal_at: null,
+        payload_purged_at: null,
+        current_operation: expect.any(String),
+        source_excerpt: sourceExcerpt,
+      });
+    } finally {
+      db.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("uses the same configured retention for terminal preview masking and maintenance pruning", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-01T12:00:00.000Z"));

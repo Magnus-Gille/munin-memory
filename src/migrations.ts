@@ -980,6 +980,16 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 23,
+    description: "Index terminal review proposal payload pruning by status and cutoff (#300)",
+    up: (db) => {
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_review_proposals_terminal_retention
+          ON review_proposals(status, payload_purged_at, terminal_at, id);
+      `);
+    },
+  },
 ];
 
 /**
