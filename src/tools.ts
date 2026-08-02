@@ -4125,10 +4125,10 @@ function serializeCommitmentExclusionDiagnostics(diagnostics: CommitmentExclusio
 }
 
 const COMMITMENT_REASON_SUMMARY =
-  "Commitments are derived from canonical tracked-status content (including Next Steps and dated future clauses in visible status prose) and from visible log phrases like 'I will...', 'We agreed to: ...', 'We will verify ... by YYYY-MM-DD', or 'I will run ... on YYYY-MM-DD'.";
+  "Commitments are derived from canonical tracked-status content (including Next Steps and dated future clauses in visible tracked-status prose) and from visible log phrases like 'I will...', 'We agreed to: ...', 'We will verify ... by YYYY-MM-DD', or 'I will run ... on YYYY-MM-DD'.";
 
 const COMMITMENT_DATA_REQUIREMENTS =
-  "Commitments are extracted from canonical tracked status entries (for example via memory_update_status) and from visible status/log prose containing explicit commitment phrases or future-dated action lines such as 'I will ... by YYYY-MM-DD' or 'I will ... on YYYY-MM-DD' (including verify/run/validate/check/test). Plain markdown status blobs with ad-hoc 'Next Steps:' headings are not parsed here; migrate them to the canonical structure if you want them to surface. When visible matches are dropped, the response may include content-blind exclusion_diagnostics counts of matched candidate units (for example a legacy Next Steps block or a dated clause), not full entry bodies.";
+  "Commitments are extracted from canonical tracked status entries (for example via memory_update_status) and from visible log prose containing explicit commitment phrases or future-dated action lines such as 'I will ... by YYYY-MM-DD' or 'I will ... on YYYY-MM-DD' (including verify/run/validate/check/test). Generic non-status state fields are not commitment sources. Plain markdown status blobs with ad-hoc 'Next Steps:' headings remain readable but are not parsed here; migrate them to the canonical structure if you want them to surface. When visible matches are dropped, the response may include content-blind exclusion_diagnostics counts of matched candidate units (for example a legacy Next Steps block or a dated clause), not full entry bodies.";
 
 function buildEmptyCommitmentsReason(
   visibleEntryCount: number,
@@ -4192,6 +4192,10 @@ function isTrackedStatusEntry(
   return entry.entry_type === "state" && entry.key === "status" && isTrackedNamespace(entry.namespace, trackedPatterns);
 }
 
+function isCommitmentReadableSourceEntry(entry: Entry): boolean {
+  return entry.entry_type === "log" || (entry.entry_type === "state" && entry.key === "status");
+}
+
 function extractStatusContentOutsideNextSteps(content: string): string {
   const strippedLegacyContent = stripLegacyPlainStatusNextSteps(content);
   const cleanedContent = strippedLegacyContent
@@ -4228,11 +4232,13 @@ function extractCandidateSegmentsFromEntry(
   entry: Entry,
   trackedPatterns: string[] = [...DEFAULT_TRACKED_PATTERNS],
 ): string[] {
-  if (entry.entry_type === "state" && entry.key === "status") {
-    if (!isTrackedStatusEntry(entry, trackedPatterns)) return [];
+  if (isTrackedStatusEntry(entry, trackedPatterns)) {
     return extractCandidateSegments(extractStatusContentOutsideNextSteps(entry.content));
   }
-  return extractCandidateSegments(entry.content);
+  if (entry.entry_type === "log" && isTrackedNamespace(entry.namespace, trackedPatterns)) {
+    return extractCandidateSegments(entry.content);
+  }
+  return [];
 }
 
 function countEntryCommitmentLikeUnits(
@@ -4468,7 +4474,7 @@ function shouldSyncCommitmentDerivationsForEntry(
   entry: Entry,
   trackedPatterns: string[] = [...DEFAULT_TRACKED_PATTERNS],
 ): boolean {
-  return !(entry.entry_type === "state" && entry.key === "status" && !isTrackedNamespace(entry.namespace, trackedPatterns));
+  return isTrackedNamespace(entry.namespace, trackedPatterns);
 }
 
 function syncDerivedCommitmentsForEntry(
@@ -4511,7 +4517,7 @@ function syncCommitmentsForScope(
   let visibleEntryCount = 0;
   let readableEntryCount = 0;
   for (const entry of filtered.allowed) {
-    if (entry.key !== "synthesis") {
+    if (isCommitmentReadableSourceEntry(entry)) {
       readableEntryCount += 1;
     }
     // Only reconcile commitments for namespaces the caller actually tracks.
@@ -4520,7 +4526,7 @@ function syncCommitmentsForScope(
     // then mark another principal's open commitment as done — silently corrupting
     // cross-principal commitment state. (#164 Codex Finding 1)
     if (!isTrackedNamespace(entry.namespace, trackedPatterns)) continue;
-    if (entry.key !== "synthesis") {
+    if (isCommitmentReadableSourceEntry(entry)) {
       visibleEntryCount += 1;
     }
     syncCommitmentsForEntry(
@@ -4577,7 +4583,7 @@ function listFreshCommitmentRows(
     since,
     limit,
     includeResolved: true,
-  }).filter((row) => canRead(ctx, row.namespace));
+  }).filter((row) => canRead(ctx, row.namespace) && isTrackedNamespace(row.namespace, trackedPatterns));
 
   const allowedRefreshCandidates = filterDerivedSources(
     db,
@@ -4629,7 +4635,7 @@ function listFreshCommitmentRows(
     since,
     limit,
     includeResolved,
-  }).filter((row) => canRead(ctx, row.namespace));
+  }).filter((row) => canRead(ctx, row.namespace) && isTrackedNamespace(row.namespace, trackedPatterns));
 
   const visibleRows = filterDerivedSources(
     db,
@@ -5307,7 +5313,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_commitments",
     description:
-      "Surface explicit commitments derived from canonical tracked-status content and dated, attributable source text. Use this when you want to review open, at-risk, overdue, or recently completed follow-through items rather than rely on fuzzy prose search.\n\nThis tool derives and reports commitments from existing entries; callers cannot write commitments directly. Canonical tracked-status Next Steps (for example via `memory_update_status`), dated future clauses in visible tracked-status prose, and future-dated log phrases such as `I will ... by YYYY-MM-DD`, `I will ... on YYYY-MM-DD`, or `We agreed to: ...` can surface here. Legacy plain markdown status blobs with ad-hoc `Next Steps:` headings remain readable but are not commitment-eligible until migrated to the canonical structure. When visible matches are dropped, the response may include content-blind `exclusion_diagnostics` counts of matched candidate units (for example a legacy Next Steps block or a dated clause), not full entry bodies.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
+      "Surface explicit commitments derived from canonical tracked-status content and dated, attributable source text. Use this when you want to review open, at-risk, overdue, or recently completed follow-through items rather than rely on fuzzy prose search.\n\nThis tool derives and reports commitments from existing entries; callers cannot write commitments directly. Canonical tracked-status Next Steps (for example via `memory_update_status`), dated future clauses in visible tracked-status prose, and future-dated `memory_log` phrases such as `I will ... by YYYY-MM-DD`, `I will ... on YYYY-MM-DD`, or `We agreed to: ...` can surface here. Generic non-status state fields are not commitment sources. Legacy plain markdown status blobs with ad-hoc `Next Steps:` headings remain readable but are not commitment-eligible until migrated to the canonical structure. When visible matches are dropped, the response may include content-blind `exclusion_diagnostics` counts of matched candidate units (for example a legacy Next Steps block or a dated clause), not full entry bodies.\n\nFirst memory operation: call `memory_orient` first if it is callable. If your host/deferred tool discovery did not expose `memory_orient`, call `memory_status` or `memory_resume` as a fallback instead of stalling.",
     inputSchema: {
       type: "object" as const,
       properties: {

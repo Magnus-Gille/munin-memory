@@ -5633,6 +5633,41 @@ describe("memory_commitments", () => {
     }
   });
 
+  it("does not derive commitments from tracked non-status state entries", async () => {
+    const publishDate = commitmentTestDate(14);
+    await callTool("memory_update_status", {
+      namespace: "projects/non-status-state-commitments",
+      phase: "Delivery",
+      current_work: "Keep canonical status current.",
+      blockers: "None.",
+      next_steps: [],
+      lifecycle: "active",
+    });
+    await callTool("memory_write", {
+      namespace: "projects/non-status-state-commitments",
+      key: "architecture",
+      content: `We will publish the API reference by ${publishDate}.`,
+    });
+
+    const rowCount = db.prepare(
+      "SELECT COUNT(*) AS count FROM commitments WHERE namespace = ?",
+    ).get("projects/non-status-state-commitments") as { count: number };
+    expect(rowCount.count).toBe(0);
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/non-status-state-commitments",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ text: string }>;
+      overdue: Array<{ text: string }>;
+      at_risk: Array<{ text: string }>;
+    };
+
+    expect(result.open).toHaveLength(0);
+    expect(result.overdue).toHaveLength(0);
+    expect(result.at_risk).toHaveLength(0);
+  });
+
   it("deduplicates repeated commitment sentences within one entry and reports the dropped duplicate", async () => {
     const duplicateDueDate = commitmentTestDate(19);
     await callTool("memory_log", {
@@ -6677,6 +6712,55 @@ describe("memory_commitments", () => {
     expect(result.reason).toMatch(/tracked/i);
     expect(result.reason).not.toMatch(/no status or log entries to scan/i);
     expect(result.data_requirements).toBeDefined();
+  });
+
+  it("stops deriving and surfacing log commitments when a namespace becomes untracked", async () => {
+    const namespace = "projects/commitment-tracked-pattern-regression";
+    const firstPublishDate = commitmentTestDate(15);
+    const secondPublishDate = commitmentTestDate(16);
+
+    await callTool("memory_log", {
+      namespace,
+      content: `We will publish the rollout checklist by ${firstPublishDate}.`,
+      tags: ["decision"],
+    });
+
+    let rowCount = db.prepare(
+      "SELECT COUNT(*) AS count FROM commitments WHERE namespace = ?",
+    ).get(namespace) as { count: number };
+    expect(rowCount.count).toBe(1);
+
+    await callTool("memory_write", {
+      namespace: "meta/config",
+      key: "config",
+      content: JSON.stringify({ tracked_patterns: ["clients/*"] }),
+    });
+    await callTool("memory_log", {
+      namespace,
+      content: `We will publish the release notes by ${secondPublishDate}.`,
+      tags: ["decision"],
+    });
+
+    rowCount = db.prepare(
+      "SELECT COUNT(*) AS count FROM commitments WHERE namespace = ?",
+    ).get(namespace) as { count: number };
+    expect(rowCount.count).toBe(1);
+
+    const raw = await callTool("memory_commitments", { namespace });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ text: string }>;
+      overdue: Array<{ text: string }>;
+      at_risk: Array<{ text: string }>;
+      reason?: string;
+    };
+
+    expect(result.open).toHaveLength(0);
+    expect(result.overdue).toHaveLength(0);
+    expect(result.at_risk).toHaveLength(0);
+    expect(result.reason).toMatch(/tracked/i);
+    expect(result.open).not.toContainEqual(expect.objectContaining({
+      text: `We will publish the rollout checklist by ${firstPublishDate}.`,
+    }));
   });
 
   it("includes data_requirements and suggestion in empty results, omits them in non-empty results", async () => {
