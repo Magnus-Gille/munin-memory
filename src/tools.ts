@@ -214,6 +214,7 @@ import type {
   RetrievalFeedbackParams,
   RetrievalAggregates,
   ClassificationLevel,
+  CommitmentStatus,
   IntakeResult,
 } from "./types.js";
 
@@ -4264,6 +4265,11 @@ function buildNarrativeSources(
 
 const COMMITMENT_SOON_DAYS = 3;
 const COMMITMENT_COMPLETED_RECENT_DAYS = 14;
+
+function recentlyDoneCommitmentCutoff(now = Date.now()): string {
+  return new Date(now - COMMITMENT_COMPLETED_RECENT_DAYS * 24 * 60 * 60 * 1000).toISOString();
+}
+
 const COMMITMENT_ACTION_VERB =
   /\b(send|ship|deliver|finish|complete|publish|deploy|update|write|call|review|rerun|check|prepare|create|build|submit|investigate|resolve|schedule|organize|migrate|refactor|test|validate|verify|research|draft|design|implement|configure|setup|set up|run|file|fix|address|handle|ensure|confirm)\b/i;
 const COMMITMENT_FORWARD_CUE =
@@ -4774,7 +4780,14 @@ function listFreshCommitmentRows(
     namespace?: string;
     since?: string;
     limit: number;
-    includeResolved?: boolean;
+    statuses?: readonly CommitmentStatus[];
+    recentlyDoneSince?: string;
+    /**
+     * Exhaust the SQL-eligible rows instead of stopping after pageLimit
+     * visible rows. The commitments view uses this so one classification
+     * bucket cannot consume a fixed shared cap.
+     */
+    exhaustEligible?: boolean;
   },
   sessionId?: string,
   visibleResolvedNamespaces: Set<string> = new Set<string>(),
@@ -4786,7 +4799,14 @@ function listFreshCommitmentRows(
   visibleEntryCount: number;
   readableEntryCount: number;
 } {
-  const { namespace, since, limit, includeResolved = true } = options;
+  const {
+    namespace,
+    since,
+    limit,
+    statuses,
+    recentlyDoneSince,
+    exhaustEligible = false,
+  } = options;
   const diagnostics = createCommitmentExclusionDiagnostics();
   const syncResult = syncCommitmentsForScope(
     db,
@@ -4802,7 +4822,7 @@ function listFreshCommitmentRows(
   const trackedPatterns = resolveTrackedPatterns(db, ctx);
   const refreshSourceRedacted: RedactableEntryMetadata[] = [];
 
-  const listFilteredRows = (pageLimit: number): {
+  const listFilteredRows = (pageLimit: number, exhaust = false): {
     rows: CommitmentRow[];
     redacted: RedactableEntryMetadata[];
     sourceEntryIds: Set<string>;
@@ -4811,6 +4831,7 @@ function listFreshCommitmentRows(
     const redacted: RedactableEntryMetadata[] = [];
     const sourceEntryIds = new Set<string>();
     const pageSize = Math.min(Math.max(pageLimit, 1), 200);
+    const sqlPageSize = exhaust ? 200 : pageSize;
     const readableNamespaceSelectors = resolveReadableNamespaceSelectors(ctx);
     const classificationCeiling = isLibrarianEnabled()
       ? getContextMaxClassification(ctx)
@@ -4823,14 +4844,20 @@ function listFreshCommitmentRows(
       : undefined;
     let offset = 0;
 
-    while (rows.length < pageSize) {
+    // Each iteration consumes a disjoint, deterministic SQL page. Normal
+    // callers stop after their requested visible-row budget; the commitments
+    // multi-bucket view opts into full eligible-set exhaustion, which
+    // terminates only at an empty/short SQL page rather than at an arbitrary
+    // total cap.
+    while (exhaust || rows.length < pageSize) {
       const page = listCommitments(db, {
         namespace,
         namespaceMode: "exact",
         since,
-        limit: Math.min(200, pageSize),
+        limit: sqlPageSize,
         offset,
-        includeResolved,
+        statuses,
+        recentlyDoneSince,
         namespaceSelectors: readableNamespaceSelectors,
         trackedPatterns,
         classificationCeiling,
@@ -4861,11 +4888,11 @@ function listFreshCommitmentRows(
         if (visibleResolvedNamespaces.has(row.namespace)) continue;
         rows.push(row);
         sourceEntryIds.add(row.source_entry_id);
-        if (rows.length >= pageSize) break;
+        if (!exhaust && rows.length >= pageSize) break;
       }
 
       offset += page.length;
-      if (page.length < Math.min(200, pageSize)) break;
+      if (page.length < sqlPageSize) break;
     }
 
     return { rows, redacted, sourceEntryIds };
@@ -4902,7 +4929,7 @@ function listFreshCommitmentRows(
     );
   }
 
-  const visibleRows = listFilteredRows(limit);
+  const visibleRows = listFilteredRows(limit, exhaustEligible);
 
   return {
     rows: visibleRows.rows,
@@ -5002,9 +5029,9 @@ function classifyCommitments(
   rows: CommitmentRow[],
   trackedStatusByNamespace: Map<string, TrackedStatusAssessment>,
   limit: number,
+  completedCutoff = recentlyDoneCommitmentCutoff(),
 ) {
   const now = nowUTC();
-  const completedCutoff = new Date(Date.now() - COMMITMENT_COMPLETED_RECENT_DAYS * 24 * 60 * 60 * 1000).toISOString();
 
   const open: CommitmentItem[] = [];
   const atRisk: CommitmentItem[] = [];
@@ -8661,14 +8688,20 @@ export function registerTools(
               );
               const trackedStatusByNamespace = mapTrackedStatusAssessmentsByNamespace(visibleTrackedStatuses.allowed);
               const visibleResolvedNamespaces = getVisibleResolvedNamespaces(visibleTrackedStatuses.allowed);
+              // Use one cutoff for both SQL eligibility and response
+              // classification so a boundary row cannot move between
+              // completed_recently and the discarded set mid-request.
+              const completedCutoff = recentlyDoneCommitmentCutoff();
               const { rows, redacted, diagnostics, visibleEntryCount, readableEntryCount } = listFreshCommitmentRows(db, ctx, "memory_commitments", {
                 namespace,
                 since: normalizedSince,
                 limit: Math.max(limit * 8, 80),
-                includeResolved: true,
+                statuses: ["open", "done"],
+                recentlyDoneSince: completedCutoff,
+                exhaustEligible: true,
               }, sessionId, visibleResolvedNamespaces, loggedEntryIds);
 
-              const classified = classifyCommitments(db, rows, trackedStatusByNamespace, limit);
+              const classified = classifyCommitments(db, rows, trackedStatusByNamespace, limit, completedCutoff);
               const response: Record<string, unknown> = { ...classified };
               const exclusionDiagnostics = serializeCommitmentExclusionDiagnostics(diagnostics);
               if (exclusionDiagnostics) response.exclusion_diagnostics = exclusionDiagnostics;
@@ -8825,7 +8858,7 @@ export function registerTools(
                 namespace,
                 since: normalizedSince,
                 limit: 200,
-                includeResolved: true,
+                statuses: ["open"],
               }, sessionId, visibleResolvedNamespaces, loggedEntryIds);
 
               const undatedOpen = commitmentRows.filter((row) => row.status === "open" && !row.due_at);
@@ -9093,7 +9126,7 @@ export function registerTools(
                 namespace,
                 since: normalizedSince,
                 limit: 200,
-                includeResolved: true,
+                statuses: ["open"],
               }, sessionId, visibleResolvedNamespaces, loggedEntryIds);
               const trackedStatusByNamespace = mapTrackedStatusAssessmentsByNamespace(visibleTrackedStatuses.allowed);
               const currentState = buildHandoffCurrentState(namespace, visibleStatusEntry, allEntries);

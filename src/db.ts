@@ -1824,10 +1824,24 @@ export interface CommitmentRow {
 export interface ListCommitmentsOptions {
   namespace?: string;
   namespaceMode?: BareNamespaceMode;
+  /** Lower bound on the commitment row's reconciliation/update timestamp. */
   since?: string;
   limit?: number;
   offset?: number;
+  /**
+   * Legacy status convenience: false selects open rows only; true (the
+   * default) leaves all commitment statuses eligible. Prefer `statuses` for
+   * new callers that need a precise status set.
+   */
   includeResolved?: boolean;
+  /** Explicit status allow-list. Takes precedence over includeResolved. */
+  statuses?: readonly CommitmentStatus[];
+  /**
+   * Retain open rows and done rows resolved at or after this cutoff. This is
+   * intentionally a done-only time predicate, so cancelled and old done rows
+   * cannot enter a recent-completions view.
+   */
+  recentlyDoneSince?: string;
   /** Optional SQL prefilter; canonical canRead remains authoritative in tools.ts. */
   namespaceSelectors?: readonly NamespaceSelector[] | null;
   /** Resolved tracked namespace patterns for pre-limit filtering. */
@@ -2036,6 +2050,8 @@ export function listCommitments(
     limit = 100,
     offset = 0,
     includeResolved = true,
+    statuses,
+    recentlyDoneSince,
     namespaceSelectors,
     trackedPatterns,
     classificationCeiling,
@@ -2043,6 +2059,11 @@ export function listCommitments(
   } = options;
   const clampedLimit = Math.min(Math.max(limit, 1), 200);
   const clampedOffset = Number.isFinite(offset) ? Math.max(Math.floor(offset), 0) : 0;
+  const statusFilter = statuses !== undefined
+    ? [...new Set(statuses)]
+    : includeResolved
+      ? undefined
+      : (["open"] as const);
 
   let sql = `
     SELECT c.*,
@@ -2097,8 +2118,18 @@ export function listCommitments(
     params.push(since);
   }
 
-  if (!includeResolved) {
-    sql += " AND c.status = 'open'";
+  if (statusFilter !== undefined) {
+    if (statusFilter.length === 0) {
+      sql += " AND 0";
+    } else {
+      sql += " AND c.status IN (" + statusFilter.map(() => "?").join(", ") + ")";
+      params.push(...statusFilter);
+    }
+  }
+
+  if (recentlyDoneSince !== undefined) {
+    sql += " AND (c.status = 'open' OR (c.status = 'done' AND c.resolved_at >= ?))";
+    params.push(recentlyDoneSince);
   }
 
   sql += " ORDER BY CASE WHEN c.due_at IS NULL THEN 1 ELSE 0 END, c.due_at ASC, c.updated_at DESC, c.id ASC LIMIT ? OFFSET ?";

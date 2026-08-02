@@ -229,6 +229,31 @@ function seedHiddenCommitmentRows(
   }
 }
 
+function seedCommitmentStatusRow(
+  namespace: string,
+  id: string,
+  text: string,
+  status: "done" | "cancelled",
+  resolvedAt: string,
+): void {
+  const source = appendLog(db, namespace, text, []);
+  db.prepare(
+    `INSERT INTO commitments
+       (id, namespace, source_entry_id, source_type, source_fingerprint, text, due_at, status, confidence, created_at, updated_at, resolved_at, source_classification)
+     VALUES (?, ?, ?, 'explicit_commitment', ?, ?, NULL, ?, 0.9, ?, ?, ?, 'public')`,
+  ).run(
+    id,
+    namespace,
+    source.id,
+    `seeded:${id}`,
+    text,
+    status,
+    source.timestamp,
+    source.timestamp,
+    resolvedAt,
+  );
+}
+
 beforeEach(() => {
   cleanupTestDb();
   db = initDatabase(TEST_DB_PATH);
@@ -3444,6 +3469,59 @@ describe("Librarian Pattern B enforcement for derived tools", () => {
       if (previousLibrarian === undefined) delete process.env.MUNIN_LIBRARIAN_ENABLED;
       else process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
     }
+  });
+
+  it("does not let authorized cancelled rows hide open, at-risk, or recent-done commitments across public handlers", async () => {
+    const namespace = "projects/commitment-resolved-page-cap";
+    seedHiddenCommitmentRows(namespace, 205, "2026-07-01T23:59:59.000Z");
+    seedCommitmentStatusRow(
+      namespace,
+      "recently-done-commitment",
+      "Recently completed handoff notes",
+      "done",
+      "2026-07-31T12:00:00.000Z",
+    );
+    seedCommitmentStatusRow(
+      namespace,
+      "old-done-commitment",
+      "Old completed handoff notes",
+      "done",
+      "2026-06-01T12:00:00.000Z",
+    );
+    const undatedTexts = [
+      "Commitment: review the undated migration notes",
+      "Commitment: review the undated rollback notes",
+    ];
+    for (const content of undatedTexts) {
+      await callTool("memory_log", { namespace, content });
+    }
+    const dueSoonText = `We will review the due-soon handoff by ${commitmentTestDate(1)}.`;
+    await callTool("memory_log", { namespace, content: dueSoonText });
+
+    const commitments = parseToolResponse(await callTool("memory_commitments", { namespace })) as {
+      open: Array<{ text: string }>;
+      at_risk: Array<{ text: string }>;
+      overdue: Array<{ text: string }>;
+      completed_recently: Array<{ text: string; status: string }>;
+    };
+    expect(commitments.open.map((item) => item.text)).toEqual(expect.arrayContaining(undatedTexts));
+    expect(commitments.at_risk).toContainEqual(expect.objectContaining({ text: dueSoonText }));
+    expect(commitments.completed_recently).toContainEqual(expect.objectContaining({
+      text: "Recently completed handoff notes",
+      status: "done",
+    }));
+    expect(JSON.stringify(commitments)).not.toContain("Hidden commitment");
+    expect(JSON.stringify(commitments)).not.toContain("Old completed handoff notes");
+
+    const patterns = parseToolResponse(await callTool("memory_patterns", { namespace })) as {
+      patterns: Array<{ kind: string }>;
+    };
+    expect(patterns.patterns).toContainEqual(expect.objectContaining({ kind: "undated_next_steps" }));
+
+    const handoff = parseToolResponse(await callTool("memory_handoff", { namespace })) as {
+      open_loops: string[];
+    };
+    expect(handoff.open_loops.some((loop) => loop.includes(dueSoonText))).toBe(true);
   });
 
   it("keeps visible log commitments visible when only a hidden terminal status resolves the namespace", async () => {

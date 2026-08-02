@@ -935,6 +935,54 @@ describe("commitment revision identity (#253)", () => {
 });
 
 describe("commitment classification lifecycle", () => {
+  it("applies explicit statuses and the recent-done cutoff before pagination", () => {
+    const namespace = "projects/commitment-status-predicate";
+    const insert = db.prepare(
+      `INSERT INTO commitments
+         (id, namespace, source_entry_id, source_type, source_fingerprint, text, due_at, status, confidence, created_at, updated_at, resolved_at)
+       VALUES (?, ?, ?, 'explicit_commitment', ?, ?, ?, ?, 0.9, ?, ?, ?)`,
+    );
+    const seed = (
+      id: string,
+      status: "open" | "done" | "cancelled",
+      dueAt: string | null,
+      resolvedAt: string | null,
+    ) => {
+      const source = appendLog(db, namespace, `Source for ${id}`, []);
+      insert.run(
+        id,
+        namespace,
+        source.id,
+        `seeded:${id}`,
+        id,
+        dueAt,
+        status,
+        source.timestamp,
+        source.timestamp,
+        resolvedAt,
+      );
+    };
+
+    seed("cancelled", "cancelled", "2026-01-01T23:59:59.000Z", "2026-07-31T12:00:00.000Z");
+    seed("old-done", "done", "2026-01-02T23:59:59.000Z", "2026-06-01T12:00:00.000Z");
+    seed("open", "open", "2099-12-31T23:59:59.000Z", null);
+    seed("recent-done", "done", null, "2026-07-31T12:00:00.000Z");
+
+    const recentView = listCommitments(db, {
+      namespace,
+      statuses: ["open", "done"],
+      recentlyDoneSince: "2026-07-18T00:00:00.000Z",
+      limit: 2,
+    });
+    expect(recentView.map((row) => row.id)).toEqual(["open", "recent-done"]);
+
+    expect(listCommitments(db, {
+      namespace,
+      includeResolved: false,
+      statuses: ["done"],
+    }).map((row) => row.id)).toEqual(["old-done", "recent-done"]);
+  });
+
   it("propagates source classification and scrubs client-restricted derivatives", () => {
     const { id } = appendLog(
       db,

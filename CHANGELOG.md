@@ -66,6 +66,13 @@ changelog is the canonical record of what moved.
 
 ### Fixed
 
+- **Commitment-derived views no longer let resolved rows consume the page cap (#274).**
+  `memory_commitments` now paginates the SQL-eligible open and recently-done rows
+  to exhaustion before filling its independent output buckets, while
+  `memory_patterns` and `memory_handoff` prefilter to open rows. Cancelled and
+  old completed rows therefore cannot hide current obligations, and the
+  recent-completion cutoff is shared by query eligibility and classification.
+
 - **`memory_commitments` now recognizes future-dated verify/run forms and
   explains conservative exclusions (#274).** The dated-action vocabulary now
   includes `verify`, so future phrases such as `We will verify ... by
