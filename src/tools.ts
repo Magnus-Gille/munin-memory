@@ -1470,16 +1470,16 @@ import {
   REFERENCE_NAMESPACE_PATTERNS,
   detectUntrackedNamespaces,
   detectUntrackedNamespaceClusters,
+  namespaceMatchesQueryScope,
   canonicalizeTags,
   stripReservedTags,
   getLifecycleTags,
   boundarySerialize,
 } from "./internal/retrieval-shared.js";
 import {
-  LEGACY_STATUS_NEXT_STEPS_HEADER,
   countLegacyPlainStatusNextStepsSections,
-  hasLegacyPlainStatusNextSteps,
   hasStructuredStatusNextStepsSection,
+  stripLegacyPlainStatusNextSteps,
 } from "./commitment-status.js";
 // The reranker pipeline lives in ./internal/reranker.js (issue #59).
 // tools.ts imports only the names it uses internally; the dedicated module
@@ -1827,12 +1827,6 @@ function resolveOrientDetail(params: OrientParams): OrientDetail {
   return DEFAULT_ORIENT_DETAIL;
 }
 
-function matchesNamespacePrefix(namespace: string, prefix?: string): boolean {
-  if (!prefix) return true;
-  if (prefix.endsWith("/")) return namespace.startsWith(prefix);
-  return namespace === prefix;
-}
-
 function getAttentionSeverity(category: AttentionItem["category"]): AttentionItem["severity"] {
   switch (category) {
     case "blocked":
@@ -2077,7 +2071,7 @@ function buildResumeStatusCandidate(
   hintTerms: string[],
   includeAttention: boolean,
 ): ResumeCandidate | null {
-  const inScope = scope ? matchesNamespacePrefix(assessment.row.namespace, scope) : false;
+  const inScope = scope ? namespaceMatchesQueryScope(assessment.row.namespace, scope) : false;
   const matchText = `${assessment.row.namespace} ${assessment.row.key} ${assessment.row.content_preview}`;
   const matchedTerms = countResumeTermMatches(matchText, hintTerms);
 
@@ -2145,7 +2139,7 @@ function buildResumeStateCandidate(
       suggested_action: "Read this entry if you need implementation or reference context beyond the status.",
       ...(safePreviewResult.untrusted ? { untrusted_content: true } : {}),
     },
-    score: 60 + matchedTerms * 6 + getFreshnessScore(entry.updated_at) * 8 + (matchesNamespacePrefix(entry.namespace, scope) ? 20 : 0),
+    score: 60 + matchedTerms * 6 + getFreshnessScore(entry.updated_at) * 8 + (namespaceMatchesQueryScope(entry.namespace, scope) ? 20 : 0),
     openLoops: [],
     suggestedRead: entry.key
       ? {
@@ -2180,11 +2174,11 @@ function buildResumeLogCandidate(
   hintTerms: string[],
 ): ResumeCandidate | null {
   if (!isDecisionLikeLog(entry)) return null;
-  if (scope && !matchesNamespacePrefix(entry.namespace, scope)) return null;
+  if (scope && !namespaceMatchesQueryScope(entry.namespace, scope)) return null;
 
   const matchText = `${entry.namespace} ${entry.content}`;
   const matchedTerms = countResumeTermMatches(matchText, hintTerms);
-  const inScope = scope ? matchesNamespacePrefix(entry.namespace, scope) : false;
+  const inScope = scope ? namespaceMatchesQueryScope(entry.namespace, scope) : false;
 
   const logTags = parseTags(entry.tags);
   const safeLogPreview = safenEntryPreview(entry.content, logTags, 220);
@@ -2229,7 +2223,7 @@ function buildResumeHistoryCandidate(db: Database.Database, entry: AuditHistoryE
       suggested_action: "Review recent writes and updates before continuing work in this namespace.",
       ...(safeDetail.untrusted ? { untrusted_content: true } : {}),
     },
-    score: 50 + (matchesNamespacePrefix(entry.namespace, scope) ? 15 : 0) + getFreshnessScore(entry.timestamp) * 6,
+    score: 50 + (namespaceMatchesQueryScope(entry.namespace, scope) ? 15 : 0) + getFreshnessScore(entry.timestamp) * 6,
     openLoops: [],
     suggestedRead: {
       tool: "memory_history",
@@ -4080,7 +4074,7 @@ const COMMITMENT_PASSIVE_FUTURE_ACTION =
 const COMMITMENT_EXPLICIT_PREFIX =
   /^(?:commitment|i commit to|we (?:agreed|commit) to):\s*/i;
 const COMMITMENT_FUTURE_CLAUSE_BOUNDARY =
-  /\s*(?:,|;|\band\b|\bbut\b|\bthen\b)\s+(?=(?:(?:i|we|they|it|this|that)\s+)?(?:will|must|need to|needs to|plan to|planned to|should|target(?:ing)?(?: to)?|aim to)\b)/i;
+  /\s*(?:,|;|\band\b|\bbut\b|\bthen\b)\s+(?=(?:[^.!?]*?\b(?:will|must|need to|needs to|plan to|planned to|should|target(?:ing)?(?: to)?|aim to)\b))/i;
 const COMMITMENT_SUBJECT_PREFIX = /^(I|We|They|It|This|That)\b/i;
 const COMMITMENT_CONTEXTUAL_SUBJECT_PREFIX =
   /^(?:(?:yesterday|today|tomorrow|earlier|later|afterward|afterwards)\b[\s,:;-]*)+(I|We|They|It|This|That)\b/i;
@@ -4198,46 +4192,35 @@ function isTrackedStatusEntry(
 }
 
 function extractStatusContentOutsideNextSteps(content: string): string {
-  const hasLegacyBlock = hasLegacyPlainStatusNextSteps(content);
-  const headingMatches = [...content.matchAll(/^##\s+(.+)$/gm)];
+  const strippedLegacyContent = stripLegacyPlainStatusNextSteps(content);
+  const cleanedContent = strippedLegacyContent
+    .split("\n")
+    .filter((line) => {
+      const inline = line.match(/^\*\*([^*]+)\*\*:\s*(.+)$/);
+      return !(inline && normalizeStatusLabel(inline[1]) === "next_steps");
+    })
+    .join("\n");
+  const headingMatches = [...cleanedContent.matchAll(/^##\s+(.+)$/gm)];
   if (headingMatches.length > 0) {
     const sections: string[] = [];
-    const prefix = content.slice(0, headingMatches[0].index).trim();
+    const prefix = cleanedContent.slice(0, headingMatches[0].index).trim();
     if (prefix) sections.push(prefix);
 
     for (let i = 0; i < headingMatches.length; i++) {
       const match = headingMatches[i];
       const rawTitle = match[1].trim();
       const label = normalizeStatusLabel(rawTitle);
-      if (label === "next_steps" || (hasLegacyBlock && LEGACY_STATUS_NEXT_STEPS_HEADER.test(rawTitle))) continue;
+      if (label === "next_steps") continue;
       const sectionStart = match.index! + match[0].length;
-      const sectionEnd = i + 1 < headingMatches.length ? headingMatches[i + 1].index! : content.length;
-      const raw = content.slice(sectionStart, sectionEnd).trim();
+      const sectionEnd = i + 1 < headingMatches.length ? headingMatches[i + 1].index! : cleanedContent.length;
+      const raw = cleanedContent.slice(sectionStart, sectionEnd).trim();
       if (raw.length > 0) sections.push(raw);
     }
 
     return sections.join("\n");
   }
 
-  const kept: string[] = [];
-  const lines = content.split("\n");
-  let skippingLegacy = false;
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!skippingLegacy && hasLegacyBlock && LEGACY_STATUS_NEXT_STEPS_HEADER.test(trimmed)) {
-      skippingLegacy = true;
-      continue;
-    }
-    if (skippingLegacy) {
-      if (/^#{1,6}\s+/.test(trimmed)) {
-        skippingLegacy = false;
-      } else {
-        continue;
-      }
-    }
-    kept.push(line);
-  }
-  return kept.join("\n");
+  return cleanedContent;
 }
 
 function extractCandidateSegmentsFromEntry(
@@ -4303,6 +4286,10 @@ function normalizeClauseText(segment: string, clause: string): string {
       subject.charAt(0).toUpperCase() + subject.slice(1).toLowerCase(),
     );
   }
+  const futureCue = trimmed.match(COMMITMENT_MODAL_FUTURE_CUE);
+  if (futureCue?.index !== undefined && futureCue.index > 0) {
+    return trimmed;
+  }
   const subject = extractCommitmentSubject(segment);
   return subject ? `${subject} ${trimmed}` : trimmed;
 }
@@ -4312,6 +4299,7 @@ function extractDueAtFromFutureClause(clause: string): string | null {
   if (futureCue?.index !== undefined) {
     const futureDate = clause.slice(futureCue.index).match(DATE_PATTERN)?.[0];
     if (futureDate) return buildDueAtFromDateString(futureDate);
+    if (looksLikeRetrospectiveCompletion(clause.slice(0, futureCue.index))) return null;
   }
   return extractDueAtFromText(clause);
 }
@@ -7864,7 +7852,7 @@ export function registerTools(
 
               if (allBucketsEmpty) {
                 const statusEntryCount = visibleTrackedStatuses.allowed.filter(
-                  (assessment) => matchesNamespacePrefix(assessment.row.namespace, namespace),
+                  (assessment) => namespaceMatchesQueryScope(assessment.row.namespace, namespace),
                 ).length;
                 if (statusEntryCount === 0) {
                   if (visibleEntryCount === 0 && readableEntryCount > 0) {
@@ -9688,7 +9676,7 @@ export function registerTools(
               const attentionItems: AttentionItem[] = [];
 
               for (const assessment of trackedStatusAssessments) {
-                if (!matchesNamespacePrefix(assessment.row.namespace, attentionArgs.namespace_prefix)) continue;
+                if (!namespaceMatchesQueryScope(assessment.row.namespace, attentionArgs.namespace_prefix)) continue;
 
                 // Trust envelope (#152): decide from the FULL status content + tags so a
                 // payload past the 150-char preview window still flags the entry, then
@@ -9743,7 +9731,7 @@ export function registerTools(
                 for (const ns of namespaces) {
                   if (!isTrackedNamespace(ns.namespace, attentionTrackedPatterns)) continue;
                   if (trackedNsWithStatus.has(ns.namespace)) continue;
-                  if (!matchesNamespacePrefix(ns.namespace, attentionArgs.namespace_prefix)) continue;
+                  if (!namespaceMatchesQueryScope(ns.namespace, attentionArgs.namespace_prefix)) continue;
 
                   attentionItems.push(buildAttentionItem(
                     ns.namespace,

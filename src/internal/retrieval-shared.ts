@@ -154,6 +154,19 @@ export function namespaceMatchesAnyPattern(ns: string, patterns: readonly string
   return false;
 }
 
+/**
+ * Match a concrete namespace against the exact-or-subtree scope semantics used
+ * by list/read derivation queries:
+ * - no scope: match everything
+ * - trailing slash: strict prefix match (`projects/x/` → descendants only)
+ * - no trailing slash: exact namespace or a direct subtree (`projects/x`)
+ */
+export function namespaceMatchesQueryScope(namespace: string, scope?: string): boolean {
+  if (!scope) return true;
+  if (scope.endsWith("/")) return namespace.startsWith(scope);
+  return namespace === scope || namespace.startsWith(`${scope}/`);
+}
+
 function escapeLikePattern(s: string): string {
   return s.replace(/[\\%_]/g, (c) => "\\" + c);
 }

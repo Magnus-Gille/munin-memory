@@ -5903,6 +5903,30 @@ describe("memory_commitments", () => {
     expect(result.overdue).toHaveLength(0);
   });
 
+  it("does not reuse a retrospective date when an unsplit noun-subject future clause has no due date of its own", async () => {
+    const retrospectiveDate = commitmentTestDate(-1);
+    await callTool("memory_log", {
+      namespace: "projects/mixed-tense-noun-subject-no-due",
+      content: `We completed the audit on ${retrospectiveDate}; the report should be filed later.`,
+      tags: ["decision"],
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/mixed-tense-noun-subject-no-due",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<unknown>;
+      at_risk: Array<unknown>;
+      overdue: Array<unknown>;
+      completed_recently: Array<unknown>;
+    };
+
+    expect(result.open).toHaveLength(0);
+    expect(result.at_risk).toHaveLength(0);
+    expect(result.overdue).toHaveLength(0);
+    expect(result.completed_recently).toHaveLength(0);
+  });
+
   it("extracts passive future commitments from dated clauses", async () => {
     const validationDate = commitmentTestDate(10);
     await callTool("memory_log", {
@@ -5922,6 +5946,35 @@ describe("memory_commitments", () => {
       text: `The runbook must be validated by ${validationDate}.`,
       source_type: "explicit_dated_commitment",
     }));
+  });
+
+  it("normalizes an inline canonical Next Steps line into a single tracked next-step commitment", async () => {
+    const dueDate = commitmentTestDate(11);
+    await callTool("memory_write", {
+      namespace: "projects/inline-canonical-next-steps",
+      key: "status",
+      content: [
+        "**Phase**: Build",
+        "**Current Work**: Stabilizing the rollout",
+        "**Blockers**: None.",
+        `**Next Steps**: File the incident report by ${dueDate}`,
+      ].join("\n"),
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/inline-canonical-next-steps",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ text: string; source_type: string }>;
+      exclusion_diagnostics?: unknown;
+    };
+
+    expect(result.open).toEqual([expect.objectContaining({
+      text: `File the incident report by ${dueDate}`,
+      source_type: "tracked_next_step",
+    })]);
+    expect(result.exclusion_diagnostics).toBeUndefined();
   });
 
   it("reports plain markdown status next steps as unsupported rather than silently treating them as eligible", async () => {
@@ -5969,6 +6022,133 @@ describe("memory_commitments", () => {
     }));
     expect(JSON.stringify(result.exclusion_diagnostics)).not.toContain("Verify the restore path");
     expect(JSON.stringify(result.exclusion_diagnostics)).not.toContain("Run the canary");
+  });
+
+  it("strips a legacy plain Next Steps block before the first canonical heading without leaking its commitments", async () => {
+    const legacyDueDate = commitmentTestDate(16);
+    await callTool("memory_write", {
+      namespace: "projects/legacy-prefix-before-heading",
+      key: "status",
+      content: [
+        "Phase: Build",
+        "Current Work: Stabilizing the rollout",
+        "Blockers: None.",
+        "Next Steps:",
+        `- Verify the restore path by ${legacyDueDate}`,
+        "",
+        "## Notes",
+        "Canonical notes only.",
+      ].join("\n"),
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/legacy-prefix-before-heading",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<unknown>;
+      at_risk: Array<unknown>;
+      overdue: Array<unknown>;
+      completed_recently: Array<unknown>;
+      exclusion_diagnostics?: {
+        matched_but_excluded: number;
+        reason_counts?: Record<string, number>;
+      };
+    };
+
+    expect(result.open).toHaveLength(0);
+    expect(result.at_risk).toHaveLength(0);
+    expect(result.overdue).toHaveLength(0);
+    expect(result.completed_recently).toHaveLength(0);
+    expect(result.exclusion_diagnostics).toEqual(expect.objectContaining({
+      matched_but_excluded: 1,
+      reason_counts: expect.objectContaining({
+        legacy_plain_status_next_steps: 1,
+      }),
+    }));
+    expect(JSON.stringify(result.exclusion_diagnostics)).not.toContain("Verify the restore path");
+  });
+
+  it.each([
+    "TODO",
+    "Action Items",
+  ])("keeps a canonical ## %s extras section visible for dated prose even when another section contains a Status: line", async (title) => {
+    const dueDate = commitmentTestDate(17);
+    const namespace = `projects/canonical-extra-${title.toLowerCase().replace(/\s+/g, "-")}`;
+    await callTool("memory_write", {
+      namespace,
+      key: "status",
+      content: [
+        "## Phase",
+        "Build",
+        "",
+        "## Current Work",
+        "Stabilizing the rollout",
+        "",
+        "## Blockers",
+        "None.",
+        "",
+        "## Notes",
+        "Status: waiting on finance approval.",
+        "",
+        `## ${title}`,
+        `The report should be filed by ${dueDate}.`,
+      ].join("\n"),
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_commitments", { namespace });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ text: string; due_at: string | null }>;
+      exclusion_diagnostics?: { reason_counts?: Record<string, number> };
+    };
+
+    expect(result.open).toContainEqual(expect.objectContaining({
+      text: `The report should be filed by ${dueDate}.`,
+      due_at: `${dueDate}T23:59:59.000Z`,
+    }));
+    expect(result.exclusion_diagnostics?.reason_counts?.legacy_plain_status_next_steps ?? 0).toBe(0);
+  });
+
+  it("bounds a legacy line-mode Next Steps block so later dated prose still derives commitments", async () => {
+    const legacyDueDate = commitmentTestDate(19);
+    const followupDate = commitmentTestDate(20);
+    await callTool("memory_write", {
+      namespace: "projects/legacy-line-mode-bounds",
+      key: "status",
+      content: [
+        "Phase: Build",
+        "Current Work: Stabilizing the rollout",
+        "Blockers: None.",
+        "Next Steps:",
+        `- Verify the restore path by ${legacyDueDate}`,
+        "",
+        `Later, we will file the rollout report by ${followupDate}.`,
+      ].join("\n"),
+      tags: ["active"],
+    });
+
+    const raw = await callTool("memory_commitments", {
+      namespace: "projects/legacy-line-mode-bounds",
+    });
+    const result = parseToolResponse(raw) as {
+      open: Array<{ text: string; due_at: string | null }>;
+      exclusion_diagnostics?: {
+        matched_but_excluded: number;
+        reason_counts?: Record<string, number>;
+      };
+    };
+
+    expect(result.open).toContainEqual(expect.objectContaining({
+      text: `We will file the rollout report by ${followupDate}.`,
+      due_at: `${followupDate}T23:59:59.000Z`,
+    }));
+    expect(result.exclusion_diagnostics).toEqual(expect.objectContaining({
+      matched_but_excluded: 1,
+      reason_counts: expect.objectContaining({
+        legacy_plain_status_next_steps: 1,
+      }),
+    }));
   });
 
   it.each([

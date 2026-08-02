@@ -55,7 +55,20 @@ changelog is the canonical record of what moved.
   legacy rows from those plain-status `Next Steps:` blocks retire through a
   non-completion path, and older whole-segment dated rows revise in place to a
   surviving future clause instead of reading as completed just because the
-  derived fingerprint changed.
+  derived fingerprint changed. The parser now also keeps due dates local to the
+  actual future clause, so a retrospective date such as `completed ... on
+  2026-07-31` cannot be recycled into a new overdue commitment when a later
+  noun-subject clause says `the report should be filed later`. Legacy plain
+  `Next Steps:` blocks are stripped by the same structural matcher that powers
+  the exclusion diagnostics, which fixes three drift cases at once: a legacy
+  block before the first `##` heading no longer leaks commitments through the
+  preserved prefix, line-mode stripping stops at the real end of the block
+  instead of consuming unrelated later prose, and canonical extras headings
+  such as `## TODO` / `## Action Items` stay visible for dated obligation prose
+  even when another section contains a `Status:` line. Inline canonical
+  `**Next Steps**:` lines now normalize to the same single tracked-next-step
+  commitment as the `## Next Steps` form, and empty-namespace diagnostics use
+  the same exact-or-subtree namespace scope semantics as the derivation scan.
 
 - **`memory_delete` previews disclose and bind the full correction lineage
   they will remove (#281).** A delete of a corrected state entry removes its
