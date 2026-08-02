@@ -27,7 +27,7 @@ expiry. The response still states that memory truth was not changed.
 |---|---|
 | `list` | Returns only the caller's visible proposals plus scoped status, failed, and stale counts. |
 | `get` | Returns one proposal and its attributable append-only events. |
-| `preview` | Returns the exact accepted operation and current source/target freshness. Never writes. |
+| `preview` | Pure-read inspection of current source/target freshness; returns `exact_operation` only while the payload is retained and eligible for display. Never writes. |
 | `edit` | Replaces the accepted operation while retaining the original form. Never writes memory. |
 | `decline` | Records an attributable terminal transition. |
 | `approve` | Revalidates and atomically applies the accepted operation once. |
@@ -64,11 +64,15 @@ Proposal states are `pending`, `edited`, `approved`, `declined`, `superseded`,
 timestamp, and bounded detail in `review_proposal_events`. SQLite triggers reject
 updates or deletes from that event table.
 
-Pending and edited proposals expire after 30 days. Declined, expired, and failed
-proposal payloads are purged seven days after their terminal transition; the
-minimal proposal tombstone and append-only events remain. Approved and superseded
+Pending and edited proposals expire after 30 days. Declined, failed, and other
+non-timeout terminal causes use their actual `terminal_at`. Declined, expired,
+and failed payloads are purged seven days after that effective terminal time. A
+timeout-expired proposal (`terminal_code: "review_expired"`) becomes terminal at
+`expires_at`, so its seven-day retention starts at that expiry time; the minimal
+proposal tombstone and append-only events remain. Approved and superseded
 proposals retain their payloads and any prior entry snapshot for a 30-day
-reviewed-undo window, after which maintenance reduces them to the same tombstone.
+reviewed-undo window measured from their actual terminal time, after which
+maintenance reduces them to the same tombstone.
 If a prior entry was more restricted than the accepted replacement, the proposal
 inherits that higher classification while the snapshot is retained, and an undo
 restores the prior classification.
