@@ -12,6 +12,7 @@ import {
 import { registerTools, _setHealthSectionOverridesForTesting } from "../src/tools.js";
 import {
   KEY_PATTERN,
+  MAX_TAGS,
   NAMESPACE_PATTERN,
   TAG_PATTERN,
   WRITE_NAMESPACE_PATTERN,
@@ -20,6 +21,7 @@ import { ownerContext } from "../src/access.js";
 import type { AccessContext } from "../src/access.js";
 import { _setApiKey, _consolidationConfig, resetConsolidationCircuitBreaker, getConsolidationHealth, _resetHealthState } from "../src/consolidation.js";
 import { _embeddingConfig, isEmbeddingCircuitBreakerTripped, getActiveEmbeddingDtype, _forceCircuitBreakerTrippedForTesting, resetCircuitBreaker } from "../src/embeddings.js";
+import { LIFECYCLE_TAGS } from "../src/internal/retrieval-shared.js";
 import type { LibrarianRuntimeConfig } from "../src/librarian.js";
 
 const TEST_DB_PATH = "/tmp/munin-memory-tools-test.db";
@@ -35,6 +37,16 @@ function cleanupTestDb() {
 
 let db: Database.Database;
 let server: Server;
+
+type SchemaNode = {
+  pattern?: string;
+  title?: string;
+  description?: string;
+  enum?: unknown[];
+  maxItems?: number;
+  properties?: Record<string, SchemaNode>;
+  items?: SchemaNode;
+};
 
 // Helper to call a tool handler directly through the server's request handler
 async function callTool(name: string, args: Record<string, unknown> = {}): Promise<unknown> {
@@ -6263,15 +6275,6 @@ describe("compare-and-swap (memory_write)", () => {
       }).tools.map((tool) => [tool.name, tool]),
     );
 
-    type SchemaNode = {
-      pattern?: string;
-      title?: string;
-      description?: string;
-      enum?: unknown[];
-      properties?: Record<string, SchemaNode>;
-      items?: SchemaNode;
-    };
-
     const readSchema = (toolName: string, path: string[]): SchemaNode | undefined => {
       let current: SchemaNode | undefined = toolsByName.get(toolName)?.inputSchema as SchemaNode | undefined;
       for (const segment of path) {
@@ -6341,29 +6344,41 @@ describe("compare-and-swap (memory_write)", () => {
       }).tools.map((tool) => [tool.name, tool]),
     );
 
-    type ArraySchema = {
-      description?: string;
-      items?: {
-        pattern?: string;
-        enum?: unknown[];
-      };
-    };
-
     for (const toolName of ["memory_write", "memory_log"] as const) {
-      const tags = toolsByName.get(toolName)?.inputSchema.properties?.tags as ArraySchema | undefined;
+      const tags = toolsByName.get(toolName)?.inputSchema.properties?.tags as SchemaNode | undefined;
       expect(tags?.description, `${toolName} tags should stay documented as freeform`).toContain("freeform");
+      expect(tags?.maxItems, `${toolName} tags should advertise the validated max item count`).toBe(MAX_TAGS);
       expect(tags?.items?.pattern, `${toolName} tags should constrain item grammar`).toBe(TAG_PATTERN);
       expect(tags?.items?.enum, `${toolName} tags must not be falsely enumerated`).toBeUndefined();
     }
 
-    const queryTags = toolsByName.get("memory_query")?.inputSchema.properties?.tags as ArraySchema | undefined;
+    const writeTags = toolsByName.get("memory_write")?.inputSchema.properties?.tags as SchemaNode | undefined;
+    for (const fragment of ["done", "paused", "inactive", "architecture", "preference", "convention", "bug", "feature", "research"]) {
+      expect(writeTags?.description, `memory_write tags should mention ${fragment}`).toContain(fragment);
+    }
+
+    const logTags = toolsByName.get("memory_log")?.inputSchema.properties?.tags as SchemaNode | undefined;
+    for (const fragment of ["blocker", "discovery", "correction", "person:", "topic:", "type:", "source:"]) {
+      expect(logTags?.description, `memory_log tags should mention ${fragment}`).toContain(fragment);
+    }
+
+    const queryTags = toolsByName.get("memory_query")?.inputSchema.properties?.tags as SchemaNode | undefined;
     expect(queryTags?.description).toContain("freeform");
+    expect(queryTags?.maxItems).toBeUndefined();
     expect(queryTags?.items?.pattern).toBeUndefined();
     expect(queryTags?.items?.enum).toBeUndefined();
 
     const patchSchema = toolsByName.get("memory_write")?.inputSchema.properties?.patch as SchemaNode | undefined;
-    const patchTags = patchSchema?.properties?.tags_add?.items;
-    expect(patchTags?.pattern).toBe(TAG_PATTERN);
+    const patchTagsAdd = patchSchema?.properties?.tags_add;
+    expect(patchTagsAdd?.maxItems).toBe(MAX_TAGS);
+    expect(patchTagsAdd?.items?.pattern).toBe(TAG_PATTERN);
+
+    const patchTagsRemove = patchSchema?.properties?.tags_remove;
+    expect(patchTagsRemove?.maxItems).toBeUndefined();
+    expect(patchTagsRemove?.items?.pattern).toBeUndefined();
+
+    const lifecycle = toolsByName.get("memory_update_status")?.inputSchema.properties?.lifecycle as SchemaNode | undefined;
+    expect(lifecycle?.enum).toEqual([...LIFECYCLE_TAGS]);
   });
 
   it("provides an explicit create-if-absent contract and typed winner conflict", async () => {

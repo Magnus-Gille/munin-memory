@@ -126,6 +126,7 @@ import {
   WRITE_NAMESPACE_PATTERN,
   KEY_PATTERN,
   TAG_PATTERN,
+  MAX_TAGS,
 } from "./security.js";
 import {
   approveReviewProposal,
@@ -4674,8 +4675,6 @@ function projectConventions(
   return conv;
 }
 
-const LIFECYCLE_TAG_ENUM = ["active", "blocked", "completed", "stopped", "maintenance", "archived"] as const;
-
 export const MCP_SERVER_INSTRUCTIONS =
   "First memory operation: call `memory_orient` when it is callable. " +
   "If your host or deferred tool discovery did not expose `memory_orient`, " +
@@ -4724,14 +4723,15 @@ function keySchema(
 function tagsArraySchema(
   description: string,
   examples?: string[][],
-  validateItems = false,
+  options?: { validateItems?: boolean; maxItems?: number },
 ) {
   return {
     type: "array" as const,
     title: "Tags",
+    ...(typeof options?.maxItems === "number" ? { maxItems: options.maxItems } : {}),
     items: {
       type: "string" as const,
-      ...(validateItems ? { pattern: TAG_PATTERN } : {}),
+      ...(options?.validateItems ? { pattern: TAG_PATTERN } : {}),
       examples: ["decision", "active", "client:acme"],
     },
     description,
@@ -5037,9 +5037,9 @@ const TOOL_DEFINITIONS = [
             "The content to store. Markdown supported. Be specific and write for your future self.",
         },
         tags: tagsArraySchema(
-          "Optional freeform tags for cross-cutting queries. Reuse canonical tags such as `decision`, lifecycle tags such as `active`, and prefixed forms such as `client:acme` or `topic:auth`. Do not pass a comma-separated string.",
+          "Optional freeform tags for cross-cutting queries. For tracked `status` entries, prefer lifecycle tags `active`, `blocked`, `completed`, `stopped`, `maintenance`, or `archived`; aliases auto-normalize (`done` -> `completed`, `paused` -> `stopped`, `inactive` -> `archived`). Reuse canonical tags such as `decision`, `architecture`, `preference`, `milestone`, `convention`, `bug`, `feature`, and `research`, plus prefixed forms like `client:acme`, `person:alice`, `topic:auth`, `type:pdf`, or `source:external`/`source:internal`. Do not pass a comma-separated string.",
           [["decision", "active", "client:acme"]],
-          true,
+          { validateItems: true, maxItems: MAX_TAGS },
         ),
         classification: {
           type: "string",
@@ -5085,6 +5085,7 @@ const TOOL_DEFINITIONS = [
             content_prepend: { type: "string", description: "Text to prepend before existing content (separated by newline)" },
             tags_add: {
               type: "array",
+              maxItems: MAX_TAGS,
               items: { type: "string", pattern: TAG_PATTERN },
               description: "Tags to add (deduplicated with existing)",
             },
@@ -5129,7 +5130,7 @@ const TOOL_DEFINITIONS = [
         },
         lifecycle: {
           type: "string",
-          enum: [...LIFECYCLE_TAG_ENUM],
+          enum: [...LIFECYCLE_TAGS],
           description: "Optional. Sets the tracked lifecycle tag while preserving non-lifecycle tags.",
         },
         valid_until: {
@@ -5364,9 +5365,9 @@ const TOOL_DEFINITIONS = [
             "The log entry content. Be specific — include what was decided and why.",
         },
         tags: tagsArraySchema(
-          "Optional freeform tags. Reuse canonical tags such as `decision`, `milestone`, `blocker`, `discovery`, or `correction`, plus prefixed forms such as `client:acme` when they improve retrieval.",
+          "Optional freeform tags. Reuse canonical tags such as `decision`, `milestone`, `blocker`, `discovery`, or `correction`, plus prefixed forms like `client:acme`, `person:alice`, `topic:auth`, `type:meeting-notes`, or `source:external`/`source:internal` when they improve retrieval.",
           [["decision"], ["client:acme", "milestone"]],
-          true,
+          { validateItems: true, maxItems: MAX_TAGS },
         ),
         classification: {
           type: "string",

@@ -133,7 +133,7 @@ const NAMESPACE_RE = /^[a-zA-Z0-9][a-zA-Z0-9/_-]*$/;
 const WRITE_NAMESPACE_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]*(?:\/[a-zA-Z0-9_-]+)*$/;
 const KEY_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
 const TAG_RE = /^[a-zA-Z0-9][a-zA-Z0-9_:-]*$/;
-const MAX_TAGS = 20;
+export const MAX_TAGS = 20;
 
 // JSON Schema sources for MCP metadata. Derive them from the runtime
 // validators so the advertised interface cannot drift from enforcement.
