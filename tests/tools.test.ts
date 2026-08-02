@@ -6656,6 +6656,25 @@ describe("memory_commitments", () => {
     expect(typeof emptyResult.reason).toBe("string");
     expect(emptyResult.reason!.length).toBeGreaterThan(0);
 
+    // Readable entries but no commitments — explanatory summary should name
+    // the explicit log prefixes that do qualify.
+    await callTool("memory_log", {
+      namespace: "projects/commitments-reason-field-explained",
+      content: "General observations without follow-through.",
+    });
+    const explainedRaw = await callTool("memory_commitments", {
+      namespace: "projects/commitments-reason-field-explained",
+    });
+    const explainedResult = parseToolResponse(explainedRaw) as {
+      open: Array<unknown>;
+      reason?: string;
+    };
+
+    expect(explainedResult.open).toHaveLength(0);
+    expect(explainedResult.reason).toContain("explicit `memory_log` commitment phrases");
+    expect(explainedResult.reason).toContain("We agreed to: ...");
+    expect(explainedResult.reason).toContain("I commit to: ...");
+
     // Non-empty namespace — commitments found
     const deliverDate = commitmentTestDate(31);
     await callTool("memory_update_status", {
@@ -6782,6 +6801,9 @@ describe("memory_commitments", () => {
     expect(emptyResult.data_requirements).toBeDefined();
     expect(typeof emptyResult.data_requirements).toBe("string");
     expect(emptyResult.data_requirements!.length).toBeGreaterThan(0);
+    expect(emptyResult.data_requirements).toContain("explicit `memory_log` commitment phrases");
+    expect(emptyResult.data_requirements).toContain("We agreed to: ...");
+    expect(emptyResult.data_requirements).toContain("I commit to: ...");
     expect(emptyResult.suggestion).toBeDefined();
     expect(emptyResult.suggestion).toBe("Use memory_read to check the status entry's next steps directly.");
 

@@ -51,12 +51,15 @@ describe("MCP tool metadata discovery contract", () => {
     }
   });
 
-  it("keeps published memory_commitments wording aligned with tracked-status prose derivation", () => {
+  it("keeps published memory_commitments wording aligned with tracked-status and explicit log derivation", () => {
     const commitments = metadataByName.get("memory_commitments");
     expect(commitments).toBeDefined();
 
     for (const phrase of [
       "dated future clauses in visible tracked-status prose",
+      "explicit `memory_log` commitment phrases",
+      "`We agreed to: ...`",
+      "`I commit to: ...`",
       "future-dated `memory_log` phrases",
       "Legacy plain markdown status blobs with ad-hoc `Next Steps:` headings",
     ]) {
