@@ -25,7 +25,7 @@ expiry. The response still states that memory truth was not changed.
 
 | Action | Effect |
 |---|---|
-| `list` | Returns only the caller's visible proposals plus scoped status, failed, and stale counts. |
+| `list` | Returns only the caller's visible proposals plus scoped status, failed, and stale counts. The default scope is the current server-derived session and principal; exact `namespace` and `operation_type` filters are available. |
 | `get` | Returns one proposal and its attributable append-only events. |
 | `preview` | Pure-read inspection of current source/target freshness; returns `exact_operation` only while the payload is retained and eligible for display. Never writes. |
 | `edit` | Replaces the accepted operation while retaining the original form. Never writes memory. |
@@ -42,9 +42,30 @@ plus SHA-256 hashes and at most ten authorized entry references; the raw
 conversation is not retained. Instruction-shaped text is advisory: it is stored
 with untrusted flags and returned as data, never interpreted as policy or commands.
 
-Proposal identity is stricter than namespace access. Only the principal that
-created a proposal can list, inspect, or transition it. Losing target read access
-or classification visibility makes it invisible rather than leaking metadata.
+Proposal identity is stricter than namespace access. Every new proposal records a
+server-derived creator session/run identifier as well as its creator principal.
+Only the current session and principal can list, inspect, or transition a proposal
+by default. A known ID from another session receives the same `not_found` response
+as an unknown ID, and no proposal payload or event is loaded before that decision.
+Pass `scope:"principal"` explicitly when the same principal intentionally needs to
+list, inspect, or transition another session's proposals; the principal is always
+bound from authenticated context and cannot be expanded by the request. Authorized
+list/get responses expose `creator_session_id` so operators can distinguish runs.
+Losing target read access or classification visibility makes a proposal invisible
+rather than leaking metadata.
+
+The v26 migration adds the nullable session column and an indexed principal/session
+lookup path. Existing rows are not guessed or backfilled: a null creator session is
+a legacy proposal, excluded from default session scope and available only through
+explicit same-principal scope. It remains subject to the existing expiry, terminal
+payload retention, event, and approval rules.
+
+Durable capture requires a stable server-derived session. Stdio creates one for the
+process; HTTP derives an opaque stored ID from the authenticated principal and a
+stable MCP session token under a process-local server secret. HTTP requests without
+that token do not get an implicit shared owner/session ID, so `persist:true` fails
+closed. A server restart may make the old run unavailable in default scope; explicit
+same-principal scope remains the recovery path.
 
 Approval re-runs authorization, secret validation, classification resolution, and
 transport visibility. It also verifies every retained source reference by UUID,

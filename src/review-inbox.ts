@@ -21,6 +21,23 @@ export type ReviewProposalStatus =
   | "expired"
   | "failed";
 
+export type ReviewProposalScope = "session" | "principal";
+
+/**
+ * The caller's review scope. The default MCP scope is session; the persistence
+ * helpers retain their historical principal-wide default when this is omitted
+ * so maintenance and existing internal callers remain compatible.
+ */
+export interface ReviewProposalAccess {
+  scope?: ReviewProposalScope;
+  sessionId?: string | null;
+}
+
+export interface ReviewProposalListFilters {
+  namespace?: string;
+  operationType?: ReviewOperation["action"];
+}
+
 export type ReviewOperation =
   | {
       action: "memory_write";
@@ -76,6 +93,7 @@ export interface ReviewSourceRef {
 interface ReviewProposalRow {
   id: string;
   creator_principal_id: string;
+  creator_session_id: string | null;
   operation_type: ReviewOperation["action"];
   target_namespace: string;
   target_key: string | null;
@@ -141,6 +159,8 @@ export interface ReviewProposalEvent {
 
 export interface CreateReviewProposalInput {
   creatorPrincipalId: string;
+  /** Server-derived session/run identity. Omitted only by low-level import/test callers. */
+  creatorSessionId?: string;
   operation: ReviewOperation;
   classification: ClassificationLevel;
   confidence: number;
@@ -237,6 +257,7 @@ function resolveReviewProposalRetentionPolicy(
 function parseProposal(row: ReviewProposalRow): ReviewProposal {
   return {
     ...row,
+    creator_session_id: row.creator_session_id ?? null,
     reasons: parseJson<string[]>(row.reasons),
     source_refs: parseJson<ReviewSourceRef[]>(row.source_refs),
     source_untrusted: row.source_untrusted === 1,
@@ -253,14 +274,47 @@ function parseProposal(row: ReviewProposalRow): ReviewProposal {
   };
 }
 
+function resolveProposalAccess(access?: ReviewProposalAccess): {
+  scope: ReviewProposalScope;
+  sessionId: string | null;
+} {
+  if (!access) return { scope: "principal", sessionId: null };
+  return {
+    scope: access.scope ?? "session",
+    sessionId: access.sessionId ?? null,
+  };
+}
+
+function scopedProposalWhere(
+  principalId: string,
+  access: ReviewProposalAccess | undefined,
+  extraClauses: string[] = [],
+): { where: string; params: Array<string | number> } {
+  const resolved = resolveProposalAccess(access);
+  const clauses = ["creator_principal_id = ?"];
+  const params: Array<string | number> = [principalId];
+  if (resolved.scope === "session") {
+    if (!resolved.sessionId) {
+      clauses.push("0 = 1");
+    } else {
+      clauses.push("creator_session_id = ?");
+      params.push(resolved.sessionId);
+    }
+  }
+  clauses.push(...extraClauses);
+  return { where: clauses.join(" AND "), params };
+}
+
 function getOwnedProposalRow(
   db: Database.Database,
   id: string,
   principalId: string,
+  access?: ReviewProposalAccess,
 ): ReviewProposalRow | null {
+  const scoped = scopedProposalWhere(principalId, access, ["id = ?"]);
   return (db.prepare(
-    "SELECT * FROM review_proposals WHERE id = ? AND creator_principal_id = ?",
-  ).get(id, principalId) as ReviewProposalRow | undefined) ?? null;
+    `SELECT * FROM review_proposals WHERE ${scoped.where}`,
+  ).get(...scoped.params, id) as ReviewProposalRow | undefined) ?? null;
 }
 
 function operationTarget(operation: ReviewOperation): {
@@ -282,6 +336,9 @@ function operationTarget(operation: ReviewOperation): {
 function validateCreateInput(input: CreateReviewProposalInput): void {
   if (!input.creatorPrincipalId) {
     throw new Error("Review proposal creator principal is required.");
+  }
+  if (input.creatorSessionId !== undefined && !input.creatorSessionId) {
+    throw new Error("Review proposal creator session is required when supplied.");
   }
   if (!Number.isFinite(input.confidence) || input.confidence < 0 || input.confidence > 1) {
     throw new Error("Review proposal confidence must be between 0 and 1.");
@@ -352,18 +409,14 @@ export function createReviewProposal(
 ): { id: string; status: "pending"; created_at: string; expires_at: string } {
   validateCreateInput(input);
   const id = randomUUID();
+  const creatorSessionId = input.creatorSessionId ?? randomUUID();
   const target = operationTarget(input.operation);
   const operationJson = JSON.stringify(input.operation);
   const txn = db.transaction(() => {
-    db.prepare(
-      `INSERT INTO review_proposals
-         (id, creator_principal_id, operation_type, target_namespace, target_key,
-          classification, confidence, reasons, source_refs, source_excerpt,
-          source_hash, source_untrusted, injection_flags,
-          original_operation, current_operation, status,
-          undo_of_proposal_id, created_at, updated_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
-    ).run(
+    const sessionColumn = db.prepare("PRAGMA table_info(review_proposals)").all() as Array<{
+      name: string;
+    }>;
+    const commonValues = [
       id,
       input.creatorPrincipalId,
       target.operationType,
@@ -383,7 +436,28 @@ export function createReviewProposal(
       input.createdAt,
       input.createdAt,
       input.expiresAt,
-    );
+    ] as const;
+    if (sessionColumn.some(({ name }) => name === "creator_session_id")) {
+      db.prepare(
+        `INSERT INTO review_proposals
+           (id, creator_principal_id, creator_session_id, operation_type, target_namespace, target_key,
+            classification, confidence, reasons, source_refs, source_excerpt,
+            source_hash, source_untrusted, injection_flags,
+            original_operation, current_operation, status,
+            undo_of_proposal_id, created_at, updated_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
+      ).run(commonValues[0], commonValues[1], creatorSessionId, ...commonValues.slice(2));
+    } else {
+      db.prepare(
+        `INSERT INTO review_proposals
+           (id, creator_principal_id, operation_type, target_namespace, target_key,
+            classification, confidence, reasons, source_refs, source_excerpt,
+            source_hash, source_untrusted, injection_flags,
+            original_operation, current_operation, status,
+            undo_of_proposal_id, created_at, updated_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
+      ).run(...commonValues);
+    }
     insertEvent(
       db,
       id,
@@ -408,8 +482,9 @@ export function getReviewProposal(
   db: Database.Database,
   id: string,
   principalId: string,
+  access?: ReviewProposalAccess,
 ): ReviewProposal | null {
-  const row = getOwnedProposalRow(db, id, principalId);
+  const row = getOwnedProposalRow(db, id, principalId, access);
   return row ? parseProposal(row) : null;
 }
 
@@ -418,19 +493,30 @@ export function listReviewProposals(
   principalId: string,
   status?: ReviewProposalStatus,
   limit = 50,
+  access?: ReviewProposalAccess,
+  filters: ReviewProposalListFilters = {},
 ): ReviewProposal[] {
   const boundedLimit = Math.max(1, Math.min(100, Math.trunc(limit)));
-  const rows = status
-    ? db.prepare(
-        `SELECT * FROM review_proposals
-         WHERE creator_principal_id = ? AND status = ?
-         ORDER BY updated_at DESC, id ASC LIMIT ?`,
-      ).all(principalId, status, boundedLimit)
-    : db.prepare(
-        `SELECT * FROM review_proposals
-         WHERE creator_principal_id = ?
-         ORDER BY updated_at DESC, id ASC LIMIT ?`,
-      ).all(principalId, boundedLimit);
+  const extraClauses: string[] = [];
+  const extraParams: Array<string | number> = [];
+  if (status) {
+    extraClauses.push("status = ?");
+    extraParams.push(status);
+  }
+  if (filters.namespace !== undefined) {
+    extraClauses.push("target_namespace = ?");
+    extraParams.push(filters.namespace);
+  }
+  if (filters.operationType !== undefined) {
+    extraClauses.push("operation_type = ?");
+    extraParams.push(filters.operationType);
+  }
+  const scoped = scopedProposalWhere(principalId, access, extraClauses);
+  const rows = db.prepare(
+    `SELECT * FROM review_proposals
+     WHERE ${scoped.where}
+     ORDER BY updated_at DESC, id ASC LIMIT ?`,
+  ).all(...scoped.params, ...extraParams, boundedLimit);
   return (rows as ReviewProposalRow[]).map(parseProposal);
 }
 
@@ -438,6 +524,8 @@ export function getReviewProposalQueueHealthRows(
   db: Database.Database,
   principalId: string,
   staleBefore: string,
+  access?: ReviewProposalAccess,
+  filters: ReviewProposalListFilters = {},
 ): Array<{
   status: ReviewProposalStatus;
   target_namespace: string;
@@ -445,6 +533,17 @@ export function getReviewProposalQueueHealthRows(
   count: number;
   stale_count: number;
 }> {
+  const extraClauses: string[] = [];
+  const extraParams: Array<string | number> = [];
+  if (filters.namespace !== undefined) {
+    extraClauses.push("target_namespace = ?");
+    extraParams.push(filters.namespace);
+  }
+  if (filters.operationType !== undefined) {
+    extraClauses.push("operation_type = ?");
+    extraParams.push(filters.operationType);
+  }
+  const scoped = scopedProposalWhere(principalId, access, extraClauses);
   return db.prepare(
     `SELECT status, target_namespace, classification,
             COUNT(*) AS count,
@@ -455,9 +554,9 @@ export function getReviewProposalQueueHealthRows(
               END
             ) AS stale_count
      FROM review_proposals
-     WHERE creator_principal_id = ?
+     WHERE ${scoped.where}
      GROUP BY status, target_namespace, classification`,
-  ).all(staleBefore, principalId) as Array<{
+  ).all(staleBefore, ...scoped.params, ...extraParams) as Array<{
     status: ReviewProposalStatus;
     target_namespace: string;
     classification: ClassificationLevel;
@@ -470,8 +569,9 @@ export function listReviewProposalEvents(
   db: Database.Database,
   proposalId: string,
   principalId: string,
+  access?: ReviewProposalAccess,
 ): ReviewProposalEvent[] {
-  if (!getOwnedProposalRow(db, proposalId, principalId)) return [];
+  if (!getOwnedProposalRow(db, proposalId, principalId, access)) return [];
   const rows = db.prepare(
     `SELECT * FROM review_proposal_events
      WHERE proposal_id = ? ORDER BY created_at, id`,
@@ -487,9 +587,10 @@ export function editReviewProposal(
   reason: string,
   now: string,
   metadata?: { classification?: ClassificationLevel; injectionFlags?: string[] },
+  access?: ReviewProposalAccess,
 ): ReviewTransitionResult {
   const txn = db.transaction((): ReviewTransitionResult => {
-    const row = getOwnedProposalRow(db, id, principalId);
+    const row = getOwnedProposalRow(db, id, principalId, access);
     if (!row) return { status: "not_found" };
     if (row.status !== "pending" && row.status !== "edited") {
       return { status: "invalid_transition", current_status: row.status };
@@ -541,12 +642,14 @@ export function createUndoReviewProposal(
   db: Database.Database,
   originalProposalId: string,
   input: CreateReviewProposalInput,
+  access?: ReviewProposalAccess,
 ): { id: string; status: "pending"; created_at: string; expires_at: string } | null {
   const txn = db.transaction(() => {
     const original = getOwnedProposalRow(
       db,
       originalProposalId,
       input.creatorPrincipalId,
+      access,
     );
     if (!original || original.status !== "approved") return null;
     const created = createReviewProposal(db, {
@@ -574,9 +677,10 @@ export function markReviewProposalSuperseded(
   undoProposalId: string,
   principalId: string,
   now: string,
+  access?: ReviewProposalAccess,
 ): boolean {
-  const original = getOwnedProposalRow(db, originalProposalId, principalId);
-  const undo = getOwnedProposalRow(db, undoProposalId, principalId);
+  const original = getOwnedProposalRow(db, originalProposalId, principalId, access);
+  const undo = getOwnedProposalRow(db, undoProposalId, principalId, access);
   if (
     !original ||
     !undo ||
@@ -610,9 +714,10 @@ export function declineReviewProposal(
   principalId: string,
   reason: string,
   now: string,
+  access?: ReviewProposalAccess,
 ): ReviewTransitionResult {
   const txn = db.transaction((): ReviewTransitionResult => {
-    const row = getOwnedProposalRow(db, id, principalId);
+    const row = getOwnedProposalRow(db, id, principalId, access);
     if (!row) return { status: "not_found" };
     if (row.status === "declined") return { status: "declined", duplicate: true };
     if (row.status !== "pending" && row.status !== "edited") {
@@ -675,9 +780,10 @@ export function approveReviewProposal(
   principalId: string,
   apply: (proposal: ReviewProposal) => ReviewApplyResult,
   now: string,
+  access?: ReviewProposalAccess,
 ): ReviewTransitionResult {
   const txn = db.transaction((): ReviewTransitionResult => {
-    const row = getOwnedProposalRow(db, id, principalId);
+    const row = getOwnedProposalRow(db, id, principalId, access);
     if (!row) return { status: "not_found" };
     const approvalState = evaluateReviewProposalApprovalState(row, now);
     if (approvalState.outcome === "duplicate") {

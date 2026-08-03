@@ -204,10 +204,18 @@ memory:
 4. Call `memory_resume` or `memory_read` to verify the accepted memory in normal
    retrieval.
 
-The queue is scoped to the principal that created each proposal, even when another
-principal knows its UUID or can otherwise read the target namespace. A changed or
-superseded source produces a review conflict rather than a stale write. Duplicate
-approval returns the stored applied result without writing twice.
+The queue is scoped to the current server-derived session and creating principal by
+default, even when another session of that principal or another principal knows its
+UUID. A known foreign-session ID is intentionally indistinguishable from a missing
+ID. Use `scope:"principal"` only when the same principal intentionally needs to
+review across sessions; this never expands to another principal. Exact `namespace`
+and `operation_type` filters are available on `list`, and authorized list/get
+responses expose the creator session. Legacy proposals without a session are
+available only through that explicit principal scope. A stable server-derived
+session is required for durable capture; callers without one fail closed rather
+than sharing an implicit session. A changed or superseded source produces a review
+conflict rather than a stale write. Duplicate approval returns the stored applied
+result without writing twice.
 
 `prepare_undo` never mutates memory. It creates another pending proposal. If that
 proposal is approved, Munin uses the correction lineage (`supersedes` plus CAS) to

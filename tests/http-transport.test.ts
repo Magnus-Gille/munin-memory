@@ -158,10 +158,37 @@ describe("stateless HTTP transport", () => {
     const parsedContent = JSON.parse(content[0].text) as { namespaces: unknown[] };
 
     expect(Array.isArray(parsedContent.namespaces)).toBe(true);
+
+    const durableResponse = await supertest(app)
+      .post("/mcp")
+      .set({
+        ...jsonRpcHeaders(),
+        "mcp-protocol-version": "2025-03-26",
+      })
+      .send({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: {
+          name: "memory_extract",
+          arguments: {
+            conversation_text: "We decided this stateless request must not capture durable memory.",
+            namespace_hint: "projects/http-stateless",
+            persist: true,
+          },
+        },
+      })
+      .expect(200);
+    expect(parseToolContent<Record<string, unknown>>(durableResponse.text)).toMatchObject({
+      error: "session_required",
+    });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM review_proposals").get())
+      .toEqual({ count: 0 });
+
     expect(requestLogs.at(-1)).toMatchObject({
       method: "POST",
       rpcMethod: "tools/call",
-      toolName: "memory_list",
+      toolName: "memory_extract",
       authType: "bearer",
       clientId: "legacy",
       status: 200,

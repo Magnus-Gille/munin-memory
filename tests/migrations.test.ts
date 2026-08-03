@@ -46,7 +46,12 @@ function makeReviewCall(db: Database.Database) {
     )._requestHandlers.get("tools/call");
     const response = await handler!({
       method: "tools/call",
-      params: { name, arguments: args },
+      params: {
+        name,
+        arguments: name === "memory_review" && args.scope === undefined
+          ? { ...args, scope: "principal" }
+          : args,
+      },
     });
     return JSON.parse((response as { content: Array<{ text: string }> }).content[0].text) as Record<string, unknown>;
   };
@@ -130,6 +135,7 @@ describe("runMigrations", () => {
     expect(names).toContain("idx_query_snapshots_principal_created");
     expect(names).toContain("idx_query_snapshots_created");
     expect(names).toContain("idx_review_proposals_creator_status_updated");
+    expect(names).toContain("idx_review_proposals_creator_session_status_updated");
     expect(names).toContain("idx_review_proposals_expiry");
     expect(names).toContain("idx_review_proposals_terminal_retention");
     expect(names).toContain("idx_review_proposal_events_proposal_created");
@@ -200,7 +206,7 @@ describe("runMigrations", () => {
       "idx_entries_state_history",
       "idx_review_proposals_terminal_retention",
     ]));
-    expect(getSchemaVersion(db)).toBe(25);
+    expect(getSchemaVersion(db)).toBe(migrations[migrations.length - 1].version);
     db.close();
   });
 

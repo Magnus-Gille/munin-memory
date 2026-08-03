@@ -8,7 +8,7 @@ import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import express from "express";
 import type { Request, Response, NextFunction } from "express";
 import { createServer, IncomingMessage } from "node:http";
-import { timingSafeEqual, randomUUID, createHash, createHmac, randomBytes } from "node:crypto";
+import { timingSafeEqual, randomUUID, createHmac, randomBytes } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import {
   initDatabase,
@@ -220,12 +220,13 @@ function createMcpServer(
   sessionId?: string,
   accessContext?: AccessContext,
   runtimeConfig?: LibrarianRuntimeConfig,
+  reviewSessionIdOverride?: string | null,
 ): Server {
   const server = new Server(
     { name: "munin-memory", version: SERVER_VERSION },
     { capabilities: { tools: {} }, instructions: MCP_SERVER_INSTRUCTIONS },
   );
-  registerTools(server, database, sessionId, accessContext, runtimeConfig);
+  registerTools(server, database, sessionId, accessContext, runtimeConfig, undefined, reviewSessionIdOverride);
   return server;
 }
 
@@ -555,15 +556,22 @@ function getRateLimitIdentity(
 }
 
 /**
- * Derive a stable session ID from the caller's identity and a time bucket.
- * When the client doesn't send mcp-session-id, this ensures all requests from
- * the same caller within a 30-minute window share a session ID, so retrieval
- * analytics can correlate queries with outcomes.
+ * Derive the review creator identity from a stable transport session token.
+ * The token is caller-presented, but the durable proposal value is an HMAC
+ * under a process-local server secret and is bound to the authenticated
+ * principal. A caller cannot choose or spoof the stored creator session ID;
+ * callers without a stable token receive no review session at all.
  */
-function deriveSessionId(clientId: string): string {
-  const bucketMs = 30 * 60 * 1000;
-  const bucket = Math.floor(Date.now() / bucketMs);
-  return createHash("sha256").update(`${clientId}:${bucket}`).digest("hex").slice(0, 32);
+function deriveReviewSessionId(
+  secret: Buffer,
+  principalId: string,
+  presentedSessionId: string | undefined,
+): string | undefined {
+  if (!presentedSessionId || !principalId) return undefined;
+  return createHmac("sha256", secret)
+    .update(`${principalId}\0${presentedSessionId}`)
+    .digest("hex")
+    .slice(0, 32);
 }
 
 const REDACTED_HEADER_KEYS = new Set([
@@ -697,6 +705,7 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
   const runtimeConfig = buildLibrarianRuntimeConfig("http", { apiKey, apiKeyDpa, apiKeyConsumer });
   const rateLimiter = new McpRateLimiter(rateLimitConfig);
   const rateLimitSecret = randomBytes(32);
+  const reviewSessionSecret = randomBytes(32);
   const consentAuth = getConsentAuthConfig();
   const issuer = new URL(issuerUrl);
   const consentConfigError = validateConsentAuthConfig(consentAuth, issuer);
@@ -913,8 +922,6 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });
-    // Use mcp-session-id header for correlation, fall back to caller-derived stable ID
-    const mcpSessionId = getSessionHeader(req) ?? deriveSessionId(req.auth?.clientId ?? "anonymous");
     const authInfo = req.auth as ExtendedAuthInfo | undefined;
     const accessContext = resolveAccessContext(
       database,
@@ -924,7 +931,20 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
       authInfo?.authMethod ?? "oauth",
       authInfo?.transportTypeHint,
     );
-    const mcpServer = createMcpServer(database, mcpSessionId, accessContext, runtimeConfig);
+    const mcpSessionId = deriveReviewSessionId(
+      reviewSessionSecret,
+      accessContext.principalId,
+      getSessionHeader(req),
+    );
+    // Null is intentional: registerTools must not invent a shared session for
+    // a stateless HTTP caller that omitted the stable transport token.
+    const mcpServer = createMcpServer(
+      database,
+      mcpSessionId,
+      accessContext,
+      runtimeConfig,
+      mcpSessionId ?? null,
+    );
 
     try {
       await mcpServer.connect(transport);
