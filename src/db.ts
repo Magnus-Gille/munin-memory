@@ -3350,6 +3350,8 @@ export interface RetrievalEventInput {
   resultIds: string[];
   resultNamespaces: string[];
   resultRanks: number[];
+  /** True when this event is a continuation page from the same frozen query snapshot. */
+  isPaginationContinuation?: boolean;
   /** Wall-clock query latency in milliseconds. Recorded for memory_query only,
    *  so the health retrieval section can report p50/p95 latency percentiles. */
   durationMs?: number;
@@ -3419,7 +3421,7 @@ export function logRetrievalEvent(
         const nowMs = new Date(now).getTime();
         const withinWindow = nowMs - priorTs <= RETRIEVAL_CORRELATION_WINDOW_MS;
 
-        if (withinWindow) {
+        if (withinWindow && input.isPaginationContinuation !== true) {
           // Check for query_reformulated: prior event has no positive outcomes
           const positiveOutcomeCount = (
             db
@@ -3444,6 +3446,10 @@ export function logRetrievalEvent(
         }
       }
 
+      const detail = input.isPaginationContinuation
+        ? { ...(input.detail ?? {}), pagination_continuation: true }
+        : input.detail;
+
       // Insert the new retrieval event
       db.prepare(
         `INSERT INTO retrieval_events
@@ -3464,7 +3470,7 @@ export function logRetrievalEvent(
         typeof input.durationMs === "number" && Number.isFinite(input.durationMs)
           ? Math.round(input.durationMs)
           : null,
-        input.detail ? JSON.stringify(input.detail) : null,
+        detail ? JSON.stringify(detail) : null,
       );
 
       // Upsert the session cursor
@@ -4071,6 +4077,7 @@ export function getRetrievalAggregates(
 export interface AuditHistoryOptions {
   namespace?: string;   // bare namespace uses namespaceMode; trailing / stays descendant-only
   namespaceMode?: BareNamespaceMode;
+  namespaceSelectors?: readonly NamespaceSelector[] | null;
   since?: string;       // ISO 8601 — filter timestamp >= since
   action?: string;      // filter by action type
   limit?: number;       // default 20, max 100
@@ -4116,7 +4123,7 @@ export function getAuditHistory(
   db: Database.Database,
   options: AuditHistoryOptions,
 ): AuditHistoryEntry[] {
-  const { namespace, namespaceMode = "subtree", since, action, limit = 20 } = options;
+  const { namespace, namespaceMode = "subtree", namespaceSelectors, since, action, limit = 20 } = options;
 
   // Clamp limit to 1–100
   const clampedLimit = Math.min(Math.max(limit, 1), 100);
@@ -4132,7 +4139,7 @@ export function getAuditHistory(
   let sql = "SELECT id, timestamp, agent_id, action, namespace, key, detail, entry_id FROM audit_log WHERE 1=1";
   const params: unknown[] = [];
 
-  sql = appendNamespaceSqlFilter(sql, params, "namespace", namespace, namespaceMode);
+  sql = appendNamespaceSqlFilter(sql, params, "namespace", namespace, namespaceMode, namespaceSelectors);
 
   if (since !== undefined) {
     sql += " AND timestamp >= ?";
@@ -4162,6 +4169,7 @@ export function getAuditHistoryPage(
   const {
     namespace,
     namespaceMode = "subtree",
+    namespaceSelectors,
     since,
     action,
     limit = 20,
@@ -4190,7 +4198,7 @@ export function getAuditHistoryPage(
   let sql = "SELECT id, timestamp, agent_id, action, namespace, key, detail, entry_id FROM audit_log WHERE 1=1";
   const params: unknown[] = [];
 
-  sql = appendNamespaceSqlFilter(sql, params, "namespace", namespace, namespaceMode);
+  sql = appendNamespaceSqlFilter(sql, params, "namespace", namespace, namespaceMode, namespaceSelectors);
 
   if (since !== undefined) {
     sql += " AND timestamp >= ?";
@@ -4416,7 +4424,6 @@ export function createQuerySnapshot(
 ): StoredQuerySnapshot {
   const id = input.id ?? randomUUID();
   const createdAt = input.createdAt ?? nowUTC();
-  pruneExpiredQuerySnapshots(db, createdAt);
   const storedBytes = getStoredQuerySnapshotBytes({
     id,
     principalId: input.principalId,
@@ -4430,30 +4437,7 @@ export function createQuerySnapshot(
     createdAt,
     expiresAt: input.expiresAt,
   });
-  evictOldestQuerySnapshotsToFit(db, input.principalId, storedBytes, createdAt);
-  db.prepare(
-    `INSERT INTO query_snapshots
-      (id, tool_name, principal_id, access_fingerprint, request_fingerprint, request_shape, response_meta,
-       result_ids, result_match_meta, cursor_secret, created_at, expires_at, total_matched)
-     VALUES
-      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    id,
-    QUERY_SNAPSHOT_TOOL_NAME,
-    input.principalId,
-    input.accessFingerprint,
-    input.requestFingerprint,
-    input.requestShape,
-    input.responseMeta,
-    input.resultIds,
-    input.resultMatchMeta,
-    input.cursorSecret,
-    createdAt,
-    input.expiresAt,
-    input.totalMatched,
-  );
-
-  return {
+  const storedSnapshot: StoredQuerySnapshot = {
     id,
     principalId: input.principalId,
     accessFingerprint: input.accessFingerprint,
@@ -4467,6 +4451,35 @@ export function createQuerySnapshot(
     expiresAt: input.expiresAt,
     totalMatched: input.totalMatched,
   };
+  const insertSnapshot = db.prepare(
+    `INSERT INTO query_snapshots
+      (id, tool_name, principal_id, access_fingerprint, request_fingerprint, request_shape, response_meta,
+       result_ids, result_match_meta, cursor_secret, created_at, expires_at, total_matched)
+     VALUES
+      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const createSnapshot = db.transaction(() => {
+    pruneExpiredQuerySnapshots(db, createdAt);
+    evictOldestQuerySnapshotsToFit(db, input.principalId, storedBytes, createdAt);
+    insertSnapshot.run(
+      id,
+      QUERY_SNAPSHOT_TOOL_NAME,
+      input.principalId,
+      input.accessFingerprint,
+      input.requestFingerprint,
+      input.requestShape,
+      input.responseMeta,
+      input.resultIds,
+      input.resultMatchMeta,
+      input.cursorSecret,
+      createdAt,
+      input.expiresAt,
+      input.totalMatched,
+    );
+  });
+
+  createSnapshot.immediate();
+  return storedSnapshot;
 }
 
 export function getQuerySnapshot(
@@ -4494,72 +4507,6 @@ export function getQuerySnapshot(
   ).get(id) as StoredQuerySnapshot | undefined;
   if (!row) return null;
   return row.expiresAt <= now ? null : row;
-}
-
-export interface SemanticCoverageGapOptions {
-  namespace?: string;
-  namespaceMode?: BareNamespaceMode;
-  namespaceSelectors?: NamespaceSelector[];
-  entryType?: EntryType;
-  tags?: string[];
-  includeExpired?: boolean;
-  since?: string;
-  until?: string;
-  activeEmbeddingModel: string;
-}
-
-export function hasScopeEntriesMissingActiveEmbeddings(
-  db: Database.Database,
-  options: SemanticCoverageGapOptions,
-): boolean {
-  const {
-    namespace,
-    namespaceMode = "subtree",
-    namespaceSelectors,
-    entryType,
-    tags,
-    includeExpired = false,
-    since,
-    until,
-    activeEmbeddingModel,
-  } = options;
-  const now = nowUTC();
-  let sql = "SELECT 1 FROM entries e WHERE e.is_current = 1";
-  const params: unknown[] = [];
-
-  sql = appendNamespaceSqlFilter(sql, params, "e.namespace", namespace, namespaceMode, namespaceSelectors);
-
-  if (entryType) {
-    sql += " AND e.entry_type = ?";
-    params.push(entryType);
-  }
-
-  if (!includeExpired) {
-    sql += " AND (e.entry_type != 'state' OR e.valid_until IS NULL OR e.valid_until > ?)";
-    params.push(now);
-  }
-
-  if (tags && tags.length > 0) {
-    for (const tag of tags) {
-      sql += " AND EXISTS (SELECT 1 FROM json_each(e.tags) WHERE value = ?)";
-      params.push(tag);
-    }
-  }
-
-  if (since) {
-    sql += " AND e.updated_at >= ?";
-    params.push(since);
-  }
-
-  if (until) {
-    sql += " AND e.updated_at <= ?";
-    params.push(until);
-  }
-
-  sql += " AND NOT (e.embedding_status = 'generated' AND e.embedding_model = ?) LIMIT 1";
-  params.push(activeEmbeddingModel);
-
-  return Boolean(db.prepare(sql).get(...params));
 }
 
 // --- Hint helpers ---

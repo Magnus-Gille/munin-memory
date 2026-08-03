@@ -593,7 +593,85 @@ describe("memory_history tool handler", () => {
     expect(sync.next_cursor).toBe(sync.sync_cursor);
   });
 
-  it("does not advertise another older page when the final raw page is fully access-filtered", async () => {
+  it("returns an older visible row even when newer hidden history exists", async () => {
+    const exactParentServer = new Server(
+      { name: "test-munin-history-exact-parent", version: "0.0.1" },
+      { capabilities: { tools: {} } },
+    );
+    registerTools(exactParentServer, db, undefined, {
+      principalId: "auditor",
+      principalType: "family",
+      accessibleNamespaces: [{ pattern: "projects/reports", permissions: "read" }],
+    });
+
+    writeState(db, "projects/reports", "status", "visible parent", []);
+    writeState(db, "projects/reports/private", "status", "hidden newer child", []);
+
+    const result = parseToolResponse(await callTool(exactParentServer, "memory_history", {
+      namespace: "projects/reports",
+      limit: 1,
+    })) as {
+      count: number;
+      entries: Array<{ id: number; namespace: string }>;
+      sync_cursor: number | null;
+      older_cursor: number | null;
+      has_more: boolean;
+      has_older: boolean;
+    };
+
+    expect(result.count).toBe(1);
+    expect(result.entries.map((entry) => entry.namespace)).toEqual(["projects/reports"]);
+    expect(result.sync_cursor).toBe(result.entries[0].id);
+    expect(result.older_cursor).toBeNull();
+    expect(result.has_more).toBe(false);
+    expect(result.has_older).toBe(false);
+  });
+
+  it("does not advance forward sync cursors for hidden activity", async () => {
+    const exactParentServer = new Server(
+      { name: "test-munin-history-exact-parent-sync", version: "0.0.1" },
+      { capabilities: { tools: {} } },
+    );
+    registerTools(exactParentServer, db, undefined, {
+      principalId: "auditor",
+      principalType: "family",
+      accessibleNamespaces: [{ pattern: "projects/reports", permissions: "read" }],
+    });
+
+    writeState(db, "projects/reports", "status", "visible parent", []);
+    const initial = parseToolResponse(await callTool(exactParentServer, "memory_history", {
+      namespace: "projects/reports",
+      limit: 10,
+    })) as {
+      sync_cursor: number;
+      entries: Array<{ namespace: string }>;
+    };
+    expect(initial.entries.map((entry) => entry.namespace)).toEqual(["projects/reports"]);
+
+    writeState(db, "projects/reports/private", "status", "hidden child update", []);
+
+    const sync = parseToolResponse(await callTool(exactParentServer, "memory_history", {
+      namespace: "projects/reports",
+      cursor: initial.sync_cursor,
+      limit: 10,
+    })) as {
+      count: number;
+      entries: Array<{ namespace: string }>;
+      next_cursor: number | null;
+      sync_cursor: number | null;
+      has_more: boolean;
+      has_newer: boolean;
+    };
+
+    expect(sync.count).toBe(0);
+    expect(sync.entries).toEqual([]);
+    expect(sync.next_cursor).toBe(initial.sync_cursor);
+    expect(sync.sync_cursor).toBe(initial.sync_cursor);
+    expect(sync.has_more).toBe(false);
+    expect(sync.has_newer).toBe(false);
+  });
+
+  it("does not advertise another older page when only hidden older rows remain", async () => {
     const restrictedServer = new Server(
       { name: "test-munin-history-restricted", version: "0.0.1" },
       { capabilities: { tools: {} } },
@@ -621,29 +699,9 @@ describe("memory_history tool handler", () => {
       "shared/family/visible-newest",
       "shared/family/visible-middle",
     ]);
-    expect(first.has_more).toBe(true);
-    expect(first.has_older).toBe(true);
-
-    const older = parseToolResponse(await callTool(restrictedServer, "memory_history", {
-      limit: 2,
-      older_cursor: first.older_cursor,
-    })) as {
-      count: number;
-      entries: Array<{ id: number }>;
-      older_cursor: number | null;
-      sync_cursor: number | null;
-      has_more: boolean;
-      has_older: boolean;
-      has_newer: boolean;
-    };
-
-    expect(older.count).toBe(0);
-    expect(older.entries).toEqual([]);
-    expect(older.older_cursor).toBeNull();
-    expect(older.sync_cursor).toBeNull();
-    expect(older.has_more).toBe(false);
-    expect(older.has_older).toBe(false);
-    expect(older.has_newer).toBe(true);
+    expect(first.older_cursor).toBeNull();
+    expect(first.has_more).toBe(false);
+    expect(first.has_older).toBe(false);
   });
 
   it("supports cursor-based forward sync with canonical actions", async () => {

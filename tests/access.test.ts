@@ -513,17 +513,14 @@ describe("resolveReadableNamespaceSelectors", () => {
       ] satisfies NamespaceSelector[],
     },
     {
-      name: "unsupported wildcard forms fail open to the requested subtree",
+      name: "stray star characters remain literal exact selectors",
       ctx: {
         principalId: "legacy",
         principalType: "external",
         accessibleNamespaces: [{ pattern: "users/alice*", permissions: "read" }],
       } satisfies AccessContext,
       requestedNamespace: "users/alice",
-      expectedSelectors: [
-        { kind: "prefix", value: "users/alice/" },
-        { kind: "exact", value: "users/alice" },
-      ] satisfies NamespaceSelector[],
+      expectedSelectors: [] satisfies NamespaceSelector[],
     },
     {
       name: "write-only rules do not contribute readable selectors",
@@ -544,7 +541,7 @@ describe("resolveReadableNamespaceSelectors", () => {
     expect(prefiltered).toEqual(expect.arrayContaining(canonical));
   });
 
-  it("fails open to unrestricted SQL narrowing when an unsupported readable rule is queried without a namespace", () => {
+  it("keeps stray-star readable rules literal on an unscoped read", () => {
     const ctx: AccessContext = {
       principalId: "legacy",
       principalType: "external",
@@ -553,8 +550,8 @@ describe("resolveReadableNamespaceSelectors", () => {
 
     const selectors = resolveReadableNamespaceSelectors(ctx);
 
-    expect(selectors).toBeNull();
-    expect(applySelectorPrefilter(selectors, namespaceUniverse)).toEqual(namespaceUniverse);
+    expect(selectors).toEqual([{ kind: "exact", value: "users/alice*" }]);
+    expect(applySelectorPrefilter(selectors, namespaceUniverse)).toEqual([]);
   });
 
   it("preserves representable home/meta grants on an unscoped read", () => {

@@ -76,8 +76,17 @@ was applied. Multi-page `memory_query` responses persist a server-side snapshot 
 more than one page is needed; the opaque resume cursor is authenticated to the frozen
 snapshot id and position, explicit resume overrides must still normalize back to the
 stored request shape, the snapshot expires after 5 minutes, and semantic/hybrid queries
-fail closed instead of claiming an exact total when the scoped corpus is missing current
-embeddings.
+use an indexed-candidate contract. Semantic `total_matched` is exact over currently
+retrievable candidates indexed with the active embedding model; entries without a
+compatible embedding are outside that candidate set. Hybrid totals are exact over the
+union of lexical matches and those currently retrievable semantic candidates, so a
+missing embedding does not prevent an entry from matching lexically. When
+`include_expired` is false, expired state rows are excluded before the 500-candidate
+exact-pagination bound is checked; with `include_expired: true`, those expired matches
+still count toward the bound. `expired_filtered_count` is a bounded retrieval diagnostic,
+not an unbounded count across the whole corpus. Each returned page is also logged as its
+own retrieval event; continuation pages carry a continuation marker instead of
+retroactively marking the prior page as a query reformulation.
 
 `memory_history` has two paging directions. Cursorless calls are newest-first browsing
 pages: they return `older_cursor` / `has_older` for deeper history plus `sync_cursor`,
@@ -86,7 +95,9 @@ bootstrapping later forward polling. `older_cursor` calls continue that newest-f
 history view but return `sync_cursor: null`; callers retain the initial watermark while
 walking backward. `cursor` calls are ascending sync pages: they return rows with `id >
 cursor` and advance `next_cursor` (also echoed as `sync_cursor`, or preserved when the
-sync page is empty). `cursor` and `older_cursor` are mutually exclusive.
+sync page is empty). `cursor` and `older_cursor` are mutually exclusive. For
+non-owner callers, namespace visibility is applied in SQL before cursor predicates,
+limits, and lookahead, so paging state reflects visible history rather than hidden rows.
 
 `memory_commitments` derives tracked follow-through from canonical tracked-status
 `Next Steps`, dated future clauses in visible tracked-status prose, explicit

@@ -212,14 +212,18 @@ describe("memory_query require_lexical_match + semantic-only warning (#77)", () 
       writeState(db, `bulk/cat-${i}`, "info", `cat cat cat cats cats note ${i}`, []);
     }
     const targetId = seedEntry("animals/special", "info", "a special cat", 1);
+    // Deliberately leave an unrelated in-scope entry unembedded: its coverage
+    // gap must not fail the otherwise valid low-rank hybrid regression.
+    writeState(db, "unrelated/missing-embedding", "info", "unrelated entry without a vector", []);
 
     const result = parse(await callTool("memory_query", {
       query: "cat",
       search_mode: "hybrid",
       require_lexical_match: true,
       limit: 2,
-    })) as { results: Array<{ id: string }> };
+    })) as { ok: boolean; results: Array<{ id: string }> };
 
+    expect(result.ok).toBe(true);
     expect(result.results.some((r) => r.id === targetId)).toBe(true);
   });
 

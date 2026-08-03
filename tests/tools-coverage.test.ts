@@ -911,13 +911,20 @@ describe.skipIf(!vecAvailable)("memory_query semantic and hybrid paths", () => {
     expect(res.error).toBe("query_bound_exceeded");
   });
 
-  it("fails closed for semantic totals when the scoped corpus has embedding gaps", async () => {
-    await callTool("memory_write", {
+  it("returns exact semantic totals over currently indexed candidates when the scope has embedding gaps", async () => {
+    const indexed = parseToolResponse(await callTool("memory_write", {
+      namespace: "projects/semantic-gap/item-indexed",
+      key: "status",
+      content: "cat semantic paging corpus semantic-gap indexed",
+      tags: ["active", "topic:semantic-gap"],
+    }));
+    const missing = parseToolResponse(await callTool("memory_write", {
       namespace: "projects/semantic-gap/item-missing",
       key: "status",
       content: "cat semantic paging corpus semantic-gap missing",
       tags: ["active", "topic:semantic-gap"],
-    });
+    }));
+    storeEmbedding(db, indexed.id, embeddingToBuffer(makeEmbedding(1)), getActiveEmbeddingModel());
 
     const res = parseToolResponse(await callTool("memory_query", {
       query: "cat",
@@ -925,52 +932,34 @@ describe.skipIf(!vecAvailable)("memory_query semantic and hybrid paths", () => {
       namespace: "projects/semantic-gap",
     }));
 
-    expect(res.ok).toBe(false);
-    expect(res.error).toBe("query_exact_totals_unavailable");
+    expect(res.ok).toBe(true);
+    expect(res.total).toBe(1);
+    expect(res.total_matched).toBe(1);
+    expect(res.returned).toBe(1);
+    expect(res.results.map((result: ToolResponse) => result.id)).toEqual([indexed.id]);
+    expect(res.results.some((result: ToolResponse) => result.id === missing.id)).toBe(false);
   });
 
-  it("fails closed for hybrid totals when the scoped corpus has embedding gaps", async () => {
-    await callTool("memory_write", {
+  it("returns a hybrid lexical match when the in-scope entry lacks an embedding", async () => {
+    const missing = parseToolResponse(await callTool("memory_write", {
       namespace: "projects/hybrid-gap/item-missing",
       key: "status",
-      content: "cat semantic paging corpus hybrid-gap missing",
+      content: "lexicalgapmarker appears only in this unembedded entry",
       tags: ["active", "topic:hybrid-gap"],
-    });
+    }));
 
     const res = parseToolResponse(await callTool("memory_query", {
-      query: "cat",
+      query: "lexicalgapmarker",
       search_mode: "hybrid",
       namespace: "projects/hybrid-gap",
     }));
 
-    expect(res.ok).toBe(false);
-    expect(res.error).toBe("query_exact_totals_unavailable");
-  });
-
-  it("does not fail closed on expired embedding gaps unless include_expired is true", async () => {
-    await callTool("memory_write", {
-      namespace: "projects/expired-gap/item-missing",
-      key: "status",
-      content: "cat semantic paging corpus expired-gap missing",
-      tags: ["active", "topic:expired-gap"],
-      valid_until: "2026-08-02T00:00:00.000Z",
-    });
-
-    const hiddenExpired = parseToolResponse(await callTool("memory_query", {
-      query: "cat",
-      search_mode: "semantic",
-      namespace: "projects/expired-gap",
-    }));
-    expect(hiddenExpired.ok).toBe(true);
-
-    const visibleExpired = parseToolResponse(await callTool("memory_query", {
-      query: "cat",
-      search_mode: "semantic",
-      namespace: "projects/expired-gap",
-      include_expired: true,
-    }));
-    expect(visibleExpired.ok).toBe(false);
-    expect(visibleExpired.error).toBe("query_exact_totals_unavailable");
+    expect(res.ok).toBe(true);
+    expect(res.total).toBe(1);
+    expect(res.total_matched).toBe(1);
+    expect(res.returned).toBe(1);
+    expect(res.results.map((result: ToolResponse) => result.id)).toEqual([missing.id]);
+    expect(res.search_meta.mode_effective).toBe("lexical_only");
   });
 
   it("falls back to lexical when semantic query embedding generation fails", async () => {

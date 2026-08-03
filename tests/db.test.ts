@@ -40,7 +40,6 @@ import {
   getTrackedStatuses,
   getAuditHistoryPage,
   createQuerySnapshot,
-  hasScopeEntriesMissingActiveEmbeddings,
   rebuildFTS,
   logToolCall,
   getToolCallAggregates,
@@ -64,7 +63,6 @@ import {
   MAX_ACTIVE_QUERY_SNAPSHOTS_PER_PRINCIPAL,
   QuerySnapshotCapacityError,
 } from "../src/db.js";
-import { getActiveEmbeddingModel } from "../src/embeddings.js";
 import { CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX } from "../src/commitment-status.js";
 import { embeddingToBuffer } from "../src/embeddings.js";
 import { namespacePrefixSuccessor } from "../src/internal/namespace-filter.js";
@@ -2720,6 +2718,34 @@ describe("query snapshot retention", () => {
     expect(rows.map((row) => row.id)).toEqual(createdIds.slice(-MAX_ACTIVE_QUERY_SNAPSHOTS_PER_PRINCIPAL));
   });
 
+  it("rolls back caller-owned evictions when the replacement insert fails", () => {
+    const createdIds = Array.from(
+      { length: MAX_ACTIVE_QUERY_SNAPSHOTS_PER_PRINCIPAL },
+      (_, index) => makeSnapshot(index),
+    );
+    const duplicateId = createdIds[createdIds.length - 1];
+
+    expect(() => createQuerySnapshot(db, {
+      id: duplicateId,
+      principalId: "owner",
+      accessFingerprint: "c".repeat(64),
+      requestFingerprint: "d".repeat(64),
+      requestShape: JSON.stringify({ query: "replacement-that-must-fail" }),
+      responseMeta: JSON.stringify({ search_mode: "filter", retrieval: { serialization: "linear" } }),
+      resultIds: JSON.stringify(["replacement-result"]),
+      resultMatchMeta: "{}",
+      cursorSecret: "replacement-secret",
+      createdAt: "2026-01-01T00:01:00.000Z",
+      expiresAt: "2026-12-31T00:00:00.000Z",
+      totalMatched: 1,
+    })).toThrow(/UNIQUE constraint failed/);
+
+    const rows = db.prepare("SELECT id FROM query_snapshots ORDER BY created_at ASC, id ASC")
+      .all() as Array<{ id: string }>;
+    expect(rows).toHaveLength(MAX_ACTIVE_QUERY_SNAPSHOTS_PER_PRINCIPAL);
+    expect(rows.map((row) => row.id)).toEqual(createdIds);
+  });
+
   it("fails once the global active cap is full instead of evicting another principal", () => {
     const createdIds: string[] = [];
     for (let index = 0; index < MAX_ACTIVE_QUERY_SNAPSHOTS_GLOBAL; index++) {
@@ -2792,25 +2818,6 @@ describe("query snapshot retention", () => {
     ].reduce((sum, value) => sum + Buffer.byteLength(value, "utf8"), 0);
 
     expect(row.storedBytes).toBe(expected);
-  });
-});
-
-describe("semantic coverage gap guard", () => {
-  it("detects in-scope entries missing current embeddings", () => {
-    const embedded = writeState(db, "projects/semantic-gap", "embedded", "semantic coverage entry", []);
-    const missing = writeState(db, "projects/semantic-gap", "missing", "semantic coverage entry", []);
-    const embedding = new Float32Array(384);
-    embedding[0] = 1;
-
-    storeEmbedding(db, embedded.id, embeddingToBuffer(embedding), getActiveEmbeddingModel());
-
-    expect(
-      hasScopeEntriesMissingActiveEmbeddings(db, {
-        namespace: "projects/semantic-gap",
-        activeEmbeddingModel: getActiveEmbeddingModel(),
-      }),
-    ).toBe(true);
-    expect(missing.id).toBeTruthy();
   });
 });
 

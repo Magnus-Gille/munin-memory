@@ -2415,7 +2415,7 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
       ...ownerContext(),
       transportType: "consumer",
       maxClassification: "internal",
-    });
+    }, "query-redaction-session");
 
     const raw = await consumerOwnerCall("memory_query", {
       query: "Unique billing review marker",
@@ -2435,6 +2435,65 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
     expect(result.results[0].classification).toBe("client-confidential");
     expect(result.results[0].content_preview).toBeUndefined();
     expect(result.results[0].match).toBeUndefined();
+
+    const redactionCount = (
+      db.prepare(
+        "SELECT COUNT(*) AS count FROM redaction_log WHERE tool_name = 'memory_query' AND entry_namespace = ?",
+      ).get("clients/acme") as { count: number }
+    ).count;
+    expect(redactionCount).toBe(1);
+  });
+
+  it("drops redacted non-owner query results from aligned analytics vectors", async () => {
+    await callTool("memory_write", {
+      namespace: "shared/family/secret",
+      key: "status",
+      content: "family redaction analytics marker",
+      classification: "client-confidential",
+    });
+
+    const familyCall = makeContextCallTool({
+      principalId: "alice",
+      principalType: "family",
+      accessibleNamespaces: [{ pattern: "shared/family/*", permissions: "rw" }],
+      transportType: "consumer",
+      maxClassification: "internal",
+    }, "query-redaction-family-session");
+
+    const raw = await familyCall("memory_query", {
+      query: "family redaction analytics marker",
+      search_mode: "lexical",
+    });
+    const result = parseToolResponse(raw) as {
+      redacted_count: number;
+      results: Array<Record<string, unknown>>;
+    };
+
+    expect(result.redacted_count).toBe(1);
+    expect(result.results[0].redacted).toBe(true);
+    expect(result.results[0].id).toBeUndefined();
+
+    const redactionCount = (
+      db.prepare(
+        "SELECT COUNT(*) AS count FROM redaction_log WHERE tool_name = 'memory_query' AND entry_namespace = ?",
+      ).get("shared/family/secret") as { count: number }
+    ).count;
+    expect(redactionCount).toBe(1);
+
+    const eventRow = db.prepare(
+      `SELECT result_ids, result_namespaces, result_ranks
+         FROM retrieval_events
+        WHERE session_id = ? AND tool_name = 'memory_query'
+        ORDER BY rowid DESC
+        LIMIT 1`,
+    ).get("query-redaction-family-session") as {
+      result_ids: string;
+      result_namespaces: string;
+      result_ranks: string;
+    };
+    expect(JSON.parse(eventRow.result_ids)).toEqual([]);
+    expect(JSON.parse(eventRow.result_namespaces)).toEqual([]);
+    expect(JSON.parse(eventRow.result_ranks)).toEqual([]);
   });
 
   it("rejects consumer writes to classified namespaces (orphan prevention)", async () => {
@@ -4714,6 +4773,93 @@ describe("memory_query", () => {
       expect(result.ok).toBe(false);
       expect(result.error).toBe("query_bound_exceeded");
       expect(result.message).toContain("500");
+    });
+
+    it("ignores expired filter-only matches before the 500-candidate bound", async () => {
+      await callTool("memory_write", {
+        namespace: "projects/filter-expiry-live",
+        key: "status",
+        content: "live filter-only candidate",
+        tags: ["topic:filter-expiry-bound"],
+      });
+      const liveId = (
+        db.prepare("SELECT id FROM entries WHERE namespace = 'projects/filter-expiry-live' AND key = 'status'")
+          .get() as { id: string }
+      ).id;
+
+      for (let index = 0; index < 501; index += 1) {
+        await callTool("memory_write", {
+          namespace: `projects/filter-expiry-dead-${index}`,
+          key: "status",
+          content: `expired filter-only candidate ${index}`,
+          tags: ["topic:filter-expiry-bound"],
+          valid_until: "2020-01-01T00:00:00Z",
+        });
+      }
+
+      const result = parseToolResponse(await callTool("memory_query", {
+        tags: ["topic:filter-expiry-bound"],
+        limit: 50,
+      })) as {
+        ok?: boolean;
+        total: number;
+        total_matched: number;
+        returned: number;
+        has_more: boolean;
+        next_cursor: string | null;
+        results: Array<{ id: string }>;
+      };
+
+      expect(result.ok).not.toBe(false);
+      expect(result.total).toBe(1);
+      expect(result.total_matched).toBe(1);
+      expect(result.returned).toBe(1);
+      expect(result.has_more).toBe(false);
+      expect(result.next_cursor).toBeNull();
+      expect(result.results.map((entry) => entry.id)).toEqual([liveId]);
+    });
+
+    it("ignores expired lexical matches before the 500-candidate bound", async () => {
+      for (let index = 0; index < 501; index += 1) {
+        await callTool("memory_write", {
+          namespace: `projects/lexical-expiry-dead-${index}`,
+          key: "status",
+          content: "lexical expiry bound token",
+          valid_until: "2020-01-01T00:00:00Z",
+        });
+      }
+
+      await callTool("memory_write", {
+        namespace: "projects/lexical-expiry-live",
+        key: "status",
+        content: "lexical expiry bound token",
+      });
+      const liveId = (
+        db.prepare("SELECT id FROM entries WHERE namespace = 'projects/lexical-expiry-live' AND key = 'status'")
+          .get() as { id: string }
+      ).id;
+
+      const result = parseToolResponse(await callTool("memory_query", {
+        query: "lexical expiry bound token",
+        search_mode: "lexical",
+        limit: 50,
+      })) as {
+        ok?: boolean;
+        total: number;
+        total_matched: number;
+        returned: number;
+        has_more: boolean;
+        next_cursor: string | null;
+        results: Array<{ id: string }>;
+      };
+
+      expect(result.ok).not.toBe(false);
+      expect(result.total).toBe(1);
+      expect(result.total_matched).toBe(1);
+      expect(result.returned).toBe(1);
+      expect(result.has_more).toBe(false);
+      expect(result.next_cursor).toBeNull();
+      expect(result.results.map((entry) => entry.id)).toEqual([liveId]);
     });
   });
 

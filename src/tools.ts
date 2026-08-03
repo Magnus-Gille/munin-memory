@@ -79,7 +79,6 @@ import {
   getAuditHistoryPage,
   createQuerySnapshot,
   getQuerySnapshot,
-  hasScopeEntriesMissingActiveEmbeddings,
   insertRedactionLog,
   getOtherKeysInNamespaceByClassification,
   getNamespaceEntriesForIntake,
@@ -727,6 +726,29 @@ function buildQuerySnapshotPage(
     redactedCount,
     expiredFilteredCount,
     linearRanks: visibleEntries.map(({ index }) => index + 1),
+  };
+}
+
+function buildQueryAnalyticsVectors(page: QuerySnapshotPage): {
+  resultIds: string[];
+  resultNamespaces: string[];
+  resultRanks: number[];
+} {
+  const kept: Array<{ id: string; namespace: string; rank: number }> = [];
+
+  page.results.forEach((entry, index) => {
+    if (typeof entry.id !== "string" || entry.id.length === 0) return;
+    kept.push({
+      id: entry.id,
+      namespace: entry.namespace,
+      rank: page.linearRanks[index] ?? index + 1,
+    });
+  });
+
+  return {
+    resultIds: kept.map((entry) => entry.id),
+    resultNamespaces: kept.map((entry) => entry.namespace),
+    resultRanks: kept.map((entry) => entry.rank),
   };
 }
 
@@ -2326,24 +2348,14 @@ function validateOptionalStringArray(value: unknown, fieldName: string): string 
     : `${fieldName} must be an array of strings.`;
 }
 
-function filterExpiredEntries<T extends Entry | { entry: Entry }>(
-  items: T[],
-  includeExpired: boolean,
-): { items: T[]; expiredFilteredCount: number } {
-  if (includeExpired) {
-    return { items, expiredFilteredCount: 0 };
-  }
-
-  let expiredFilteredCount = 0;
-  const filtered = items.filter((item) => {
+function countExpiredEntries<T extends Entry | { entry: Entry }>(items: T[]): number {
+  let count = 0;
+  for (const item of items) {
     const wrapper = item as { entry?: Entry };
     const entry = wrapper.entry ?? (item as Entry);
-    if (!isEntryExpired(entry)) return true;
-    expiredFilteredCount += 1;
-    return false;
-  });
-
-  return { items: filtered, expiredFilteredCount };
+    if (isEntryExpired(entry)) count += 1;
+  }
+  return count;
 }
 
 /**
@@ -7184,7 +7196,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_query",
     description:
-      "Search and filter memories with lexical, semantic, or hybrid `search_mode`. Queryless browsing is allowed with filters such as namespace, tags, entry type, or time range; each page `limit` defaults to 10 and caps at 50. Responses report `returned`, exact `total_matched`, `has_more`, and an opaque `next_cursor` when more results remain. Pagination snapshots are created only when more than one page is needed, expire after 5 minutes, and are bounded per principal and globally; a caller may evict its own oldest active snapshots, but resumes fail with `capacity_exceeded` rather than deleting another principal's cursor. Resume with that `cursor`; you may change `limit` on resume, but every other explicit query/filter/mode/serialization argument must be omitted or normalize to the frozen snapshot shape exactly. Semantic and hybrid queries fail closed instead of claiming an exact total when in-scope entries under the actual namespace/expiry scope are missing current embeddings. Namespace filters are literal and case-sensitive: a bare namespace includes descendants (`namespace_scope: subtree`), while a trailing-slash prefix includes only descendants (`namespace_scope: prefix`). Broad retrieval hides expired state unless `include_expired:true`; `explain:true` returns retrieval metadata. If exact bounded pagination would exceed the server safety cap, the call fails explicitly instead of returning a misleading lower-bound count.",
+      "Search and filter memories with lexical, semantic, or hybrid `search_mode`. Queryless browsing is allowed with filters such as namespace, tags, entry type, or time range; each page `limit` defaults to 10 and caps at 50. Responses report `returned`, exact `total_matched`, `has_more`, and an opaque `next_cursor` when more results remain. Pagination snapshots are created only when more than one page is needed, expire after 5 minutes, and are bounded per principal and globally; a caller may evict its own oldest active snapshots, but resumes fail with `capacity_exceeded` rather than deleting another principal's cursor. Resume with that `cursor`; you may change `limit` on resume, but every other explicit query/filter/mode/serialization argument must be omitted or normalize to the frozen snapshot shape exactly. Semantic `total_matched` is exact over currently retrievable candidates indexed with the active embedding model; entries without a compatible embedding are outside that candidate set. Hybrid totals are exact over the union of lexical matches and those currently retrievable semantic candidates, so entries without embeddings can still match lexically. Namespace filters are literal and case-sensitive: a bare namespace includes descendants (`namespace_scope: subtree`), while a trailing-slash prefix includes only descendants (`namespace_scope: prefix`). Broad retrieval hides expired state unless `include_expired:true`; `explain:true` returns retrieval metadata. If exact bounded pagination would exceed the server safety cap, the call fails explicitly instead of returning a misleading lower-bound count.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -11085,12 +11097,13 @@ export function registerTools(
                 resultIds: string[],
                 storedMatchMeta: Record<string, StoredQueryResultMeta>,
                 startPosition: number,
+                existingPage?: QuerySnapshotPage,
               ) => {
                 const actualMode = (
                   responseMeta.search_mode_actual
                   ?? (responseMeta.search_mode === "filter" ? "lexical" : responseMeta.search_mode)
                 ) as SearchMode;
-                const page = buildQuerySnapshotPage(
+                const page = existingPage ?? buildQuerySnapshotPage(
                   db,
                   ctx,
                   sessionId,
@@ -11107,6 +11120,7 @@ export function registerTools(
                 );
 
                 if (sessionId) {
+                  const analytics = buildQueryAnalyticsVectors(page);
                   logRetrievalEvent(db, {
                     sessionId,
                     toolName: "memory_query",
@@ -11114,10 +11128,12 @@ export function registerTools(
                       ?? `[filter-only] ns=${storedShape.namespace ?? "*"} tags=${storedShape.tags.join(",") || "*"} since=${storedShape.since ?? "*"} until=${storedShape.until ?? "*"}`,
                     requestedMode: responseMeta.search_mode === "filter" ? "lexical" : responseMeta.search_mode,
                     actualMode,
-                    resultIds: page.results.map((entry) => entry.id!).filter(Boolean),
-                    resultNamespaces: page.results.map((entry) => entry.namespace),
-                    resultRanks: page.linearRanks,
+                    resultIds: analytics.resultIds,
+                    resultNamespaces: analytics.resultNamespaces,
+                    resultRanks: analytics.resultRanks,
+                    isPaginationContinuation: startPosition > 0,
                     durationMs: Date.now() - queryStartedAt,
+                    detail: startPosition > 0 ? { query_snapshot_continuation: true } : undefined,
                   });
                 }
 
@@ -11220,7 +11236,7 @@ export function registerTools(
                   entryType: entry_type,
                   tags,
                   limit: QUERY_SNAPSHOT_PROBE_LIMIT,
-                  includeExpired: true,
+                  includeExpired,
                   since,
                   until,
                 });
@@ -11228,8 +11244,18 @@ export function registerTools(
                   return exactQueryBoundExceeded("This filter-only browse");
                 }
 
-                const filteredExpired = filterExpiredEntries(filterResults, includeExpired);
-                const visibleResults = filterByAccess(ctx, filteredExpired.items);
+                const expiredFilteredCount = includeExpired
+                  ? 0
+                  : countExpiredEntries(queryEntriesByFilter(db, {
+                    namespaceSelectors: readableNamespaceSelectors,
+                    entryType: entry_type,
+                    tags,
+                    limit: QUERY_SNAPSHOT_PROBE_LIMIT,
+                    includeExpired: true,
+                    since,
+                    until,
+                  }));
+                const visibleResults = filterByAccess(ctx, filterResults);
                 if (visibleResults.length > MAX_QUERY_SNAPSHOT_MATCHES) {
                   return exactQueryBoundExceeded("This filter-only browse");
                 }
@@ -11243,7 +11269,7 @@ export function registerTools(
                     fallback_reason: null,
                     recency_applied: false,
                     search_recency_weight: 0,
-                    expired_filtered_count: filteredExpired.expiredFilteredCount,
+                    expired_filtered_count: expiredFilteredCount,
                     serialization: "linear",
                   },
                 };
@@ -11298,6 +11324,7 @@ export function registerTools(
                   resultIds,
                   {},
                   0,
+                  page,
                 );
               }
 
@@ -11342,6 +11369,37 @@ export function registerTools(
               let lexicalResults: ReturnType<typeof queryEntriesLexicalScored> = [];
               let semanticResults: ReturnType<typeof queryEntriesSemanticScored> = [];
               let hybridResults: HybridQueryResult[] = [];
+              const countLexicalExpired = (resolvedQuery: string, rawFts5 = false) => (
+                includeExpired
+                  ? 0
+                  : countExpiredEntries(queryEntriesLexicalScored(db, {
+                    query: resolvedQuery,
+                    namespaceSelectors: readableNamespaceSelectors,
+                    entryType: entry_type,
+                    tags,
+                    limit: QUERY_SNAPSHOT_PROBE_LIMIT,
+                    includeExpired: true,
+                    since,
+                    until,
+                    rawFts5,
+                  }))
+              );
+              const countSemanticExpired = (queryEmbedding: Buffer, queryEmbeddingModel: string) => (
+                includeExpired
+                  ? 0
+                  : countExpiredEntries(queryEntriesSemanticScored(db, {
+                    queryEmbedding,
+                    queryEmbeddingModel,
+                    namespaceSelectors: readableNamespaceSelectors,
+                    entryType: entry_type,
+                    tags,
+                    limit: QUERY_SNAPSHOT_PROBE_LIMIT,
+                    includeExpired: true,
+                    since,
+                    until,
+                    maxDistance: getSemanticMaxDistance(),
+                  }))
+              );
 
               if (requestedMode === "semantic") {
                 if (!isSemanticEnabled() || !vecLoaded()) {
@@ -11365,22 +11423,6 @@ export function registerTools(
                   fallbackReason = "embedding_generation_failed";
                 } else {
                   const activeEmbeddingModel = getActiveEmbeddingModel();
-                  if (hasScopeEntriesMissingActiveEmbeddings(db, {
-                    namespace,
-                    namespaceSelectors: readableNamespaceSelectors ?? undefined,
-                    entryType: entry_type,
-                    tags,
-                    includeExpired,
-                    since,
-                    until,
-                    activeEmbeddingModel,
-                  })) {
-                    return errResult(
-                      "query",
-                      "query_exact_totals_unavailable",
-                      "Semantic query exact totals are unavailable while some in-scope entries lack current embeddings. Retry after embeddings catch up or use lexical search.",
-                    );
-                  }
                   const buf = embeddingToBuffer(queryEmb);
                   semanticResults = queryEntriesSemanticScored(db, {
                     queryEmbedding: buf,
@@ -11389,7 +11431,7 @@ export function registerTools(
                     entryType: entry_type,
                     tags,
                     limit: QUERY_SNAPSHOT_PROBE_LIMIT,
-                    includeExpired: true,
+                    includeExpired,
                     since,
                     until,
                     maxDistance: getSemanticMaxDistance(),
@@ -11397,9 +11439,7 @@ export function registerTools(
                   if (semanticResults.length > MAX_QUERY_SNAPSHOT_MATCHES) {
                     return exactQueryBoundExceeded("This semantic query");
                   }
-                  const filteredExpired = filterExpiredEntries(semanticResults, includeExpired);
-                  semanticResults = filteredExpired.items;
-                  expiredFilteredCount = filteredExpired.expiredFilteredCount;
+                  expiredFilteredCount = countSemanticExpired(buf, activeEmbeddingModel);
                   results = semanticResults.map((result) => result.entry);
                 }
               }
@@ -11412,22 +11452,6 @@ export function registerTools(
                   fallbackReason = "embedding_generation_failed";
                 } else {
                   const activeEmbeddingModel = getActiveEmbeddingModel();
-                  if (hasScopeEntriesMissingActiveEmbeddings(db, {
-                    namespace,
-                    namespaceSelectors: readableNamespaceSelectors ?? undefined,
-                    entryType: entry_type,
-                    tags,
-                    includeExpired,
-                    since,
-                    until,
-                    activeEmbeddingModel,
-                  })) {
-                    return errResult(
-                      "query",
-                      "query_exact_totals_unavailable",
-                      "Hybrid query exact totals are unavailable while some in-scope entries lack current embeddings. Retry after embeddings catch up or use lexical search.",
-                    );
-                  }
                   const buf = embeddingToBuffer(queryEmb);
                   const relaxedQuery = buildRelaxedLexicalQuery(queryText);
                   lexicalResults = queryEntriesLexicalScored(db, {
@@ -11436,7 +11460,7 @@ export function registerTools(
                     entryType: entry_type,
                     tags,
                     limit: QUERY_SNAPSHOT_PROBE_LIMIT,
-                    includeExpired: true,
+                    includeExpired,
                     since,
                     until,
                   });
@@ -11447,7 +11471,7 @@ export function registerTools(
                       entryType: entry_type,
                       tags,
                       limit: QUERY_SNAPSHOT_PROBE_LIMIT,
-                      includeExpired: true,
+                      includeExpired,
                       since,
                       until,
                       rawFts5: true,
@@ -11464,7 +11488,7 @@ export function registerTools(
                     entryType: entry_type,
                     tags,
                     limit: QUERY_SNAPSHOT_PROBE_LIMIT,
-                    includeExpired: true,
+                    includeExpired,
                     since,
                     until,
                     maxDistance: getSemanticMaxDistance(),
@@ -11478,11 +11502,8 @@ export function registerTools(
                       warning = "No exact lexical matches found. Used relaxed token matching for natural-language query.";
                     }
                   }
-                  const filteredLexical = filterExpiredEntries(lexicalResults, includeExpired);
-                  lexicalResults = filteredLexical.items;
-                  const filteredSemantic = filterExpiredEntries(semanticResults, includeExpired);
-                  semanticResults = filteredSemantic.items;
-                  expiredFilteredCount = filteredLexical.expiredFilteredCount + filteredSemantic.expiredFilteredCount;
+                  expiredFilteredCount = countSemanticExpired(buf, activeEmbeddingModel)
+                    + countLexicalExpired(relaxedLexical && relaxedQuery ? relaxedQuery : queryText, relaxedLexical);
                   hybridResults = fuseHybridResults(lexicalResults, semanticResults);
                   if (hybridResults.length > MAX_QUERY_SNAPSHOT_MATCHES) {
                     return exactQueryBoundExceeded("This hybrid query");
@@ -11499,16 +11520,14 @@ export function registerTools(
                   entryType: entry_type,
                   tags,
                   limit: QUERY_SNAPSHOT_PROBE_LIMIT,
-                  includeExpired: true,
+                  includeExpired,
                   since,
                   until,
                 });
                 if (lexicalResults.length > MAX_QUERY_SNAPSHOT_MATCHES) {
                   return exactQueryBoundExceeded("This lexical query");
                 }
-                let filteredExpired = filterExpiredEntries(lexicalResults, includeExpired);
-                lexicalResults = filteredExpired.items;
-                expiredFilteredCount = filteredExpired.expiredFilteredCount;
+                expiredFilteredCount = countLexicalExpired(queryText);
                 results = lexicalResults.map((result) => result.entry);
 
                 if (results.length === 0) {
@@ -11520,7 +11539,7 @@ export function registerTools(
                       entryType: entry_type,
                       tags,
                       limit: QUERY_SNAPSHOT_PROBE_LIMIT,
-                      includeExpired: true,
+                      includeExpired,
                       since,
                       until,
                       rawFts5: true,
@@ -11528,9 +11547,7 @@ export function registerTools(
                     if (lexicalResults.length > MAX_QUERY_SNAPSHOT_MATCHES) {
                       return exactQueryBoundExceeded("This lexical query");
                     }
-                    filteredExpired = filterExpiredEntries(lexicalResults, includeExpired);
-                    lexicalResults = filteredExpired.items;
-                    expiredFilteredCount = filteredExpired.expiredFilteredCount;
+                    expiredFilteredCount = countLexicalExpired(relaxedQuery, true);
                     results = lexicalResults.map((result) => result.entry);
                     if (results.length > 0 && !warning) {
                       warning = "No exact lexical matches found. Used relaxed token matching for natural-language query.";
@@ -11696,6 +11713,7 @@ export function registerTools(
                 resultIds,
                 storedMatchMeta,
                 0,
+                firstPage,
               );
             };
             return handleMemoryQuery();
@@ -12427,6 +12445,7 @@ export function registerTools(
                 );
               }
 
+              const readableNamespaceSelectors = resolveReadableNamespaceSelectors(ctx, namespace);
               const historyPage = getAuditHistoryPage(db, {
                 namespace,
                 since,
@@ -12434,15 +12453,11 @@ export function registerTools(
                 limit,
                 cursor,
                 olderCursor: older_cursor,
+                namespaceSelectors: readableNamespaceSelectors,
               });
 
               const accessFiltered = historyPage.entries.filter((entry) => canRead(ctx, entry.namespace));
               const filteredEntries = accessFiltered.map((entry) => formatHistoryEntry(db, ctx, entry, sessionId));
-              const responseSyncCursor = cursor !== undefined
-                ? historyPage.syncCursor
-                : older_cursor !== undefined
-                  ? null
-                  : (filteredEntries[0]?.id ?? 0);
 
               return okResult("history", {
                 generated_at: new Date().toISOString(),
@@ -12450,7 +12465,7 @@ export function registerTools(
                 entries: filteredEntries,
                 next_cursor: historyPage.nextCursor,
                 older_cursor: historyPage.olderCursor,
-                sync_cursor: responseSyncCursor,
+                sync_cursor: historyPage.syncCursor,
                 has_more: historyPage.hasMore,
                 has_newer: historyPage.hasNewer,
                 has_older: historyPage.hasOlder,

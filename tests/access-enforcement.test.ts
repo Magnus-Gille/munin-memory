@@ -676,9 +676,21 @@ describe("memory_query — access enforcement", () => {
       search_mode: "lexical",
       limit: 1,
     });
-    const result = parse(raw) as { total: number; results: Array<{ namespace: string }> };
+    const result = parse(raw) as {
+      total: number;
+      total_matched: number;
+      returned: number;
+      has_more: boolean;
+      next_cursor: unknown;
+      results: Array<{ namespace: string }>;
+    };
 
-    expect(result.total).toBe(1);
+    expect(result.total).toBe(2);
+    expect(result.total_matched).toBe(2);
+    expect(result.returned).toBe(1);
+    expect(result.results).toHaveLength(1);
+    expect(result.has_more).toBe(true);
+    expect(typeof result.next_cursor).toBe("string");
     expect(result.results[0].namespace).not.toBe("projects/foo");
     expect(
       result.results[0].namespace.startsWith("users/alice/") ||
@@ -695,9 +707,21 @@ describe("memory_query — access enforcement", () => {
       entry_type: "state",
       limit: 1,
     });
-    const result = parse(raw) as { total: number; results: Array<{ namespace: string }> };
+    const result = parse(raw) as {
+      total: number;
+      total_matched: number;
+      returned: number;
+      has_more: boolean;
+      next_cursor: unknown;
+      results: Array<{ namespace: string }>;
+    };
 
-    expect(result.total).toBe(1);
+    expect(result.total).toBe(2);
+    expect(result.total_matched).toBe(2);
+    expect(result.returned).toBe(1);
+    expect(result.results).toHaveLength(1);
+    expect(result.has_more).toBe(true);
+    expect(typeof result.next_cursor).toBe("string");
     expect(result.results[0].namespace).not.toBe("projects/foo");
     expect(
       result.results[0].namespace.startsWith("users/alice/") ||

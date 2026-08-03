@@ -10,7 +10,7 @@ const ENFORCEMENT_EXPECTATIONS: Record<string, string[]> = {
   memory_read: ["serializeEntry(", "buildReadMissHint("],
   memory_read_batch: ["serializeEntry("],
   memory_get: ["serializeEntry("],
-  memory_query: ["formatQueryResult("],
+  memory_query: ["buildQuerySnapshotPage("],
   memory_list: ["listVisibleNamespaces(", "maybeRedactEntryMetadata("],
   memory_delete: ["previewDeleteByClassification("],
   memory_history: ["formatHistoryEntry("],
@@ -55,6 +55,8 @@ const ENFORCEMENT_EXPECTATIONS: Record<string, string[]> = {
 // a regression tripwire for fixes whose call site is one level removed from
 // the case block (#152).
 const HELPER_ENFORCEMENT_EXPECTATIONS: Record<string, string[]> = {
+  // memory_query result previews, including resumed snapshot pages
+  buildQuerySnapshotPage: ["formatQueryResult("],
   // memory_resume (open_loops) + memory_handoff (status-derived open loops)
   extractResumeOpenLoops: ["safenPreview(", "loopUntrustedOverride"],
   // memory_commitments (text/source_excerpt) + memory_handoff (commitment-derived open loops)
