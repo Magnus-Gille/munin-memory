@@ -90,6 +90,8 @@ export interface GetParams {
 
 export interface QueryParams {
   query?: string;
+  /** Opaque pagination cursor returned by a prior memory_query page. */
+  cursor?: string;
   namespace?: string;
   entry_type?: EntryType;
   tags?: string[];
@@ -411,7 +413,13 @@ export interface QueryResult {
 
 export interface QueryResponse {
   results: QueryResult[];
+  /** Back-compat alias for total_matched. */
   total: number;
+  /** Exact visible matches in the current bounded snapshot after current access/expiry checks. */
+  total_matched: number;
+  returned: number;
+  has_more: boolean;
+  next_cursor: string | null;
   redacted_count?: number;
   query?: string;
   search_mode: SearchMode | "filter";
@@ -856,6 +864,7 @@ export interface AuditHistoryParams {
   action?: AuditAction | "delete_namespace" | "log";
   limit?: number;
   cursor?: number;
+  older_cursor?: number;
 }
 
 // Intake / quality-gate types
@@ -995,5 +1004,9 @@ export interface AuditHistoryResponse {
   count: number;
   entries: AuditEntry[];
   next_cursor: number | null;
+  older_cursor: number | null;
+  sync_cursor: number | null;
   has_more: boolean;
+  has_newer: boolean;
+  has_older: boolean;
 }

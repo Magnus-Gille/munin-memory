@@ -7,6 +7,8 @@ import {
   computeCommitmentConfidence,
   initDatabase,
   listCommitments,
+  MAX_ACTIVE_QUERY_SNAPSHOTS_GLOBAL,
+  MAX_ACTIVE_QUERY_SNAPSHOTS_PER_PRINCIPAL,
   supersedeState,
   upsertConsolidationMetadata,
   writeState,
@@ -118,6 +120,12 @@ function snapshotValidationSideEffects() {
 function countToolCalls(): number {
   return (
     db.prepare("SELECT COUNT(*) AS count FROM tool_calls").get() as { count: number }
+  ).count;
+}
+
+function countQuerySnapshots(): number {
+  return (
+    db.prepare("SELECT COUNT(*) AS count FROM query_snapshots").get() as { count: number }
   ).count;
 }
 
@@ -4155,6 +4163,558 @@ describe("memory_query", () => {
     expect(result).toMatchObject({ ok: false, error: "validation_error" });
     expect(result.message).toContain("since");
     expect(result.message).toContain("until");
+  });
+
+  describe("cursor pagination", () => {
+    function seedPagedLexicalCorpus(total: number, prefix: string) {
+      for (let i = 0; i < total; i++) {
+        writeState(
+          db,
+          `projects/${prefix}-${String(i).padStart(2, "0")}`,
+          "status",
+          `Paged lexical corpus ${prefix} shared-token ${i}`,
+          ["active", `topic:${prefix}`],
+        );
+      }
+    }
+
+    it("pages 55 lexical matches without duplicates and allows changing limit on resume", async () => {
+      seedPagedLexicalCorpus(55, "lexical-page");
+
+      const firstRaw = await callTool("memory_query", {
+        query: "Paged lexical corpus lexical-page",
+        search_mode: "lexical",
+        limit: 50,
+      });
+      const first = parseToolResponse(firstRaw) as {
+        results: Array<{ id: string }>;
+        total: number;
+        total_matched: number;
+        returned: number;
+        has_more: boolean;
+        next_cursor: string | null;
+      };
+
+      expect(first.total).toBe(55);
+      expect(first.total_matched).toBe(55);
+      expect(first.returned).toBe(50);
+      expect(first.results).toHaveLength(50);
+      expect(first.has_more).toBe(true);
+      expect(typeof first.next_cursor).toBe("string");
+      expect(new Set(first.results.map((result) => result.id)).size).toBe(50);
+
+      const secondRaw = await callTool("memory_query", {
+        cursor: first.next_cursor!,
+        limit: 10,
+      });
+      const second = parseToolResponse(secondRaw) as {
+        results: Array<{ id: string }>;
+        total: number;
+        total_matched: number;
+        returned: number;
+        has_more: boolean;
+        next_cursor: string | null;
+      };
+
+      expect(second.total).toBe(55);
+      expect(second.total_matched).toBe(55);
+      expect(second.returned).toBe(5);
+      expect(second.results).toHaveLength(5);
+      expect(second.has_more).toBe(false);
+      expect(second.next_cursor).toBeNull();
+
+      const allIds = [...first.results, ...second.results].map((result) => result.id);
+      expect(new Set(allIds).size).toBe(55);
+    });
+
+    it("supports exact partial resume overrides and normalizes tag order/dedup", async () => {
+      seedPagedLexicalCorpus(55, "partial-page");
+
+      const first = parseToolResponse(await callTool("memory_query", {
+        query: "Paged lexical corpus partial-page",
+        search_mode: "lexical",
+        tags: ["active", "topic:partial-page"],
+        limit: 50,
+      })) as { next_cursor: string; total_matched: number };
+
+      const resumed = parseToolResponse(await callTool("memory_query", {
+        cursor: first.next_cursor,
+        query: "Paged lexical corpus partial-page",
+        search_mode: "lexical",
+        tags: ["topic:partial-page", "active", "active"],
+        limit: 10,
+      })) as {
+        results: Array<{ id: string }>;
+        total_matched: number;
+        returned: number;
+        has_more: boolean;
+      };
+
+      expect(resumed.total_matched).toBe(first.total_matched);
+      expect(resumed.returned).toBe(5);
+      expect(resumed.has_more).toBe(false);
+      expect(new Set(resumed.results.map((result) => result.id)).size).toBe(5);
+    });
+
+    it("rejects a single mismatched explicit resume override", async () => {
+      seedPagedLexicalCorpus(55, "partial-mismatch");
+
+      const first = parseToolResponse(await callTool("memory_query", {
+        query: "Paged lexical corpus partial-mismatch",
+        search_mode: "lexical",
+        limit: 50,
+      })) as { next_cursor: string };
+
+      const mismatched = parseToolResponse(await callTool("memory_query", {
+        cursor: first.next_cursor,
+        include_expired: true,
+      })) as { ok: boolean; error?: string; message?: string };
+
+      expect(mismatched.ok).toBe(false);
+      expect(mismatched.error).toBe("validation_error");
+      expect(mismatched.message).toContain("cursor");
+    });
+
+    it("can exhaust a 55-result snapshot over repeated default-size resumes without duplicates", async () => {
+      seedPagedLexicalCorpus(55, "multi-resume");
+
+      const allIds = new Set<string>();
+      const firstPage = parseToolResponse(await callTool("memory_query", {
+        query: "Paged lexical corpus multi-resume",
+        search_mode: "lexical",
+      })) as {
+        results: Array<{ id: string }>;
+        returned: number;
+        has_more: boolean;
+        next_cursor: string | null;
+      };
+      firstPage.results.forEach((result) => allIds.add(result.id));
+      expect(firstPage.returned).toBe(10);
+      expect(firstPage.has_more).toBe(true);
+      let cursor = firstPage.next_cursor;
+      let pages = 1;
+
+      while (cursor) {
+        const page = parseToolResponse(await callTool("memory_query", { cursor })) as {
+          results: Array<{ id: string }>;
+          returned: number;
+          has_more: boolean;
+          next_cursor: string | null;
+        };
+        page.results.forEach((result) => allIds.add(result.id));
+        pages += 1;
+        cursor = page.next_cursor;
+      }
+
+      expect(pages).toBeGreaterThanOrEqual(6);
+      expect(allIds.size).toBe(55);
+    });
+
+    it("does not persist a query snapshot for a one-page result", async () => {
+      seedPagedLexicalCorpus(5, "single-page");
+
+      const result = parseToolResponse(await callTool("memory_query", {
+        query: "Paged lexical corpus single-page",
+        search_mode: "lexical",
+        limit: 50,
+      })) as { total_matched: number; has_more: boolean };
+
+      expect(result.total_matched).toBe(5);
+      expect(result.has_more).toBe(false);
+      expect(countQuerySnapshots()).toBe(0);
+    });
+
+    it("pages filter-only results beyond the public 50/page cap", async () => {
+      seedPagedLexicalCorpus(55, "filter-page");
+
+      const firstRaw = await callTool("memory_query", {
+        tags: ["topic:filter-page"],
+        limit: 50,
+      });
+      const first = parseToolResponse(firstRaw) as {
+        results: Array<{ id: string }>;
+        total: number;
+        total_matched: number;
+        returned: number;
+        has_more: boolean;
+        next_cursor: string | null;
+        search_mode: string;
+      };
+
+      expect(first.search_mode).toBe("filter");
+      expect(first.total).toBe(55);
+      expect(first.total_matched).toBe(55);
+      expect(first.returned).toBe(50);
+      expect(first.has_more).toBe(true);
+
+      const secondRaw = await callTool("memory_query", { cursor: first.next_cursor! });
+      const second = parseToolResponse(secondRaw) as {
+        results: Array<{ id: string }>;
+        total_matched: number;
+        returned: number;
+        has_more: boolean;
+      };
+
+      expect(second.total_matched).toBe(55);
+      expect(second.returned).toBe(5);
+      expect(second.has_more).toBe(false);
+      expect(new Set([...first.results, ...second.results].map((result) => result.id)).size).toBe(55);
+    });
+
+    it("normalizes inapplicable filter-only resume overrides to the stored effective shape", async () => {
+      seedPagedLexicalCorpus(55, "filter-normalized");
+
+      const first = parseToolResponse(await callTool("memory_query", {
+        tags: ["topic:filter-normalized"],
+        limit: 50,
+        search_mode: "hybrid",
+        explain: true,
+        search_recency_weight: 0.8,
+        require_lexical_match: true,
+        serialization: "boundary",
+      })) as {
+        next_cursor: string;
+        has_more: boolean;
+        retrieval: { serialization: string };
+      };
+
+      expect(first.has_more).toBe(true);
+      expect(first.retrieval.serialization).toBe("linear");
+
+      const snapshotRow = db.prepare(
+        "SELECT request_shape FROM query_snapshots ORDER BY created_at DESC, id DESC LIMIT 1",
+      ).get() as { request_shape: string };
+      const requestShape = JSON.parse(snapshotRow.request_shape) as {
+        requested_mode: string;
+        search_recency_weight: number;
+        explain: boolean;
+        require_lexical_match: boolean;
+        serialization: string;
+      };
+      expect(requestShape).toMatchObject({
+        requested_mode: "filter",
+        search_recency_weight: 0,
+        explain: false,
+        require_lexical_match: false,
+        serialization: "linear",
+      });
+
+      const resumed = parseToolResponse(await callTool("memory_query", {
+        cursor: first.next_cursor,
+        tags: ["topic:filter-normalized"],
+        search_mode: "semantic",
+        explain: true,
+        search_recency_weight: 1,
+        require_lexical_match: true,
+        serialization: "boundary",
+      })) as {
+        total_matched: number;
+        returned: number;
+        has_more: boolean;
+        retrieval: { serialization: string };
+      };
+
+      expect(resumed.total_matched).toBe(55);
+      expect(resumed.returned).toBe(5);
+      expect(resumed.has_more).toBe(false);
+      expect(resumed.retrieval.serialization).toBe("linear");
+    });
+
+    it("rejects tampered or mismatched cursors", async () => {
+      seedPagedLexicalCorpus(55, "tamper-page");
+
+      const first = parseToolResponse(await callTool("memory_query", {
+        query: "Paged lexical corpus tamper-page",
+        search_mode: "lexical",
+        limit: 50,
+      })) as { next_cursor: string };
+
+      const tamperedRaw = await callTool("memory_query", {
+        cursor: `${first.next_cursor.slice(0, -1)}x`,
+      });
+      const tampered = parseToolResponse(tamperedRaw) as { ok: boolean; error?: string; message?: string };
+      expect(tampered.ok).toBe(false);
+      expect(tampered.error).toBe("validation_error");
+      expect(tampered.message).toContain("cursor");
+
+      const mismatchedRaw = await callTool("memory_query", {
+        cursor: first.next_cursor,
+        query: "Paged lexical corpus something-else",
+      });
+      const mismatched = parseToolResponse(mismatchedRaw) as { ok: boolean; error?: string; message?: string };
+      expect(mismatched.ok).toBe(false);
+      expect(mismatched.error).toBe("validation_error");
+      expect(mismatched.message).toContain("cursor");
+    });
+
+    it("rejects out-of-range query cursors safely", async () => {
+      seedPagedLexicalCorpus(55, "range-page");
+
+      const first = parseToolResponse(await callTool("memory_query", {
+        query: "Paged lexical corpus range-page",
+        search_mode: "lexical",
+        limit: 50,
+      })) as { next_cursor: string };
+
+      db.prepare("UPDATE query_snapshots SET result_ids = ?").run(JSON.stringify(["only-one-left"]));
+
+      const outOfRange = parseToolResponse(await callTool("memory_query", {
+        cursor: first.next_cursor,
+      })) as { ok: boolean; error?: string; message?: string };
+
+      expect(outOfRange.ok).toBe(false);
+      expect(outOfRange.error).toBe("validation_error");
+      expect(outOfRange.message).toContain("out of range");
+    });
+
+    it("rejects expired query cursors safely", async () => {
+      seedPagedLexicalCorpus(55, "expired-page");
+
+      const first = parseToolResponse(await callTool("memory_query", {
+        query: "Paged lexical corpus expired-page",
+        search_mode: "lexical",
+        limit: 50,
+      })) as { next_cursor: string };
+
+      db.prepare("UPDATE query_snapshots SET expires_at = ?").run("2026-08-03T00:00:00.000Z");
+
+      const expired = parseToolResponse(await callTool("memory_query", {
+        cursor: first.next_cursor,
+      })) as { ok: boolean; error?: string; message?: string };
+
+      expect(expired.ok).toBe(false);
+      expect(expired.error).toBe("validation_error");
+      expect(expired.message).toContain("expired");
+    });
+
+    it("rejects resumed cursors when the access shape changes", async () => {
+      seedPagedLexicalCorpus(55, "access-page");
+
+      const ownerCall = makeContextCallTool(ownerContext(), "query-access-owner");
+      const ownerFirst = parseToolResponse(await ownerCall("memory_query", {
+        query: "Paged lexical corpus access-page",
+        search_mode: "lexical",
+        limit: 50,
+      })) as { next_cursor: string };
+
+      const narrowerOwnerCall = makeContextCallTool({
+        ...ownerContext(),
+        transportType: "consumer",
+        maxClassification: "internal",
+      }, "query-access-consumer");
+      const narrowedRaw = await narrowerOwnerCall("memory_query", {
+        cursor: ownerFirst.next_cursor,
+      });
+      const narrowed = parseToolResponse(narrowedRaw) as { ok: boolean; error?: string; message?: string };
+
+      expect(narrowed.ok).toBe(false);
+      expect(narrowed.error).toBe("validation_error");
+      expect(narrowed.message).toContain("cursor");
+    });
+
+    it("keeps newer writes out of a resumed snapshot", async () => {
+      seedPagedLexicalCorpus(55, "stable-page");
+
+      const first = parseToolResponse(await callTool("memory_query", {
+        query: "Paged lexical corpus stable-page",
+        search_mode: "lexical",
+        limit: 50,
+      })) as {
+        results: Array<{ id: string }>;
+        next_cursor: string;
+        total_matched: number;
+      };
+
+      const newer = writeState(
+        db,
+        "projects/stable-page-newer",
+        "status",
+        "Paged lexical corpus stable-page newest addition",
+        ["active", "topic:stable-page"],
+      );
+
+      const second = parseToolResponse(await callTool("memory_query", {
+        cursor: first.next_cursor,
+      })) as {
+        results: Array<{ id: string }>;
+        total_matched: number;
+      };
+
+      expect(first.total_matched).toBe(55);
+      expect(second.total_matched).toBe(55);
+      expect(first.results.some((result) => result.id === newer.id)).toBe(false);
+      expect(second.results.some((result) => result.id === newer.id)).toBe(false);
+    });
+
+    it("recomputes visible totals after deleted or expired snapshot members disappear", async () => {
+      seedPagedLexicalCorpus(55, "holes-page");
+
+      const first = parseToolResponse(await callTool("memory_query", {
+        query: "Paged lexical corpus holes-page",
+        search_mode: "lexical",
+        limit: 50,
+      })) as {
+        next_cursor: string;
+        total_matched: number;
+      };
+
+      const snapshotRow = db.prepare(
+        "SELECT result_ids FROM query_snapshots ORDER BY created_at DESC, id DESC LIMIT 1",
+      ).get() as { result_ids: string };
+      const resultIds = JSON.parse(snapshotRow.result_ids) as string[];
+      const deletedId = resultIds[50];
+      const expiredId = resultIds[51];
+
+      db.prepare("DELETE FROM entries WHERE id = ?").run(deletedId);
+      db.prepare("UPDATE entries SET valid_until = ? WHERE id = ?").run("2026-08-02T00:00:00.000Z", expiredId);
+
+      const second = parseToolResponse(await callTool("memory_query", {
+        cursor: first.next_cursor,
+      })) as {
+        results: Array<{ id: string }>;
+        total_matched: number;
+        returned: number;
+        has_more: boolean;
+      };
+
+      expect(first.total_matched).toBe(55);
+      expect(second.total_matched).toBe(53);
+      expect(second.returned).toBe(3);
+      expect(second.has_more).toBe(false);
+      expect(second.results.some((result) => result.id === deletedId)).toBe(false);
+      expect(second.results.some((result) => result.id === expiredId)).toBe(false);
+    });
+
+    it("caps active snapshots per principal with deterministic oldest-first eviction", async () => {
+      const queries: string[] = [];
+      for (let index = 0; index < MAX_ACTIVE_QUERY_SNAPSHOTS_PER_PRINCIPAL + 2; index++) {
+        const prefix = `principal-cap-${index}`;
+        seedPagedLexicalCorpus(55, prefix);
+        const query = `Paged lexical corpus ${prefix}`;
+        queries.push(query);
+        const result = parseToolResponse(await callTool("memory_query", {
+          query,
+          search_mode: "lexical",
+          limit: 50,
+        })) as { has_more: boolean };
+        expect(result.has_more).toBe(true);
+      }
+
+      const rows = db.prepare(
+        "SELECT request_shape FROM query_snapshots ORDER BY created_at ASC, id ASC",
+      ).all() as Array<{ request_shape: string }>;
+
+      expect(rows).toHaveLength(MAX_ACTIVE_QUERY_SNAPSHOTS_PER_PRINCIPAL);
+      expect(rows.map((row) => (JSON.parse(row.request_shape) as { query: string | null }).query)).toEqual(
+        queries.slice(-MAX_ACTIVE_QUERY_SNAPSHOTS_PER_PRINCIPAL),
+      );
+    });
+
+    it("fails with capacity_exceeded instead of evicting another principal's active snapshot", async () => {
+      const queries: string[] = [];
+      for (let index = 0; index < MAX_ACTIVE_QUERY_SNAPSHOTS_GLOBAL; index++) {
+        const prefix = `global-cap-${index}`;
+        seedPagedLexicalCorpus(55, prefix);
+        const query = `Paged lexical corpus ${prefix}`;
+        queries.push(query);
+        const principalCall = makeContextCallTool({
+          ...ownerContext(),
+          principalId: `snapshot-principal-${index}`,
+        }, `snapshot-global-${index}`);
+        const result = parseToolResponse(await principalCall("memory_query", {
+          query,
+          search_mode: "lexical",
+          limit: 50,
+        })) as { has_more: boolean };
+        expect(result.has_more).toBe(true);
+      }
+
+      seedPagedLexicalCorpus(55, "global-cap-overflow");
+      const overflowCall = makeContextCallTool({
+        ...ownerContext(),
+        principalId: "snapshot-principal-overflow",
+      }, "snapshot-global-overflow");
+      const overflow = parseToolResponse(await overflowCall("memory_query", {
+        query: "Paged lexical corpus global-cap-overflow",
+        search_mode: "lexical",
+        limit: 50,
+      })) as { ok: boolean; error?: string };
+
+      const rows = db.prepare(
+        "SELECT request_shape FROM query_snapshots ORDER BY created_at ASC, id ASC",
+      ).all() as Array<{ request_shape: string }>;
+
+      expect(overflow.ok).toBe(false);
+      expect(overflow.error).toBe("capacity_exceeded");
+      expect(rows).toHaveLength(MAX_ACTIVE_QUERY_SNAPSHOTS_GLOBAL);
+      expect(rows.map((row) => (JSON.parse(row.request_shape) as { query: string | null }).query)).toEqual(queries);
+    });
+
+    it("preserves another principal's active cursor when the global pool is full", async () => {
+      seedPagedLexicalCorpus(55, "principal-survives");
+      const protectedCall = makeContextCallTool({
+        ...ownerContext(),
+        principalId: "protected-principal",
+      }, "protected-principal");
+      const protectedFirst = parseToolResponse(await protectedCall("memory_query", {
+        query: "Paged lexical corpus principal-survives",
+        search_mode: "lexical",
+        limit: 50,
+      })) as { next_cursor: string };
+
+      for (let index = 0; index < MAX_ACTIVE_QUERY_SNAPSHOTS_GLOBAL - 1; index++) {
+        const prefix = `principal-fill-${index}`;
+        seedPagedLexicalCorpus(55, prefix);
+        const fillerCall = makeContextCallTool({
+          ...ownerContext(),
+          principalId: `filler-principal-${index}`,
+        }, `filler-principal-${index}`);
+        const filler = parseToolResponse(await fillerCall("memory_query", {
+          query: `Paged lexical corpus ${prefix}`,
+          search_mode: "lexical",
+          limit: 50,
+        })) as { has_more: boolean };
+        expect(filler.has_more).toBe(true);
+      }
+
+      const overflowCall = makeContextCallTool({
+        ...ownerContext(),
+        principalId: "overflow-principal",
+      }, "overflow-principal");
+      seedPagedLexicalCorpus(55, "overflow-fill");
+      const overflow = parseToolResponse(await overflowCall("memory_query", {
+        query: "Paged lexical corpus overflow-fill",
+        search_mode: "lexical",
+        limit: 50,
+      })) as { ok: boolean; error?: string };
+      expect(overflow.ok).toBe(false);
+      expect(overflow.error).toBe("capacity_exceeded");
+
+      const resumed = parseToolResponse(await protectedCall("memory_query", {
+        cursor: protectedFirst.next_cursor,
+      })) as {
+        results: Array<{ id: string }>;
+        returned: number;
+        has_more: boolean;
+      };
+      expect(resumed.returned).toBe(5);
+      expect(resumed.has_more).toBe(false);
+    });
+
+    it("fails safely when exact paging would exceed the bounded snapshot limit", async () => {
+      seedPagedLexicalCorpus(501, "bound-page");
+
+      const raw = await callTool("memory_query", {
+        query: "Paged lexical corpus bound-page",
+        search_mode: "lexical",
+        limit: 50,
+      });
+      const result = parseToolResponse(raw) as { ok: boolean; error?: string; message?: string };
+
+      expect(result.ok).toBe(false);
+      expect(result.error).toBe("query_bound_exceeded");
+      expect(result.message).toContain("500");
+    });
   });
 
   describe("boundary serialization", () => {

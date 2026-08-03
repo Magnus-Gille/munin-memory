@@ -314,24 +314,33 @@ describe("memory_history tool handler", () => {
     const result = parseToolResponse(raw) as {
       generated_at: string;
       count: number;
-      entries: Array<{ provenance: { principal_id: string } }>;
+      entries: Array<{ id: number; provenance: { principal_id: string } }>;
       next_cursor: number | null;
+      sync_cursor: number | null;
       has_more: boolean;
+      older_cursor: number | null;
+      has_older: boolean;
+      has_newer: boolean;
     };
 
     expect(result.generated_at).toBeTypeOf("string");
     expect(result.count).toBe(1);
     expect(result.entries).toHaveLength(1);
     expect(result.entries[0].provenance.principal_id).toBe("default");
-    expect(typeof result.next_cursor).toBe("number");
+    expect(result.next_cursor).toBeNull();
+    expect(result.older_cursor).toBeNull();
+    expect(result.sync_cursor).toBe(result.entries[0].id);
     expect(result.has_more).toBe(false);
+    expect(result.has_older).toBe(false);
+    expect(result.has_newer).toBe(false);
   });
 
   it("returns empty result when no writes have been made", async () => {
     const raw = await callTool(server, "memory_history", {});
-    const result = parseToolResponse(raw) as { count: number; entries: unknown[] };
+    const result = parseToolResponse(raw) as { count: number; entries: unknown[]; sync_cursor: number | null };
     expect(result.count).toBe(0);
     expect(result.entries).toHaveLength(0);
+    expect(result.sync_cursor).toBe(0);
   });
 
   it("write then history: write appears in audit trail", async () => {
@@ -498,6 +507,145 @@ describe("memory_history tool handler", () => {
     expect(result.entries).toHaveLength(3);
   });
 
+  it("supports explicit older paging for cursorless newest-first pages", async () => {
+    for (let i = 0; i < 5; i++) {
+      writeState(db, `projects/older-${i}`, "status", `v${i}`, []);
+    }
+
+    const firstRaw = await callTool(server, "memory_history", { limit: 2 });
+    const first = parseToolResponse(firstRaw) as {
+      entries: Array<{ id: number }>;
+      next_cursor: number | null;
+      older_cursor: number | null;
+      sync_cursor: number | null;
+      has_more: boolean;
+      has_older: boolean;
+      has_newer: boolean;
+    };
+
+    expect(first.entries).toHaveLength(2);
+    expect(first.entries[0].id).toBeGreaterThan(first.entries[1].id);
+    expect(first.next_cursor).toBeNull();
+    expect(first.has_more).toBe(true);
+    expect(first.has_older).toBe(true);
+    expect(first.has_newer).toBe(false);
+    expect(first.sync_cursor).toBe(first.entries[0].id);
+    expect(first.older_cursor).toBe(first.entries[1].id);
+
+    const secondRaw = await callTool(server, "memory_history", {
+      limit: 2,
+      older_cursor: first.older_cursor,
+    });
+    const second = parseToolResponse(secondRaw) as {
+      entries: Array<{ id: number }>;
+      older_cursor: number | null;
+      sync_cursor: number | null;
+      has_more: boolean;
+      has_older: boolean;
+      has_newer: boolean;
+      next_cursor: number | null;
+    };
+
+    expect(second.entries).toHaveLength(2);
+    expect(second.entries[0].id).toBeLessThan(first.entries[1].id);
+    expect(new Set([...first.entries, ...second.entries].map((entry) => entry.id)).size).toBe(4);
+    expect(second.next_cursor).toBeNull();
+    expect(second.has_more).toBe(true);
+    expect(second.has_older).toBe(true);
+    expect(second.has_newer).toBe(true);
+    expect(second.sync_cursor).toBeNull();
+    expect(second.older_cursor).toBe(second.entries[1].id);
+  });
+
+  it("returns writes after the initial watermark when paging older history", async () => {
+    for (let i = 0; i < 5; i++) {
+      writeState(db, `projects/watermark-${i}`, "status", `v${i}`, []);
+    }
+
+    const first = parseToolResponse(await callTool(server, "memory_history", { limit: 2 })) as {
+      entries: Array<{ id: number }>;
+      older_cursor: number | null;
+      sync_cursor: number | null;
+    };
+    expect(first.sync_cursor).toBe(first.entries[0].id);
+
+    writeState(db, "projects/watermark-between", "status", "new after first page", []);
+
+    const older = parseToolResponse(await callTool(server, "memory_history", {
+      limit: 2,
+      older_cursor: first.older_cursor,
+    })) as {
+      sync_cursor: number | null;
+      entries: Array<{ id: number }>;
+    };
+    expect(older.sync_cursor).toBeNull();
+
+    const sync = parseToolResponse(await callTool(server, "memory_history", {
+      cursor: first.sync_cursor,
+      limit: 10,
+    })) as {
+      entries: Array<{ id: number; namespace: string }>;
+      next_cursor: number | null;
+      sync_cursor: number | null;
+    };
+
+    expect(sync.entries.map((entry) => entry.namespace)).toContain("projects/watermark-between");
+    expect(sync.next_cursor).toBe(sync.sync_cursor);
+  });
+
+  it("does not advertise another older page when the final raw page is fully access-filtered", async () => {
+    const restrictedServer = new Server(
+      { name: "test-munin-history-restricted", version: "0.0.1" },
+      { capabilities: { tools: {} } },
+    );
+    registerTools(restrictedServer, db, undefined, {
+      principalId: "family",
+      principalType: "family",
+      accessibleNamespaces: [{ pattern: "shared/family/*", permissions: "rw" }],
+    });
+
+    writeState(db, "projects/private-older", "status", "hidden", []);
+    writeState(db, "shared/family/visible-middle", "status", "middle", []);
+    writeState(db, "shared/family/visible-newest", "status", "newest", []);
+
+    const first = parseToolResponse(await callTool(restrictedServer, "memory_history", { limit: 2 })) as {
+      count: number;
+      entries: Array<{ id: number; namespace: string }>;
+      older_cursor: number | null;
+      has_more: boolean;
+      has_older: boolean;
+    };
+
+    expect(first.count).toBe(2);
+    expect(first.entries.map((entry) => entry.namespace)).toEqual([
+      "shared/family/visible-newest",
+      "shared/family/visible-middle",
+    ]);
+    expect(first.has_more).toBe(true);
+    expect(first.has_older).toBe(true);
+
+    const older = parseToolResponse(await callTool(restrictedServer, "memory_history", {
+      limit: 2,
+      older_cursor: first.older_cursor,
+    })) as {
+      count: number;
+      entries: Array<{ id: number }>;
+      older_cursor: number | null;
+      sync_cursor: number | null;
+      has_more: boolean;
+      has_older: boolean;
+      has_newer: boolean;
+    };
+
+    expect(older.count).toBe(0);
+    expect(older.entries).toEqual([]);
+    expect(older.older_cursor).toBeNull();
+    expect(older.sync_cursor).toBeNull();
+    expect(older.has_more).toBe(false);
+    expect(older.has_older).toBe(false);
+    expect(older.has_newer).toBe(true);
+  });
+
   it("supports cursor-based forward sync with canonical actions", async () => {
     writeState(db, "projects/sync", "status", "v1", []);
     appendLog(db, "projects/sync", "progress", []);
@@ -510,14 +658,20 @@ describe("memory_history tool handler", () => {
     const first = parseToolResponse(firstRaw) as {
       entries: Array<{ id: number; action: string }>;
       next_cursor: number | null;
+      sync_cursor: number | null;
       has_more: boolean;
+      older_cursor: number | null;
+      has_newer: boolean;
     };
 
     expect(first.entries).toHaveLength(2);
     expect(first.entries[0].action).toBe("write");
     expect(first.entries[1].action).toBe("log");
     expect(first.next_cursor).toBe(first.entries[1].id);
+    expect(first.sync_cursor).toBe(first.entries[1].id);
     expect(first.has_more).toBe(false);
+    expect(first.older_cursor).toBeNull();
+    expect(first.has_newer).toBe(false);
 
     writeState(db, "projects/sync", "status", "v2", []);
 
@@ -529,10 +683,47 @@ describe("memory_history tool handler", () => {
     const second = parseToolResponse(secondRaw) as {
       entries: Array<{ action: string }>;
       next_cursor: number | null;
+      sync_cursor: number | null;
+      has_newer: boolean;
+      older_cursor: number | null;
     };
 
     expect(second.entries).toHaveLength(1);
     expect(second.entries[0].action).toBe("update");
     expect(second.next_cursor).not.toBe(first.next_cursor);
+    expect(second.sync_cursor).toBe(second.next_cursor);
+    expect(second.has_newer).toBe(false);
+    expect(second.older_cursor).toBeNull();
+  });
+
+  it("preserves the input sync cursor on an empty sync page", async () => {
+    const raw = await callTool(server, "memory_history", {
+      namespace: "projects/empty-sync",
+      cursor: 1234,
+      limit: 10,
+    });
+    const result = parseToolResponse(raw) as {
+      entries: unknown[];
+      next_cursor: number | null;
+      sync_cursor: number | null;
+      has_newer: boolean;
+    };
+
+    expect(result.entries).toEqual([]);
+    expect(result.next_cursor).toBe(1234);
+    expect(result.sync_cursor).toBe(1234);
+    expect(result.has_newer).toBe(false);
+  });
+
+  it("rejects mutually exclusive cursor directions", async () => {
+    const raw = await callTool(server, "memory_history", {
+      cursor: 1,
+      older_cursor: 2,
+    });
+    const result = parseToolResponse(raw) as { ok: boolean; error?: string; message?: string };
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("validation_error");
+    expect(result.message).toContain("mutually exclusive");
   });
 });

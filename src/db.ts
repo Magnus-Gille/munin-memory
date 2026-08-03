@@ -1308,7 +1308,7 @@ export function buildQueryEntriesByFilterStatement(
     since,
     until,
   } = options;
-  const clampedLimit = Math.min(Math.max(limit, 1), MAX_QUERY_LIMIT);
+  const clampedLimit = Math.min(Math.max(limit, 1), MAX_INTERNAL_QUERY_LIMIT);
 
   let sql = "SELECT * FROM entries WHERE is_current = 1";
   const params: unknown[] = [];
@@ -1342,7 +1342,7 @@ export function buildQueryEntriesByFilterStatement(
     params.push(until);
   }
 
-  sql += " ORDER BY updated_at DESC LIMIT ?";
+  sql += " ORDER BY updated_at DESC, rowid LIMIT ?";
   params.push(clampedLimit);
   return { sql, params };
 }
@@ -1364,7 +1364,7 @@ export function buildQueryEntriesLexicalStatement(
     until,
     rawFts5 = false,
   } = options;
-  const clampedLimit = Math.min(Math.max(limit, 1), MAX_QUERY_LIMIT);
+  const clampedLimit = Math.min(Math.max(limit, 1), MAX_INTERNAL_QUERY_LIMIT);
 
   let sql = `
     SELECT e.*, bm25(entries_fts) as lexical_score FROM entries e
@@ -1601,6 +1601,22 @@ export function listEntriesForDerivation(
  * truncated page is never mistaken for an exhausted result set.
  */
 export const MAX_QUERY_LIMIT = 50;
+/** Exact snapshot pagination refuses broader result sets rather than lying about totals. */
+export const MAX_QUERY_SNAPSHOT_MATCHES = 500;
+export const MAX_ACTIVE_QUERY_SNAPSHOTS_PER_PRINCIPAL = 3;
+export const MAX_ACTIVE_QUERY_SNAPSHOTS_GLOBAL = 8;
+export const MAX_QUERY_SNAPSHOT_BYTES_PER_ROW = 256 * 1024;
+export const MAX_ACTIVE_QUERY_SNAPSHOT_BYTES_PER_PRINCIPAL = 512 * 1024;
+export const MAX_ACTIVE_QUERY_SNAPSHOT_BYTES_GLOBAL = 2 * 1024 * 1024;
+const MAX_INTERNAL_QUERY_LIMIT = MAX_QUERY_SNAPSHOT_MATCHES + 1;
+const QUERY_SNAPSHOT_TOOL_NAME = "memory_query";
+
+export class QuerySnapshotCapacityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "QuerySnapshotCapacityError";
+  }
+}
 
 export interface DerivedCommitmentInput {
   sourceType: string;
@@ -2923,7 +2939,7 @@ export function queryEntriesSemanticScored(
     maxDistance,
     queryEmbeddingModel,
   } = options;
-  const clampedLimit = Math.min(Math.max(limit, 1), MAX_QUERY_LIMIT);
+  const clampedLimit = Math.min(Math.max(limit, 1), MAX_INTERNAL_QUERY_LIMIT);
   const now = nowUTC();
   const effectiveNamespaceMode = namespaceMode ?? (options.exactNamespaceScan === true ? "exact" : "subtree");
   const resolvedNamespaceSelectors = resolveNamespaceSelectorScope(
@@ -2955,7 +2971,31 @@ export function queryEntriesSemanticScored(
       params.push(queryEmbeddingModel);
     }
 
-    sql += " ORDER BY distance";
+    if (entryType) {
+      sql += " AND e.entry_type = ?";
+      params.push(entryType);
+    }
+    if (!includeExpired) {
+      sql += " AND (e.entry_type != 'state' OR e.valid_until IS NULL OR e.valid_until > ?)";
+      params.push(now);
+    }
+    if (tags && tags.length > 0) {
+      for (const tag of tags) {
+        sql += " AND EXISTS (SELECT 1 FROM json_each(e.tags) WHERE value = ?)";
+        params.push(tag);
+      }
+    }
+    if (since) {
+      sql += " AND e.updated_at >= ?";
+      params.push(since);
+    }
+    if (until) {
+      sql += " AND e.updated_at <= ?";
+      params.push(until);
+    }
+
+    sql += " ORDER BY distance, e.rowid LIMIT ?";
+    params.push(clampedLimit);
 
     const rows = db.prepare(sql).all(...params) as Array<Entry & { distance: number }>;
 
@@ -3004,7 +3044,31 @@ export function queryEntriesSemanticScored(
 
     sql = appendNamespaceSqlFilter(sql, params, "e.namespace", namespace, effectiveNamespaceMode, namespaceSelectors);
 
-    sql += " ORDER BY distance";
+    if (entryType) {
+      sql += " AND e.entry_type = ?";
+      params.push(entryType);
+    }
+    if (!includeExpired) {
+      sql += " AND (e.entry_type != 'state' OR e.valid_until IS NULL OR e.valid_until > ?)";
+      params.push(now);
+    }
+    if (tags && tags.length > 0) {
+      for (const tag of tags) {
+        sql += " AND EXISTS (SELECT 1 FROM json_each(e.tags) WHERE value = ?)";
+        params.push(tag);
+      }
+    }
+    if (since) {
+      sql += " AND e.updated_at >= ?";
+      params.push(since);
+    }
+    if (until) {
+      sql += " AND e.updated_at <= ?";
+      params.push(until);
+    }
+
+    sql += " ORDER BY distance, e.rowid LIMIT ?";
+    params.push(clampedLimit);
 
     const rows = db.prepare(sql).all(...params) as Array<Entry & { distance: number }>;
     const filterOpts: SemanticFilterOptions = {
@@ -3035,7 +3099,7 @@ export function queryEntriesSemanticScored(
   // over-fetch and filter inline, stopping once we have enough matches.
   // Only reached when queryEmbeddingModel is NOT set (backward-compat, or
   // callers that opt out of the model guard explicitly).
-  const knnFetch = Math.min(Math.max(clampedLimit * 10, 100), 500);
+  const knnFetch = Math.min(Math.max(clampedLimit * 10, 100), MAX_INTERNAL_QUERY_LIMIT);
 
   // KNN query via vec0
   const vecResults = db
@@ -3115,10 +3179,10 @@ export function queryEntriesHybridScored(
   options: HybridQueryOptions,
 ): HybridQueryScored {
   const { ftsOptions, semanticOptions, ftsFallbackOptions } = options;
-  const limit = Math.min(Math.max(ftsOptions.limit ?? 10, 1), 50);
+  const limit = Math.min(Math.max(ftsOptions.limit ?? 10, 1), MAX_INTERNAL_QUERY_LIMIT);
 
   // Over-fetch from both sources (5x limit per Codex finding)
-  const overFetchLimit = limit * 5;
+  const overFetchLimit = Math.min(limit * 5, MAX_INTERNAL_QUERY_LIMIT);
 
   let ftsResults = queryEntriesLexicalScored(db, { ...ftsOptions, limit: overFetchLimit });
   let ftsRelaxed = false;
@@ -3184,7 +3248,7 @@ export function queryEntriesHybridScored(
   }
 
   // Sort by score descending
-  scored.sort((a, b) => b.score - a.score);
+  scored.sort((a, b) => b.score - a.score || a.entry.id.localeCompare(b.entry.id));
 
   return { results: scored.slice(0, limit), ftsRelaxed };
 }
@@ -4011,6 +4075,7 @@ export interface AuditHistoryOptions {
   action?: string;      // filter by action type
   limit?: number;       // default 20, max 100
   cursor?: number;      // exclusive lower bound on audit_log.id for sync
+  olderCursor?: number; // exclusive upper bound on audit_log.id for older paging
 }
 
 export interface AuditHistoryEntry {
@@ -4028,6 +4093,10 @@ export interface AuditHistoryPage {
   entries: AuditHistoryEntry[];
   hasMore: boolean;
   nextCursor: number | null;
+  olderCursor: number | null;
+  syncCursor: number | null;
+  hasOlder: boolean;
+  hasNewer: boolean;
 }
 
 function normalizeAuditAction(action: string): AuditAction {
@@ -4090,7 +4159,15 @@ export function getAuditHistoryPage(
   db: Database.Database,
   options: AuditHistoryOptions,
 ): AuditHistoryPage {
-  const { namespace, namespaceMode = "subtree", since, action, limit = 20, cursor } = options;
+  const {
+    namespace,
+    namespaceMode = "subtree",
+    since,
+    action,
+    limit = 20,
+    cursor,
+    olderCursor,
+  } = options;
   const clampedLimit = Math.min(Math.max(limit, 1), 100);
 
   if (since !== undefined) {
@@ -4102,6 +4179,12 @@ export function getAuditHistoryPage(
 
   if (cursor !== undefined && (!Number.isInteger(cursor) || cursor < 0)) {
     throw new Error(`Invalid "cursor" value: "${cursor}". Must be a non-negative integer.`);
+  }
+  if (olderCursor !== undefined && (!Number.isInteger(olderCursor) || olderCursor < 0)) {
+    throw new Error(`Invalid "older_cursor" value: "${olderCursor}". Must be a non-negative integer.`);
+  }
+  if (cursor !== undefined && olderCursor !== undefined) {
+    throw new Error(`"cursor" and "older_cursor" are mutually exclusive.`);
   }
 
   let sql = "SELECT id, timestamp, agent_id, action, namespace, key, detail, entry_id FROM audit_log WHERE 1=1";
@@ -4124,8 +4207,12 @@ export function getAuditHistoryPage(
     sql += " AND id > ?";
     params.push(cursor);
     sql += " ORDER BY id ASC LIMIT ?";
+  } else if (olderCursor !== undefined) {
+    sql += " AND id < ?";
+    params.push(olderCursor);
+    sql += " ORDER BY id DESC LIMIT ?";
   } else {
-    sql += " ORDER BY timestamp DESC LIMIT ?";
+    sql += " ORDER BY id DESC LIMIT ?";
   }
   params.push(clampedLimit + 1);
 
@@ -4136,11 +4223,343 @@ export function getAuditHistoryPage(
     action: normalizeAuditAction(row.action),
   }));
 
+  if (cursor !== undefined) {
+    const syncCursor = rows.length > 0 ? rows[rows.length - 1].id : cursor;
+    return {
+      entries: rows,
+      hasMore,
+      nextCursor: syncCursor,
+      olderCursor: null,
+      syncCursor,
+      hasOlder: false,
+      hasNewer: hasMore,
+    };
+  }
+
+  const hasOlder = hasMore;
+  const hasNewer = olderCursor !== undefined;
+  const syncCursor = olderCursor !== undefined ? null : (rows.length > 0 ? rows[0].id : 0);
+
   return {
     entries: rows,
     hasMore,
-    nextCursor: rows.length > 0 ? rows[rows.length - 1].id : cursor ?? null,
+    nextCursor: null,
+    olderCursor: hasOlder && rows.length > 0 ? rows[rows.length - 1].id : null,
+    syncCursor,
+    hasOlder,
+    hasNewer,
   };
+}
+
+export interface StoredQuerySnapshot {
+  id: string;
+  principalId: string;
+  accessFingerprint: string;
+  requestFingerprint: string;
+  requestShape: string;
+  responseMeta: string;
+  resultIds: string;
+  resultMatchMeta: string;
+  cursorSecret: string;
+  createdAt: string;
+  expiresAt: string;
+  totalMatched: number;
+}
+
+export interface CreateQuerySnapshotInput {
+  id?: string;
+  principalId: string;
+  accessFingerprint: string;
+  requestFingerprint: string;
+  requestShape: string;
+  responseMeta: string;
+  resultIds: string;
+  resultMatchMeta: string;
+  cursorSecret: string;
+  createdAt?: string;
+  expiresAt: string;
+  totalMatched: number;
+}
+
+interface QuerySnapshotStorageRow {
+  id: string;
+  principalId: string;
+  createdAt: string;
+  storedBytes: number;
+}
+
+function getStoredQuerySnapshotBytes(input: Pick<
+  CreateQuerySnapshotInput,
+  | "principalId"
+  | "accessFingerprint"
+  | "requestFingerprint"
+  | "requestShape"
+  | "responseMeta"
+  | "resultIds"
+  | "resultMatchMeta"
+  | "cursorSecret"
+> & { id: string; createdAt: string; expiresAt: string }): number {
+  return [
+    input.id,
+    QUERY_SNAPSHOT_TOOL_NAME,
+    input.principalId,
+    input.accessFingerprint,
+    input.requestFingerprint,
+    input.requestShape,
+    input.responseMeta,
+    input.resultIds,
+    input.resultMatchMeta,
+    input.cursorSecret,
+    input.createdAt,
+    input.expiresAt,
+  ].reduce((sum, value) => sum + Buffer.byteLength(value, "utf8"), 0);
+}
+
+function listActiveQuerySnapshotStorageRows(
+  db: Database.Database,
+  now: string,
+  principalId?: string,
+): QuerySnapshotStorageRow[] {
+  const wherePrincipal = principalId ? "AND principal_id = ?" : "";
+  return db.prepare(
+    `SELECT
+        id,
+        principal_id AS principalId,
+        created_at AS createdAt,
+        (
+          length(CAST(id AS BLOB))
+          + length(CAST(tool_name AS BLOB))
+          + length(CAST(principal_id AS BLOB))
+          + length(CAST(access_fingerprint AS BLOB))
+          + length(CAST(request_fingerprint AS BLOB))
+          + length(CAST(request_shape AS BLOB))
+          + length(CAST(response_meta AS BLOB))
+          + length(CAST(result_ids AS BLOB))
+          + length(CAST(result_match_meta AS BLOB))
+          + length(CAST(cursor_secret AS BLOB))
+          + length(CAST(created_at AS BLOB))
+          + length(CAST(expires_at AS BLOB))
+        ) AS storedBytes
+      FROM query_snapshots
+      WHERE expires_at > ?
+      ${wherePrincipal}
+      ORDER BY created_at ASC, id ASC`,
+  ).all(
+    ...(principalId ? [now, principalId] : [now]),
+  ) as QuerySnapshotStorageRow[];
+}
+
+function evictOldestQuerySnapshotsToFit(
+  db: Database.Database,
+  principalId: string,
+  nextSnapshotBytes: number,
+  now: string,
+): void {
+  if (nextSnapshotBytes > MAX_QUERY_SNAPSHOT_BYTES_PER_ROW) {
+    throw new QuerySnapshotCapacityError(
+      `Query pagination snapshot exceeded the ${MAX_QUERY_SNAPSHOT_BYTES_PER_ROW}-byte storage cap.`,
+    );
+  }
+  if (nextSnapshotBytes > MAX_ACTIVE_QUERY_SNAPSHOT_BYTES_PER_PRINCIPAL) {
+    throw new QuerySnapshotCapacityError(
+      "Query pagination snapshot exceeded the per-principal storage cap.",
+    );
+  }
+  if (nextSnapshotBytes > MAX_ACTIVE_QUERY_SNAPSHOT_BYTES_GLOBAL) {
+    throw new QuerySnapshotCapacityError(
+      "Query pagination snapshot exceeded the global storage cap.",
+    );
+  }
+
+  const deleteSnapshot = db.prepare("DELETE FROM query_snapshots WHERE id = ?");
+
+  while (true) {
+    const rows = listActiveQuerySnapshotStorageRows(db, now, principalId);
+    const storedBytes = rows.reduce((sum, row) => sum + row.storedBytes, 0);
+    if (
+      rows.length < MAX_ACTIVE_QUERY_SNAPSHOTS_PER_PRINCIPAL
+      && storedBytes + nextSnapshotBytes <= MAX_ACTIVE_QUERY_SNAPSHOT_BYTES_PER_PRINCIPAL
+    ) {
+      break;
+    }
+    if (rows.length === 0) {
+      throw new QuerySnapshotCapacityError("Unable to free per-principal query snapshot capacity.");
+    }
+    deleteSnapshot.run(rows[0].id);
+  }
+
+  while (true) {
+    const rows = listActiveQuerySnapshotStorageRows(db, now);
+    const storedBytes = rows.reduce((sum, row) => sum + row.storedBytes, 0);
+    if (
+      rows.length < MAX_ACTIVE_QUERY_SNAPSHOTS_GLOBAL
+      && storedBytes + nextSnapshotBytes <= MAX_ACTIVE_QUERY_SNAPSHOT_BYTES_GLOBAL
+    ) {
+      break;
+    }
+    const principalRows = listActiveQuerySnapshotStorageRows(db, now, principalId);
+    if (principalRows.length === 0) {
+      throw new QuerySnapshotCapacityError("Query pagination snapshot exceeded the global storage cap.");
+    }
+    deleteSnapshot.run(principalRows[0].id);
+  }
+}
+
+export function pruneExpiredQuerySnapshots(db: Database.Database, now = nowUTC()): number {
+  const result = db.prepare("DELETE FROM query_snapshots WHERE expires_at <= ?").run(now);
+  return result.changes;
+}
+
+export function createQuerySnapshot(
+  db: Database.Database,
+  input: CreateQuerySnapshotInput,
+): StoredQuerySnapshot {
+  const id = input.id ?? randomUUID();
+  const createdAt = input.createdAt ?? nowUTC();
+  pruneExpiredQuerySnapshots(db, createdAt);
+  const storedBytes = getStoredQuerySnapshotBytes({
+    id,
+    principalId: input.principalId,
+    accessFingerprint: input.accessFingerprint,
+    requestFingerprint: input.requestFingerprint,
+    requestShape: input.requestShape,
+    responseMeta: input.responseMeta,
+    resultIds: input.resultIds,
+    resultMatchMeta: input.resultMatchMeta,
+    cursorSecret: input.cursorSecret,
+    createdAt,
+    expiresAt: input.expiresAt,
+  });
+  evictOldestQuerySnapshotsToFit(db, input.principalId, storedBytes, createdAt);
+  db.prepare(
+    `INSERT INTO query_snapshots
+      (id, tool_name, principal_id, access_fingerprint, request_fingerprint, request_shape, response_meta,
+       result_ids, result_match_meta, cursor_secret, created_at, expires_at, total_matched)
+     VALUES
+      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    id,
+    QUERY_SNAPSHOT_TOOL_NAME,
+    input.principalId,
+    input.accessFingerprint,
+    input.requestFingerprint,
+    input.requestShape,
+    input.responseMeta,
+    input.resultIds,
+    input.resultMatchMeta,
+    input.cursorSecret,
+    createdAt,
+    input.expiresAt,
+    input.totalMatched,
+  );
+
+  return {
+    id,
+    principalId: input.principalId,
+    accessFingerprint: input.accessFingerprint,
+    requestFingerprint: input.requestFingerprint,
+    requestShape: input.requestShape,
+    responseMeta: input.responseMeta,
+    resultIds: input.resultIds,
+    resultMatchMeta: input.resultMatchMeta,
+    cursorSecret: input.cursorSecret,
+    createdAt,
+    expiresAt: input.expiresAt,
+    totalMatched: input.totalMatched,
+  };
+}
+
+export function getQuerySnapshot(
+  db: Database.Database,
+  id: string,
+  now = nowUTC(),
+): StoredQuerySnapshot | null {
+  pruneExpiredQuerySnapshots(db, now);
+  const row = db.prepare(
+    `SELECT
+        id,
+        principal_id AS principalId,
+        access_fingerprint AS accessFingerprint,
+        request_fingerprint AS requestFingerprint,
+        request_shape AS requestShape,
+        response_meta AS responseMeta,
+        result_ids AS resultIds,
+        result_match_meta AS resultMatchMeta,
+        cursor_secret AS cursorSecret,
+        created_at AS createdAt,
+        expires_at AS expiresAt,
+        total_matched AS totalMatched
+      FROM query_snapshots
+      WHERE id = ?`,
+  ).get(id) as StoredQuerySnapshot | undefined;
+  if (!row) return null;
+  return row.expiresAt <= now ? null : row;
+}
+
+export interface SemanticCoverageGapOptions {
+  namespace?: string;
+  namespaceMode?: BareNamespaceMode;
+  namespaceSelectors?: NamespaceSelector[];
+  entryType?: EntryType;
+  tags?: string[];
+  includeExpired?: boolean;
+  since?: string;
+  until?: string;
+  activeEmbeddingModel: string;
+}
+
+export function hasScopeEntriesMissingActiveEmbeddings(
+  db: Database.Database,
+  options: SemanticCoverageGapOptions,
+): boolean {
+  const {
+    namespace,
+    namespaceMode = "subtree",
+    namespaceSelectors,
+    entryType,
+    tags,
+    includeExpired = false,
+    since,
+    until,
+    activeEmbeddingModel,
+  } = options;
+  const now = nowUTC();
+  let sql = "SELECT 1 FROM entries e WHERE e.is_current = 1";
+  const params: unknown[] = [];
+
+  sql = appendNamespaceSqlFilter(sql, params, "e.namespace", namespace, namespaceMode, namespaceSelectors);
+
+  if (entryType) {
+    sql += " AND e.entry_type = ?";
+    params.push(entryType);
+  }
+
+  if (!includeExpired) {
+    sql += " AND (e.entry_type != 'state' OR e.valid_until IS NULL OR e.valid_until > ?)";
+    params.push(now);
+  }
+
+  if (tags && tags.length > 0) {
+    for (const tag of tags) {
+      sql += " AND EXISTS (SELECT 1 FROM json_each(e.tags) WHERE value = ?)";
+      params.push(tag);
+    }
+  }
+
+  if (since) {
+    sql += " AND e.updated_at >= ?";
+    params.push(since);
+  }
+
+  if (until) {
+    sql += " AND e.updated_at <= ?";
+    params.push(until);
+  }
+
+  sql += " AND NOT (e.embedding_status = 'generated' AND e.embedding_model = ?) LIMIT 1";
+  params.push(activeEmbeddingModel);
+
+  return Boolean(db.prepare(sql).get(...params));
 }
 
 // --- Hint helpers ---

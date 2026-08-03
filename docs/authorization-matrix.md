@@ -114,6 +114,8 @@ Invisible denial is critical: non-owner principals must not be able to distingui
 | **namespace param** | Literal and case-sensitive. Bare `projects/foo` means that namespace plus descendants; trailing-slash `projects/` means descendants under that prefix only. If caller specifies an inaccessible namespace, return empty results (not an error) |
 | **namespace_scope** | Returned only when a real namespace filter was applied: `subtree` for bare namespaces, `prefix` for trailing-slash filters |
 | **Result count** | `total` reflects only accessible results (don't leak hidden count) |
+| **Pagination cursor** | Opaque and authenticated. A resumed cursor must match the stored snapshot id/position, current access shape, and any explicit resume overrides after normalizing them back to the frozen request shape; only `limit` may vary freely. Multi-page snapshots are short-lived operational writes (5-minute TTL) and are created only when more than one page is needed. |
+| **Semantic / hybrid exact totals** | Fail closed when the filtered scope contains entries without a current embedding for the active model; the server must not present a lower-bound total as exact. |
 
 ### memory_attention
 
@@ -149,6 +151,7 @@ Invisible denial is critical: non-owner principals must not be able to distingui
 | **Namespace filter** | Literal and case-sensitive. Bare `projects/foo` means that namespace plus descendants; trailing-slash `projects/foo/` means descendants under that literal prefix only. Only returns audit entries for caller's accessible namespaces. |
 | **Without namespace** | Returns history across all accessible namespaces only |
 | **Unauthorized namespace** | Empty result set (not an error) |
+| **Paging contract** | Cursorless pages are newest-first and return `older_cursor` + `has_older` for backward paging plus an initial forward watermark in `sync_cursor` (or `0` for an empty feed). `older_cursor` pages continue backward paging and return `sync_cursor: null`, so callers retain the initial watermark while paging older. `cursor` pages are ascending sync pages and advance `next_cursor` / `sync_cursor`, preserving the input cursor when the sync page is empty. `cursor` and `older_cursor` are mutually exclusive. |
 
 ### memory_delete
 

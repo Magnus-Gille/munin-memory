@@ -1026,6 +1026,38 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 25,
+    description: "Persist bounded memory_query snapshots for opaque pagination cursors (#268)",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS query_snapshots (
+          id TEXT PRIMARY KEY,
+          tool_name TEXT NOT NULL CHECK(tool_name = 'memory_query'),
+          principal_id TEXT NOT NULL,
+          access_fingerprint TEXT NOT NULL,
+          request_fingerprint TEXT NOT NULL,
+          request_shape TEXT NOT NULL CHECK(json_valid(request_shape) AND json_type(request_shape) = 'object'),
+          response_meta TEXT NOT NULL CHECK(json_valid(response_meta) AND json_type(response_meta) = 'object'),
+          result_ids TEXT NOT NULL CHECK(json_valid(result_ids) AND json_type(result_ids) = 'array'),
+          result_match_meta TEXT NOT NULL CHECK(json_valid(result_match_meta) AND json_type(result_match_meta) = 'object'),
+          cursor_secret TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          total_matched INTEGER NOT NULL CHECK(total_matched >= 0)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_query_snapshots_expires_at
+          ON query_snapshots(expires_at);
+
+        CREATE INDEX IF NOT EXISTS idx_query_snapshots_principal_created
+          ON query_snapshots(principal_id, created_at, id);
+
+        CREATE INDEX IF NOT EXISTS idx_query_snapshots_created
+          ON query_snapshots(created_at, id);
+      `);
+    },
+  },
 ];
 
 /**

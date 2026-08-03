@@ -72,7 +72,21 @@ namespace such as `projects/munin-memory` matches that namespace and its descend
 while a trailing-slash filter such as `projects/` matches only descendants under that
 literal prefix. Successful query responses echo this as `namespace_scope: "subtree"` or
 `namespace_scope: "prefix"`; responses omit `namespace_scope` when no namespace filter
-was applied.
+was applied. Multi-page `memory_query` responses persist a server-side snapshot only when
+more than one page is needed; the opaque resume cursor is authenticated to the frozen
+snapshot id and position, explicit resume overrides must still normalize back to the
+stored request shape, the snapshot expires after 5 minutes, and semantic/hybrid queries
+fail closed instead of claiming an exact total when the scoped corpus is missing current
+embeddings.
+
+`memory_history` has two paging directions. Cursorless calls are newest-first browsing
+pages: they return `older_cursor` / `has_older` for deeper history plus `sync_cursor`,
+the newest visible audit id in that initial feed (or `0` when the feed is empty), for
+bootstrapping later forward polling. `older_cursor` calls continue that newest-first
+history view but return `sync_cursor: null`; callers retain the initial watermark while
+walking backward. `cursor` calls are ascending sync pages: they return rows with `id >
+cursor` and advance `next_cursor` (also echoed as `sync_cursor`, or preserved when the
+sync page is empty). `cursor` and `older_cursor` are mutually exclusive.
 
 `memory_commitments` derives tracked follow-through from canonical tracked-status
 `Next Steps`, dated future clauses in visible tracked-status prose, explicit

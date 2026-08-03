@@ -766,6 +766,21 @@ describe.skipIf(!vecAvailable)("memory_query semantic and hybrid paths", () => {
   let catId: string;
   let dogId: string;
 
+  async function seedPagedSemanticCorpus(prefix: string, total: number) {
+    const ids: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const created = parseToolResponse(await callTool("memory_write", {
+        namespace: `projects/${prefix}/item-${String(i).padStart(2, "0")}`,
+        key: "status",
+        content: `cat semantic paging corpus ${prefix} ${i}`,
+        tags: ["active", `topic:${prefix}`],
+      }));
+      ids.push(created.id);
+      storeEmbedding(db, created.id, embeddingToBuffer(makeEmbedding(1)), getActiveEmbeddingModel());
+    }
+    return ids;
+  }
+
   beforeEach(async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     _setExtractorForTesting(mockExtractor as any);
@@ -817,6 +832,145 @@ describe.skipIf(!vecAvailable)("memory_query semantic and hybrid paths", () => {
     const withHybrid = res.results.find((r: ToolResponse) => r.match?.hybrid_score !== undefined);
     expect(withHybrid).toBeDefined();
     expect(res.search_meta).toBeDefined();
+  });
+
+  it("pages deterministic semantic results beyond 50 per page", async () => {
+    await seedPagedSemanticCorpus("semantic-page", 55);
+
+    const first = parseToolResponse(await callTool("memory_query", {
+      query: "cat",
+      search_mode: "semantic",
+      namespace: "projects/semantic-page",
+      limit: 50,
+    }));
+    expect(first.ok).toBe(true);
+    expect(first.total_matched).toBe(55);
+    expect(first.returned).toBe(50);
+    expect(first.has_more).toBe(true);
+
+    const second = parseToolResponse(await callTool("memory_query", {
+      cursor: first.next_cursor,
+    }));
+    expect(second.ok).toBe(true);
+    expect(second.total_matched).toBe(55);
+    expect(second.returned).toBe(5);
+    expect(second.has_more).toBe(false);
+    expect(new Set([...first.results, ...second.results].map((result: ToolResponse) => result.id)).size).toBe(55);
+  });
+
+  it("pages deterministic hybrid results beyond 50 per page", async () => {
+    await seedPagedSemanticCorpus("hybrid-page", 55);
+
+    const first = parseToolResponse(await callTool("memory_query", {
+      query: "cat",
+      search_mode: "hybrid",
+      namespace: "projects/hybrid-page",
+      limit: 50,
+    }));
+    expect(first.ok).toBe(true);
+    expect(first.total_matched).toBe(55);
+    expect(first.returned).toBe(50);
+    expect(first.has_more).toBe(true);
+
+    const second = parseToolResponse(await callTool("memory_query", {
+      cursor: first.next_cursor,
+      limit: 10,
+    }));
+    expect(second.ok).toBe(true);
+    expect(second.total_matched).toBe(55);
+    expect(second.returned).toBe(5);
+    expect(second.has_more).toBe(false);
+    expect(new Set([...first.results, ...second.results].map((result: ToolResponse) => result.id)).size).toBe(55);
+  });
+
+  it("fails safely when exact semantic paging would exceed the bounded internal probe", async () => {
+    await seedPagedSemanticCorpus("semantic-bound", 501);
+
+    const res = parseToolResponse(await callTool("memory_query", {
+      query: "cat",
+      search_mode: "semantic",
+      namespace: "projects/semantic-bound",
+      limit: 50,
+    }));
+
+    expect(res.ok).toBe(false);
+    expect(res.error).toBe("query_bound_exceeded");
+  });
+
+  it("fails safely when exact hybrid paging would exceed the bounded internal probe", async () => {
+    await seedPagedSemanticCorpus("hybrid-bound", 501);
+
+    const res = parseToolResponse(await callTool("memory_query", {
+      query: "cat",
+      search_mode: "hybrid",
+      namespace: "projects/hybrid-bound",
+      limit: 50,
+    }));
+
+    expect(res.ok).toBe(false);
+    expect(res.error).toBe("query_bound_exceeded");
+  });
+
+  it("fails closed for semantic totals when the scoped corpus has embedding gaps", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/semantic-gap/item-missing",
+      key: "status",
+      content: "cat semantic paging corpus semantic-gap missing",
+      tags: ["active", "topic:semantic-gap"],
+    });
+
+    const res = parseToolResponse(await callTool("memory_query", {
+      query: "cat",
+      search_mode: "semantic",
+      namespace: "projects/semantic-gap",
+    }));
+
+    expect(res.ok).toBe(false);
+    expect(res.error).toBe("query_exact_totals_unavailable");
+  });
+
+  it("fails closed for hybrid totals when the scoped corpus has embedding gaps", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/hybrid-gap/item-missing",
+      key: "status",
+      content: "cat semantic paging corpus hybrid-gap missing",
+      tags: ["active", "topic:hybrid-gap"],
+    });
+
+    const res = parseToolResponse(await callTool("memory_query", {
+      query: "cat",
+      search_mode: "hybrid",
+      namespace: "projects/hybrid-gap",
+    }));
+
+    expect(res.ok).toBe(false);
+    expect(res.error).toBe("query_exact_totals_unavailable");
+  });
+
+  it("does not fail closed on expired embedding gaps unless include_expired is true", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/expired-gap/item-missing",
+      key: "status",
+      content: "cat semantic paging corpus expired-gap missing",
+      tags: ["active", "topic:expired-gap"],
+      valid_until: "2026-08-02T00:00:00.000Z",
+    });
+
+    const hiddenExpired = parseToolResponse(await callTool("memory_query", {
+      query: "cat",
+      search_mode: "semantic",
+      namespace: "projects/expired-gap",
+    }));
+    expect(hiddenExpired.ok).toBe(true);
+
+    const visibleExpired = parseToolResponse(await callTool("memory_query", {
+      query: "cat",
+      search_mode: "semantic",
+      namespace: "projects/expired-gap",
+      include_expired: true,
+    }));
+    expect(visibleExpired.ok).toBe(false);
+    expect(visibleExpired.error).toBe("query_exact_totals_unavailable");
   });
 
   it("falls back to lexical when semantic query embedding generation fails", async () => {

@@ -39,6 +39,8 @@ import {
   getCompletedTaskNamespaces,
   getTrackedStatuses,
   getAuditHistoryPage,
+  createQuerySnapshot,
+  hasScopeEntriesMissingActiveEmbeddings,
   rebuildFTS,
   logToolCall,
   getToolCallAggregates,
@@ -58,7 +60,11 @@ import {
   getAvgConsolidationLatencyMs,
   upsertConsolidationMetadata,
   countUnusedSurfaces,
+  MAX_ACTIVE_QUERY_SNAPSHOTS_GLOBAL,
+  MAX_ACTIVE_QUERY_SNAPSHOTS_PER_PRINCIPAL,
+  QuerySnapshotCapacityError,
 } from "../src/db.js";
+import { getActiveEmbeddingModel } from "../src/embeddings.js";
 import { CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX } from "../src/commitment-status.js";
 import { embeddingToBuffer } from "../src/embeddings.js";
 import { namespacePrefixSuccessor } from "../src/internal/namespace-filter.js";
@@ -2620,11 +2626,42 @@ describe("getAuditHistoryPage", () => {
     // With cursor: ascending order, nextCursor advances
     const second = getAuditHistoryPage(db, { limit: 3, cursor: first.nextCursor! });
     expect(second.entries.length).toBeGreaterThanOrEqual(1);
+    expect(first.syncCursor).toBe(first.nextCursor);
+    expect(second.syncCursor).toBe(second.nextCursor);
     // IDs must be strictly increasing (ascending order)
     const allIds = [...first.entries, ...second.entries].map((e) => e.id);
     for (let i = 1; i < allIds.length; i++) {
       expect(allIds[i]).toBeGreaterThan(allIds[i - 1]);
     }
+  });
+
+  it("supports descending older pagination from the newest-first view", () => {
+    for (let i = 0; i < 5; i++) {
+      writeState(db, "projects/paginate-older", `key-${i}`, `content-${i}`, []);
+    }
+
+    const first = getAuditHistoryPage(db, { limit: 2 });
+    expect(first.entries.length).toBe(2);
+    expect(first.entries[0].id).toBeGreaterThan(first.entries[1].id);
+    expect(first.nextCursor).toBeNull();
+    expect(first.syncCursor).toBe(first.entries[0].id);
+    expect(first.olderCursor).toBe(first.entries[1].id);
+    expect(first.hasOlder).toBe(true);
+    expect(first.hasNewer).toBe(false);
+
+    const second = getAuditHistoryPage(db, { limit: 2, olderCursor: first.olderCursor! });
+    expect(second.entries.length).toBe(2);
+    expect(second.entries[0].id).toBeLessThan(first.entries[1].id);
+    expect(second.entries[0].id).toBeGreaterThan(second.entries[1].id);
+    expect(second.nextCursor).toBeNull();
+    expect(second.syncCursor).toBeNull();
+    expect(second.olderCursor).toBe(second.entries[1].id);
+    expect(second.hasOlder).toBe(true);
+    expect(second.hasNewer).toBe(true);
+  });
+
+  it("throws when cursor directions are mixed", () => {
+    expect(() => getAuditHistoryPage(db, { cursor: 1, olderCursor: 2 })).toThrow(/mutually exclusive/);
   });
 
   it("hasMore is true when more entries exist beyond limit", () => {
@@ -2633,6 +2670,147 @@ describe("getAuditHistoryPage", () => {
     }
     const page = getAuditHistoryPage(db, { limit: 2 });
     expect(page.hasMore).toBe(true);
+  });
+
+  it("preserves the input sync cursor on an empty ascending sync page", () => {
+    const cursor = 9_999;
+    const page = getAuditHistoryPage(db, { cursor, limit: 2 });
+
+    expect(page.entries).toEqual([]);
+    expect(page.nextCursor).toBe(cursor);
+    expect(page.syncCursor).toBe(cursor);
+    expect(page.hasNewer).toBe(false);
+    expect(page.olderCursor).toBeNull();
+  });
+});
+
+describe("query snapshot retention", () => {
+  function makeSnapshot(index: number, principalId = "owner"): string {
+    const id = `000000000000000000000000000000${index.toString(16)}`.slice(-32);
+    createQuerySnapshot(db, {
+      id,
+      principalId,
+      accessFingerprint: "a".repeat(64),
+      requestFingerprint: "b".repeat(64),
+      requestShape: JSON.stringify({ query: `query-${index}` }),
+      responseMeta: JSON.stringify({ search_mode: "filter", retrieval: { serialization: "linear" } }),
+      resultIds: JSON.stringify([`result-${index}`]),
+      resultMatchMeta: "{}",
+      cursorSecret: `secret-${index}`,
+      createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
+      expiresAt: "2026-12-31T00:00:00.000Z",
+      totalMatched: 1,
+    });
+    return id;
+  }
+
+  it("uses the expires_at index for snapshot expiry cleanup", () => {
+    const plan = db.prepare("EXPLAIN QUERY PLAN DELETE FROM query_snapshots WHERE expires_at <= ?")
+      .all("2026-08-03T00:00:00.000Z") as Array<{ detail: string }>;
+
+    expect(plan.some((row) => row.detail.includes("idx_query_snapshots_expires_at"))).toBe(true);
+  });
+
+  it("evicts the oldest snapshots first when a principal exceeds the active cap", () => {
+    const createdIds = Array.from({ length: MAX_ACTIVE_QUERY_SNAPSHOTS_PER_PRINCIPAL + 2 }, (_, index) => makeSnapshot(index));
+    const rows = db.prepare("SELECT id FROM query_snapshots ORDER BY created_at ASC, id ASC")
+      .all() as Array<{ id: string }>;
+
+    expect(rows).toHaveLength(MAX_ACTIVE_QUERY_SNAPSHOTS_PER_PRINCIPAL);
+    expect(rows.map((row) => row.id)).toEqual(createdIds.slice(-MAX_ACTIVE_QUERY_SNAPSHOTS_PER_PRINCIPAL));
+  });
+
+  it("fails once the global active cap is full instead of evicting another principal", () => {
+    const createdIds: string[] = [];
+    for (let index = 0; index < MAX_ACTIVE_QUERY_SNAPSHOTS_GLOBAL; index++) {
+      createdIds.push(makeSnapshot(index, `principal-${index}`));
+    }
+    expect(() => makeSnapshot(MAX_ACTIVE_QUERY_SNAPSHOTS_GLOBAL, "principal-overflow")).toThrow(QuerySnapshotCapacityError);
+
+    const rows = db.prepare("SELECT id FROM query_snapshots ORDER BY created_at ASC, id ASC")
+      .all() as Array<{ id: string }>;
+
+    expect(rows).toHaveLength(MAX_ACTIVE_QUERY_SNAPSHOTS_GLOBAL);
+    expect(rows.map((row) => row.id)).toEqual(createdIds);
+  });
+
+  it("counts multibyte snapshot text with the same byte length in SQL and Node", () => {
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const expiresAt = "2026-12-31T00:00:00.000Z";
+    const requestShape = JSON.stringify({ query: "emoji 😺", namespace: "projects/åäö" });
+    const responseMeta = JSON.stringify({ warning: "snowman ☃", retrieval: { serialization: "linear" } });
+    const resultIds = JSON.stringify(["résumé-😺"]);
+    const resultMatchMeta = JSON.stringify({ "résumé-😺": { lexical_score: 1 } });
+    const cursorSecret = "sekret-🔐";
+    createQuerySnapshot(db, {
+      id: "0123456789abcdef0123456789abcdef",
+      principalId: "principal-ü",
+      accessFingerprint: "a".repeat(64),
+      requestFingerprint: "b".repeat(64),
+      requestShape,
+      responseMeta,
+      resultIds,
+      resultMatchMeta,
+      cursorSecret,
+      createdAt,
+      expiresAt,
+      totalMatched: 1,
+    });
+
+    const row = db.prepare(`
+      SELECT (
+        length(CAST(id AS BLOB))
+        + length(CAST(tool_name AS BLOB))
+        + length(CAST(principal_id AS BLOB))
+        + length(CAST(access_fingerprint AS BLOB))
+        + length(CAST(request_fingerprint AS BLOB))
+        + length(CAST(request_shape AS BLOB))
+        + length(CAST(response_meta AS BLOB))
+        + length(CAST(result_ids AS BLOB))
+        + length(CAST(result_match_meta AS BLOB))
+        + length(CAST(cursor_secret AS BLOB))
+        + length(CAST(created_at AS BLOB))
+        + length(CAST(expires_at AS BLOB))
+      ) AS storedBytes
+      FROM query_snapshots
+      WHERE id = ?
+    `).get("0123456789abcdef0123456789abcdef") as { storedBytes: number };
+
+    const expected = [
+      "0123456789abcdef0123456789abcdef",
+      "memory_query",
+      "principal-ü",
+      "a".repeat(64),
+      "b".repeat(64),
+      requestShape,
+      responseMeta,
+      resultIds,
+      resultMatchMeta,
+      cursorSecret,
+      createdAt,
+      expiresAt,
+    ].reduce((sum, value) => sum + Buffer.byteLength(value, "utf8"), 0);
+
+    expect(row.storedBytes).toBe(expected);
+  });
+});
+
+describe("semantic coverage gap guard", () => {
+  it("detects in-scope entries missing current embeddings", () => {
+    const embedded = writeState(db, "projects/semantic-gap", "embedded", "semantic coverage entry", []);
+    const missing = writeState(db, "projects/semantic-gap", "missing", "semantic coverage entry", []);
+    const embedding = new Float32Array(384);
+    embedding[0] = 1;
+
+    storeEmbedding(db, embedded.id, embeddingToBuffer(embedding), getActiveEmbeddingModel());
+
+    expect(
+      hasScopeEntriesMissingActiveEmbeddings(db, {
+        namespace: "projects/semantic-gap",
+        activeEmbeddingModel: getActiveEmbeddingModel(),
+      }),
+    ).toBe(true);
+    expect(missing.id).toBeTruthy();
   });
 });
 
