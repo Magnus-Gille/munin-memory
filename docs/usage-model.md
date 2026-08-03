@@ -75,8 +75,16 @@ literal prefix. Successful query responses echo this as `namespace_scope: "subtr
 was applied. Multi-page `memory_query` responses persist a server-side snapshot only when
 more than one page is needed; the opaque resume cursor is authenticated to the frozen
 snapshot id and position, explicit resume overrides must still normalize back to the
-stored request shape, the snapshot expires after 5 minutes, and semantic/hybrid queries
-use an indexed-candidate contract. Semantic `total_matched` is exact over currently
+stored request shape, and the current access shape must exactly match a versioned
+canonical JSON binding with fixed field order and sorted rule objects. The legacy
+`access_fingerprint` database column stores this exact binding rather than a digest;
+cursor integrity remains independently protected by HMAC-SHA-256 under the snapshot's
+random secret. Cursor validity ends exactly 5 minutes after snapshot creation even if
+physical deletion has not happened yet. Expired rows are physically pruned at startup
+and by periodic maintenance for both HTTP and stdio, so during normal runtime cleanup
+may lag logical expiry only until the next maintenance pass (at most the maintenance
+interval, currently 1 minute). Semantic/hybrid queries use an indexed-candidate
+contract. Semantic `total_matched` is exact over currently
 retrievable candidates indexed with the active embedding model; entries without a
 compatible embedding are outside that candidate set. Hybrid totals are exact over the
 union of lexical matches and those currently retrievable semantic candidates, so a

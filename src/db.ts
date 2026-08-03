@@ -4211,6 +4211,9 @@ export function getAuditHistoryPage(
     params.push(normalizedAction);
   }
 
+  const filteredSql = sql;
+  const filteredParams = [...params];
+
   if (cursor !== undefined) {
     sql += " AND id > ?";
     params.push(cursor);
@@ -4245,7 +4248,9 @@ export function getAuditHistoryPage(
   }
 
   const hasOlder = hasMore;
-  const hasNewer = olderCursor !== undefined;
+  const hasNewer = olderCursor !== undefined && db.prepare(
+    `${filteredSql} AND id >= ? LIMIT 1`,
+  ).get(...filteredParams, olderCursor) !== undefined;
   const syncCursor = olderCursor !== undefined ? null : (rows.length > 0 ? rows[0].id : 0);
 
   return {
@@ -4262,6 +4267,7 @@ export function getAuditHistoryPage(
 export interface StoredQuerySnapshot {
   id: string;
   principalId: string;
+  /** Exact versioned access-shape JSON stored in the legacy access_fingerprint column. */
   accessFingerprint: string;
   requestFingerprint: string;
   requestShape: string;
@@ -4277,6 +4283,7 @@ export interface StoredQuerySnapshot {
 export interface CreateQuerySnapshotInput {
   id?: string;
   principalId: string;
+  /** Exact versioned access-shape JSON stored in the legacy access_fingerprint column. */
   accessFingerprint: string;
   requestFingerprint: string;
   requestShape: string;
@@ -4328,7 +4335,7 @@ function listActiveQuerySnapshotStorageRows(
   now: string,
   principalId?: string,
 ): QuerySnapshotStorageRow[] {
-  const wherePrincipal = principalId ? "AND principal_id = ?" : "";
+  const wherePrincipal = principalId !== undefined ? "AND principal_id = ?" : "";
   return db.prepare(
     `SELECT
         id,
@@ -4353,7 +4360,7 @@ function listActiveQuerySnapshotStorageRows(
       ${wherePrincipal}
       ORDER BY created_at ASC, id ASC`,
   ).all(
-    ...(principalId ? [now, principalId] : [now]),
+    ...(principalId !== undefined ? [now, principalId] : [now]),
   ) as QuerySnapshotStorageRow[];
 }
 

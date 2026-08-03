@@ -10,7 +10,13 @@ import type { Request, Response, NextFunction } from "express";
 import { createServer, IncomingMessage } from "node:http";
 import { timingSafeEqual, randomUUID, createHash, createHmac, randomBytes } from "node:crypto";
 import { pathToFileURL } from "node:url";
-import { initDatabase, nowUTC, pruneRedactionLog, pruneRetrievalAnalytics } from "./db.js";
+import {
+  initDatabase,
+  nowUTC,
+  pruneExpiredQuerySnapshots,
+  pruneRedactionLog,
+  pruneRetrievalAnalytics,
+} from "./db.js";
 import { MCP_SERVER_INSTRUCTIONS, registerTools } from "./tools.js";
 import { initEmbeddings, startEmbeddingWorker, stopEmbeddingWorker } from "./embeddings.js";
 import { initConsolidation, startConsolidationWorker, stopConsolidationWorker } from "./consolidation.js";
@@ -61,9 +67,11 @@ function getRedactionLogRetentionDays(): number {
 }
 
 export function runMaintenancePrune(database: Database.Database): void {
+  const maintenanceNow = nowUTC();
+  pruneExpiredQuerySnapshots(database, maintenanceNow);
   pruneRetrievalAnalytics(database, getAnalyticsRetentionDays());
   pruneRedactionLog(database, getRedactionLogRetentionDays());
-  pruneReviewProposals(database, nowUTC());
+  pruneReviewProposals(database, maintenanceNow);
 }
 
 // --- Configuration ---
@@ -80,7 +88,7 @@ const issuerUrl = process.env.MUNIN_OAUTH_ISSUER_URL ?? "http://localhost:3030";
 
 export const MAX_BODY_SIZE = 1 * 1024 * 1024; // 1MB
 const BODY_PARSE_TIMEOUT_MS = 10_000;
-const OAUTH_CLEANUP_INTERVAL_MS = 60 * 1000;
+const MAINTENANCE_PRUNE_INTERVAL_MS = 60 * 1000;
 
 // --- Heimdall self-descriptor ---
 // Served at GET /heimdall.json for Tier-1 discovery by the Heimdall dashboard.
@@ -176,6 +184,34 @@ export interface ConsentIdentity {
 
 let cleanupTimerId: ReturnType<typeof setInterval> | undefined;
 let activeDb: Database.Database | undefined;
+
+export interface MaintenancePruneTimerOptions {
+  intervalMs?: number;
+  additionalCleanup?: () => void;
+}
+
+export function startMaintenancePruneTimer(
+  database: Database.Database,
+  options: MaintenancePruneTimerOptions = {},
+): ReturnType<typeof setInterval> {
+  const intervalMs = options.intervalMs ?? MAINTENANCE_PRUNE_INTERVAL_MS;
+  if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
+    throw new Error("Maintenance prune interval must be a positive finite number.");
+  }
+
+  const timer = setInterval(() => {
+    options.additionalCleanup?.();
+    runMaintenancePrune(database);
+  }, intervalMs);
+  timer.unref();
+  return timer;
+}
+
+export function stopMaintenancePruneTimer(
+  timer: ReturnType<typeof setInterval> | undefined,
+): void {
+  if (timer !== undefined) clearInterval(timer);
+}
 
 // --- MCP server factory ---
 
@@ -936,10 +972,9 @@ async function startHttp(database: Database.Database) {
   httpServer.requestTimeout = 30_000;
   httpServer.headersTimeout = 10_000;
 
-  cleanupTimerId = setInterval(() => {
-    oauthProvider.cleanupExpired();
-    runMaintenancePrune(database);
-  }, OAUTH_CLEANUP_INTERVAL_MS);
+  cleanupTimerId = startMaintenancePruneTimer(database, {
+    additionalCleanup: () => oauthProvider.cleanupExpired(),
+  });
 
   httpServer.listen(httpPort, httpHost, () => {
     console.error(`Munin-memory HTTP server listening on ${httpHost}:${httpPort}`);
@@ -973,6 +1008,7 @@ async function startStdio(database: Database.Database) {
   );
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  cleanupTimerId = startMaintenancePruneTimer(database);
 }
 
 // --- Entry point ---
@@ -1016,10 +1052,8 @@ async function main() {
 
 // Graceful shutdown
 async function shutdown() {
-  if (cleanupTimerId) {
-    clearInterval(cleanupTimerId);
-    cleanupTimerId = undefined;
-  }
+  stopMaintenancePruneTimer(cleanupTimerId);
+  cleanupTimerId = undefined;
   let exitCode = 0;
   try {
     await stopEmbeddingWorker();
@@ -1046,10 +1080,8 @@ if (isMainModule) {
 
   main().catch(async (err) => {
     console.error("Fatal error:", err);
-    if (cleanupTimerId) {
-      clearInterval(cleanupTimerId);
-      cleanupTimerId = undefined;
-    }
+    stopMaintenancePruneTimer(cleanupTimerId);
+    cleanupTimerId = undefined;
     await stopEmbeddingWorker();
     await stopConsolidationWorker();
     activeDb?.close();

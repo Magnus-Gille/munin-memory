@@ -2658,6 +2658,22 @@ describe("getAuditHistoryPage", () => {
     expect(second.hasNewer).toBe(true);
   });
 
+  it.each([
+    ["namespace", { namespace: "projects/no-visible-history" }],
+    ["since", { since: "2099-01-01T00:00:00.000Z" }],
+    ["action", { action: "delete" }],
+  ])("does not report newer rows for an arbitrary older cursor after the %s filter removes them", (_label, filters) => {
+    const page = getAuditHistoryPage(db, {
+      ...filters,
+      olderCursor: 999_999,
+      limit: 2,
+    });
+
+    expect(page.entries).toEqual([]);
+    expect(page.hasNewer).toBe(false);
+    expect(page.hasOlder).toBe(false);
+  });
+
   it("throws when cursor directions are mixed", () => {
     expect(() => getAuditHistoryPage(db, { cursor: 1, olderCursor: 2 })).toThrow(/mutually exclusive/);
   });
@@ -2758,6 +2774,26 @@ describe("query snapshot retention", () => {
 
     expect(rows).toHaveLength(MAX_ACTIVE_QUERY_SNAPSHOTS_GLOBAL);
     expect(rows.map((row) => row.id)).toEqual(createdIds);
+  });
+
+  it("keeps legacy empty-ID snapshot eviction scoped to that exact principal", () => {
+    const protectedId = makeSnapshot(0, "protected-principal");
+    const emptyPrincipalIds = Array.from(
+      { length: MAX_ACTIVE_QUERY_SNAPSHOTS_PER_PRINCIPAL + 1 },
+      (_, index) => makeSnapshot(index + 1, ""),
+    );
+
+    const protectedRow = db.prepare("SELECT id FROM query_snapshots WHERE id = ?")
+      .get(protectedId) as { id: string } | undefined;
+    const emptyRows = db.prepare(
+      "SELECT id FROM query_snapshots WHERE principal_id = '' ORDER BY created_at ASC, id ASC",
+    ).all() as Array<{ id: string }>;
+
+    expect(protectedRow).toEqual({ id: protectedId });
+    expect(emptyRows).toHaveLength(MAX_ACTIVE_QUERY_SNAPSHOTS_PER_PRINCIPAL);
+    expect(emptyRows.map((row) => row.id)).toEqual(
+      emptyPrincipalIds.slice(-MAX_ACTIVE_QUERY_SNAPSHOTS_PER_PRINCIPAL),
+    );
   });
 
   it("counts multibyte snapshot text with the same byte length in SQL and Node", () => {

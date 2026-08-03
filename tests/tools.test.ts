@@ -2838,6 +2838,34 @@ describe("Librarian Pattern A enforcement for query/list/history", () => {
     expect(result.entries.some((entry) => String(entry.detail ?? "").includes("should not leak"))).toBe(false);
   });
 
+  it("does not let a hidden newer audit row set has_newer on an authorized older page", async () => {
+    writeState(db, "projects/visible/item", "status", "Visible older history", []);
+    writeState(db, "projects/hidden/item", "status", "Hidden newer history", []);
+    const hiddenBoundary = db.prepare(
+      "SELECT MAX(id) AS id FROM audit_log WHERE namespace = ?",
+    ).get("projects/hidden/item") as { id: number };
+    const visibleCall = makeContextCallTool({
+      principalId: "visible-history-reader",
+      principalType: "agent",
+      accessibleNamespaces: [{ pattern: "projects/visible/*", permissions: "read" }],
+    });
+
+    const raw = await visibleCall("memory_history", {
+      older_cursor: hiddenBoundary.id,
+      limit: 10,
+    });
+    const result = parseToolResponse(raw) as {
+      entries: Array<{ namespace: string }>;
+      has_newer: boolean;
+      has_older: boolean;
+    };
+
+    expect(result.entries).toHaveLength(1);
+    expect(result.entries[0].namespace).toBe("projects/visible/item");
+    expect(result.has_newer).toBe(false);
+    expect(result.has_older).toBe(false);
+  });
+
   it("fails closed for deleted-entry audit history and logs the redaction", async () => {
     await callTool("memory_write", {
       namespace: "clients/acme",
@@ -4639,41 +4667,50 @@ describe("memory_query", () => {
       expect(narrowed.message).toContain("cursor");
     });
 
-    it("uses a fresh keyed access binding per snapshot, separate from the request fingerprint", async () => {
-      seedPagedLexicalCorpus(55, "keyed-access-one");
-      const first = parseToolResponse(await callTool("memory_query", {
-        query: "Paged lexical corpus keyed-access-one",
-        search_mode: "lexical",
-        limit: 50,
-      })) as { next_cursor: string; has_more: boolean };
-
-      seedPagedLexicalCorpus(55, "keyed-access-two");
-      const second = parseToolResponse(await callTool("memory_query", {
-        query: "Paged lexical corpus keyed-access-two",
+    it("stores an exact versioned access binding, separate from the request fingerprint", async () => {
+      seedPagedLexicalCorpus(55, "canonical-access");
+      const accessContext: AccessContext = {
+        principalId: "canonical-principal",
+        principalType: "family",
+        accessibleNamespaces: [
+          { pattern: "projects/*", permissions: "read" },
+          { pattern: "clients/*", permissions: "rw" },
+        ],
+        transportType: "dpa_covered",
+        maxClassification: "client-confidential",
+      };
+      const contextCall = makeContextCallTool(accessContext, "canonical-access-session");
+      const first = parseToolResponse(await contextCall("memory_query", {
+        query: "Paged lexical corpus canonical-access",
         search_mode: "lexical",
         limit: 50,
       })) as { next_cursor: string; has_more: boolean };
 
       expect(first.has_more).toBe(true);
-      expect(second.has_more).toBe(true);
-      const snapshots = db.prepare(
-        "SELECT access_fingerprint, request_fingerprint FROM query_snapshots ORDER BY id",
-      ).all() as Array<{ access_fingerprint: string; request_fingerprint: string }>;
+      const snapshot = db.prepare(
+        "SELECT access_fingerprint, request_fingerprint FROM query_snapshots",
+      ).get() as { access_fingerprint: string; request_fingerprint: string };
+      const expectedBinding = {
+        domain: "munin-memory.query-access-binding",
+        version: 1,
+        principal_id: "canonical-principal",
+        principal_type: "family",
+        max_classification: "client-confidential",
+        transport_type: "dpa_covered",
+        accessible_namespaces: [
+          { pattern: "clients/*", permissions: "rw" },
+          { pattern: "projects/*", permissions: "read" },
+        ],
+      };
 
-      expect(snapshots).toHaveLength(2);
-      expect(snapshots[0].access_fingerprint).not.toBe(snapshots[1].access_fingerprint);
-      expect(snapshots[0].access_fingerprint).not.toBe(snapshots[0].request_fingerprint);
-      expect(snapshots[1].access_fingerprint).not.toBe(snapshots[1].request_fingerprint);
+      expect(snapshot.access_fingerprint).toBe(JSON.stringify(expectedBinding));
+      expect(snapshot.request_fingerprint).toMatch(/^[a-f0-9]{64}$/);
+      expect(snapshot.access_fingerprint).not.toBe(snapshot.request_fingerprint);
 
-      const firstContinuation = parseToolResponse(await callTool("memory_query", {
+      const continuation = parseToolResponse(await contextCall("memory_query", {
         cursor: first.next_cursor,
       })) as { returned: number; has_more: boolean };
-      const secondContinuation = parseToolResponse(await callTool("memory_query", {
-        cursor: second.next_cursor,
-      })) as { returned: number; has_more: boolean };
-
-      expect(firstContinuation).toMatchObject({ returned: 5, has_more: false });
-      expect(secondContinuation).toMatchObject({ returned: 5, has_more: false });
+      expect(continuation).toMatchObject({ returned: 5, has_more: false });
     });
 
     it("keeps newer writes out of a resumed snapshot", async () => {

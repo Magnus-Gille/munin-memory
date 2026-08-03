@@ -328,6 +328,7 @@ type QuerySnapshotPage = {
 type QuerySnapshotCursorContext = {
   id: string;
   cursorSecret: string;
+  /** Exact versioned access-shape JSON; field name mirrors the legacy storage column. */
   accessFingerprint: string;
   requestFingerprint: string;
 };
@@ -443,18 +444,27 @@ function fingerprintJson(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
-function buildQueryAccessFingerprint(ctx: AccessContext, cursorSecret: string): string {
-  return createHmac("sha256", cursorSecret)
-    .update(JSON.stringify({
-      principal_id: ctx.principalId,
-      principal_type: ctx.principalType,
-      max_classification: getContextMaxClassification(ctx),
-      transport_type: getContextTransportType(ctx),
-      accessible_namespaces: [...ctx.accessibleNamespaces]
-        .map((rule) => `${rule.pattern}:${rule.permissions}`)
-        .sort(),
-    }))
-    .digest("hex");
+const QUERY_ACCESS_BINDING_DOMAIN = "munin-memory.query-access-binding";
+const QUERY_ACCESS_BINDING_VERSION = 1;
+
+function buildQueryAccessBinding(ctx: AccessContext): string {
+  const accessibleNamespaces = [...ctx.accessibleNamespaces]
+    .map((rule) => ({ pattern: rule.pattern, permissions: rule.permissions }))
+    .sort((left, right) => {
+      if (left.pattern !== right.pattern) return left.pattern < right.pattern ? -1 : 1;
+      if (left.permissions === right.permissions) return 0;
+      return left.permissions < right.permissions ? -1 : 1;
+    });
+
+  return JSON.stringify({
+    domain: QUERY_ACCESS_BINDING_DOMAIN,
+    version: QUERY_ACCESS_BINDING_VERSION,
+    principal_id: ctx.principalId,
+    principal_type: ctx.principalType,
+    max_classification: getContextMaxClassification(ctx),
+    transport_type: getContextTransportType(ctx),
+    accessible_namespaces: accessibleNamespaces,
+  });
 }
 
 function signQueryCursor(
@@ -11209,8 +11219,8 @@ export function registerTools(
                 if (!constantTimeEqualBase64Url(parsedCursor.mac, expectedMac)) {
                   return errResult("query", "validation_error", "Invalid query cursor.");
                 }
-                const accessFingerprint = buildQueryAccessFingerprint(ctx, snapshot.cursorSecret);
-                if (snapshot.accessFingerprint !== accessFingerprint) {
+                const accessBinding = buildQueryAccessBinding(ctx);
+                if (snapshot.accessFingerprint !== accessBinding) {
                   return errResult("query", "validation_error", "Query cursor no longer matches the current access shape.");
                 }
 
@@ -11301,7 +11311,7 @@ export function registerTools(
                 };
                 const snapshotId = randomBytes(16).toString("hex");
                 const cursorSecret = randomBytes(32).toString("base64url");
-                const accessFingerprint = buildQueryAccessFingerprint(ctx, cursorSecret);
+                const accessBinding = buildQueryAccessBinding(ctx);
                 const page = buildQuerySnapshotPage(
                   db,
                   ctx,
@@ -11322,7 +11332,7 @@ export function registerTools(
                     createQuerySnapshot(db, {
                       id: snapshotId,
                       principalId: ctx.principalId,
-                      accessFingerprint,
+                      accessFingerprint: accessBinding,
                       requestFingerprint,
                       requestShape: JSON.stringify(requestShape),
                       responseMeta: JSON.stringify(responseMeta),
@@ -11343,7 +11353,7 @@ export function registerTools(
                   {
                     id: snapshotId,
                     cursorSecret,
-                    accessFingerprint,
+                    accessFingerprint: accessBinding,
                     requestFingerprint,
                   },
                   responseMeta,
@@ -11705,7 +11715,7 @@ export function registerTools(
               );
               const snapshotId = randomBytes(16).toString("hex");
               const cursorSecret = randomBytes(32).toString("base64url");
-              const accessFingerprint = buildQueryAccessFingerprint(ctx, cursorSecret);
+              const accessBinding = buildQueryAccessBinding(ctx);
               const firstPage = buildQuerySnapshotPage(
                 db,
                 ctx,
@@ -11726,7 +11736,7 @@ export function registerTools(
                   createQuerySnapshot(db, {
                     id: snapshotId,
                     principalId: ctx.principalId,
-                    accessFingerprint,
+                    accessFingerprint: accessBinding,
                     requestFingerprint,
                     requestShape: JSON.stringify(requestShape),
                     responseMeta: JSON.stringify(responseMeta),
@@ -11748,7 +11758,7 @@ export function registerTools(
                 {
                   id: snapshotId,
                   cursorSecret,
-                  accessFingerprint,
+                  accessFingerprint: accessBinding,
                   requestFingerprint,
                 },
                 responseMeta,
