@@ -443,16 +443,18 @@ function fingerprintJson(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
-function buildQueryAccessFingerprint(ctx: AccessContext): string {
-  return fingerprintJson({
-    principal_id: ctx.principalId,
-    principal_type: ctx.principalType,
-    max_classification: getContextMaxClassification(ctx),
-    transport_type: getContextTransportType(ctx),
-    accessible_namespaces: [...ctx.accessibleNamespaces]
-      .map((rule) => `${rule.pattern}:${rule.permissions}`)
-      .sort(),
-  });
+function buildQueryAccessFingerprint(ctx: AccessContext, cursorSecret: string): string {
+  return createHmac("sha256", cursorSecret)
+    .update(JSON.stringify({
+      principal_id: ctx.principalId,
+      principal_type: ctx.principalType,
+      max_classification: getContextMaxClassification(ctx),
+      transport_type: getContextTransportType(ctx),
+      accessible_namespaces: [...ctx.accessibleNamespaces]
+        .map((rule) => `${rule.pattern}:${rule.permissions}`)
+        .sort(),
+    }))
+    .digest("hex");
 }
 
 function signQueryCursor(
@@ -11112,7 +11114,6 @@ export function registerTools(
               const appliedNamespaceScope = namespaceFilterScope(namespace);
               const readableNamespaceSelectors = resolveReadableNamespaceSelectors(ctx, namespace);
               const requestedMode: SearchMode | "filter" = hasQueryText ? (search_mode ?? "hybrid") : "filter";
-              const accessFingerprint = buildQueryAccessFingerprint(ctx);
 
               const respondFromSnapshot = (
                 snapshot: QuerySnapshotCursorContext,
@@ -11208,6 +11209,7 @@ export function registerTools(
                 if (!constantTimeEqualBase64Url(parsedCursor.mac, expectedMac)) {
                   return errResult("query", "validation_error", "Invalid query cursor.");
                 }
+                const accessFingerprint = buildQueryAccessFingerprint(ctx, snapshot.cursorSecret);
                 if (snapshot.accessFingerprint !== accessFingerprint) {
                   return errResult("query", "validation_error", "Query cursor no longer matches the current access shape.");
                 }
@@ -11299,6 +11301,7 @@ export function registerTools(
                 };
                 const snapshotId = randomBytes(16).toString("hex");
                 const cursorSecret = randomBytes(32).toString("base64url");
+                const accessFingerprint = buildQueryAccessFingerprint(ctx, cursorSecret);
                 const page = buildQuerySnapshotPage(
                   db,
                   ctx,
@@ -11702,6 +11705,7 @@ export function registerTools(
               );
               const snapshotId = randomBytes(16).toString("hex");
               const cursorSecret = randomBytes(32).toString("base64url");
+              const accessFingerprint = buildQueryAccessFingerprint(ctx, cursorSecret);
               const firstPage = buildQuerySnapshotPage(
                 db,
                 ctx,

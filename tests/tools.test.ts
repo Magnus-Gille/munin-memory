@@ -4639,6 +4639,43 @@ describe("memory_query", () => {
       expect(narrowed.message).toContain("cursor");
     });
 
+    it("uses a fresh keyed access binding per snapshot, separate from the request fingerprint", async () => {
+      seedPagedLexicalCorpus(55, "keyed-access-one");
+      const first = parseToolResponse(await callTool("memory_query", {
+        query: "Paged lexical corpus keyed-access-one",
+        search_mode: "lexical",
+        limit: 50,
+      })) as { next_cursor: string; has_more: boolean };
+
+      seedPagedLexicalCorpus(55, "keyed-access-two");
+      const second = parseToolResponse(await callTool("memory_query", {
+        query: "Paged lexical corpus keyed-access-two",
+        search_mode: "lexical",
+        limit: 50,
+      })) as { next_cursor: string; has_more: boolean };
+
+      expect(first.has_more).toBe(true);
+      expect(second.has_more).toBe(true);
+      const snapshots = db.prepare(
+        "SELECT access_fingerprint, request_fingerprint FROM query_snapshots ORDER BY id",
+      ).all() as Array<{ access_fingerprint: string; request_fingerprint: string }>;
+
+      expect(snapshots).toHaveLength(2);
+      expect(snapshots[0].access_fingerprint).not.toBe(snapshots[1].access_fingerprint);
+      expect(snapshots[0].access_fingerprint).not.toBe(snapshots[0].request_fingerprint);
+      expect(snapshots[1].access_fingerprint).not.toBe(snapshots[1].request_fingerprint);
+
+      const firstContinuation = parseToolResponse(await callTool("memory_query", {
+        cursor: first.next_cursor,
+      })) as { returned: number; has_more: boolean };
+      const secondContinuation = parseToolResponse(await callTool("memory_query", {
+        cursor: second.next_cursor,
+      })) as { returned: number; has_more: boolean };
+
+      expect(firstContinuation).toMatchObject({ returned: 5, has_more: false });
+      expect(secondContinuation).toMatchObject({ returned: 5, has_more: false });
+    });
+
     it("keeps newer writes out of a resumed snapshot", async () => {
       seedPagedLexicalCorpus(55, "stable-page");
 
