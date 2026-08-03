@@ -442,6 +442,10 @@ export function addPrincipal(
   db: Database.Database,
   opts: AddPrincipalOpts,
 ): AddPrincipalResult {
+  if (opts.principalId.trim().length === 0) {
+    throw new Error("Principal ID must not be blank.");
+  }
+
   if (!VALID_TYPES.has(opts.principalType)) {
     throw new Error(
       `Invalid principal type: "${opts.principalType}". Must be one of: owner, family, agent, external.`,

@@ -100,6 +100,7 @@ describe("runMigrations", () => {
     expect(names).toContain("audit_log");
     expect(names).toContain("entries_fts");
     expect(names).toContain("entry_intake");
+    expect(names).toContain("query_snapshots");
     expect(names).toContain("review_proposals");
     expect(names).toContain("review_proposal_events");
     expect(names).toContain("schema_version");
@@ -125,6 +126,9 @@ describe("runMigrations", () => {
     expect(names).toContain("idx_entries_ns_owner");
     expect(names).toContain("idx_audit_timestamp");
     expect(names).toContain("idx_audit_entry_id");
+    expect(names).toContain("idx_query_snapshots_expires_at");
+    expect(names).toContain("idx_query_snapshots_principal_created");
+    expect(names).toContain("idx_query_snapshots_created");
     expect(names).toContain("idx_review_proposals_creator_status_updated");
     expect(names).toContain("idx_review_proposals_expiry");
     expect(names).toContain("idx_review_proposals_terminal_retention");
@@ -196,7 +200,7 @@ describe("runMigrations", () => {
       "idx_entries_state_history",
       "idx_review_proposals_terminal_retention",
     ]));
-    expect(getSchemaVersion(db)).toBe(24);
+    expect(getSchemaVersion(db)).toBe(25);
     db.close();
   });
 

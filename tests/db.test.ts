@@ -25,6 +25,7 @@ import {
   pairRevisedCommitments,
   listEntriesForDerivation,
   queryEntries,
+  queryEntriesLexicalScored,
   queryEntriesByFilter,
   filterIdsMatchingFts,
   listNamespaces,
@@ -39,6 +40,7 @@ import {
   getCompletedTaskNamespaces,
   getTrackedStatuses,
   getAuditHistoryPage,
+  createQuerySnapshot,
   rebuildFTS,
   logToolCall,
   getToolCallAggregates,
@@ -58,6 +60,9 @@ import {
   getAvgConsolidationLatencyMs,
   upsertConsolidationMetadata,
   countUnusedSurfaces,
+  MAX_ACTIVE_QUERY_SNAPSHOTS_GLOBAL,
+  MAX_ACTIVE_QUERY_SNAPSHOTS_PER_PRINCIPAL,
+  QuerySnapshotCapacityError,
 } from "../src/db.js";
 import { CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX } from "../src/commitment-status.js";
 import { embeddingToBuffer } from "../src/embeddings.js";
@@ -1582,6 +1587,26 @@ describe("queryEntries (FTS5)", () => {
     expect(results.length).toBeLessThanOrEqual(2);
   });
 
+  it("caps the exported lexical helper at the public 50-result contract", () => {
+    for (let index = 0; index < 51; index += 1) {
+      writeState(
+        db,
+        `projects/public-lexical-cap-${index}`,
+        "status",
+        "public lexical cap fixture",
+        [],
+      );
+    }
+
+    const results = queryEntriesLexicalScored(db, {
+      query: "public lexical cap fixture",
+      limit: 1_000,
+      includeExpired: true,
+    });
+
+    expect(results).toHaveLength(50);
+  });
+
   it("handles hyphenated terms without FTS5 syntax errors (#1)", () => {
     writeState(db, "projects/hugin-munin", "tools", "Uses better-sqlite3 and nano-banana", ["tools"]);
     const results = queryEntries(db, { query: "nano-banana" });
@@ -2500,6 +2525,26 @@ describe("queryEntriesByFilter (no FTS)", () => {
     expect(bigLimit.length).toBeLessThanOrEqual(50);
   });
 
+  it("caps the exported filter helper at the public 50-result contract with a real larger fixture", () => {
+    for (let index = 0; index < 51; index += 1) {
+      writeState(
+        db,
+        `projects/public-filter-cap-${index}`,
+        "status",
+        `public filter cap fixture ${index}`,
+        ["public-filter-cap"],
+      );
+    }
+
+    const results = queryEntriesByFilter(db, {
+      tags: ["public-filter-cap"],
+      limit: 1_000,
+      includeExpired: true,
+    });
+
+    expect(results).toHaveLength(50);
+  });
+
   it("filters by since and until timestamps", () => {
     const before = new Date(Date.now() - 1000).toISOString();
     const after = new Date(Date.now() + 1000).toISOString();
@@ -2620,11 +2665,58 @@ describe("getAuditHistoryPage", () => {
     // With cursor: ascending order, nextCursor advances
     const second = getAuditHistoryPage(db, { limit: 3, cursor: first.nextCursor! });
     expect(second.entries.length).toBeGreaterThanOrEqual(1);
+    expect(first.syncCursor).toBe(first.nextCursor);
+    expect(second.syncCursor).toBe(second.nextCursor);
     // IDs must be strictly increasing (ascending order)
     const allIds = [...first.entries, ...second.entries].map((e) => e.id);
     for (let i = 1; i < allIds.length; i++) {
       expect(allIds[i]).toBeGreaterThan(allIds[i - 1]);
     }
+  });
+
+  it("supports descending older pagination from the newest-first view", () => {
+    for (let i = 0; i < 5; i++) {
+      writeState(db, "projects/paginate-older", `key-${i}`, `content-${i}`, []);
+    }
+
+    const first = getAuditHistoryPage(db, { limit: 2 });
+    expect(first.entries.length).toBe(2);
+    expect(first.entries[0].id).toBeGreaterThan(first.entries[1].id);
+    expect(first.nextCursor).toBeNull();
+    expect(first.syncCursor).toBe(first.entries[0].id);
+    expect(first.olderCursor).toBe(first.entries[1].id);
+    expect(first.hasOlder).toBe(true);
+    expect(first.hasNewer).toBe(false);
+
+    const second = getAuditHistoryPage(db, { limit: 2, olderCursor: first.olderCursor! });
+    expect(second.entries.length).toBe(2);
+    expect(second.entries[0].id).toBeLessThan(first.entries[1].id);
+    expect(second.entries[0].id).toBeGreaterThan(second.entries[1].id);
+    expect(second.nextCursor).toBeNull();
+    expect(second.syncCursor).toBeNull();
+    expect(second.olderCursor).toBe(second.entries[1].id);
+    expect(second.hasOlder).toBe(true);
+    expect(second.hasNewer).toBe(true);
+  });
+
+  it.each([
+    ["namespace", { namespace: "projects/no-visible-history" }],
+    ["since", { since: "2099-01-01T00:00:00.000Z" }],
+    ["action", { action: "delete" }],
+  ])("does not report newer rows for an arbitrary older cursor after the %s filter removes them", (_label, filters) => {
+    const page = getAuditHistoryPage(db, {
+      ...filters,
+      olderCursor: 999_999,
+      limit: 2,
+    });
+
+    expect(page.entries).toEqual([]);
+    expect(page.hasNewer).toBe(false);
+    expect(page.hasOlder).toBe(false);
+  });
+
+  it("throws when cursor directions are mixed", () => {
+    expect(() => getAuditHistoryPage(db, { cursor: 1, olderCursor: 2 })).toThrow(/mutually exclusive/);
   });
 
   it("hasMore is true when more entries exist beyond limit", () => {
@@ -2633,6 +2725,176 @@ describe("getAuditHistoryPage", () => {
     }
     const page = getAuditHistoryPage(db, { limit: 2 });
     expect(page.hasMore).toBe(true);
+  });
+
+  it("preserves the input sync cursor on an empty ascending sync page", () => {
+    const cursor = 9_999;
+    const page = getAuditHistoryPage(db, { cursor, limit: 2 });
+
+    expect(page.entries).toEqual([]);
+    expect(page.nextCursor).toBe(cursor);
+    expect(page.syncCursor).toBe(cursor);
+    expect(page.hasNewer).toBe(false);
+    expect(page.olderCursor).toBeNull();
+  });
+});
+
+describe("query snapshot retention", () => {
+  function makeSnapshot(index: number, principalId = "owner"): string {
+    const id = `000000000000000000000000000000${index.toString(16)}`.slice(-32);
+    createQuerySnapshot(db, {
+      id,
+      principalId,
+      accessFingerprint: "a".repeat(64),
+      requestFingerprint: "b".repeat(64),
+      requestShape: JSON.stringify({ query: `query-${index}` }),
+      responseMeta: JSON.stringify({ search_mode: "filter", retrieval: { serialization: "linear" } }),
+      resultIds: JSON.stringify([`result-${index}`]),
+      resultMatchMeta: "{}",
+      cursorSecret: `secret-${index}`,
+      createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
+      expiresAt: "2026-12-31T00:00:00.000Z",
+      totalMatched: 1,
+    });
+    return id;
+  }
+
+  it("uses the expires_at index for snapshot expiry cleanup", () => {
+    const plan = db.prepare("EXPLAIN QUERY PLAN DELETE FROM query_snapshots WHERE expires_at <= ?")
+      .all("2026-08-03T00:00:00.000Z") as Array<{ detail: string }>;
+
+    expect(plan.some((row) => row.detail.includes("idx_query_snapshots_expires_at"))).toBe(true);
+  });
+
+  it("evicts the oldest snapshots first when a principal exceeds the active cap", () => {
+    const createdIds = Array.from({ length: MAX_ACTIVE_QUERY_SNAPSHOTS_PER_PRINCIPAL + 2 }, (_, index) => makeSnapshot(index));
+    const rows = db.prepare("SELECT id FROM query_snapshots ORDER BY created_at ASC, id ASC")
+      .all() as Array<{ id: string }>;
+
+    expect(rows).toHaveLength(MAX_ACTIVE_QUERY_SNAPSHOTS_PER_PRINCIPAL);
+    expect(rows.map((row) => row.id)).toEqual(createdIds.slice(-MAX_ACTIVE_QUERY_SNAPSHOTS_PER_PRINCIPAL));
+  });
+
+  it("rolls back caller-owned evictions when the replacement insert fails", () => {
+    const createdIds = Array.from(
+      { length: MAX_ACTIVE_QUERY_SNAPSHOTS_PER_PRINCIPAL },
+      (_, index) => makeSnapshot(index),
+    );
+    const duplicateId = createdIds[createdIds.length - 1];
+
+    expect(() => createQuerySnapshot(db, {
+      id: duplicateId,
+      principalId: "owner",
+      accessFingerprint: "c".repeat(64),
+      requestFingerprint: "d".repeat(64),
+      requestShape: JSON.stringify({ query: "replacement-that-must-fail" }),
+      responseMeta: JSON.stringify({ search_mode: "filter", retrieval: { serialization: "linear" } }),
+      resultIds: JSON.stringify(["replacement-result"]),
+      resultMatchMeta: "{}",
+      cursorSecret: "replacement-secret",
+      createdAt: "2026-01-01T00:01:00.000Z",
+      expiresAt: "2026-12-31T00:00:00.000Z",
+      totalMatched: 1,
+    })).toThrow(/UNIQUE constraint failed/);
+
+    const rows = db.prepare("SELECT id FROM query_snapshots ORDER BY created_at ASC, id ASC")
+      .all() as Array<{ id: string }>;
+    expect(rows).toHaveLength(MAX_ACTIVE_QUERY_SNAPSHOTS_PER_PRINCIPAL);
+    expect(rows.map((row) => row.id)).toEqual(createdIds);
+  });
+
+  it("fails once the global active cap is full instead of evicting another principal", () => {
+    const createdIds: string[] = [];
+    for (let index = 0; index < MAX_ACTIVE_QUERY_SNAPSHOTS_GLOBAL; index++) {
+      createdIds.push(makeSnapshot(index, `principal-${index}`));
+    }
+    expect(() => makeSnapshot(MAX_ACTIVE_QUERY_SNAPSHOTS_GLOBAL, "principal-overflow")).toThrow(QuerySnapshotCapacityError);
+
+    const rows = db.prepare("SELECT id FROM query_snapshots ORDER BY created_at ASC, id ASC")
+      .all() as Array<{ id: string }>;
+
+    expect(rows).toHaveLength(MAX_ACTIVE_QUERY_SNAPSHOTS_GLOBAL);
+    expect(rows.map((row) => row.id)).toEqual(createdIds);
+  });
+
+  it("keeps legacy empty-ID snapshot eviction scoped to that exact principal", () => {
+    const protectedId = makeSnapshot(0, "protected-principal");
+    const emptyPrincipalIds = Array.from(
+      { length: MAX_ACTIVE_QUERY_SNAPSHOTS_PER_PRINCIPAL + 1 },
+      (_, index) => makeSnapshot(index + 1, ""),
+    );
+
+    const protectedRow = db.prepare("SELECT id FROM query_snapshots WHERE id = ?")
+      .get(protectedId) as { id: string } | undefined;
+    const emptyRows = db.prepare(
+      "SELECT id FROM query_snapshots WHERE principal_id = '' ORDER BY created_at ASC, id ASC",
+    ).all() as Array<{ id: string }>;
+
+    expect(protectedRow).toEqual({ id: protectedId });
+    expect(emptyRows).toHaveLength(MAX_ACTIVE_QUERY_SNAPSHOTS_PER_PRINCIPAL);
+    expect(emptyRows.map((row) => row.id)).toEqual(
+      emptyPrincipalIds.slice(-MAX_ACTIVE_QUERY_SNAPSHOTS_PER_PRINCIPAL),
+    );
+  });
+
+  it("counts multibyte snapshot text with the same byte length in SQL and Node", () => {
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const expiresAt = "2026-12-31T00:00:00.000Z";
+    const requestShape = JSON.stringify({ query: "emoji 😺", namespace: "projects/åäö" });
+    const responseMeta = JSON.stringify({ warning: "snowman ☃", retrieval: { serialization: "linear" } });
+    const resultIds = JSON.stringify(["résumé-😺"]);
+    const resultMatchMeta = JSON.stringify({ "résumé-😺": { lexical_score: 1 } });
+    const cursorSecret = "sekret-🔐";
+    createQuerySnapshot(db, {
+      id: "0123456789abcdef0123456789abcdef",
+      principalId: "principal-ü",
+      accessFingerprint: "a".repeat(64),
+      requestFingerprint: "b".repeat(64),
+      requestShape,
+      responseMeta,
+      resultIds,
+      resultMatchMeta,
+      cursorSecret,
+      createdAt,
+      expiresAt,
+      totalMatched: 1,
+    });
+
+    const row = db.prepare(`
+      SELECT (
+        length(CAST(id AS BLOB))
+        + length(CAST(tool_name AS BLOB))
+        + length(CAST(principal_id AS BLOB))
+        + length(CAST(access_fingerprint AS BLOB))
+        + length(CAST(request_fingerprint AS BLOB))
+        + length(CAST(request_shape AS BLOB))
+        + length(CAST(response_meta AS BLOB))
+        + length(CAST(result_ids AS BLOB))
+        + length(CAST(result_match_meta AS BLOB))
+        + length(CAST(cursor_secret AS BLOB))
+        + length(CAST(created_at AS BLOB))
+        + length(CAST(expires_at AS BLOB))
+      ) AS storedBytes
+      FROM query_snapshots
+      WHERE id = ?
+    `).get("0123456789abcdef0123456789abcdef") as { storedBytes: number };
+
+    const expected = [
+      "0123456789abcdef0123456789abcdef",
+      "memory_query",
+      "principal-ü",
+      "a".repeat(64),
+      "b".repeat(64),
+      requestShape,
+      responseMeta,
+      resultIds,
+      resultMatchMeta,
+      cursorSecret,
+      createdAt,
+      expiresAt,
+    ].reduce((sum, value) => sum + Buffer.byteLength(value, "utf8"), 0);
+
+    expect(row.storedBytes).toBe(expected);
   });
 });
 

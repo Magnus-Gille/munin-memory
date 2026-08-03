@@ -22,8 +22,9 @@ import {
   getContextTransportType,
   resolveReadableNamespaceSelectors,
 } from "./access.js";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { namespaceFilterScope } from "./internal/namespace-filter.js";
+import { withQueryProbeLimit } from "./internal/query-probe.js";
 import {
   writeState,
   patchState,
@@ -38,7 +39,6 @@ import {
   queryEntriesLexicalScored,
   filterIdsMatchingFts,
   queryEntriesSemanticScored,
-  queryEntriesHybridScored,
   type HybridQueryResult,
   queryEntriesByFilter,
   listEntriesForDerivation,
@@ -58,6 +58,8 @@ import {
   syncCommitmentsForEntry,
   type DerivedCommitmentInput,
   MAX_QUERY_LIMIT,
+  MAX_QUERY_SNAPSHOT_MATCHES,
+  QuerySnapshotCapacityError,
   type CommitmentRow,
   computeCommitmentConfidence,
   getOtherKeysInNamespace,
@@ -76,6 +78,8 @@ import {
   logToolCall,
   getToolCallTelemetrySnapshot,
   getAuditHistoryPage,
+  createQuerySnapshot,
+  getQuerySnapshot,
   insertRedactionLog,
   getOtherKeysInNamespaceByClassification,
   getNamespaceEntriesForIntake,
@@ -254,6 +258,81 @@ const consolidationPreviewTokens = new Map<string, {
 }>();
 const CONSOLIDATION_PREVIEW_TTL_MS = 10 * 60_000;
 const MAX_CONSOLIDATION_PREVIEW_TOKENS = 100;
+const QUERY_CURSOR_VERSION = 1;
+const QUERY_SNAPSHOT_TTL_MS = 5 * 60_000;
+const MAX_QUERY_CURSOR_LENGTH = 512;
+const QUERY_SNAPSHOT_PROBE_LIMIT = MAX_QUERY_SNAPSHOT_MATCHES + 1;
+
+type QueryRequestShape = {
+  query: string | null;
+  namespace: string | null;
+  entry_type: "state" | "log" | null;
+  tags: string[];
+  since: string | null;
+  until: string | null;
+  requested_mode: SearchMode | "filter";
+  search_recency_weight: number;
+  include_expired: boolean;
+  explain: boolean;
+  require_lexical_match: boolean;
+  serialization: "linear" | "boundary";
+};
+
+type StoredQueryResultMeta = {
+  lexical_rank?: number;
+  lexical_score?: number;
+  semantic_rank?: number;
+  semantic_distance?: number;
+  hybrid_score?: number;
+  explain?: {
+    heuristic_score: number;
+    freshness_score: number;
+    reasons: string[];
+  };
+};
+
+type ParsedQueryCursor = {
+  snapshotId: string;
+  position: number;
+  mac: string;
+};
+
+type QueryResponseMeta = {
+  query?: string;
+  search_mode: SearchMode | "filter";
+  search_mode_actual?: SearchMode;
+  namespace_scope?: string;
+  warning?: string;
+  search_meta?: Record<string, unknown>;
+  retrieval: {
+    reranked: boolean;
+    relaxed_lexical: boolean;
+    fallback_reason: string | null;
+    recency_applied: boolean;
+    search_recency_weight: number;
+    expired_filtered_count: number;
+    serialization: "linear" | "boundary";
+  };
+};
+
+type QuerySnapshotPage = {
+  results: QueryResult[];
+  totalMatched: number;
+  returned: number;
+  hasMore: boolean;
+  nextCursor: string | null;
+  redactedCount: number;
+  expiredFilteredCount: number;
+  linearRanks: number[];
+};
+
+type QuerySnapshotCursorContext = {
+  id: string;
+  cursorSecret: string;
+  /** Exact versioned access-shape JSON; field name mirrors the legacy storage column. */
+  accessFingerprint: string;
+  requestFingerprint: string;
+};
 
 function pruneConsolidationPreviewTokens(now = Date.now()): void {
   for (const [token, preview] of consolidationPreviewTokens) {
@@ -324,6 +403,422 @@ const deleteTokenCleanupTimer = setInterval(() => {
   }
 }, 30_000);
 deleteTokenCleanupTimer.unref();
+
+function normalizeQueryTags(tags?: string[]): string[] {
+  return [...new Set((tags ?? []).slice().sort())];
+}
+
+function buildQueryRequestShape(
+  params: {
+    query?: string;
+    namespace?: string;
+    entry_type?: "state" | "log";
+    tags?: string[];
+    since?: string;
+    until?: string;
+    requestedMode: SearchMode | "filter";
+    searchRecencyWeight: number;
+    includeExpired: boolean;
+    explain: boolean;
+    requireLexicalMatch: boolean;
+    serialization: "linear" | "boundary";
+  },
+): QueryRequestShape {
+  const hasQueryText = Boolean(params.query && typeof params.query === "string");
+  return {
+    query: hasQueryText ? params.query! : null,
+    namespace: params.namespace ?? null,
+    entry_type: params.entry_type ?? null,
+    tags: normalizeQueryTags(params.tags),
+    since: params.since ?? null,
+    until: params.until ?? null,
+    requested_mode: hasQueryText ? params.requestedMode : "filter",
+    search_recency_weight: hasQueryText ? params.searchRecencyWeight : 0,
+    include_expired: params.includeExpired,
+    explain: hasQueryText ? params.explain : false,
+    require_lexical_match: hasQueryText ? params.requireLexicalMatch : false,
+    serialization: hasQueryText ? params.serialization : "linear",
+  };
+}
+
+function fingerprintJson(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+const QUERY_ACCESS_BINDING_DOMAIN = "munin-memory.query-access-binding";
+const QUERY_ACCESS_BINDING_VERSION = 1;
+
+function buildQueryAccessBinding(ctx: AccessContext): string {
+  const accessibleNamespaces = [...ctx.accessibleNamespaces]
+    .map((rule) => ({ pattern: rule.pattern, permissions: rule.permissions }))
+    .sort((left, right) => {
+      if (left.pattern !== right.pattern) return left.pattern < right.pattern ? -1 : 1;
+      if (left.permissions === right.permissions) return 0;
+      return left.permissions < right.permissions ? -1 : 1;
+    });
+
+  return JSON.stringify({
+    domain: QUERY_ACCESS_BINDING_DOMAIN,
+    version: QUERY_ACCESS_BINDING_VERSION,
+    principal_id: ctx.principalId,
+    principal_type: ctx.principalType,
+    max_classification: getContextMaxClassification(ctx),
+    transport_type: getContextTransportType(ctx),
+    accessible_namespaces: accessibleNamespaces,
+  });
+}
+
+function signQueryCursor(
+  secret: string,
+  snapshotId: string,
+  position: number,
+): string {
+  return createHmac("sha256", secret)
+    .update(`${QUERY_CURSOR_VERSION}:${snapshotId}:${position}`)
+    .digest("base64url");
+}
+
+function buildQueryCursor(
+  snapshotId: string,
+  position: number,
+  secret: string,
+): string {
+  return Buffer.from(JSON.stringify({
+    v: QUERY_CURSOR_VERSION,
+    s: snapshotId,
+    p: position,
+    m: signQueryCursor(secret, snapshotId, position),
+  })).toString("base64url");
+}
+
+function decodeStrictBase64Url(value: string): Buffer | null {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) return null;
+  try {
+    const decoded = Buffer.from(value, "base64url");
+    if (decoded.length === 0) return null;
+    return decoded.toString("base64url") === value ? decoded : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseQueryCursor(cursor: string): ParsedQueryCursor | null {
+  try {
+    if (cursor.length === 0 || cursor.length > MAX_QUERY_CURSOR_LENGTH) return null;
+    const decodedBuffer = decodeStrictBase64Url(cursor);
+    if (!decodedBuffer || decodedBuffer.length > MAX_QUERY_CURSOR_LENGTH) return null;
+    const decoded = new TextDecoder("utf-8", { fatal: true }).decode(decodedBuffer);
+    const parsed = JSON.parse(decoded) as { v?: unknown; s?: unknown; p?: unknown; m?: unknown };
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const keys = Object.keys(parsed).sort();
+    if (keys.length !== 4 || keys.join(",") !== "m,p,s,v") return null;
+    if (parsed.v !== QUERY_CURSOR_VERSION) return null;
+    if (
+      typeof parsed.s !== "string"
+      || typeof parsed.p !== "number"
+      || !Number.isSafeInteger(parsed.p)
+      || parsed.p < 0
+    ) {
+      return null;
+    }
+    if (!/^[a-f0-9]{32}$/i.test(parsed.s)) return null;
+    if (typeof parsed.m !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(parsed.m)) return null;
+    return {
+      snapshotId: parsed.s,
+      position: parsed.p,
+      mac: parsed.m,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function constantTimeEqualBase64Url(a: string, b: string): boolean {
+  const left = decodeStrictBase64Url(a);
+  const right = decodeStrictBase64Url(b);
+  if (!left || !right) return false;
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+
+function hasOwnQueryArg<T extends object>(args: T, key: keyof T): boolean {
+  return Object.prototype.hasOwnProperty.call(args, key);
+}
+
+function queryResumeOverridesMatch(
+  queryArgs: QueryParams,
+  storedShape: QueryRequestShape,
+  normalizedSince?: string,
+  normalizedUntil?: string,
+): boolean {
+  const filterOnlyShape = storedShape.requested_mode === "filter" && storedShape.query === null;
+  if (hasOwnQueryArg(queryArgs, "query") && ((queryArgs.query || null) !== storedShape.query)) return false;
+  if (hasOwnQueryArg(queryArgs, "namespace") && (queryArgs.namespace ?? null) !== storedShape.namespace) return false;
+  if (hasOwnQueryArg(queryArgs, "entry_type") && (queryArgs.entry_type ?? null) !== storedShape.entry_type) return false;
+  if (
+    hasOwnQueryArg(queryArgs, "tags")
+    && JSON.stringify(normalizeQueryTags(queryArgs.tags)) !== JSON.stringify(storedShape.tags)
+  ) {
+    return false;
+  }
+  if (hasOwnQueryArg(queryArgs, "since") && (normalizedSince ?? null) !== storedShape.since) return false;
+  if (hasOwnQueryArg(queryArgs, "until") && (normalizedUntil ?? null) !== storedShape.until) return false;
+  if (!filterOnlyShape && hasOwnQueryArg(queryArgs, "search_mode") && queryArgs.search_mode !== storedShape.requested_mode) {
+    return false;
+  }
+  if (
+    !filterOnlyShape
+    &&
+    hasOwnQueryArg(queryArgs, "search_recency_weight")
+    && queryArgs.search_recency_weight !== storedShape.search_recency_weight
+  ) {
+    return false;
+  }
+  if (hasOwnQueryArg(queryArgs, "include_expired") && (queryArgs.include_expired === true) !== storedShape.include_expired) {
+    return false;
+  }
+  if (!filterOnlyShape && hasOwnQueryArg(queryArgs, "explain") && (queryArgs.explain === true) !== storedShape.explain) {
+    return false;
+  }
+  if (
+    !filterOnlyShape
+    &&
+    hasOwnQueryArg(queryArgs, "require_lexical_match")
+    && (queryArgs.require_lexical_match === true) !== storedShape.require_lexical_match
+  ) {
+    return false;
+  }
+  if (!filterOnlyShape && hasOwnQueryArg(queryArgs, "serialization") && queryArgs.serialization !== storedShape.serialization) {
+    return false;
+  }
+  return true;
+}
+
+function buildStoredQueryMatchMeta(
+  results: Entry[],
+  actualMode: SearchMode,
+  lexicalById: Map<string, ReturnType<typeof queryEntriesLexicalScored>[number]>,
+  semanticById: Map<string, ReturnType<typeof queryEntriesSemanticScored>[number]>,
+  hybridById: Map<string, HybridQueryResult>,
+  explain: boolean,
+  queryLower: string,
+  trackedStatuses: Map<string, TrackedStatusAssessment> | undefined,
+): Record<string, StoredQueryResultMeta> {
+  const meta: Record<string, StoredQueryResultMeta> = {};
+  for (const entry of results) {
+    const item: StoredQueryResultMeta = {};
+    const lexical = lexicalById.get(entry.id);
+    const semantic = semanticById.get(entry.id);
+    const hybrid = hybridById.get(entry.id);
+    if (lexical) {
+      item.lexical_rank = lexical.rank;
+      item.lexical_score = lexical.score;
+    }
+    if (semantic && (actualMode !== "hybrid" || !hybrid)) {
+      item.semantic_rank = semantic.rank;
+      item.semantic_distance = semantic.distance;
+    }
+    if (actualMode === "hybrid" && hybrid) {
+      item.hybrid_score = hybrid.score;
+      if (item.lexical_rank === undefined && hybrid.lexicalRank !== undefined) item.lexical_rank = hybrid.lexicalRank;
+      if (item.lexical_score === undefined && hybrid.lexicalScore !== undefined) item.lexical_score = hybrid.lexicalScore;
+      if (item.semantic_rank === undefined && hybrid.semanticRank !== undefined) item.semantic_rank = hybrid.semanticRank;
+      if (item.semantic_distance === undefined && hybrid.semanticDistance !== undefined) item.semantic_distance = hybrid.semanticDistance;
+    }
+    if (explain) {
+      const match: NonNullable<QueryResult["match"]> = {
+        heuristic_score: getQueryHeuristicScore(entry, queryLower, trackedStatuses),
+        freshness_score: getFreshnessScore(entry.updated_at),
+        reasons: [],
+      };
+      applyQueryMatchScores(match, entry, actualMode, lexicalById, semanticById, hybridById);
+      item.explain = {
+        heuristic_score: match.heuristic_score,
+        freshness_score: match.freshness_score!,
+        reasons: getQueryExplainReasons(entry, queryLower, trackedStatuses?.get(entry.id), match),
+      };
+    }
+    if (Object.keys(item).length > 0) meta[entry.id] = item;
+  }
+  return meta;
+}
+
+function buildStoredMatchMaps(
+  pageEntries: Entry[],
+  storedMeta: Record<string, StoredQueryResultMeta>,
+): {
+  lexicalById: Map<string, ReturnType<typeof queryEntriesLexicalScored>[number]>;
+  semanticById: Map<string, ReturnType<typeof queryEntriesSemanticScored>[number]>;
+  hybridById: Map<string, HybridQueryResult>;
+} {
+  const lexicalById = new Map<string, ReturnType<typeof queryEntriesLexicalScored>[number]>();
+  const semanticById = new Map<string, ReturnType<typeof queryEntriesSemanticScored>[number]>();
+  const hybridById = new Map<string, HybridQueryResult>();
+
+  for (const entry of pageEntries) {
+    const meta = storedMeta[entry.id];
+    if (!meta) continue;
+    if (meta.lexical_rank !== undefined && meta.lexical_score !== undefined) {
+      lexicalById.set(entry.id, { entry, rank: meta.lexical_rank, score: meta.lexical_score });
+    }
+    if (meta.semantic_rank !== undefined && meta.semantic_distance !== undefined) {
+      semanticById.set(entry.id, { entry, rank: meta.semantic_rank, distance: meta.semantic_distance });
+    }
+    if (
+      meta.hybrid_score !== undefined
+      || meta.lexical_rank !== undefined
+      || meta.semantic_rank !== undefined
+    ) {
+      hybridById.set(entry.id, {
+        entry,
+        score: meta.hybrid_score ?? 0,
+        lexicalRank: meta.lexical_rank,
+        lexicalScore: meta.lexical_score,
+        semanticRank: meta.semantic_rank,
+        semanticDistance: meta.semantic_distance,
+      });
+    }
+  }
+
+  return { lexicalById, semanticById, hybridById };
+}
+
+function exactQueryBoundExceeded(messageContext: string) {
+  return errResult(
+    "query",
+    "query_bound_exceeded",
+    `${messageContext} matched more than ${MAX_QUERY_SNAPSHOT_MATCHES} candidates. Exact pagination is bounded; narrow the query or filters and retry.`,
+  );
+}
+
+function buildQuerySnapshotPage(
+  db: Database.Database,
+  ctx: AccessContext,
+  sessionId: string | undefined,
+  snapshotId: string,
+  cursorSecret: string,
+  startPosition: number,
+  limit: number,
+  includeExpired: boolean,
+  explain: boolean,
+  queryLower: string | null,
+  actualMode: SearchMode,
+  resultIds: string[],
+  storedMeta: Record<string, StoredQueryResultMeta>,
+): QuerySnapshotPage {
+  const getEntry = db.prepare("SELECT * FROM entries WHERE id = ? AND is_current = 1");
+  const visibleEntries: Array<{ index: number; entry: Entry }> = [];
+  let totalMatched = 0;
+  let expiredFilteredCount = 0;
+  let hasMore = false;
+  if (startPosition < 0 || (resultIds.length > 0 && startPosition >= resultIds.length)) {
+    throw new Error("Query cursor is out of range.");
+  }
+
+  for (let index = 0; index < resultIds.length; index++) {
+    const row = getEntry.get(resultIds[index]) as Entry | undefined;
+    if (!row) continue;
+    if (!canRead(ctx, row.namespace)) continue;
+    if (!includeExpired && isEntryExpired(row)) {
+      expiredFilteredCount += 1;
+      continue;
+    }
+    totalMatched += 1;
+    if (index < startPosition) continue;
+    if (visibleEntries.length < limit) {
+      visibleEntries.push({ index, entry: row });
+    } else {
+      hasMore = true;
+    }
+  }
+
+  const pageEntries = visibleEntries.map(({ entry }) => entry);
+  const { lexicalById, semanticById, hybridById } = buildStoredMatchMaps(pageEntries, storedMeta);
+  const formatted = pageEntries.map((entry) => formatQueryResult(
+    db,
+    ctx,
+    entry,
+    "memory_query",
+    sessionId,
+    explain,
+    queryLower,
+    storedMeta[entry.id]?.explain,
+    actualMode,
+    lexicalById,
+    semanticById,
+    hybridById,
+  ));
+  const redactedCount = formatted.filter((entry) => entry.redacted === true).length;
+  const nextPosition = visibleEntries.length > 0 ? visibleEntries[visibleEntries.length - 1].index + 1 : startPosition;
+  return {
+    results: formatted,
+    totalMatched,
+    returned: formatted.length,
+    hasMore,
+    nextCursor: hasMore
+      ? buildQueryCursor(snapshotId, nextPosition, cursorSecret)
+      : null,
+    redactedCount,
+    expiredFilteredCount,
+    linearRanks: visibleEntries.map(({ index }) => index + 1),
+  };
+}
+
+function buildQueryAnalyticsVectors(page: QuerySnapshotPage): {
+  resultIds: string[];
+  resultNamespaces: string[];
+  resultRanks: number[];
+} {
+  const kept: Array<{ id: string; namespace: string; rank: number }> = [];
+
+  page.results.forEach((entry, index) => {
+    if (typeof entry.id !== "string" || entry.id.length === 0) return;
+    kept.push({
+      id: entry.id,
+      namespace: entry.namespace,
+      rank: page.linearRanks[index] ?? index + 1,
+    });
+  });
+
+  return {
+    resultIds: kept.map((entry) => entry.id),
+    resultNamespaces: kept.map((entry) => entry.namespace),
+    resultRanks: kept.map((entry) => entry.rank),
+  };
+}
+
+function fuseHybridResults(
+  ftsResults: ReturnType<typeof queryEntriesLexicalScored>,
+  semanticResults: ReturnType<typeof queryEntriesSemanticScored>,
+): HybridQueryResult[] {
+  const lexicalById = new Map(ftsResults.map((result) => [result.entry.id, result] as const));
+  const semanticById = new Map(semanticResults.map((result) => [result.entry.id, result] as const));
+  const entryMap = new Map<string, Entry>();
+  for (const result of ftsResults) entryMap.set(result.entry.id, result.entry);
+  for (const result of semanticResults) entryMap.set(result.entry.id, result.entry);
+
+  const allIds = new Set<string>([...lexicalById.keys(), ...semanticById.keys()]);
+  const k = 60;
+  const scored: HybridQueryResult[] = [];
+
+  for (const id of allIds) {
+    const lexical = lexicalById.get(id);
+    const semantic = semanticById.get(id);
+    let score = 0;
+    if (lexical) score += 1 / (k + lexical.rank);
+    if (semantic) score += 1 / (k + semantic.rank);
+    scored.push({
+      entry: entryMap.get(id)!,
+      score,
+      lexicalRank: lexical?.rank,
+      lexicalScore: lexical?.score,
+      semanticRank: semantic?.rank,
+      semanticDistance: semantic?.distance,
+    });
+  }
+
+  scored.sort((left, right) => right.score - left.score || left.entry.id.localeCompare(right.entry.id));
+  return scored;
+}
 
 // --- Display timestamp formatting ---
 
@@ -979,7 +1474,7 @@ function formatQueryResult(
   sessionId: string | undefined,
   explain: boolean,
   queryLower: string | null,
-  trackedStatuses: ReturnType<typeof getTrackedStatusAssessments> | undefined,
+  frozenExplain: StoredQueryResultMeta["explain"],
   actualMode: SearchMode,
   lexicalById: Map<string, ReturnType<typeof queryEntriesLexicalScored>[number]>,
   semanticById: Map<string, ReturnType<typeof queryEntriesSemanticScored>[number]>,
@@ -1023,16 +1518,19 @@ function formatQueryResult(
   }
 
   if (explain && queryLower !== null) {
-    const heuristicScore = getQueryHeuristicScore(entry, queryLower, trackedStatuses);
     const match: NonNullable<QueryResult["match"]> = {
-      heuristic_score: heuristicScore,
-      freshness_score: getFreshnessScore(entry.updated_at),
-      reasons: [],
+      heuristic_score: frozenExplain?.heuristic_score ?? getQueryHeuristicScore(entry, queryLower),
+      freshness_score: frozenExplain?.freshness_score ?? getFreshnessScore(entry.updated_at),
+      reasons: frozenExplain ? [...frozenExplain.reasons] : [],
     };
 
     applyQueryMatchScores(match, entry, actualMode, lexicalById, semanticById, hybridById);
 
-    match.reasons = getQueryExplainReasons(entry, queryLower, trackedStatuses?.get(entry.id), match);
+    if (!frozenExplain) {
+      // Compatibility fallback for a cursor minted by a pre-freeze server
+      // during the short snapshot TTL window.
+      match.reasons = getQueryExplainReasons(entry, queryLower, undefined, match);
+    }
     result.match = match;
   }
 
@@ -1540,7 +2038,6 @@ import {
 // tools.ts imports only the names it uses internally; the dedicated module
 // is the explicit public surface (benchmark/ imports from there directly).
 import {
-  QUERY_RERANK_OVERFETCH_MULTIPLIER,
   DEFAULT_SEARCH_RECENCY_WEIGHT,
   buildRelaxedLexicalQuery,
   shouldApplyDefaultQuerySuppression,
@@ -1888,24 +2385,14 @@ function validateOptionalStringArray(value: unknown, fieldName: string): string 
     : `${fieldName} must be an array of strings.`;
 }
 
-function filterExpiredEntries<T extends Entry | { entry: Entry }>(
-  items: T[],
-  includeExpired: boolean,
-): { items: T[]; expiredFilteredCount: number } {
-  if (includeExpired) {
-    return { items, expiredFilteredCount: 0 };
-  }
-
-  let expiredFilteredCount = 0;
-  const filtered = items.filter((item) => {
+function collectExpiredEntryIds<T extends Entry | { entry: Entry }>(items: T[]): Set<string> {
+  const ids = new Set<string>();
+  for (const item of items) {
     const wrapper = item as { entry?: Entry };
     const entry = wrapper.entry ?? (item as Entry);
-    if (!isEntryExpired(entry)) return true;
-    expiredFilteredCount += 1;
-    return false;
-  });
-
-  return { items: filtered, expiredFilteredCount };
+    if (isEntryExpired(entry)) ids.add(entry.id);
+  }
+  return ids;
 }
 
 /**
@@ -6746,7 +7233,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_query",
     description:
-      "Search and filter memories with lexical, semantic, or hybrid `search_mode`. Queryless browsing is allowed with filters such as namespace, tags, entry type, or time range; `limit` defaults to 10 and caps at 50. Namespace filters are literal and case-sensitive: a bare namespace includes descendants (`namespace_scope: subtree`), while a trailing-slash prefix includes only descendants (`namespace_scope: prefix`). Broad retrieval hides expired state unless `include_expired:true`; `explain:true` returns retrieval metadata. If results are empty, widen by dropping namespace and tag filters before reformulating.",
+      "Search and filter memories with lexical, semantic, or hybrid `search_mode`. Queryless browsing is allowed with filters such as namespace, tags, entry type, or time range; each page `limit` defaults to 10 and caps at 50. Responses report `returned`, exact `total_matched`, `has_more`, and an opaque `next_cursor` when more results remain. Pagination snapshots are created only when more than one page is needed, expire after 5 minutes, and are bounded per principal and globally; a caller may evict its own oldest active snapshots, but resumes fail with `capacity_exceeded` rather than deleting another principal's cursor. Resume with that `cursor`; you may change `limit` on resume, but every other explicit query/filter/mode/serialization argument must be omitted or normalize to the frozen snapshot shape exactly. Semantic `total_matched` is exact over currently retrievable candidates indexed with the active embedding model; entries without a compatible embedding are outside that candidate set. Hybrid totals are exact over the union of lexical matches and those currently retrievable semantic candidates, so entries without embeddings can still match lexically. Those mode rules define the retrieval candidate set; server-policy canonical orientation and blocked/needs-attention entries may then be injected before final reranking. Injected entries become members of the frozen final result set and count in `total_matched`. Namespace filters are literal and case-sensitive: a bare namespace includes descendants (`namespace_scope: subtree`), while a trailing-slash prefix includes only descendants (`namespace_scope: prefix`). Broad retrieval hides expired state unless `include_expired:true`; `explain:true` returns retrieval metadata frozen from the same scoring inputs as the result order. If exact bounded pagination would exceed the server safety cap, the call fails explicitly instead of returning a misleading lower-bound count.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -6754,6 +7241,10 @@ const TOOL_DEFINITIONS = [
           type: "string",
           description:
             "Search terms. Natural language works best (default mode is hybrid). Queries are tokenized server-side: quoted phrases are preserved, other terms are split on whitespace, and all terms must match (implicit AND). Boolean operators (`AND`/`OR`/`NOT`/`NEAR`) are not supported — write term lists or natural language instead of FTS5 expressions. Optional — omit to browse by filters alone (tags, namespace, time range). Concrete tokens likely present in structured-vocabulary content improve lexical retrieval.",
+        },
+        cursor: {
+          type: "string",
+          description: "Optional opaque authenticated pagination cursor returned by a prior `memory_query` page. Resume with this to fetch the next page from the same bounded snapshot. `limit` may change on resume; other explicit bound query/filter/mode/serialization arguments must be omitted or normalize to the stored snapshot shape exactly.",
         },
         namespace: namespaceSchema(
           "Optional. Filter to a literal, case-sensitive namespace scope or prefix. A bare namespace includes that namespace and descendants; a trailing slash matches descendants under that literal prefix and reports the corresponding namespace scope. Prefix filters may end with '/'. If a filtered query is empty, drop this filter before reformulating.",
@@ -6770,7 +7261,7 @@ const TOOL_DEFINITIONS = [
         ),
         limit: {
           type: "number",
-          description: "Max results to return. Default 10, max 50.",
+          description: "Max results to return in this page. Default 10, max 50. You may change this between resumed pages.",
         },
         search_mode: {
           type: "string",
@@ -6955,7 +7446,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_history",
     description:
-      "View the chronological audit trail of changes to memory. Returns a timeline of writes, updates, corrections, deletes, namespace deletes, and log appends. Use this to answer 'what changed recently?' or 'what happened in this namespace?' — unlike memory_query (which is relevance-based search), this is a change feed ordered by time. Namespace filters are literal and case-sensitive: bare `projects/foo` returns that namespace plus descendants, while trailing-slash `projects/foo/` returns only descendants under that literal prefix.\n\nCursor semantics (read carefully): a call WITHOUT `cursor` returns the most recent changes first (newest→oldest); its `next_cursor` is the audit id of the OLDEST row in that page. A call WITH `cursor` switches to ascending sync mode: it returns rows with `id > cursor` in ascending (oldest→newest) order, and `next_cursor` then advances to the NEWEST id seen. For forward polling of new mutations, do an initial cursorless call, then keep passing the latest `next_cursor` you have observed.",
+      "View the chronological audit trail of changes to memory. Returns a timeline of writes, updates, corrections, deletes, namespace deletes, and log appends. Use this to answer 'what changed recently?' or 'what happened in this namespace?' — unlike memory_query (which is relevance-based search), this is a change feed ordered by time. Namespace filters are literal and case-sensitive: bare `projects/foo` returns that namespace plus descendants, while trailing-slash `projects/foo/` returns only descendants under that literal prefix.\n\nCursor semantics (read carefully): a call WITHOUT `cursor` or `older_cursor` returns the most recent changes first (newest→oldest), sets `sync_cursor` to the newest visible audit id in that initial feed (or `0` when the feed is empty), and uses `older_cursor` / `has_older` for paging further back in time. A call WITH `older_cursor` continues that newest-first history view with older rows only, returns `sync_cursor: null`, and expects the caller to retain the initial page's watermark for later forward polling. A call WITH `cursor` switches to ascending sync mode: it returns rows with `id > cursor` in ascending (oldest→newest) order, and `next_cursor` / `sync_cursor` then advance to the NEWEST id seen; an empty sync page preserves the input cursor as both values. `cursor` and `older_cursor` are mutually exclusive. `has_more` is a direction alias (`has_older` on newest-first pages, `has_newer` on sync pages), so directional clients should prefer the explicit fields.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -6980,11 +7471,16 @@ const TOOL_DEFINITIONS = [
           type: "integer",
           description: "Optional. Exclusive lower-bound audit cursor. When provided, entries are returned in ascending audit order for sync/polling workflows.",
         },
+        older_cursor: {
+          type: "integer",
+          description: "Optional. Exclusive upper-bound audit cursor for newest-first history browsing. Use the `older_cursor` returned by a cursorless or older-paging response to fetch the next older page.",
+        },
         limit: {
           type: "integer",
           description: "Optional. Maximum entries to return. Default: 20, max: 100.",
         },
       },
+      additionalProperties: false,
       required: [],
     },
   },
@@ -10553,7 +11049,7 @@ export function registerTools(
               // onto the retrieval_event so memory_health can report p50/p95.
               const queryStartedAt = Date.now();
               const unknownArgumentError = rejectUnknownArguments(args, [
-                "query", "namespace", "entry_type", "tags", "limit", "search_mode",
+                "query", "cursor", "namespace", "entry_type", "tags", "limit", "search_mode",
                 "search_recency_weight", "include_expired", "explain", "since", "until",
                 "require_lexical_match", "serialization",
               ]);
@@ -10561,8 +11057,9 @@ export function registerTools(
                 return errResult("query", "validation_error", unknownArgumentError);
               }
               const queryArgs = (args ?? {}) as unknown as QueryParams;
-              let { query, namespace, entry_type, tags, limit, search_mode, since, until } = queryArgs;
+              let { query, cursor, namespace, entry_type, tags, limit, search_mode, since, until } = queryArgs;
               for (const validationError of [
+                validateOptionalString(cursor, "cursor"),
                 validateOptionalString(query, "query"),
                 validateOptionalString(namespace, "namespace"),
                 validateOptionalStringArray(tags, "tags"),
@@ -10595,7 +11092,8 @@ export function registerTools(
               if (since !== undefined && until !== undefined && since > until) {
                 return errResult("query", "validation_error", "since must be earlier than or equal to until.");
               }
-              const explain = queryArgs.explain === true;
+              const hasQueryText = Boolean(query && typeof query === "string");
+              const explain = hasQueryText && queryArgs.explain === true;
               const includeExpired = queryArgs.include_expired === true;
               const requireLexicalMatch = queryArgs.require_lexical_match === true;
               // Validate serialization up front (parity with namespace/recency
@@ -10614,7 +11112,7 @@ export function registerTools(
               if (!recencyWeightCheck.ok) {
                 return errResult("query", "validation_error", recencyWeightCheck.error);
               }
-              const searchRecencyWeight = recencyWeightCheck.value;
+              const searchRecencyWeight = hasQueryText ? recencyWeightCheck.value : 0;
 
               // Validate the namespace filter (parity with write/read/log paths).
               // A trailing slash is permitted for prefix filters (e.g. "projects/").
@@ -10626,93 +11124,270 @@ export function registerTools(
               }
               const appliedNamespaceScope = namespaceFilterScope(namespace);
               const readableNamespaceSelectors = resolveReadableNamespaceSelectors(ctx, namespace);
+              const requestedMode: SearchMode | "filter" = hasQueryText ? (search_mode ?? "hybrid") : "filter";
+
+              const respondFromSnapshot = (
+                snapshot: QuerySnapshotCursorContext,
+                responseMeta: QueryResponseMeta,
+                storedShape: QueryRequestShape,
+                resultIds: string[],
+                storedMatchMeta: Record<string, StoredQueryResultMeta>,
+                startPosition: number,
+                existingPage?: QuerySnapshotPage,
+              ) => {
+                const actualMode = (
+                  responseMeta.search_mode_actual
+                  ?? (responseMeta.search_mode === "filter" ? "lexical" : responseMeta.search_mode)
+                ) as SearchMode;
+                const page = existingPage ?? buildQuerySnapshotPage(
+                  db,
+                  ctx,
+                  sessionId,
+                  snapshot.id,
+                  snapshot.cursorSecret,
+                  startPosition,
+                  limitResolution.applied,
+                  storedShape.include_expired,
+                  storedShape.explain,
+                  storedShape.query?.toLowerCase() ?? null,
+                  actualMode,
+                  resultIds,
+                  storedMatchMeta,
+                );
+
+                if (sessionId) {
+                  const analytics = buildQueryAnalyticsVectors(page);
+                  logRetrievalEvent(db, {
+                    sessionId,
+                    toolName: "memory_query",
+                    queryText: storedShape.query
+                      ?? `[filter-only] ns=${storedShape.namespace ?? "*"} tags=${storedShape.tags.join(",") || "*"} since=${storedShape.since ?? "*"} until=${storedShape.until ?? "*"}`,
+                    requestedMode: responseMeta.search_mode === "filter" ? "lexical" : responseMeta.search_mode,
+                    actualMode,
+                    resultIds: analytics.resultIds,
+                    resultNamespaces: analytics.resultNamespaces,
+                    resultRanks: analytics.resultRanks,
+                    isPaginationContinuation: startPosition > 0,
+                    durationMs: Date.now() - queryStartedAt,
+                    detail: startPosition > 0 ? { query_snapshot_continuation: true } : undefined,
+                  });
+                }
+
+                const warnings = [...new Set([limitResolution.warning, responseMeta.warning].filter(Boolean))];
+                const resultsForResponse = responseMeta.retrieval.serialization === "boundary"
+                  ? boundarySerialize(page.results)
+                  : page.results;
+                const response: Record<string, unknown> = {
+                  results: resultsForResponse,
+                  total: page.totalMatched,
+                  total_matched: page.totalMatched,
+                  returned: page.returned,
+                  has_more: page.hasMore,
+                  next_cursor: page.nextCursor,
+                  redacted_count: page.redactedCount,
+                  search_mode: responseMeta.search_mode,
+                  retrieval: {
+                    ...responseMeta.retrieval,
+                    expired_filtered_count: responseMeta.retrieval.expired_filtered_count + page.expiredFilteredCount,
+                  },
+                };
+                if (responseMeta.query !== undefined) response.query = responseMeta.query;
+                if (responseMeta.namespace_scope !== undefined) response.namespace_scope = responseMeta.namespace_scope;
+                if (responseMeta.search_mode_actual !== undefined) response.search_mode_actual = responseMeta.search_mode_actual;
+                if (responseMeta.search_meta !== undefined) response.search_meta = responseMeta.search_meta;
+                if (warnings.length > 0) response.warning = warnings.join(" ");
+                if (limitResolution.warning) {
+                  response.requested_limit = limitResolution.requested;
+                  response.limit_applied = limitResolution.applied;
+                }
+                return okResult("query", response);
+              };
+
+              if (cursor !== undefined) {
+                const parsedCursor = parseQueryCursor(cursor);
+                if (!parsedCursor) {
+                  return errResult("query", "validation_error", "Invalid query cursor.");
+                }
+                const snapshot = getQuerySnapshot(db, parsedCursor.snapshotId);
+                if (!snapshot) {
+                  return errResult("query", "validation_error", "Query cursor is invalid or expired.");
+                }
+                const expectedMac = signQueryCursor(
+                  snapshot.cursorSecret,
+                  snapshot.id,
+                  parsedCursor.position,
+                );
+                if (!constantTimeEqualBase64Url(parsedCursor.mac, expectedMac)) {
+                  return errResult("query", "validation_error", "Invalid query cursor.");
+                }
+                const accessBinding = buildQueryAccessBinding(ctx);
+                if (snapshot.accessFingerprint !== accessBinding) {
+                  return errResult("query", "validation_error", "Query cursor no longer matches the current access shape.");
+                }
+
+                const storedShape = JSON.parse(snapshot.requestShape) as QueryRequestShape;
+                const storedResponseMeta = JSON.parse(snapshot.responseMeta) as QueryResponseMeta;
+                const storedMatchMeta = JSON.parse(snapshot.resultMatchMeta) as Record<string, StoredQueryResultMeta>;
+                const resultIds = JSON.parse(snapshot.resultIds) as string[];
+                if (parsedCursor.position >= resultIds.length) {
+                  return errResult("query", "validation_error", "Query cursor is out of range.");
+                }
+
+                if (!queryResumeOverridesMatch(queryArgs, storedShape, since, until)) {
+                  return errResult("query", "validation_error", "Query cursor does not match the supplied query arguments.");
+                }
+
+                return respondFromSnapshot(
+                  snapshot,
+                  storedResponseMeta,
+                  storedShape,
+                  resultIds,
+                  storedMatchMeta,
+                  parsedCursor.position,
+                );
+              }
 
               // Filter-only mode: no query text, just browse by filters
-              if (!query || typeof query !== "string") {
+              if (!hasQueryText) {
+                const requestShape = buildQueryRequestShape({
+                  query,
+                  namespace,
+                  entry_type,
+                  tags,
+                  since,
+                  until,
+                  requestedMode,
+                  searchRecencyWeight,
+                  includeExpired,
+                  explain,
+                  requireLexicalMatch,
+                  serialization,
+                });
+                const requestFingerprint = fingerprintJson(requestShape);
                 // Must have at least one filter to avoid returning everything
                 if (!namespace && (!tags || tags.length === 0) && !since && !until && !entry_type) {
                   return errResult("query", "validation_error", "Provide either a 'query' string for search, or at least one filter (namespace, tags, entry_type, since, until) to browse.");
                 }
-                const requestedLimit = limitResolution.applied;
-                const internalFilterLimit = Math.min(requestedLimit * QUERY_RERANK_OVERFETCH_MULTIPLIER, 50);
-                let filterResults = queryEntriesByFilter(db, {
+                let filterResults = queryEntriesByFilter(db, withQueryProbeLimit({
                   namespaceSelectors: readableNamespaceSelectors,
                   entryType: entry_type,
                   tags,
-                  limit: internalFilterLimit,
-                  includeExpired: true,
+                  limit: QUERY_SNAPSHOT_PROBE_LIMIT,
+                  includeExpired,
                   since,
                   until,
-                });
-                const filteredExpired = filterExpiredEntries(filterResults, includeExpired);
-                filterResults = filterByAccess(ctx, filteredExpired.items).slice(0, requestedLimit);
-                const formatted = filterResults.map((entry) => formatQueryResult(
-                  db,
-                  ctx,
-                  entry,
-                  "memory_query",
-                  sessionId,
-                  false,
-                  null,
-                  undefined,
-                  "lexical",
-                  new Map(),
-                  new Map(),
-                  new Map(),
-                ));
-                const redactedCount = formatted.filter((entry) => entry.redacted === true).length;
-
-                // Analytics
-                if (sessionId) {
-                  const resultIds = filterResults.map((entry) => entry.id);
-                  const resultNamespaces = filterResults.map((entry) => entry.namespace);
-                  const resultRanks = filterResults.map((_, i) => i + 1);
-                  logRetrievalEvent(db, {
-                    sessionId,
-                    toolName: "memory_query",
-                    queryText: `[filter-only] ns=${namespace ?? "*"} tags=${tags?.join(",") ?? "*"} since=${since ?? "*"} until=${until ?? "*"}`,
-                    requestedMode: "lexical",
-                    actualMode: "lexical",
-                    resultIds,
-                    resultNamespaces,
-                    resultRanks,
-                    durationMs: Date.now() - queryStartedAt,
-                  });
+                }));
+                if (filterResults.length > MAX_QUERY_SNAPSHOT_MATCHES) {
+                  return exactQueryBoundExceeded("This filter-only browse");
                 }
 
-                return okResult("query", {
-                  results: formatted,
-                  total: formatted.length,
-                  redacted_count: redactedCount,
+                const expiredFilteredCount = includeExpired
+                  ? 0
+                  : collectExpiredEntryIds(queryEntriesByFilter(db, withQueryProbeLimit({
+                    namespaceSelectors: readableNamespaceSelectors,
+                    entryType: entry_type,
+                    tags,
+                    limit: QUERY_SNAPSHOT_PROBE_LIMIT,
+                    includeExpired: true,
+                    since,
+                    until,
+                  }))).size;
+                const visibleResults = filterByAccess(ctx, filterResults);
+                if (visibleResults.length > MAX_QUERY_SNAPSHOT_MATCHES) {
+                  return exactQueryBoundExceeded("This filter-only browse");
+                }
+                const resultIds = visibleResults.map((entry) => entry.id);
+                const responseMeta: QueryResponseMeta = {
                   search_mode: "filter",
                   ...(appliedNamespaceScope ? { namespace_scope: appliedNamespaceScope } : {}),
-                  ...(limitResolution.warning ? {
-                    requested_limit: limitResolution.requested,
-                    limit_applied: limitResolution.applied,
-                    warning: limitResolution.warning,
-                  } : {}),
                   retrieval: {
                     reranked: false,
                     relaxed_lexical: false,
                     fallback_reason: null,
                     recency_applied: false,
                     search_recency_weight: 0,
-                    expired_filtered_count: filteredExpired.expiredFilteredCount,
-                    // Browse results are not relevance-ranked, so boundary
-                    // placement never applies here — always report linear.
+                    expired_filtered_count: expiredFilteredCount,
                     serialization: "linear",
                   },
-                });
+                };
+                const snapshotId = randomBytes(16).toString("hex");
+                const cursorSecret = randomBytes(32).toString("base64url");
+                const accessBinding = buildQueryAccessBinding(ctx);
+                const page = buildQuerySnapshotPage(
+                  db,
+                  ctx,
+                  sessionId,
+                  snapshotId,
+                  cursorSecret,
+                  0,
+                  limitResolution.applied,
+                  includeExpired,
+                  false,
+                  null,
+                  "lexical",
+                  resultIds,
+                  {},
+                );
+                if (page.hasMore) {
+                  try {
+                    createQuerySnapshot(db, {
+                      id: snapshotId,
+                      principalId: ctx.principalId,
+                      accessFingerprint: accessBinding,
+                      requestFingerprint,
+                      requestShape: JSON.stringify(requestShape),
+                      responseMeta: JSON.stringify(responseMeta),
+                      resultIds: JSON.stringify(resultIds),
+                      resultMatchMeta: "{}",
+                      cursorSecret,
+                      expiresAt: new Date(Date.now() + QUERY_SNAPSHOT_TTL_MS).toISOString(),
+                      totalMatched: resultIds.length,
+                    });
+                  } catch (error) {
+                    if (error instanceof QuerySnapshotCapacityError) {
+                      return errResult("query", "capacity_exceeded", error.message);
+                    }
+                    throw error;
+                  }
+                }
+                return respondFromSnapshot(
+                  {
+                    id: snapshotId,
+                    cursorSecret,
+                    accessFingerprint: accessBinding,
+                    requestFingerprint,
+                  },
+                  responseMeta,
+                  requestShape,
+                  resultIds,
+                  {},
+                  0,
+                  page,
+                );
               }
 
-              const requestedLimit = limitResolution.applied;
-              const internalLimit = Math.min(requestedLimit * QUERY_RERANK_OVERFETCH_MULTIPLIER, 50);
-              const queryParams: QueryParams = {
+              const queryText = query as string;
+              const requestShape = buildQueryRequestShape({
                 query,
                 namespace,
                 entry_type,
                 tags,
-                limit: requestedLimit,
+                since,
+                until,
+                requestedMode,
+                searchRecencyWeight,
+                includeExpired,
+                explain,
+                requireLexicalMatch,
+                serialization,
+              });
+              const requestFingerprint = fingerprintJson(requestShape);
+              const queryParams: QueryParams = {
+                query: queryText,
+                namespace,
+                entry_type,
+                tags,
+                limit: limitResolution.applied,
                 search_mode,
                 search_recency_weight: searchRecencyWeight,
                 include_expired: includeExpired,
@@ -10720,9 +11395,8 @@ export function registerTools(
                 since,
                 until,
               };
-              const requestedMode: SearchMode = search_mode ?? "hybrid";
-              let actualMode: SearchMode = requestedMode;
-              let warning: string | undefined = limitResolution.warning;
+              let actualMode: SearchMode = requestedMode as SearchMode;
+              let warning: string | undefined;
               // The storage layer clamps to MAX_QUERY_LIMIT, so an over-limit
               // request used to return fewer rows than asked for with no signal
               // — indistinguishable from "that is all there was". Say so.
@@ -10733,6 +11407,37 @@ export function registerTools(
               let lexicalResults: ReturnType<typeof queryEntriesLexicalScored> = [];
               let semanticResults: ReturnType<typeof queryEntriesSemanticScored> = [];
               let hybridResults: HybridQueryResult[] = [];
+              const collectLexicalExpiredIds = (resolvedQuery: string, rawFts5 = false) => (
+                includeExpired
+                  ? new Set<string>()
+                  : collectExpiredEntryIds(queryEntriesLexicalScored(db, withQueryProbeLimit({
+                    query: resolvedQuery,
+                    namespaceSelectors: readableNamespaceSelectors,
+                    entryType: entry_type,
+                    tags,
+                    limit: QUERY_SNAPSHOT_PROBE_LIMIT,
+                    includeExpired: true,
+                    since,
+                    until,
+                    rawFts5,
+                  })))
+              );
+              const collectSemanticExpiredIds = (queryEmbedding: Buffer, queryEmbeddingModel: string) => (
+                includeExpired
+                  ? new Set<string>()
+                  : collectExpiredEntryIds(queryEntriesSemanticScored(db, withQueryProbeLimit({
+                    queryEmbedding,
+                    queryEmbeddingModel,
+                    namespaceSelectors: readableNamespaceSelectors,
+                    entryType: entry_type,
+                    tags,
+                    limit: QUERY_SNAPSHOT_PROBE_LIMIT,
+                    includeExpired: true,
+                    since,
+                    until,
+                    maxDistance: getSemanticMaxDistance(),
+                  })))
+              );
 
               if (requestedMode === "semantic") {
                 if (!isSemanticEnabled() || !vecLoaded()) {
@@ -10749,126 +11454,144 @@ export function registerTools(
               }
 
               if (actualMode === "semantic") {
-                const queryEmb = await generateEmbedding(query);
+                const queryEmb = await generateEmbedding(queryText);
                 if (!queryEmb) {
                   actualMode = "lexical";
                   warning = "Failed to generate query embedding. Falling back to lexical search.";
                   fallbackReason = "embedding_generation_failed";
                 } else {
+                  const activeEmbeddingModel = getActiveEmbeddingModel();
                   const buf = embeddingToBuffer(queryEmb);
-                  semanticResults = queryEntriesSemanticScored(db, {
+                  semanticResults = queryEntriesSemanticScored(db, withQueryProbeLimit({
                     queryEmbedding: buf,
-                    queryEmbeddingModel: getActiveEmbeddingModel(),
+                    queryEmbeddingModel: activeEmbeddingModel,
                     namespaceSelectors: readableNamespaceSelectors,
                     entryType: entry_type,
                     tags,
-                    limit: internalLimit,
-                    includeExpired: true,
+                    limit: QUERY_SNAPSHOT_PROBE_LIMIT,
+                    includeExpired,
                     since,
                     until,
                     maxDistance: getSemanticMaxDistance(),
-                  });
-                  const filteredExpired = filterExpiredEntries(semanticResults, includeExpired);
-                  semanticResults = filteredExpired.items;
-                  expiredFilteredCount = filteredExpired.expiredFilteredCount;
+                  }));
+                  if (semanticResults.length > MAX_QUERY_SNAPSHOT_MATCHES) {
+                    return exactQueryBoundExceeded("This semantic query");
+                  }
+                  expiredFilteredCount = collectSemanticExpiredIds(buf, activeEmbeddingModel).size;
                   results = semanticResults.map((result) => result.entry);
                 }
               }
 
               if (actualMode === "hybrid") {
-                const queryEmb = await generateEmbedding(query);
+                const queryEmb = await generateEmbedding(queryText);
                 if (!queryEmb) {
                   actualMode = "lexical";
                   warning = "Failed to generate query embedding. Falling back to lexical search.";
                   fallbackReason = "embedding_generation_failed";
                 } else {
+                  const activeEmbeddingModel = getActiveEmbeddingModel();
                   const buf = embeddingToBuffer(queryEmb);
-                  const relaxedQuery = buildRelaxedLexicalQuery(query);
-                  const hybridScored = queryEntriesHybridScored(db, {
-                    ftsOptions: {
-                      query,
+                  const relaxedQuery = buildRelaxedLexicalQuery(queryText);
+                  lexicalResults = queryEntriesLexicalScored(db, withQueryProbeLimit({
+                    query: queryText,
+                    namespaceSelectors: readableNamespaceSelectors,
+                    entryType: entry_type,
+                    tags,
+                    limit: QUERY_SNAPSHOT_PROBE_LIMIT,
+                    includeExpired,
+                    since,
+                    until,
+                  }));
+                  if (lexicalResults.length === 0 && relaxedQuery) {
+                    const relaxedResults = queryEntriesLexicalScored(db, withQueryProbeLimit({
+                      query: relaxedQuery,
                       namespaceSelectors: readableNamespaceSelectors,
                       entryType: entry_type,
                       tags,
-                      limit: internalLimit,
-                      includeExpired: true,
+                      limit: QUERY_SNAPSHOT_PROBE_LIMIT,
+                      includeExpired,
                       since,
                       until,
-                    },
-                    semanticOptions: {
-                      queryEmbedding: buf,
-                      queryEmbeddingModel: getActiveEmbeddingModel(),
-                      namespaceSelectors: readableNamespaceSelectors,
-                      entryType: entry_type,
-                      tags,
-                      limit: internalLimit,
-                      includeExpired: true,
-                      since,
-                      until,
-                      maxDistance: getSemanticMaxDistance(),
-                    },
-                    ftsFallbackOptions: relaxedQuery
-                      ? {
-                        query: relaxedQuery,
-                        namespaceSelectors: readableNamespaceSelectors,
-                        entryType: entry_type,
-                        tags,
-                        limit: internalLimit,
-                        includeExpired: true,
-                        since,
-                        until,
-                        rawFts5: true,
-                      }
-                      : undefined,
-                  });
-                  hybridResults = hybridScored.results;
-                  if (hybridScored.ftsRelaxed) {
+                      rawFts5: true,
+                    }));
+                    if (relaxedResults.length > 0) {
+                      lexicalResults = relaxedResults;
+                      relaxedLexical = true;
+                    }
+                  }
+                  semanticResults = queryEntriesSemanticScored(db, withQueryProbeLimit({
+                    queryEmbedding: buf,
+                    queryEmbeddingModel: activeEmbeddingModel,
+                    namespaceSelectors: readableNamespaceSelectors,
+                    entryType: entry_type,
+                    tags,
+                    limit: QUERY_SNAPSHOT_PROBE_LIMIT,
+                    includeExpired,
+                    since,
+                    until,
+                    maxDistance: getSemanticMaxDistance(),
+                  }));
+                  if (lexicalResults.length > MAX_QUERY_SNAPSHOT_MATCHES || semanticResults.length > MAX_QUERY_SNAPSHOT_MATCHES) {
+                    return exactQueryBoundExceeded("This hybrid query");
+                  }
+                  if (relaxedLexical) {
                     relaxedLexical = true;
                     if (!warning) {
                       warning = "No exact lexical matches found. Used relaxed token matching for natural-language query.";
                     }
                   }
-                  const filteredExpired = filterExpiredEntries(hybridResults, includeExpired);
-                  hybridResults = filteredExpired.items;
-                  expiredFilteredCount = filteredExpired.expiredFilteredCount;
+                  const expiredCandidateIds = collectSemanticExpiredIds(buf, activeEmbeddingModel);
+                  for (const id of collectLexicalExpiredIds(
+                    relaxedLexical && relaxedQuery ? relaxedQuery : queryText,
+                    relaxedLexical,
+                  )) {
+                    expiredCandidateIds.add(id);
+                  }
+                  expiredFilteredCount = expiredCandidateIds.size;
+                  hybridResults = fuseHybridResults(lexicalResults, semanticResults);
+                  if (hybridResults.length > MAX_QUERY_SNAPSHOT_MATCHES) {
+                    return exactQueryBoundExceeded("This hybrid query");
+                  }
                   results = hybridResults.map((result) => result.entry);
                 }
               }
 
               // Lexical fallback (or original mode)
               if (actualMode === "lexical") {
-                lexicalResults = queryEntriesLexicalScored(db, {
-                  query,
+                lexicalResults = queryEntriesLexicalScored(db, withQueryProbeLimit({
+                  query: queryText,
                   namespaceSelectors: readableNamespaceSelectors,
                   entryType: entry_type,
                   tags,
-                  limit: internalLimit,
-                  includeExpired: true,
+                  limit: QUERY_SNAPSHOT_PROBE_LIMIT,
+                  includeExpired,
                   since,
                   until,
-                });
-                let filteredExpired = filterExpiredEntries(lexicalResults, includeExpired);
-                lexicalResults = filteredExpired.items;
-                expiredFilteredCount = filteredExpired.expiredFilteredCount;
+                }));
+                if (lexicalResults.length > MAX_QUERY_SNAPSHOT_MATCHES) {
+                  return exactQueryBoundExceeded("This lexical query");
+                }
+                expiredFilteredCount = collectLexicalExpiredIds(queryText).size;
                 results = lexicalResults.map((result) => result.entry);
 
                 if (results.length === 0) {
-                  const relaxedQuery = buildRelaxedLexicalQuery(query);
+                  const relaxedQuery = buildRelaxedLexicalQuery(queryText);
                   if (relaxedQuery) {
-                    lexicalResults = queryEntriesLexicalScored(db, {
+                    lexicalResults = queryEntriesLexicalScored(db, withQueryProbeLimit({
                       query: relaxedQuery,
                       namespaceSelectors: readableNamespaceSelectors,
                       entryType: entry_type,
                       tags,
-                      limit: internalLimit,
-                      includeExpired: true,
+                      limit: QUERY_SNAPSHOT_PROBE_LIMIT,
+                      includeExpired,
                       since,
                       until,
                       rawFts5: true,
-                    });
-                    filteredExpired = filterExpiredEntries(lexicalResults, includeExpired);
-                    lexicalResults = filteredExpired.items;
-                    expiredFilteredCount = filteredExpired.expiredFilteredCount;
+                    }));
+                    if (lexicalResults.length > MAX_QUERY_SNAPSHOT_MATCHES) {
+                      return exactQueryBoundExceeded("This lexical query");
+                    }
+                    expiredFilteredCount = collectLexicalExpiredIds(relaxedQuery, true).size;
                     results = lexicalResults.map((result) => result.entry);
                     if (results.length > 0 && !warning) {
                       warning = "No exact lexical matches found. Used relaxed token matching for natural-language query.";
@@ -10905,7 +11628,7 @@ export function registerTools(
                 //     natural-language query with stopwords), those entries are
                 //     legitimately lexically anchored even though the exact-query
                 //     scoped check above would not match them.
-                const anchored = filterIdsMatchingFts(db, query, vectorIds);
+                const anchored = filterIdsMatchingFts(db, queryText, vectorIds);
                 if (actualMode === "hybrid") {
                   for (const r of hybridResults) {
                     if (r.lexicalRank !== undefined) anchored.add(r.entry.id);
@@ -10945,95 +11668,107 @@ export function registerTools(
               const completedTasks = shouldApplyDefaultQuerySuppression(queryParams)
                 ? getCompletedTaskNamespaces(db)
                 : new Set<string>();
-              results = rerankQueryResults(results, queryParams, completedTasks, trackedStatuses).slice(0, requestedLimit);
+              results = rerankQueryResults(results, queryParams, completedTasks, trackedStatuses);
+              if (results.length > MAX_QUERY_SNAPSHOT_MATCHES) {
+                return exactQueryBoundExceeded("This query");
+              }
 
               const lexicalById = new Map(lexicalResults.map((result) => [result.entry.id, result] as const));
               const semanticById = new Map(semanticResults.map((result) => [result.entry.id, result] as const));
               const hybridById = new Map(hybridResults.map((result) => [result.entry.id, result] as const));
-
-              const queryLower = query.toLowerCase();
-              const formatted = results.map((entry) => formatQueryResult(
-                db,
-                ctx,
-                entry,
-                "memory_query",
-                sessionId,
-                explain,
-                queryLower,
-                trackedStatuses,
-                actualMode,
-                lexicalById,
-                semanticById,
-                hybridById,
-              ));
-              const redactedCount = formatted.filter((entry) => entry.redacted === true).length;
-
-              const response: Record<string, unknown> = {
-                results: formatted,
-                total: formatted.length,
-                redacted_count: redactedCount,
-                query,
+              const responseMeta: QueryResponseMeta = {
+                query: queryText,
                 search_mode: requestedMode,
+                ...(actualMode !== requestedMode ? { search_mode_actual: actualMode } : {}),
                 ...(appliedNamespaceScope ? { namespace_scope: appliedNamespaceScope } : {}),
-                ...(limitResolution.warning ? {
-                  requested_limit: limitResolution.requested,
-                  limit_applied: limitResolution.applied,
-                } : {}),
-              };
-              if (actualMode !== requestedMode) {
-                response.search_mode_actual = actualMode;
-              }
-              const responseWarnings = [...new Set([limitResolution.warning, warning].filter(Boolean))];
-              if (responseWarnings.length > 0) {
-                response.warning = responseWarnings.join(" ");
-              }
-              response.retrieval = {
-                reranked: true,
-                relaxed_lexical: relaxedLexical,
-                fallback_reason: fallbackReason,
-                recency_applied: searchRecencyWeight > 0,
-                search_recency_weight: searchRecencyWeight,
-                expired_filtered_count: expiredFilteredCount,
-                serialization,
+                ...(warning ? { warning } : {}),
+                retrieval: {
+                  reranked: true,
+                  relaxed_lexical: relaxedLexical,
+                  fallback_reason: fallbackReason,
+                  recency_applied: searchRecencyWeight > 0,
+                  search_recency_weight: searchRecencyWeight,
+                  expired_filtered_count: expiredFilteredCount,
+                  serialization,
+                },
               };
               if (actualMode === "hybrid" && hybridResults.length > 0) {
                 const inFts = hybridResults.filter((r) => r.lexicalRank !== undefined).length;
                 const inSemantic = hybridResults.filter((r) => r.semanticRank !== undefined).length;
                 const inBoth = hybridResults.filter((r) => r.lexicalRank !== undefined && r.semanticRank !== undefined).length;
-                response.search_meta = {
+                responseMeta.search_meta = {
                   fts5_matches: inFts,
                   semantic_matches: inSemantic,
                   both_matches: inBoth,
                   mode_effective: inFts === 0 ? "semantic_only" : inSemantic === 0 ? "lexical_only" : "hybrid",
                 };
               }
-
-              // Analytics: log retrieval event with result IDs and ranks
-              if (sessionId) {
-                const resultIds = results.map((entry) => entry.id);
-                const resultNamespaces = results.map((entry) => entry.namespace);
-                const resultRanks = results.map((_, i) => i + 1);
-                logRetrievalEvent(db, {
-                  sessionId,
-                  toolName: "memory_query",
-                  queryText: query,
-                  requestedMode: requestedMode,
-                  actualMode,
-                  resultIds,
-                  resultNamespaces,
-                  resultRanks,
-                  durationMs: Date.now() - queryStartedAt,
-                });
+              const resultIds = results.map((entry) => entry.id);
+              const storedMatchMeta = buildStoredQueryMatchMeta(
+                results,
+                actualMode,
+                lexicalById,
+                semanticById,
+                hybridById,
+                explain,
+                queryText.toLowerCase(),
+                trackedStatuses,
+              );
+              const snapshotId = randomBytes(16).toString("hex");
+              const cursorSecret = randomBytes(32).toString("base64url");
+              const accessBinding = buildQueryAccessBinding(ctx);
+              const firstPage = buildQuerySnapshotPage(
+                db,
+                ctx,
+                sessionId,
+                snapshotId,
+                cursorSecret,
+                0,
+                limitResolution.applied,
+                includeExpired,
+                explain,
+                queryText.toLowerCase(),
+                actualMode,
+                resultIds,
+                storedMatchMeta,
+              );
+              if (firstPage.hasMore) {
+                try {
+                  createQuerySnapshot(db, {
+                    id: snapshotId,
+                    principalId: ctx.principalId,
+                    accessFingerprint: accessBinding,
+                    requestFingerprint,
+                    requestShape: JSON.stringify(requestShape),
+                    responseMeta: JSON.stringify(responseMeta),
+                    resultIds: JSON.stringify(resultIds),
+                    resultMatchMeta: JSON.stringify(storedMatchMeta),
+                    cursorSecret,
+                    expiresAt: new Date(Date.now() + QUERY_SNAPSHOT_TTL_MS).toISOString(),
+                    totalMatched: resultIds.length,
+                  });
+                } catch (error) {
+                  if (error instanceof QuerySnapshotCapacityError) {
+                    return errResult("query", "capacity_exceeded", error.message);
+                  }
+                  throw error;
+                }
               }
 
-              // Boundary serialization is purely a display-order transform, applied
-              // AFTER analytics so retrieval_events keep the reranked linear order
-              // (outcome correlation must not see the reordered list).
-              if (serialization === "boundary") {
-                response.results = boundarySerialize(formatted);
-              }
-
-              return okResult("query", response);
+              return respondFromSnapshot(
+                {
+                  id: snapshotId,
+                  cursorSecret,
+                  accessFingerprint: accessBinding,
+                  requestFingerprint,
+                },
+                responseMeta,
+                requestShape,
+                resultIds,
+                storedMatchMeta,
+                0,
+                firstPage,
+              );
             };
             return handleMemoryQuery();
           }
@@ -11725,18 +12460,32 @@ export function registerTools(
 
           case "memory_history": {
             const handleMemoryHistory = async () => {
-              const { namespace, since, action, limit, cursor } = (args ?? {}) as AuditHistoryParams;
+              const unknownArgumentError = rejectUnknownArguments(args, [
+                "namespace", "since", "action", "limit", "cursor", "older_cursor",
+              ]);
+              if (unknownArgumentError) {
+                return errResult("history", "validation_error", unknownArgumentError);
+              }
+              const { namespace, since, action, limit, cursor, older_cursor } = (args ?? {}) as AuditHistoryParams;
+              if (cursor !== undefined && older_cursor !== undefined) {
+                return errResult("history", "validation_error", '"cursor" and "older_cursor" are mutually exclusive.');
+              }
 
               // Namespace subtree access check
               if (namespace) {
                 const prefix = namespace.endsWith("/") ? namespace : namespace + "/";
                 if (!canReadSubtree(ctx, prefix) && !canRead(ctx, namespace)) {
+                  const syncCursor = cursor !== undefined ? cursor : (older_cursor !== undefined ? null : 0);
                   return okResult("history", {
                     generated_at: new Date().toISOString(),
                     count: 0,
                     entries: [],
                     next_cursor: cursor ?? null,
+                    older_cursor: older_cursor ?? null,
+                    sync_cursor: syncCursor,
                     has_more: false,
+                    has_newer: false,
+                    has_older: false,
                   });
                 }
               }
@@ -11750,24 +12499,30 @@ export function registerTools(
                 );
               }
 
+              const readableNamespaceSelectors = resolveReadableNamespaceSelectors(ctx, namespace);
               const historyPage = getAuditHistoryPage(db, {
                 namespace,
                 since,
                 action,
                 limit,
                 cursor,
+                olderCursor: older_cursor,
+                namespaceSelectors: readableNamespaceSelectors,
               });
 
-              const accessFiltered = historyPage.entries.filter(e => canRead(ctx, e.namespace));
+              const accessFiltered = historyPage.entries.filter((entry) => canRead(ctx, entry.namespace));
               const filteredEntries = accessFiltered.map((entry) => formatHistoryEntry(db, ctx, entry, sessionId));
-              const entriesWereFiltered = accessFiltered.length < historyPage.entries.length;
 
               return okResult("history", {
                 generated_at: new Date().toISOString(),
                 count: filteredEntries.length,
                 entries: filteredEntries,
                 next_cursor: historyPage.nextCursor,
-                has_more: historyPage.hasMore || entriesWereFiltered,
+                older_cursor: historyPage.olderCursor,
+                sync_cursor: historyPage.syncCursor,
+                has_more: historyPage.hasMore,
+                has_newer: historyPage.hasNewer,
+                has_older: historyPage.hasOlder,
               });
             };
             return handleMemoryHistory();

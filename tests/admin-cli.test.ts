@@ -163,6 +163,17 @@ describe("addPrincipal", () => {
     expect(detail!.hasToken).toBe(false);
   });
 
+  it.each(["", "   ", "\t\n"])("rejects a blank principal ID at the provisioning boundary (%j)", (principalId) => {
+    expect(() => addPrincipal(db, {
+      principalId,
+      principalType: "family",
+      rules: [],
+    })).toThrow(/principal ID.*blank/i);
+
+    const row = db.prepare("SELECT principal_id FROM principals WHERE principal_id = ?").get(principalId);
+    expect(row).toBeUndefined();
+  });
+
   it("creates an agent principal with token and stores hash", () => {
     const result = addPrincipal(db, {
       principalId: "agent-skuld",

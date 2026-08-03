@@ -110,10 +110,15 @@ Invisible denial is critical: non-owner principals must not be able to distingui
 | Field | Rule |
 |-------|------|
 | **Who can call** | All principals |
-| **Result filtering** | Results are always post-filtered with canonical `canRead`. When the caller's readable rules map cleanly to exact/prefix SQL selectors, `memory_query` may also intersect the request with a safe prefilter before retrieval to avoid hidden rows consuming candidate slots. Unsupported or legacy rule shapes deliberately fail open to broader SQL scanning rather than narrowing incorrectly. |
+| **Result filtering** | Results are always post-filtered with canonical `canRead`. `memory_query` also applies the caller's readable namespace rules in SQL before bounded retrieval whenever their semantics are equivalent to `canRead`: `*` stays unrestricted, `prefix/*` becomes a descendant-only prefix selector, and every other rule remains a literal exact namespace selector, including stray `*` characters. |
 | **namespace param** | Literal and case-sensitive. Bare `projects/foo` means that namespace plus descendants; trailing-slash `projects/` means descendants under that prefix only. If caller specifies an inaccessible namespace, return empty results (not an error) |
 | **namespace_scope** | Returned only when a real namespace filter was applied: `subtree` for bare namespaces, `prefix` for trailing-slash filters |
 | **Result count** | `total` reflects only accessible results (don't leak hidden count) |
+| **Pagination cursor** | Opaque and authenticated. A resumed cursor must match the stored snapshot id/position, current access shape, and any explicit resume overrides after normalizing them back to the frozen request shape; only `limit` may vary freely. Cursor integrity uses HMAC-SHA-256 under the snapshot's random secret. The current access shape is compared through exact versioned canonical JSON with fixed field order and sorted rule objects; the legacy `access_fingerprint` column stores that binding, not a digest. Multi-page snapshots are created only when more than one page is needed. |
+| **Snapshot validity / cleanup** | Cursor validity ends exactly 5 minutes after snapshot creation, regardless of whether the expired row has been physically deleted yet. Physical cleanup runs at startup and on periodic maintenance for both HTTP and stdio; while the process is running normally, an expired row may remain only until the next maintenance pass (at most the maintenance interval, currently 1 minute). |
+| **Expiry / exact-total bound** | The 500-candidate exact-pagination bound applies to currently visible/retrievable rows after `include_expired: false` has excluded expired states in the DB retrieval path. With `include_expired: true`, expired matches still count toward the bound. `expired_filtered_count` counts unique candidate IDs within the bounded retrieval probe (including overlapping hybrid legs), not an unbounded corpus count. |
+| **Semantic / hybrid exact totals** | Semantic totals are exact over currently retrievable rows indexed for the active embedding model. Hybrid totals are exact over the lexical plus currently retrievable semantic union; rows still waiting on compatible embeddings remain eligible through the lexical leg. These are retrieval-candidate rules: server-policy canonical orientation and blocked/needs-attention rows may be injected before final reranking, become frozen result-set members, and count in final `total_matched`. |
+| **Explain metadata** | When requested, explanation scores and reasons are frozen from the same status and retrieval inputs used to order the snapshot, then reused on continuation pages even if mutable tracked status later changes. |
 
 ### memory_attention
 
@@ -146,9 +151,10 @@ Invisible denial is critical: non-owner principals must not be able to distingui
 | Field | Rule |
 |-------|------|
 | **Who can call** | All principals |
-| **Namespace filter** | Literal and case-sensitive. Bare `projects/foo` means that namespace plus descendants; trailing-slash `projects/foo/` means descendants under that literal prefix only. Only returns audit entries for caller's accessible namespaces. |
+| **Namespace filter** | Literal and case-sensitive. Bare `projects/foo` means that namespace plus descendants; trailing-slash `projects/foo/` means descendants under that literal prefix only. Only returns audit entries for caller's accessible namespaces, and readable namespace rules are applied in SQL before cursor predicates, ordering, limits, and lookahead. |
 | **Without namespace** | Returns history across all accessible namespaces only |
 | **Unauthorized namespace** | Empty result set (not an error) |
+| **Paging contract** | Cursorless pages are newest-first and return `older_cursor` + `has_older` for backward paging plus an initial forward watermark in `sync_cursor` (or `0` for an empty feed). `older_cursor` pages continue backward paging and return `sync_cursor: null`, so callers retain the initial watermark while paging older. `cursor` pages are ascending sync pages and advance `next_cursor` / `sync_cursor`, preserving the input cursor when the sync page is empty. `cursor`, `older_cursor`, `has_more`, `has_older`, `has_newer`, and `sync_cursor` are all derived from SQL-visible rows, not hidden rows later trimmed in the tool layer. |
 
 ### memory_delete
 

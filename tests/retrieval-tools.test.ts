@@ -67,6 +67,39 @@ describe("memory_query instrumentation", () => {
     expect(Array.isArray(resultIds)).toBe(true);
   });
 
+  it("logs continuation pages without marking the prior page query_reformulated", async () => {
+    for (let index = 0; index < 15; index += 1) {
+      writeState(db, `projects/query-page-${index}`, "status", `paged continuation corpus ${index}`, ["active"]);
+    }
+
+    const first = parseToolResponse(await callTool("memory_query", {
+      query: "paged continuation corpus",
+      search_mode: "lexical",
+      limit: 10,
+    })) as { next_cursor: string | null; has_more: boolean };
+    expect(first.has_more).toBe(true);
+    expect(typeof first.next_cursor).toBe("string");
+
+    await callTool("memory_query", { cursor: first.next_cursor! });
+
+    const events = db.prepare(
+      `SELECT id, detail
+         FROM retrieval_events
+        WHERE session_id = ? AND tool_name = 'memory_query'
+        ORDER BY rowid ASC`,
+    ).all(SESSION_ID) as Array<{ id: string; detail: string | null }>;
+    expect(events).toHaveLength(2);
+
+    const reformulations = db.prepare(
+      `SELECT COUNT(*) AS count
+         FROM retrieval_outcomes
+        WHERE retrieval_event_id = ? AND outcome_type = 'query_reformulated'`,
+    ).get(events[0].id) as { count: number };
+    expect(reformulations.count).toBe(0);
+    expect(events[0].detail).toBeNull();
+    expect(JSON.parse(events[1].detail ?? "{}")).toMatchObject({ pagination_continuation: true });
+  });
+
   it("logs no event when sessionId is not provided", async () => {
     // Create server without sessionId
     const serverNoSession = new Server(

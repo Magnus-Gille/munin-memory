@@ -72,7 +72,45 @@ namespace such as `projects/munin-memory` matches that namespace and its descend
 while a trailing-slash filter such as `projects/` matches only descendants under that
 literal prefix. Successful query responses echo this as `namespace_scope: "subtree"` or
 `namespace_scope: "prefix"`; responses omit `namespace_scope` when no namespace filter
-was applied.
+was applied. Multi-page `memory_query` responses persist a server-side snapshot only when
+more than one page is needed; the opaque resume cursor is authenticated to the frozen
+snapshot id and position, explicit resume overrides must still normalize back to the
+stored request shape, and the current access shape must exactly match a versioned
+canonical JSON binding with fixed field order and sorted rule objects. The legacy
+`access_fingerprint` database column stores this exact binding rather than a digest;
+cursor integrity remains independently protected by HMAC-SHA-256 under the snapshot's
+random secret. Cursor validity ends exactly 5 minutes after snapshot creation even if
+physical deletion has not happened yet. Expired rows are physically pruned at startup
+and by periodic maintenance for both HTTP and stdio, so during normal runtime cleanup
+may lag logical expiry only until the next maintenance pass (at most the maintenance
+interval, currently 1 minute). Semantic/hybrid queries use an indexed-candidate
+contract. Semantic `total_matched` is exact over currently
+retrievable candidates indexed with the active embedding model; entries without a
+compatible embedding are outside that candidate set. Hybrid totals are exact over the
+union of lexical matches and those currently retrievable semantic candidates, so a
+missing embedding does not prevent an entry from matching lexically. These mode rules
+define the retrieval candidate set. Server policy may then inject canonical orientation
+entries and blocked/needs-attention statuses before final reranking; those injected rows
+become members of the frozen result set and count in final `total_matched`. Snapshot
+explanation metadata is frozen from the same scoring inputs as that final order. When
+`include_expired` is false, expired state rows are excluded before the 500-candidate
+exact-pagination bound is checked; with `include_expired: true`, those expired matches
+still count toward the bound. `expired_filtered_count` counts unique candidate IDs across
+the bounded retrieval probe (including overlapping hybrid legs), not an unbounded corpus
+count. Each returned page is also logged as its
+own retrieval event; continuation pages carry a continuation marker instead of
+retroactively marking the prior page as a query reformulation.
+
+`memory_history` has two paging directions. Cursorless calls are newest-first browsing
+pages: they return `older_cursor` / `has_older` for deeper history plus `sync_cursor`,
+the newest visible audit id in that initial feed (or `0` when the feed is empty), for
+bootstrapping later forward polling. `older_cursor` calls continue that newest-first
+history view but return `sync_cursor: null`; callers retain the initial watermark while
+walking backward. `cursor` calls are ascending sync pages: they return rows with `id >
+cursor` and advance `next_cursor` (also echoed as `sync_cursor`, or preserved when the
+sync page is empty). `cursor` and `older_cursor` are mutually exclusive. For
+non-owner callers, namespace visibility is applied in SQL before cursor predicates,
+limits, and lookahead, so paging state reflects visible history rather than hidden rows.
 
 `memory_commitments` derives tracked follow-through from canonical tracked-status
 `Next Steps`, dated future clauses in visible tracked-status prose, explicit

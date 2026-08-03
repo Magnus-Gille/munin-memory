@@ -161,6 +161,40 @@ describe("logRetrievalEvent", () => {
     expect(outcomes).toHaveLength(0);
   });
 
+  it("does NOT record query_reformulated for pagination continuations and persists a marker", () => {
+    const eventId1 = logRetrievalEvent(db, {
+      sessionId: "session-5",
+      toolName: "memory_query",
+      queryText: "paged query",
+      resultIds: ["e1"],
+      resultNamespaces: ["projects/foo"],
+      resultRanks: [1],
+    });
+
+    const eventId2 = logRetrievalEvent(db, {
+      sessionId: "session-5",
+      toolName: "memory_query",
+      queryText: "paged query",
+      resultIds: ["e2"],
+      resultNamespaces: ["projects/foo"],
+      resultRanks: [2],
+      isPaginationContinuation: true,
+      detail: { query_snapshot_continuation: true },
+    });
+
+    const outcomes = db
+      .prepare(
+        "SELECT * FROM retrieval_outcomes WHERE retrieval_event_id = ? AND outcome_type = 'query_reformulated'",
+      )
+      .all(eventId1) as Record<string, unknown>[];
+    expect(outcomes).toHaveLength(0);
+
+    const detailRow = db.prepare(
+      "SELECT detail FROM retrieval_events WHERE id = ?",
+    ).get(eventId2) as { detail: string | null };
+    expect(JSON.parse(detailRow.detail ?? "{}")).toMatchObject({ pagination_continuation: true });
+  });
+
   it("never throws even with invalid input", () => {
     // Should not throw
     const result = logRetrievalEvent(db, {
