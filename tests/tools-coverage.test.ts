@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { initDatabase, storeEmbedding, vecLoaded } from "../src/db.js";
+import { initDatabase, storeEmbedding, vecLoaded, writeState } from "../src/db.js";
 import { registerTools, _setConsolidationPreviewTokenCountForTesting } from "../src/tools.js";
 import { ownerContext } from "../src/access.js";
 import type { AccessContext } from "../src/access.js";
@@ -766,6 +766,22 @@ describe.skipIf(!vecAvailable)("memory_query semantic and hybrid paths", () => {
   let catId: string;
   let dogId: string;
 
+  function seedEmbeddedState(prefix: string, index: number, validUntil?: string): string {
+    const created = writeState(
+      db,
+      `projects/${prefix}/item-${String(index).padStart(3, "0")}`,
+      "status",
+      `cat semantic paging corpus ${prefix} ${index}`,
+      ["active", `topic:${prefix}`],
+      "default",
+      undefined,
+      validUntil,
+    );
+    if (!created.id) throw new Error(`Failed to seed ${prefix}/${index}`);
+    storeEmbedding(db, created.id, embeddingToBuffer(makeEmbedding(1)), getActiveEmbeddingModel());
+    return created.id;
+  }
+
   async function seedPagedSemanticCorpus(prefix: string, total: number) {
     const ids: string[] = [];
     for (let i = 0; i < total; i++) {
@@ -909,6 +925,49 @@ describe.skipIf(!vecAvailable)("memory_query semantic and hybrid paths", () => {
 
     expect(res.ok).toBe(false);
     expect(res.error).toBe("query_bound_exceeded");
+  });
+
+  it("excludes more than 500 expired semantic and hybrid candidates before enforcing the bound", async () => {
+    for (let i = 0; i < 501; i += 1) {
+      seedEmbeddedState("expired-semantic-bound", i, "2020-01-01T00:00:00.000Z");
+    }
+    const liveId = seedEmbeddedState("expired-semantic-bound", 501);
+
+    for (const searchMode of ["semantic", "hybrid"] as const) {
+      const res = parseToolResponse(await callTool("memory_query", {
+        query: "cat",
+        search_mode: searchMode,
+        namespace: "projects/expired-semantic-bound",
+        limit: 50,
+      }));
+
+      expect(res.ok).toBe(true);
+      expect(res.total_matched).toBe(1);
+      expect(res.returned).toBe(1);
+      expect(res.results).toHaveLength(1);
+      expect(res.results[0].id).toBe(liveId);
+      expect(res.has_more).toBe(false);
+      expect(res.next_cursor).toBeNull();
+      expect(res.retrieval.expired_filtered_count).toBeGreaterThan(0);
+      expect(res.retrieval.expired_filtered_count).toBeLessThanOrEqual(501);
+    }
+  });
+
+  it("counts an expired hybrid candidate present in both retrieval legs only once", async () => {
+    seedEmbeddedState("expired-hybrid-overlap", 0, "2020-01-01T00:00:00.000Z");
+    const liveId = seedEmbeddedState("expired-hybrid-overlap", 1);
+
+    const res = parseToolResponse(await callTool("memory_query", {
+      query: "cat",
+      search_mode: "hybrid",
+      namespace: "projects/expired-hybrid-overlap",
+    }));
+
+    expect(res.ok).toBe(true);
+    expect(res.total_matched).toBe(1);
+    expect(res.results).toHaveLength(1);
+    expect(res.results[0].id).toBe(liveId);
+    expect(res.retrieval.expired_filtered_count).toBe(1);
   });
 
   it("returns exact semantic totals over currently indexed candidates when the scope has embedding gaps", async () => {

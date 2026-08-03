@@ -80,11 +80,16 @@ use an indexed-candidate contract. Semantic `total_matched` is exact over curren
 retrievable candidates indexed with the active embedding model; entries without a
 compatible embedding are outside that candidate set. Hybrid totals are exact over the
 union of lexical matches and those currently retrievable semantic candidates, so a
-missing embedding does not prevent an entry from matching lexically. When
+missing embedding does not prevent an entry from matching lexically. These mode rules
+define the retrieval candidate set. Server policy may then inject canonical orientation
+entries and blocked/needs-attention statuses before final reranking; those injected rows
+become members of the frozen result set and count in final `total_matched`. Snapshot
+explanation metadata is frozen from the same scoring inputs as that final order. When
 `include_expired` is false, expired state rows are excluded before the 500-candidate
 exact-pagination bound is checked; with `include_expired: true`, those expired matches
-still count toward the bound. `expired_filtered_count` is a bounded retrieval diagnostic,
-not an unbounded count across the whole corpus. Each returned page is also logged as its
+still count toward the bound. `expired_filtered_count` counts unique candidate IDs across
+the bounded retrieval probe (including overlapping hybrid legs), not an unbounded corpus
+count. Each returned page is also logged as its
 own retrieval event; continuation pages carry a continuation marker instead of
 retroactively marking the prior page as a query reformulation.
 

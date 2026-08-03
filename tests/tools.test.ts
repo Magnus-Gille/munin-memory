@@ -4369,6 +4369,74 @@ describe("memory_query", () => {
       expect(allIds.size).toBe(55);
     });
 
+    it("freezes attention explanation scores and reasons across continuation pages", async () => {
+      const blocked = writeState(
+        db,
+        "projects/explain-blocked",
+        "status",
+        "What needs attention: blocked release approval.",
+        ["blocked"],
+      );
+      const attention = writeState(
+        db,
+        "projects/explain-attention",
+        "status",
+        "What needs attention: active follow-up is stale.",
+        ["active"],
+      );
+      expect(blocked.id).toBeTruthy();
+      expect(attention.id).toBeTruthy();
+      db.prepare("UPDATE entries SET created_at = ?, updated_at = ? WHERE id = ?").run(
+        new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+        new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+        attention.id,
+      );
+
+      const first = parseToolResponse(await callTool("memory_query", {
+        query: "what needs attention",
+        search_mode: "lexical",
+        explain: true,
+        limit: 1,
+      })) as {
+        results: Array<{
+          id: string;
+          match: { heuristic_score: number; reasons: string[] };
+        }>;
+        has_more: boolean;
+        next_cursor: string;
+      };
+
+      expect(first.has_more).toBe(true);
+      expect(first.results[0]?.id).toBe(blocked.id);
+      expect(first.results[0]?.match.heuristic_score).toBe(68);
+      expect(first.results[0]?.match.reasons).toContain("blocked item");
+
+      // If continuation explanation were recomputed, this freshly-blocked row
+      // would report 68/"blocked item" instead of its frozen stale-active inputs.
+      db.prepare("UPDATE entries SET tags = ?, updated_at = ? WHERE id = ?").run(
+        JSON.stringify(["blocked"]),
+        new Date().toISOString(),
+        attention.id,
+      );
+
+      const second = parseToolResponse(await callTool("memory_query", {
+        cursor: first.next_cursor,
+        limit: 1,
+      })) as {
+        results: Array<{
+          id: string;
+          match: { heuristic_score: number; reasons: string[] };
+        }>;
+        has_more: boolean;
+      };
+
+      expect(second.has_more).toBe(false);
+      expect(second.results[0]?.id).toBe(attention.id);
+      expect(second.results[0]?.match.heuristic_score).toBe(62);
+      expect(second.results[0]?.match.reasons).toContain("needs attention");
+      expect(second.results[0]?.match.reasons).not.toContain("blocked item");
+    });
+
     it("does not persist a query snapshot for a one-page result", async () => {
       seedPagedLexicalCorpus(5, "single-page");
 
@@ -10227,6 +10295,22 @@ describe("compare-and-swap (memory_write)", () => {
     expect(description).toContain("hybrid_score");
     expect(description).toContain("may differ from a result's final position");
     expect(description).not.toContain('"linear" returns strict best-first rank order');
+  });
+
+  it("documents policy injection after semantic and hybrid candidate retrieval", async () => {
+    const handler = (
+      server as unknown as { _requestHandlers: Map<string, Function> }
+    )._requestHandlers?.get("tools/list");
+    const toolList = await handler!({ method: "tools/list", params: {} });
+    const memoryQuery = (
+      toolList as { tools: Array<{ name: string; description: string }> }
+    ).tools.find((tool) => tool.name === "memory_query");
+
+    expect(memoryQuery?.description).toContain("mode rules define the retrieval candidate set");
+    expect(memoryQuery?.description).toContain("canonical orientation");
+    expect(memoryQuery?.description).toContain("blocked/needs-attention");
+    expect(memoryQuery?.description).toContain("frozen final result set");
+    expect(memoryQuery?.description).toContain("count in `total_matched`");
   });
 
   it("advertises closed argument objects for the #269 validated tools", async () => {

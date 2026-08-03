@@ -283,6 +283,11 @@ type StoredQueryResultMeta = {
   semantic_rank?: number;
   semantic_distance?: number;
   hybrid_score?: number;
+  explain?: {
+    heuristic_score: number;
+    freshness_score: number;
+    reasons: string[];
+  };
 };
 
 type ParsedQueryCursor = {
@@ -581,6 +586,9 @@ function buildStoredQueryMatchMeta(
   lexicalById: Map<string, ReturnType<typeof queryEntriesLexicalScored>[number]>,
   semanticById: Map<string, ReturnType<typeof queryEntriesSemanticScored>[number]>,
   hybridById: Map<string, HybridQueryResult>,
+  explain: boolean,
+  queryLower: string,
+  trackedStatuses: Map<string, TrackedStatusAssessment> | undefined,
 ): Record<string, StoredQueryResultMeta> {
   const meta: Record<string, StoredQueryResultMeta> = {};
   for (const entry of results) {
@@ -602,6 +610,19 @@ function buildStoredQueryMatchMeta(
       if (item.lexical_score === undefined && hybrid.lexicalScore !== undefined) item.lexical_score = hybrid.lexicalScore;
       if (item.semantic_rank === undefined && hybrid.semanticRank !== undefined) item.semantic_rank = hybrid.semanticRank;
       if (item.semantic_distance === undefined && hybrid.semanticDistance !== undefined) item.semantic_distance = hybrid.semanticDistance;
+    }
+    if (explain) {
+      const match: NonNullable<QueryResult["match"]> = {
+        heuristic_score: getQueryHeuristicScore(entry, queryLower, trackedStatuses),
+        freshness_score: getFreshnessScore(entry.updated_at),
+        reasons: [],
+      };
+      applyQueryMatchScores(match, entry, actualMode, lexicalById, semanticById, hybridById);
+      item.explain = {
+        heuristic_score: match.heuristic_score,
+        freshness_score: match.freshness_score!,
+        reasons: getQueryExplainReasons(entry, queryLower, trackedStatuses?.get(entry.id), match),
+      };
     }
     if (Object.keys(item).length > 0) meta[entry.id] = item;
   }
@@ -707,7 +728,7 @@ function buildQuerySnapshotPage(
     sessionId,
     explain,
     queryLower,
-    undefined,
+    storedMeta[entry.id]?.explain,
     actualMode,
     lexicalById,
     semanticById,
@@ -1440,7 +1461,7 @@ function formatQueryResult(
   sessionId: string | undefined,
   explain: boolean,
   queryLower: string | null,
-  trackedStatuses: ReturnType<typeof getTrackedStatusAssessments> | undefined,
+  frozenExplain: StoredQueryResultMeta["explain"],
   actualMode: SearchMode,
   lexicalById: Map<string, ReturnType<typeof queryEntriesLexicalScored>[number]>,
   semanticById: Map<string, ReturnType<typeof queryEntriesSemanticScored>[number]>,
@@ -1484,16 +1505,19 @@ function formatQueryResult(
   }
 
   if (explain && queryLower !== null) {
-    const heuristicScore = getQueryHeuristicScore(entry, queryLower, trackedStatuses);
     const match: NonNullable<QueryResult["match"]> = {
-      heuristic_score: heuristicScore,
-      freshness_score: getFreshnessScore(entry.updated_at),
-      reasons: [],
+      heuristic_score: frozenExplain?.heuristic_score ?? getQueryHeuristicScore(entry, queryLower),
+      freshness_score: frozenExplain?.freshness_score ?? getFreshnessScore(entry.updated_at),
+      reasons: frozenExplain ? [...frozenExplain.reasons] : [],
     };
 
     applyQueryMatchScores(match, entry, actualMode, lexicalById, semanticById, hybridById);
 
-    match.reasons = getQueryExplainReasons(entry, queryLower, trackedStatuses?.get(entry.id), match);
+    if (!frozenExplain) {
+      // Compatibility fallback for a cursor minted by a pre-freeze server
+      // during the short snapshot TTL window.
+      match.reasons = getQueryExplainReasons(entry, queryLower, undefined, match);
+    }
     result.match = match;
   }
 
@@ -2348,14 +2372,14 @@ function validateOptionalStringArray(value: unknown, fieldName: string): string 
     : `${fieldName} must be an array of strings.`;
 }
 
-function countExpiredEntries<T extends Entry | { entry: Entry }>(items: T[]): number {
-  let count = 0;
+function collectExpiredEntryIds<T extends Entry | { entry: Entry }>(items: T[]): Set<string> {
+  const ids = new Set<string>();
   for (const item of items) {
     const wrapper = item as { entry?: Entry };
     const entry = wrapper.entry ?? (item as Entry);
-    if (isEntryExpired(entry)) count += 1;
+    if (isEntryExpired(entry)) ids.add(entry.id);
   }
-  return count;
+  return ids;
 }
 
 /**
@@ -7196,7 +7220,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_query",
     description:
-      "Search and filter memories with lexical, semantic, or hybrid `search_mode`. Queryless browsing is allowed with filters such as namespace, tags, entry type, or time range; each page `limit` defaults to 10 and caps at 50. Responses report `returned`, exact `total_matched`, `has_more`, and an opaque `next_cursor` when more results remain. Pagination snapshots are created only when more than one page is needed, expire after 5 minutes, and are bounded per principal and globally; a caller may evict its own oldest active snapshots, but resumes fail with `capacity_exceeded` rather than deleting another principal's cursor. Resume with that `cursor`; you may change `limit` on resume, but every other explicit query/filter/mode/serialization argument must be omitted or normalize to the frozen snapshot shape exactly. Semantic `total_matched` is exact over currently retrievable candidates indexed with the active embedding model; entries without a compatible embedding are outside that candidate set. Hybrid totals are exact over the union of lexical matches and those currently retrievable semantic candidates, so entries without embeddings can still match lexically. Namespace filters are literal and case-sensitive: a bare namespace includes descendants (`namespace_scope: subtree`), while a trailing-slash prefix includes only descendants (`namespace_scope: prefix`). Broad retrieval hides expired state unless `include_expired:true`; `explain:true` returns retrieval metadata. If exact bounded pagination would exceed the server safety cap, the call fails explicitly instead of returning a misleading lower-bound count.",
+      "Search and filter memories with lexical, semantic, or hybrid `search_mode`. Queryless browsing is allowed with filters such as namespace, tags, entry type, or time range; each page `limit` defaults to 10 and caps at 50. Responses report `returned`, exact `total_matched`, `has_more`, and an opaque `next_cursor` when more results remain. Pagination snapshots are created only when more than one page is needed, expire after 5 minutes, and are bounded per principal and globally; a caller may evict its own oldest active snapshots, but resumes fail with `capacity_exceeded` rather than deleting another principal's cursor. Resume with that `cursor`; you may change `limit` on resume, but every other explicit query/filter/mode/serialization argument must be omitted or normalize to the frozen snapshot shape exactly. Semantic `total_matched` is exact over currently retrievable candidates indexed with the active embedding model; entries without a compatible embedding are outside that candidate set. Hybrid totals are exact over the union of lexical matches and those currently retrievable semantic candidates, so entries without embeddings can still match lexically. Those mode rules define the retrieval candidate set; server-policy canonical orientation and blocked/needs-attention entries may then be injected before final reranking. Injected entries become members of the frozen final result set and count in `total_matched`. Namespace filters are literal and case-sensitive: a bare namespace includes descendants (`namespace_scope: subtree`), while a trailing-slash prefix includes only descendants (`namespace_scope: prefix`). Broad retrieval hides expired state unless `include_expired:true`; `explain:true` returns retrieval metadata frozen from the same scoring inputs as the result order. If exact bounded pagination would exceed the server safety cap, the call fails explicitly instead of returning a misleading lower-bound count.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -11246,7 +11270,7 @@ export function registerTools(
 
                 const expiredFilteredCount = includeExpired
                   ? 0
-                  : countExpiredEntries(queryEntriesByFilter(db, {
+                  : collectExpiredEntryIds(queryEntriesByFilter(db, {
                     namespaceSelectors: readableNamespaceSelectors,
                     entryType: entry_type,
                     tags,
@@ -11254,7 +11278,7 @@ export function registerTools(
                     includeExpired: true,
                     since,
                     until,
-                  }));
+                  })).size;
                 const visibleResults = filterByAccess(ctx, filterResults);
                 if (visibleResults.length > MAX_QUERY_SNAPSHOT_MATCHES) {
                   return exactQueryBoundExceeded("This filter-only browse");
@@ -11369,10 +11393,10 @@ export function registerTools(
               let lexicalResults: ReturnType<typeof queryEntriesLexicalScored> = [];
               let semanticResults: ReturnType<typeof queryEntriesSemanticScored> = [];
               let hybridResults: HybridQueryResult[] = [];
-              const countLexicalExpired = (resolvedQuery: string, rawFts5 = false) => (
+              const collectLexicalExpiredIds = (resolvedQuery: string, rawFts5 = false) => (
                 includeExpired
-                  ? 0
-                  : countExpiredEntries(queryEntriesLexicalScored(db, {
+                  ? new Set<string>()
+                  : collectExpiredEntryIds(queryEntriesLexicalScored(db, {
                     query: resolvedQuery,
                     namespaceSelectors: readableNamespaceSelectors,
                     entryType: entry_type,
@@ -11384,10 +11408,10 @@ export function registerTools(
                     rawFts5,
                   }))
               );
-              const countSemanticExpired = (queryEmbedding: Buffer, queryEmbeddingModel: string) => (
+              const collectSemanticExpiredIds = (queryEmbedding: Buffer, queryEmbeddingModel: string) => (
                 includeExpired
-                  ? 0
-                  : countExpiredEntries(queryEntriesSemanticScored(db, {
+                  ? new Set<string>()
+                  : collectExpiredEntryIds(queryEntriesSemanticScored(db, {
                     queryEmbedding,
                     queryEmbeddingModel,
                     namespaceSelectors: readableNamespaceSelectors,
@@ -11439,7 +11463,7 @@ export function registerTools(
                   if (semanticResults.length > MAX_QUERY_SNAPSHOT_MATCHES) {
                     return exactQueryBoundExceeded("This semantic query");
                   }
-                  expiredFilteredCount = countSemanticExpired(buf, activeEmbeddingModel);
+                  expiredFilteredCount = collectSemanticExpiredIds(buf, activeEmbeddingModel).size;
                   results = semanticResults.map((result) => result.entry);
                 }
               }
@@ -11502,8 +11526,14 @@ export function registerTools(
                       warning = "No exact lexical matches found. Used relaxed token matching for natural-language query.";
                     }
                   }
-                  expiredFilteredCount = countSemanticExpired(buf, activeEmbeddingModel)
-                    + countLexicalExpired(relaxedLexical && relaxedQuery ? relaxedQuery : queryText, relaxedLexical);
+                  const expiredCandidateIds = collectSemanticExpiredIds(buf, activeEmbeddingModel);
+                  for (const id of collectLexicalExpiredIds(
+                    relaxedLexical && relaxedQuery ? relaxedQuery : queryText,
+                    relaxedLexical,
+                  )) {
+                    expiredCandidateIds.add(id);
+                  }
+                  expiredFilteredCount = expiredCandidateIds.size;
                   hybridResults = fuseHybridResults(lexicalResults, semanticResults);
                   if (hybridResults.length > MAX_QUERY_SNAPSHOT_MATCHES) {
                     return exactQueryBoundExceeded("This hybrid query");
@@ -11527,7 +11557,7 @@ export function registerTools(
                 if (lexicalResults.length > MAX_QUERY_SNAPSHOT_MATCHES) {
                   return exactQueryBoundExceeded("This lexical query");
                 }
-                expiredFilteredCount = countLexicalExpired(queryText);
+                expiredFilteredCount = collectLexicalExpiredIds(queryText).size;
                 results = lexicalResults.map((result) => result.entry);
 
                 if (results.length === 0) {
@@ -11547,7 +11577,7 @@ export function registerTools(
                     if (lexicalResults.length > MAX_QUERY_SNAPSHOT_MATCHES) {
                       return exactQueryBoundExceeded("This lexical query");
                     }
-                    expiredFilteredCount = countLexicalExpired(relaxedQuery, true);
+                    expiredFilteredCount = collectLexicalExpiredIds(relaxedQuery, true).size;
                     results = lexicalResults.map((result) => result.entry);
                     if (results.length > 0 && !warning) {
                       warning = "No exact lexical matches found. Used relaxed token matching for natural-language query.";
@@ -11660,7 +11690,16 @@ export function registerTools(
                 };
               }
               const resultIds = results.map((entry) => entry.id);
-              const storedMatchMeta = buildStoredQueryMatchMeta(results, actualMode, lexicalById, semanticById, hybridById);
+              const storedMatchMeta = buildStoredQueryMatchMeta(
+                results,
+                actualMode,
+                lexicalById,
+                semanticById,
+                hybridById,
+                explain,
+                queryText.toLowerCase(),
+                trackedStatuses,
+              );
               const snapshotId = randomBytes(16).toString("hex");
               const cursorSecret = randomBytes(32).toString("base64url");
               const firstPage = buildQuerySnapshotPage(
