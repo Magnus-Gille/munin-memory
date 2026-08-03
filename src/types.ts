@@ -108,11 +108,14 @@ export interface QueryParams {
   require_lexical_match?: boolean;
   /**
    * Output ordering of ranked search results. `"linear"` (default) returns
-   * strict best-first rank order. `"boundary"` places the strongest results at
-   * the two context edges (rank 1 first, rank 2 last, rank 3 second, …) to
-   * counter the "Lost in the Middle" attention dip in long contexts. The set of
-   * results and their underlying ranks are unchanged — only display order — and
-   * retrieval analytics always record the true linear rank order. No effect on
+   * the order after structural reranking; visible `lexical_rank`,
+   * `semantic_rank`, and `hybrid_score` signals may differ from a result's
+   * final position. `"boundary"` places the strongest results from that
+   * reranked order at the two context edges (first result first, second result
+   * last, third result second, …) to counter the "Lost in the Middle" attention
+   * dip in long contexts. The set of results and their underlying retrieval
+   * signals are unchanged — only display order — and retrieval analytics record
+   * the same linear order before any boundary transform. No effect on
    * filter-only browse queries.
    */
   serialization?: "linear" | "boundary";

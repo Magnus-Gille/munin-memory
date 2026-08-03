@@ -11,6 +11,7 @@ changelog is the canonical record of what moved.
 ### Changed
 
 - **MCP tool metadata now provides server-level instructions and expressive input schemas (#257).** The server publishes fallback-safe first-operation guidance, while tool schemas expose relevant grammar, examples, limits, and lifecycle vocabulary.
+- **`memory_query` serialization metadata now describes reranked linear order (#252).** `linear` preserves the result order after structural reranking; visible lexical, semantic, and hybrid retrieval signals may differ from a result's final position. `boundary` remains a display-only transform applied afterward, and retrieval analytics continue to record the linear order.
 - **`memory_update_status` now supports non-mutating sandbox validation via `validate_only: true` (#275).**
   The normal mutation path is unchanged: real `memory_update_status` writes still require one
   of the caller's tracked namespaces and still create the usual state/audit/commitment effects.

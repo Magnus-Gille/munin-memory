@@ -6807,7 +6807,7 @@ const TOOL_DEFINITIONS = [
         serialization: {
           type: "string",
           enum: ["linear", "boundary"],
-          description: "Optional (default \"linear\"). Output ordering of ranked results. \"linear\" returns strict best-first rank order. \"boundary\" places the strongest results at the two context edges (rank 1 first, rank 2 last, rank 3 second, …) to counter the \"Lost in the Middle\" attention dip when dropping a long result list straight into context. The result set and underlying ranks are unchanged — only display order — and retrieval analytics always record the true linear rank order. No effect on filter-only browse queries.",
+          description: "Optional (default \"linear\"). Output ordering of ranked results. \"linear\" preserves the order after structural reranking; the visible lexical_rank, semantic_rank, and hybrid_score signals may differ from a result's final position. \"boundary\" places the strongest results from that reranked order at the two context edges (first result first, second result last, third result second, …) to counter the \"Lost in the Middle\" attention dip when dropping a long result list straight into context. The result set and underlying retrieval signals are unchanged — only display order — and retrieval analytics record the same linear order before any boundary transform. No effect on filter-only browse queries.",
         },
       },
       additionalProperties: false,
@@ -11027,7 +11027,7 @@ export function registerTools(
               }
 
               // Boundary serialization is purely a display-order transform, applied
-              // AFTER analytics so retrieval_events keep the true linear rank order
+              // AFTER analytics so retrieval_events keep the reranked linear order
               // (outcome correlation must not see the reordered list).
               if (serialization === "boundary") {
                 response.results = boundarySerialize(formatted);

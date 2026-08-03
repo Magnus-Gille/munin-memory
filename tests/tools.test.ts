@@ -9500,6 +9500,29 @@ describe("compare-and-swap (memory_write)", () => {
     expect(memoryHistory?.inputSchema.properties?.namespace?.description).toContain("returns only descendants under that literal prefix");
   });
 
+  it("documents that linear serialization preserves reranked order", async () => {
+    const handler = (
+      server as unknown as { _requestHandlers: Map<string, Function> }
+    )._requestHandlers?.get("tools/list");
+    const toolList = await handler!({ method: "tools/list", params: {} });
+    const memoryQuery = (
+      toolList as {
+        tools: Array<{
+          name: string;
+          inputSchema: { properties?: Record<string, SchemaNode> };
+        }>;
+      }
+    ).tools.find((tool) => tool.name === "memory_query");
+
+    const description = memoryQuery?.inputSchema.properties?.serialization?.description ?? "";
+    expect(description).toContain('"linear" preserves the order after structural reranking');
+    expect(description).toContain("lexical_rank");
+    expect(description).toContain("semantic_rank");
+    expect(description).toContain("hybrid_score");
+    expect(description).toContain("may differ from a result's final position");
+    expect(description).not.toContain('"linear" returns strict best-first rank order');
+  });
+
   it("advertises closed argument objects for the #269 validated tools", async () => {
     const handler = (
       server as unknown as { _requestHandlers: Map<string, Function> }
