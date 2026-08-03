@@ -467,12 +467,12 @@ export function boundarySerialize<T>(items: T[]): T[] {
   return [...front, ...back];
 }
 
-/** Serialization mode: "linear" preserves rank order, "boundary" reorders for LLM attention. */
+/** Serialization mode: "linear" preserves the supplied (already reranked) order, "boundary" reorders for LLM attention. */
 export type SerializationMode = "linear" | "boundary";
 
 /**
  * Apply a serialization mode to an ordered list of items.
- * "linear" = identity (preserves rank order).
+ * "linear" = identity (preserves the supplied order).
  * "boundary" = boundarySerialize (reorders for LLM primacy/recency effect).
  */
 export function serializeOrder<T>(items: T[], mode: SerializationMode): T[] {
