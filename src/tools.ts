@@ -24,6 +24,7 @@ import {
 } from "./access.js";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { namespaceFilterScope } from "./internal/namespace-filter.js";
+import { withQueryProbeLimit } from "./internal/query-probe.js";
 import {
   writeState,
   patchState,
@@ -11202,7 +11203,7 @@ export function registerTools(
                 return okResult("query", response);
               };
 
-              if (cursor) {
+              if (cursor !== undefined) {
                 const parsedCursor = parseQueryCursor(cursor);
                 if (!parsedCursor) {
                   return errResult("query", "validation_error", "Invalid query cursor.");
@@ -11267,7 +11268,7 @@ export function registerTools(
                 if (!namespace && (!tags || tags.length === 0) && !since && !until && !entry_type) {
                   return errResult("query", "validation_error", "Provide either a 'query' string for search, or at least one filter (namespace, tags, entry_type, since, until) to browse.");
                 }
-                let filterResults = queryEntriesByFilter(db, {
+                let filterResults = queryEntriesByFilter(db, withQueryProbeLimit({
                   namespaceSelectors: readableNamespaceSelectors,
                   entryType: entry_type,
                   tags,
@@ -11275,14 +11276,14 @@ export function registerTools(
                   includeExpired,
                   since,
                   until,
-                });
+                }));
                 if (filterResults.length > MAX_QUERY_SNAPSHOT_MATCHES) {
                   return exactQueryBoundExceeded("This filter-only browse");
                 }
 
                 const expiredFilteredCount = includeExpired
                   ? 0
-                  : collectExpiredEntryIds(queryEntriesByFilter(db, {
+                  : collectExpiredEntryIds(queryEntriesByFilter(db, withQueryProbeLimit({
                     namespaceSelectors: readableNamespaceSelectors,
                     entryType: entry_type,
                     tags,
@@ -11290,7 +11291,7 @@ export function registerTools(
                     includeExpired: true,
                     since,
                     until,
-                  })).size;
+                  }))).size;
                 const visibleResults = filterByAccess(ctx, filterResults);
                 if (visibleResults.length > MAX_QUERY_SNAPSHOT_MATCHES) {
                   return exactQueryBoundExceeded("This filter-only browse");
@@ -11409,7 +11410,7 @@ export function registerTools(
               const collectLexicalExpiredIds = (resolvedQuery: string, rawFts5 = false) => (
                 includeExpired
                   ? new Set<string>()
-                  : collectExpiredEntryIds(queryEntriesLexicalScored(db, {
+                  : collectExpiredEntryIds(queryEntriesLexicalScored(db, withQueryProbeLimit({
                     query: resolvedQuery,
                     namespaceSelectors: readableNamespaceSelectors,
                     entryType: entry_type,
@@ -11419,12 +11420,12 @@ export function registerTools(
                     since,
                     until,
                     rawFts5,
-                  }))
+                  })))
               );
               const collectSemanticExpiredIds = (queryEmbedding: Buffer, queryEmbeddingModel: string) => (
                 includeExpired
                   ? new Set<string>()
-                  : collectExpiredEntryIds(queryEntriesSemanticScored(db, {
+                  : collectExpiredEntryIds(queryEntriesSemanticScored(db, withQueryProbeLimit({
                     queryEmbedding,
                     queryEmbeddingModel,
                     namespaceSelectors: readableNamespaceSelectors,
@@ -11435,7 +11436,7 @@ export function registerTools(
                     since,
                     until,
                     maxDistance: getSemanticMaxDistance(),
-                  }))
+                  })))
               );
 
               if (requestedMode === "semantic") {
@@ -11461,7 +11462,7 @@ export function registerTools(
                 } else {
                   const activeEmbeddingModel = getActiveEmbeddingModel();
                   const buf = embeddingToBuffer(queryEmb);
-                  semanticResults = queryEntriesSemanticScored(db, {
+                  semanticResults = queryEntriesSemanticScored(db, withQueryProbeLimit({
                     queryEmbedding: buf,
                     queryEmbeddingModel: activeEmbeddingModel,
                     namespaceSelectors: readableNamespaceSelectors,
@@ -11472,7 +11473,7 @@ export function registerTools(
                     since,
                     until,
                     maxDistance: getSemanticMaxDistance(),
-                  });
+                  }));
                   if (semanticResults.length > MAX_QUERY_SNAPSHOT_MATCHES) {
                     return exactQueryBoundExceeded("This semantic query");
                   }
@@ -11491,7 +11492,7 @@ export function registerTools(
                   const activeEmbeddingModel = getActiveEmbeddingModel();
                   const buf = embeddingToBuffer(queryEmb);
                   const relaxedQuery = buildRelaxedLexicalQuery(queryText);
-                  lexicalResults = queryEntriesLexicalScored(db, {
+                  lexicalResults = queryEntriesLexicalScored(db, withQueryProbeLimit({
                     query: queryText,
                     namespaceSelectors: readableNamespaceSelectors,
                     entryType: entry_type,
@@ -11500,9 +11501,9 @@ export function registerTools(
                     includeExpired,
                     since,
                     until,
-                  });
+                  }));
                   if (lexicalResults.length === 0 && relaxedQuery) {
-                    const relaxedResults = queryEntriesLexicalScored(db, {
+                    const relaxedResults = queryEntriesLexicalScored(db, withQueryProbeLimit({
                       query: relaxedQuery,
                       namespaceSelectors: readableNamespaceSelectors,
                       entryType: entry_type,
@@ -11512,13 +11513,13 @@ export function registerTools(
                       since,
                       until,
                       rawFts5: true,
-                    });
+                    }));
                     if (relaxedResults.length > 0) {
                       lexicalResults = relaxedResults;
                       relaxedLexical = true;
                     }
                   }
-                  semanticResults = queryEntriesSemanticScored(db, {
+                  semanticResults = queryEntriesSemanticScored(db, withQueryProbeLimit({
                     queryEmbedding: buf,
                     queryEmbeddingModel: activeEmbeddingModel,
                     namespaceSelectors: readableNamespaceSelectors,
@@ -11529,7 +11530,7 @@ export function registerTools(
                     since,
                     until,
                     maxDistance: getSemanticMaxDistance(),
-                  });
+                  }));
                   if (lexicalResults.length > MAX_QUERY_SNAPSHOT_MATCHES || semanticResults.length > MAX_QUERY_SNAPSHOT_MATCHES) {
                     return exactQueryBoundExceeded("This hybrid query");
                   }
@@ -11557,7 +11558,7 @@ export function registerTools(
 
               // Lexical fallback (or original mode)
               if (actualMode === "lexical") {
-                lexicalResults = queryEntriesLexicalScored(db, {
+                lexicalResults = queryEntriesLexicalScored(db, withQueryProbeLimit({
                   query: queryText,
                   namespaceSelectors: readableNamespaceSelectors,
                   entryType: entry_type,
@@ -11566,7 +11567,7 @@ export function registerTools(
                   includeExpired,
                   since,
                   until,
-                });
+                }));
                 if (lexicalResults.length > MAX_QUERY_SNAPSHOT_MATCHES) {
                   return exactQueryBoundExceeded("This lexical query");
                 }
@@ -11576,7 +11577,7 @@ export function registerTools(
                 if (results.length === 0) {
                   const relaxedQuery = buildRelaxedLexicalQuery(queryText);
                   if (relaxedQuery) {
-                    lexicalResults = queryEntriesLexicalScored(db, {
+                    lexicalResults = queryEntriesLexicalScored(db, withQueryProbeLimit({
                       query: relaxedQuery,
                       namespaceSelectors: readableNamespaceSelectors,
                       entryType: entry_type,
@@ -11586,7 +11587,7 @@ export function registerTools(
                       since,
                       until,
                       rawFts5: true,
-                    });
+                    }));
                     if (lexicalResults.length > MAX_QUERY_SNAPSHOT_MATCHES) {
                       return exactQueryBoundExceeded("This lexical query");
                     }

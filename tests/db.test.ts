@@ -25,6 +25,7 @@ import {
   pairRevisedCommitments,
   listEntriesForDerivation,
   queryEntries,
+  queryEntriesLexicalScored,
   queryEntriesByFilter,
   filterIdsMatchingFts,
   listNamespaces,
@@ -1586,6 +1587,26 @@ describe("queryEntries (FTS5)", () => {
     expect(results.length).toBeLessThanOrEqual(2);
   });
 
+  it("caps the exported lexical helper at the public 50-result contract", () => {
+    for (let index = 0; index < 51; index += 1) {
+      writeState(
+        db,
+        `projects/public-lexical-cap-${index}`,
+        "status",
+        "public lexical cap fixture",
+        [],
+      );
+    }
+
+    const results = queryEntriesLexicalScored(db, {
+      query: "public lexical cap fixture",
+      limit: 1_000,
+      includeExpired: true,
+    });
+
+    expect(results).toHaveLength(50);
+  });
+
   it("handles hyphenated terms without FTS5 syntax errors (#1)", () => {
     writeState(db, "projects/hugin-munin", "tools", "Uses better-sqlite3 and nano-banana", ["tools"]);
     const results = queryEntries(db, { query: "nano-banana" });
@@ -2502,6 +2523,26 @@ describe("queryEntriesByFilter (no FTS)", () => {
     expect(zeroLimit.length).toBeGreaterThanOrEqual(1);
     const bigLimit = queryEntriesByFilter(db, { limit: 1000 });
     expect(bigLimit.length).toBeLessThanOrEqual(50);
+  });
+
+  it("caps the exported filter helper at the public 50-result contract with a real larger fixture", () => {
+    for (let index = 0; index < 51; index += 1) {
+      writeState(
+        db,
+        `projects/public-filter-cap-${index}`,
+        "status",
+        `public filter cap fixture ${index}`,
+        ["public-filter-cap"],
+      );
+    }
+
+    const results = queryEntriesByFilter(db, {
+      tags: ["public-filter-cap"],
+      limit: 1_000,
+      includeExpired: true,
+    });
+
+    expect(results).toHaveLength(50);
   });
 
   it("filters by since and until timestamps", () => {

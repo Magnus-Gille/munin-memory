@@ -494,6 +494,36 @@ describe("semantic search (vec integration)", () => {
 });
 
 describe("hybrid RRF search", () => {
+  it.skipIf(!vecAvailable)("caps the exported semantic and hybrid helpers at the public 50-result contract", () => {
+    const entryIds: string[] = [];
+    for (let index = 0; index < 51; index += 1) {
+      const { id } = writeState(
+        db,
+        `public-cap/${index}`,
+        "status",
+        "public semantic hybrid cap fixture",
+        [],
+      );
+      entryIds.push(id);
+      storeEmbedding(db, id, embeddingToBuffer(makeEmbedding(1)), "test");
+    }
+
+    const queryEmbedding = embeddingToBuffer(makeEmbedding(1));
+    const semanticResults = queryEntriesSemanticScored(db, {
+      queryEmbedding,
+      limit: 1_000,
+      includeExpired: true,
+    });
+    const hybridResults = queryEntriesHybridScored(db, {
+      ftsOptions: { query: "public semantic hybrid cap fixture", limit: 1_000, includeExpired: true },
+      semanticOptions: { queryEmbedding, limit: 1_000, includeExpired: true },
+    });
+
+    expect(entryIds).toHaveLength(51);
+    expect(semanticResults).toHaveLength(50);
+    expect(hybridResults.results).toHaveLength(50);
+  });
+
   it.skipIf(!vecAvailable)("ranks entries present in both FTS and vec higher", () => {
     // Entry that matches both FTS ("cat") and vec (seed 1)
     const { id: bothId } = writeState(db, "test/ns", "both", "The cat is a wonderful animal", ["test"]);

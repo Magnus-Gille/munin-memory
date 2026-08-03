@@ -4362,6 +4362,52 @@ describe("memory_query", () => {
       expect(mismatched.message).toContain("cursor");
     });
 
+    it("rejects an explicitly empty cursor with original query arguments without starting another snapshot", async () => {
+      seedPagedLexicalCorpus(55, "empty-cursor-with-args");
+
+      const first = parseToolResponse(await callTool("memory_query", {
+        query: "Paged lexical corpus empty-cursor-with-args",
+        search_mode: "lexical",
+        limit: 50,
+      })) as { next_cursor: string; has_more: boolean };
+      expect(first.has_more).toBe(true);
+      const snapshotsBefore = countQuerySnapshots();
+
+      const invalid = parseToolResponse(await callTool("memory_query", {
+        cursor: "",
+        query: "Paged lexical corpus empty-cursor-with-args",
+        search_mode: "lexical",
+        limit: 50,
+      })) as { ok: boolean; error?: string; message?: string };
+
+      expect(invalid).toMatchObject({ ok: false, error: "validation_error" });
+      expect(invalid.message).toBe("Invalid query cursor.");
+      expect(countQuerySnapshots()).toBe(snapshotsBefore);
+      expect(first.next_cursor).toBeTruthy();
+    });
+
+    it("rejects an explicitly empty cursor without original query arguments and without starting a query", async () => {
+      seedPagedLexicalCorpus(55, "empty-cursor-without-args");
+
+      const first = parseToolResponse(await callTool("memory_query", {
+        query: "Paged lexical corpus empty-cursor-without-args",
+        search_mode: "lexical",
+        limit: 50,
+      })) as { next_cursor: string; has_more: boolean };
+      expect(first.has_more).toBe(true);
+      const snapshotsBefore = countQuerySnapshots();
+
+      const invalid = parseToolResponse(await callTool("memory_query", { cursor: "" })) as {
+        ok: boolean;
+        error?: string;
+        message?: string;
+      };
+
+      expect(invalid).toMatchObject({ ok: false, error: "validation_error" });
+      expect(invalid.message).toBe("Invalid query cursor.");
+      expect(countQuerySnapshots()).toBe(snapshotsBefore);
+    });
+
     it("can exhaust a 55-result snapshot over repeated default-size resumes without duplicates", async () => {
       seedPagedLexicalCorpus(55, "multi-resume");
 
@@ -4915,6 +4961,23 @@ describe("memory_query", () => {
       expect(result.ok).toBe(false);
       expect(result.error).toBe("query_bound_exceeded");
       expect(result.message).toContain("500");
+    });
+
+    it("keeps an exact 500-candidate snapshot while probing one extra candidate", async () => {
+      seedPagedLexicalCorpus(500, "exact-bound-page");
+
+      const result = parseToolResponse(await callTool("memory_query", {
+        query: "Paged lexical corpus exact-bound-page",
+        search_mode: "lexical",
+        limit: 50,
+      })) as { total_matched: number; returned: number; has_more: boolean };
+
+      const snapshotRow = db.prepare(
+        "SELECT result_ids FROM query_snapshots ORDER BY created_at DESC, id DESC LIMIT 1",
+      ).get() as { result_ids: string };
+
+      expect(result).toMatchObject({ total_matched: 500, returned: 50, has_more: true });
+      expect(JSON.parse(snapshotRow.result_ids)).toHaveLength(500);
     });
 
     it("ignores expired filter-only matches before the 500-candidate bound", async () => {

@@ -28,6 +28,7 @@ import {
   matchesNamespaceSelectors,
   resolveNamespaceSelectorScope,
 } from "./internal/namespace-filter.js";
+import { hasQueryProbeLimit, withQueryProbeLimit } from "./internal/query-probe.js";
 import { CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX } from "./commitment-status.js";
 import { runMigrations } from "./migrations.js";
 import { resolveKnob } from "./profiles.js";
@@ -1308,7 +1309,7 @@ export function buildQueryEntriesByFilterStatement(
     since,
     until,
   } = options;
-  const clampedLimit = Math.min(Math.max(limit, 1), MAX_INTERNAL_QUERY_LIMIT);
+  const clampedLimit = clampQueryLimit(limit, options);
 
   let sql = "SELECT * FROM entries WHERE is_current = 1";
   const params: unknown[] = [];
@@ -1364,7 +1365,7 @@ export function buildQueryEntriesLexicalStatement(
     until,
     rawFts5 = false,
   } = options;
-  const clampedLimit = Math.min(Math.max(limit, 1), MAX_INTERNAL_QUERY_LIMIT);
+  const clampedLimit = clampQueryLimit(limit, options);
 
   let sql = `
     SELECT e.*, bm25(entries_fts) as lexical_score FROM entries e
@@ -1596,9 +1597,10 @@ export function listEntriesForDerivation(
 }
 
 /**
- * Maximum results any single retrieval query may return. The storage layer
- * clamps to this; `memory_query` warns when a caller asks for more so a
- * truncated page is never mistaken for an exhausted result set.
+ * Maximum results any public/default retrieval helper may return. The storage
+ * layer clamps exported helpers to this; `memory_query` warns when a caller
+ * asks for more so a truncated page is never mistaken for an exhausted result
+ * set. Its private snapshot probe uses a separate internal sentinel cap.
  */
 export const MAX_QUERY_LIMIT = 50;
 /** Exact snapshot pagination refuses broader result sets rather than lying about totals. */
@@ -1608,7 +1610,13 @@ export const MAX_ACTIVE_QUERY_SNAPSHOTS_GLOBAL = 8;
 export const MAX_QUERY_SNAPSHOT_BYTES_PER_ROW = 256 * 1024;
 export const MAX_ACTIVE_QUERY_SNAPSHOT_BYTES_PER_PRINCIPAL = 512 * 1024;
 export const MAX_ACTIVE_QUERY_SNAPSHOT_BYTES_GLOBAL = 2 * 1024 * 1024;
-const MAX_INTERNAL_QUERY_LIMIT = MAX_QUERY_SNAPSHOT_MATCHES + 1;
+/** Internal snapshot probe cap: the exact bound plus one overflow sentinel. */
+const MAX_QUERY_PROBE_LIMIT = MAX_QUERY_SNAPSHOT_MATCHES + 1;
+
+function clampQueryLimit(limit: number, options: object): number {
+  const maxLimit = hasQueryProbeLimit(options) ? MAX_QUERY_PROBE_LIMIT : MAX_QUERY_LIMIT;
+  return Math.min(Math.max(limit, 1), maxLimit);
+}
 const QUERY_SNAPSHOT_TOOL_NAME = "memory_query";
 
 export class QuerySnapshotCapacityError extends Error {
@@ -2939,7 +2947,7 @@ export function queryEntriesSemanticScored(
     maxDistance,
     queryEmbeddingModel,
   } = options;
-  const clampedLimit = Math.min(Math.max(limit, 1), MAX_INTERNAL_QUERY_LIMIT);
+  const clampedLimit = clampQueryLimit(limit, options);
   const now = nowUTC();
   const effectiveNamespaceMode = namespaceMode ?? (options.exactNamespaceScan === true ? "exact" : "subtree");
   const resolvedNamespaceSelectors = resolveNamespaceSelectorScope(
@@ -3099,7 +3107,7 @@ export function queryEntriesSemanticScored(
   // over-fetch and filter inline, stopping once we have enough matches.
   // Only reached when queryEmbeddingModel is NOT set (backward-compat, or
   // callers that opt out of the model guard explicitly).
-  const knnFetch = Math.min(Math.max(clampedLimit * 10, 100), MAX_INTERNAL_QUERY_LIMIT);
+  const knnFetch = Math.min(Math.max(clampedLimit * 10, 100), MAX_QUERY_PROBE_LIMIT);
 
   // KNN query via vec0
   const vecResults = db
@@ -3179,21 +3187,29 @@ export function queryEntriesHybridScored(
   options: HybridQueryOptions,
 ): HybridQueryScored {
   const { ftsOptions, semanticOptions, ftsFallbackOptions } = options;
-  const limit = Math.min(Math.max(ftsOptions.limit ?? 10, 1), MAX_INTERNAL_QUERY_LIMIT);
+  const isProbe = hasQueryProbeLimit(ftsOptions)
+    || hasQueryProbeLimit(semanticOptions)
+    || (ftsFallbackOptions !== undefined && hasQueryProbeLimit(ftsFallbackOptions));
+  const maxLimit = isProbe ? MAX_QUERY_PROBE_LIMIT : MAX_QUERY_LIMIT;
+  const limit = Math.min(Math.max(ftsOptions.limit ?? 10, 1), maxLimit);
 
   // Over-fetch from both sources (5x limit per Codex finding)
-  const overFetchLimit = Math.min(limit * 5, MAX_INTERNAL_QUERY_LIMIT);
+  const overFetchLimit = Math.min(limit * 5, maxLimit);
+  const withFetchLimit = <T extends { limit?: number }>(queryOptions: T): T & { limit: number } => {
+    const boundedOptions = { ...queryOptions, limit: overFetchLimit };
+    return isProbe ? withQueryProbeLimit(boundedOptions) : boundedOptions;
+  };
 
-  let ftsResults = queryEntriesLexicalScored(db, { ...ftsOptions, limit: overFetchLimit });
+  let ftsResults = queryEntriesLexicalScored(db, withFetchLimit(ftsOptions));
   let ftsRelaxed = false;
   if (ftsResults.length === 0 && ftsFallbackOptions) {
-    const relaxed = queryEntriesLexicalScored(db, { ...ftsFallbackOptions, limit: overFetchLimit });
+    const relaxed = queryEntriesLexicalScored(db, withFetchLimit(ftsFallbackOptions));
     if (relaxed.length > 0) {
       ftsResults = relaxed;
       ftsRelaxed = true;
     }
   }
-  const vecResults = queryEntriesSemanticScored(db, { ...semanticOptions, limit: overFetchLimit });
+  const vecResults = queryEntriesSemanticScored(db, withFetchLimit(semanticOptions));
 
   // Build 1-indexed rank maps
   const ftsRanks = new Map<string, number>();
