@@ -60,11 +60,13 @@ a legacy proposal, excluded from default session scope and available only throug
 explicit same-principal scope. It remains subject to the existing expiry, terminal
 payload retention, event, and approval rules.
 
-Durable capture requires a stable server-derived session. Stdio creates one for the
-process; HTTP derives an opaque stored ID from the authenticated principal and a
-stable MCP session token under a process-local server secret. HTTP requests without
-that token do not get an implicit shared owner/session ID, so `persist:true` fails
-closed. A server restart may make the old run unavailable in default scope; explicit
+Durable capture requires a server-issued run handle. Stdio creates one for the
+process. For HTTP, an authenticated OAuth or agent-token request that omits
+`Mcp-Session-Id` receives a fresh random, signed handle in the response and must
+echo it on subsequent requests. The handle is bound to the authenticated
+principal and credential; a static bearer caller or a request with an invalid
+presented handle fails closed, so neither can capture a durable proposal. A
+server restart may make the old run unavailable in default scope; explicit
 same-principal scope remains the recovery path.
 
 Approval re-runs authorization, secret validation, classification resolution, and

@@ -211,12 +211,12 @@ ID. Use `scope:"principal"` only when the same principal intentionally needs to
 review across sessions; this never expands to another principal. Exact `namespace`
 and `operation_type` filters are available on `list`, and authorized list/get
 responses expose the creator session. Legacy proposals without a session are
-available only through that explicit principal scope. For HTTP, authenticated
-OAuth and agent-token callers receive a server-issued, signed `Mcp-Session-Id`
-run handle when the request omits one and must echo that handle on subsequent
-review actions. The handle is bound to the authenticated principal and
-credential; caller-chosen or invalid handles fail closed, and static bearer
-callers without a server-issued handle cannot capture durable review proposals.
+available only through that explicit principal scope. For HTTP, an authenticated
+OAuth or agent-token request that omits `Mcp-Session-Id` receives a fresh random,
+signed server-issued run handle and must echo that handle on subsequent review
+actions. The handle is bound to the authenticated principal and credential;
+static bearer callers and requests with invalid presented handles fail closed,
+so neither can capture durable review proposals.
 A changed or superseded source produces a review conflict rather than a stale
 write. Duplicate approval returns the stored applied result without writing
 twice.
