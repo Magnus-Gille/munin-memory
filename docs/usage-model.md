@@ -211,11 +211,15 @@ ID. Use `scope:"principal"` only when the same principal intentionally needs to
 review across sessions; this never expands to another principal. Exact `namespace`
 and `operation_type` filters are available on `list`, and authorized list/get
 responses expose the creator session. Legacy proposals without a session are
-available only through that explicit principal scope. A stable server-derived
-session is required for durable capture; callers without one fail closed rather
-than sharing an implicit session. A changed or superseded source produces a review
-conflict rather than a stale write. Duplicate approval returns the stored applied
-result without writing twice.
+available only through that explicit principal scope. For HTTP, authenticated
+OAuth and agent-token callers receive a server-issued, signed `Mcp-Session-Id`
+run handle when the request omits one and must echo that handle on subsequent
+review actions. The handle is bound to the authenticated principal and
+credential; caller-chosen or invalid handles fail closed, and static bearer
+callers without a server-issued handle cannot capture durable review proposals.
+A changed or superseded source produces a review conflict rather than a stale
+write. Duplicate approval returns the stored applied result without writing
+twice.
 
 `prepare_undo` never mutates memory. It creates another pending proposal. If that
 proposal is approved, Munin uses the correction lineage (`supersedes` plus CAS) to

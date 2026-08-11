@@ -570,29 +570,66 @@ function deriveAnalyticsSessionId(clientId: string): string {
     .slice(0, 32);
 }
 
-/**
- * Derive the review creator identity from an authenticated, server-issued
- * run token. The durable proposal value is an HMAC under a process-local
- * server secret and is bound to the authenticated principal and token. A
- * caller cannot choose or spoof the stored creator session ID; callers using
- * static bearer keys, or without a verified token, receive no review session.
- */
-function deriveReviewSessionId(
+const MUNIN_RUN_SESSION_HEADER = "mcp-session-id";
+const MUNIN_RUN_HANDLE_PREFIX = "munin-run-v1";
+
+type AuthenticatedRunAuth = Pick<ExtendedAuthInfo, "authMethod" | "token">;
+
+function canCreateReviewRun(
+  principalId: string,
+  authInfo: AuthenticatedRunAuth | undefined,
+): authInfo is AuthenticatedRunAuth & { token: string } {
+  return Boolean(
+    principalId
+    && authInfo?.token
+    && (authInfo.authMethod === "oauth" || authInfo.authMethod === "agent_token"),
+  );
+}
+
+function signReviewRunHandle(
   secret: Buffer,
   principalId: string,
-  authInfo: Pick<ExtendedAuthInfo, "authMethod" | "token"> | undefined,
-): string | undefined {
-  if (
-    !principalId
-    || !authInfo?.token
-    || (authInfo.authMethod !== "oauth" && authInfo.authMethod !== "agent_token")
-  ) {
-    return undefined;
+  token: string,
+  runId: string,
+): string {
+  const signature = createHmac("sha256", secret)
+    .update(`${principalId}\0${token}\0${runId}`)
+    .digest("hex");
+  return `${MUNIN_RUN_HANDLE_PREFIX}.${runId}.${signature}`;
+}
+
+/**
+ * Resolve an authenticated server-issued run handle into the durable review
+ * creator identity. Caller-chosen MCP session IDs are never accepted.
+ */
+function resolveReviewRun(
+  secret: Buffer,
+  principalId: string,
+  authInfo: AuthenticatedRunAuth | undefined,
+  presentedHandle: string | undefined,
+): { handle: string; sessionId: string } | undefined {
+  if (!canCreateReviewRun(principalId, authInfo)) return undefined;
+
+  if (presentedHandle) {
+    const match = new RegExp(`^${MUNIN_RUN_HANDLE_PREFIX}\\.([0-9a-f]{32})\\.([0-9a-f]{64})$`)
+      .exec(presentedHandle);
+    if (!match) return undefined;
+    const [, runId, presentedSignature] = match;
+    const expectedSignature = createHmac("sha256", secret)
+      .update(`${principalId}\0${authInfo.token}\0${runId}`)
+      .digest("hex");
+    const valid = timingSafeEqual(
+      Buffer.from(presentedSignature, "ascii"),
+      Buffer.from(expectedSignature, "ascii"),
+    );
+    return valid ? { handle: presentedHandle, sessionId: runId } : undefined;
   }
-  return createHmac("sha256", secret)
-    .update(`${principalId}\0${authInfo.token}`)
-    .digest("hex")
-    .slice(0, 32);
+
+  const sessionId = randomBytes(16).toString("hex");
+  return {
+    handle: signReviewRunHandle(secret, principalId, authInfo.token, sessionId),
+    sessionId,
+  };
 }
 
 const REDACTED_HEADER_KEYS = new Set([
@@ -954,21 +991,30 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
     );
     // Analytics correlation may use the caller's transport header (or the
     // legacy time-bucket fallback), but review authorization must use only a
-    // server-verified run identity. Keep these identities independent so a
-    // missing review identity fails closed without dropping retrieval events.
+    // server-issued, authenticated run handle. Keep these identities
+    // independent so a missing review identity fails closed without dropping
+    // retrieval events.
     const analyticsSessionId = getSessionHeader(req)
       ?? deriveAnalyticsSessionId(authInfo?.clientId ?? "anonymous");
-    const reviewSessionId = deriveReviewSessionId(
+    const reviewRun = resolveReviewRun(
       reviewSessionSecret,
       accessContext.principalId,
       authInfo,
+      getSessionHeader(req),
     );
+    if (reviewRun) {
+      // StreamableHTTPServerTransport is intentionally stateless here, but
+      // MCP clients still understand Mcp-Session-Id as the server-issued
+      // handle to echo on subsequent requests. We authenticate it above and
+      // use only its random run component for review scope.
+      res.setHeader(MUNIN_RUN_SESSION_HEADER, reviewRun.handle);
+    }
     const mcpServer = createMcpServer(
       database,
       analyticsSessionId,
       accessContext,
       runtimeConfig,
-      reviewSessionId ?? null,
+      reviewRun?.sessionId ?? null,
     );
 
     try {
