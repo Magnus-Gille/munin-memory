@@ -9164,11 +9164,15 @@ export function registerTools(
                   readableProposal.source_untrusted
                   || approvalError?.untrusted_content === true
                 );
+                // Terminal or otherwise non-approvable proposals may retain their
+                // payload for audit/undo purposes, but their exact operation is
+                // no longer eligible for review-preview disclosure.
+                const showExactOperation = approvalEffect.approvalStatus !== "not_approvable";
                 return okResult("review", {
                   proposal_id: proposal.id,
                   status: readableProposal.status,
                   ...(persistedStatus ? { persisted_status: persistedStatus } : {}),
-                  ...(readableProposal.current_operation
+                  ...(showExactOperation && readableProposal.current_operation
                     ? { exact_operation: readableProposal.current_operation }
                     : {}),
                   classification: readableProposal.classification,
