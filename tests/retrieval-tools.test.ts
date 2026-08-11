@@ -280,6 +280,7 @@ describe("memory_insights tool", () => {
     const raw = await callTool("memory_insights");
     const result = parseToolResponse(raw) as {
       aggregates: {
+        scope: "global";
         reformulation_rate: number;
         reformulation_rate_adjusted: number;
         reformulation_explanation: string;
@@ -289,6 +290,7 @@ describe("memory_insights tool", () => {
     };
 
     expect(result.aggregates).toBeDefined();
+    expect(result.aggregates.scope).toBe("global");
     expect(result.aggregates.reformulation_rate).toBeTypeOf("number");
     expect(result.aggregates.reformulation_rate_adjusted).toBeTypeOf("number");
     expect(result.aggregates.reformulation_explanation).toBeTypeOf("string");
