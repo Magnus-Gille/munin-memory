@@ -596,11 +596,6 @@ function signReviewRunHandle(
   // is one binding component alongside the principal and random run ID; it is
   // never stored or used as a password verifier.
   const signature = createHmac("sha256", secret)
-
-    // CodeQL's password-hash heuristic treats the credential binding as a
-    // password flow, but this is intentional HMAC authentication, not password
-    // hashing. Keep this suppression scoped to the MAC input.
-    // codeql[js/insufficient-password-hash]
     .update(`${principalId}\0${token}\0${runId}`)
     .digest("hex");
   return `${MUNIN_RUN_HANDLE_PREFIX}.${runId}.${signature}`;
@@ -626,11 +621,6 @@ function resolveReviewRun(
     // This HMAC verifies the server-issued handle created above. The token is
     // an authenticated binding input, not a password being stored or derived.
     const expectedSignature = createHmac("sha256", secret)
-
-      // CodeQL's password-hash heuristic treats the credential binding as a
-      // password flow, but this is intentional HMAC authentication, not password
-      // hashing. Keep this suppression scoped to the MAC input.
-      // codeql[js/insufficient-password-hash]
       .update(`${principalId}\0${authInfo.token}\0${runId}`)
       .digest("hex");
     const valid = timingSafeEqual(

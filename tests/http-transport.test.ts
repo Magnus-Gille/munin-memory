@@ -109,6 +109,26 @@ function insertOAuthRunToken(token: string, clientId: string, principalId = "own
   ).run(hashToken(token), clientId, Math.floor(Date.now() / 1000) + 3600, now, principalId);
 }
 
+function insertOAuthPrincipal(principalId: string): void {
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO principals
+     (id, principal_id, principal_type, namespace_rules, created_at)
+     VALUES (?, ?, 'family', ?, ?)`,
+  ).run(
+    randomUUID(),
+    principalId,
+    JSON.stringify([{ pattern: "*", permissions: "rw" }]),
+    now,
+  );
+}
+
+function flipHexCharacter(value: string): string {
+  const last = value.at(-1);
+  if (!last) throw new Error("Cannot tamper with an empty hexadecimal value");
+  return `${value.slice(0, -1)}${last === "0" ? "1" : "0"}`;
+}
+
 let db: Database.Database;
 let app: ReturnType<typeof createHttpApp>["app"];
 let requestLogs: RequestLogEntry[];
@@ -267,6 +287,84 @@ describe("stateless HTTP transport", () => {
       error: "session_required",
     });
     expect(invalidHandleResponse.headers["mcp-session-id"]).toBeUndefined();
+  });
+
+  it("rejects a review handle replayed with a different credential for the same principal", async () => {
+    const tokenA = "oauth-run-token-owner-a";
+    const tokenB = "oauth-run-token-owner-b";
+    insertOAuthRunToken(tokenA, "http-review-client-owner-a");
+    insertOAuthRunToken(tokenB, "http-review-client-owner-b");
+
+    const initializeResponse = await initializeClient(app, tokenA);
+    const handle = initializeResponse.headers["mcp-session-id"];
+    expect(handle).toMatch(/^munin-run-v1\.[0-9a-f]{32}\.[0-9a-f]{64}$/);
+
+    const replayResponse = await callHttpTool(tokenB, 2, "memory_extract", {
+      conversation_text: "This replay must not create a proposal under the other owner credential.",
+      namespace_hint: "projects/http-review-replay",
+      persist: true,
+    }, handle);
+
+    expect(parseToolContent<Record<string, unknown>>(replayResponse.text)).toMatchObject({
+      error: "session_required",
+    });
+    expect(replayResponse.headers["mcp-session-id"]).toBeUndefined();
+    expect(db.prepare("SELECT COUNT(*) AS count FROM review_proposals").get())
+      .toEqual({ count: 0 });
+  });
+
+  it("rejects a review handle replayed by a different principal", async () => {
+    const ownerToken = "oauth-run-token-owner-principal";
+    const otherPrincipal = "http-review-peer";
+    const otherToken = "oauth-run-token-other-principal";
+    insertOAuthRunToken(ownerToken, "http-review-client-owner-principal");
+    insertOAuthPrincipal(otherPrincipal);
+    insertOAuthRunToken(otherToken, "http-review-client-other-principal", otherPrincipal);
+
+    const initializeResponse = await initializeClient(app, ownerToken);
+    const handle = initializeResponse.headers["mcp-session-id"];
+    expect(handle).toBeDefined();
+
+    const replayResponse = await callHttpTool(otherToken, 2, "memory_extract", {
+      conversation_text: "This replay must not create a proposal for a different principal.",
+      namespace_hint: "projects/http-review-principal-replay",
+      persist: true,
+    }, handle);
+
+    expect(parseToolContent<Record<string, unknown>>(replayResponse.text)).toMatchObject({
+      error: "session_required",
+    });
+    expect(replayResponse.headers["mcp-session-id"]).toBeUndefined();
+    expect(db.prepare("SELECT COUNT(*) AS count FROM review_proposals").get())
+      .toEqual({ count: 0 });
+  });
+
+  it.each([
+    ["run ID", (prefix: string, runId: string, signature: string) =>
+      `${prefix}.${flipHexCharacter(runId)}.${signature}`],
+    ["signature", (prefix: string, runId: string, signature: string) =>
+      `${prefix}.${runId}.${flipHexCharacter(signature)}`],
+  ] as const)("rejects a handle with a tampered %s", async (_label, tamper) => {
+    const token = "oauth-run-token-tampered-handle";
+    insertOAuthRunToken(token, "http-review-client-tampered-handle");
+
+    const initializeResponse = await initializeClient(app, token);
+    const handle = initializeResponse.headers["mcp-session-id"] as string;
+    const [prefix, runId, signature] = handle.split(".");
+    const tamperedHandle = tamper(prefix, runId, signature);
+
+    const replayResponse = await callHttpTool(token, 2, "memory_extract", {
+      conversation_text: "This tampered handle must not create a proposal.",
+      namespace_hint: "projects/http-review-tampered",
+      persist: true,
+    }, tamperedHandle);
+
+    expect(parseToolContent<Record<string, unknown>>(replayResponse.text)).toMatchObject({
+      error: "session_required",
+    });
+    expect(replayResponse.headers["mcp-session-id"]).toBeUndefined();
+    expect(db.prepare("SELECT COUNT(*) AS count FROM review_proposals").get())
+      .toEqual({ count: 0 });
   });
 
   it("keeps cross-run undo authorization same-principal and explicit", async () => {
