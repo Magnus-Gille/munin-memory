@@ -2399,6 +2399,7 @@ describe("reviewed undo", () => {
         },
       });
       expect(preview).not.toHaveProperty("exact_operation");
+      expect(JSON.stringify(preview)).not.toContain("Replacement architecture");
 
       const rejected = await call("memory_review", {
         action: "approve",

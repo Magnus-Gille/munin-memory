@@ -7611,7 +7611,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_insights",
     description:
-      "Return per-entry retrieval analytics: how often each entry was retrieved (impressions), opened (opens), followed by writes or logs, and whether it was stale when opened. Useful for understanding which memories are most actionable and which are frequently stale. Requires at least min_impressions retrieval events (default 3) to appear in results; when nothing clears the threshold the response carries an explanatory `message` rather than a bare empty array.",
+      "Return per-entry retrieval analytics: how often each entry was retrieved (impressions), opened (opens), followed by writes or logs, and whether it was stale when opened. Useful for understanding which memories are most actionable and which are frequently stale. Requires at least min_impressions retrieval events (default 3) to appear in results; when nothing clears the threshold the response carries an explanatory `message` rather than a bare empty array. The response's `aggregates` object is intentionally global across namespaces and is labeled with a global scope; only `entries` is namespace-filtered.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -9164,11 +9164,15 @@ export function registerTools(
                   readableProposal.source_untrusted
                   || approvalError?.untrusted_content === true
                 );
+                // Terminal or otherwise non-approvable proposals may retain their
+                // payload for audit/undo purposes, but their exact operation is
+                // no longer eligible for review-preview disclosure.
+                const showExactOperation = approvalEffect.approvalStatus !== "not_approvable";
                 return okResult("review", {
                   proposal_id: proposal.id,
                   status: readableProposal.status,
                   ...(persistedStatus ? { persisted_status: persistedStatus } : {}),
-                  ...(readableProposal.current_operation
+                  ...(showExactOperation && readableProposal.current_operation
                     ? { exact_operation: readableProposal.current_operation }
                     : {}),
                   classification: readableProposal.classification,
@@ -12515,6 +12519,9 @@ export function registerTools(
                   `${rawAgg.multi_event_sessions} multi-event sessions).`
                 : "All sessions had multiple events; raw and adjusted rates are equivalent.";
               const aggregates: RetrievalAggregates = {
+                // The per-entry rows honor insightsArgs.namespace; these health
+                // aggregates intentionally remain global and say so explicitly.
+                scope: "global",
                 period_start: rawAgg.period_start,
                 period_end: rawAgg.period_end,
                 total_events: rawAgg.total_events,

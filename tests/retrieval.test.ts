@@ -371,6 +371,119 @@ describe("getInsightsByEntry", () => {
     expect(projectsOnly.some((r) => r.entry_id === entryB.id)).toBe(false);
   });
 
+  it("keeps deleted retrieval results as anonymous rows only when unscoped", () => {
+    writeState(db, "projects/deleted-insight", "status", "will be deleted", ["active"]);
+    const entry = db
+      .prepare("SELECT id FROM entries WHERE namespace = 'projects/deleted-insight' AND key = 'status'")
+      .get() as { id: string };
+
+    logRetrievalEvent(db, {
+      sessionId: "session-insights-orphan",
+      toolName: "memory_query",
+      queryText: "deleted",
+      resultIds: [entry.id],
+      resultNamespaces: ["projects/deleted-insight"],
+      resultRanks: [1],
+    });
+    logRetrievalOutcome(db, "session-insights-orphan", {
+      outcomeType: "opened_result",
+      entryId: entry.id,
+      namespace: "projects/deleted-insight",
+    });
+    logRetrievalOutcome(db, "session-insights-orphan", {
+      outcomeType: "write_in_result_namespace",
+      namespace: "projects/deleted-insight",
+    });
+    db.prepare("DELETE FROM entries WHERE id = ?").run(entry.id);
+
+    const unscoped = getInsightsByEntry(db, undefined, 1, 20);
+    const orphan = unscoped.find((row) => row.entry_id === entry.id);
+    expect(orphan).toMatchObject({
+      entry_id: entry.id,
+      namespace: null,
+      key: null,
+      content_preview: null,
+      impressions: 1,
+      opens: 1,
+      write_outcomes: 1,
+      followthrough_events: 1,
+    });
+    expect(orphan?.updated_at).toBe("");
+
+    // A namespace scope has no surviving entry namespace to match, so the
+    // anonymous historical row must not cross that boundary.
+    expect(getInsightsByEntry(db, "projects/", 1, 20)).toEqual([]);
+  });
+
+  it("scopes entries before expansion and keeps same-event outcomes in their namespace", () => {
+    writeState(db, "projects/scoped-insights", "status", "scoped target", ["active"]);
+    writeState(db, "clients/unrelated", "status", "unrelated small", ["active"]);
+
+    const target = db
+      .prepare("SELECT id FROM entries WHERE namespace = 'projects/scoped-insights' AND key = 'status'")
+      .get() as { id: string };
+    const unrelated = db
+      .prepare("SELECT id FROM entries WHERE namespace = 'clients/unrelated' AND key = 'status'")
+      .get() as { id: string };
+
+    // The first event contains results from both namespaces. Its write outcome
+    // belongs to the unrelated namespace and must not count for the target.
+    logRetrievalEvent(db, {
+      sessionId: "session-scoped-insights-cross-namespace",
+      toolName: "memory_query",
+      queryText: "scoped",
+      resultIds: [target.id, unrelated.id],
+      resultNamespaces: ["projects/scoped-insights", "clients/unrelated"],
+      resultRanks: [1, 2],
+    });
+    logRetrievalOutcome(db, "session-scoped-insights-cross-namespace", {
+      outcomeType: "write_in_result_namespace",
+      namespace: "clients/unrelated",
+    });
+
+    // A same-namespace outcome on another event should still be associated.
+    logRetrievalEvent(db, {
+      sessionId: "session-scoped-insights-same-namespace",
+      toolName: "memory_query",
+      queryText: "scoped",
+      resultIds: [target.id],
+      resultNamespaces: ["projects/scoped-insights"],
+      resultRanks: [1],
+    });
+    logRetrievalOutcome(db, "session-scoped-insights-same-namespace", {
+      outcomeType: "write_in_result_namespace",
+      namespace: "projects/scoped-insights",
+    });
+
+    // Keep a larger unrelated corpus in the fixture so the namespace-scoped
+    // path is exercised against more than one result/event.
+    for (let index = 0; index < 64; index += 1) {
+      const namespace = `clients/unrelated-${index}`;
+      writeState(db, namespace, "status", `unrelated large ${index}`, ["active"]);
+      const entry = db
+        .prepare("SELECT id FROM entries WHERE namespace = ? AND key = 'status'")
+        .get(namespace) as { id: string };
+      logRetrievalEvent(db, {
+        sessionId: `session-scoped-insights-unrelated-${index}`,
+        toolName: "memory_query",
+        queryText: "unrelated",
+        resultIds: [entry.id],
+        resultNamespaces: [namespace],
+        resultRanks: [1],
+      });
+    }
+
+    const prefixRows = getInsightsByEntry(db, "projects/", 1, 1);
+    expect(prefixRows).toHaveLength(1);
+    expect(prefixRows[0].entry_id).toBe(target.id);
+    expect(prefixRows[0].impressions).toBe(2);
+    expect(prefixRows[0].write_outcomes).toBe(1);
+    expect(prefixRows[0].followthrough_events).toBe(1);
+
+    const exactRows = getInsightsByEntry(db, "projects/scoped-insights", 1, 1);
+    expect(exactRows.map((row) => row.entry_id)).toEqual([target.id]);
+  });
+
   it("respects min_impressions threshold", () => {
     writeState(db, "projects/low-impressions", "status", "low", ["active"]);
     const entry = db

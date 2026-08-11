@@ -836,6 +836,8 @@ export interface RetrievalFeedbackRow {
 }
 
 export interface RetrievalAggregates {
+  /** These aggregates cover all retrieval events and are not namespace-filtered. */
+  scope: "global";
   period_start: string;
   period_end: string;
   total_events: number;
