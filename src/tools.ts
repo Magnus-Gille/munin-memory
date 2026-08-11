@@ -22,7 +22,7 @@ import {
   getContextTransportType,
   resolveReadableNamespaceSelectors,
 } from "./access.js";
-import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { namespaceFilterScope } from "./internal/namespace-filter.js";
 import { withQueryProbeLimit } from "./internal/query-probe.js";
 import {
@@ -155,6 +155,7 @@ import {
   type ReviewApplyResult,
   type ReviewOperation,
   type ReviewProposal,
+  type ReviewProposalAccess,
   type ReviewProposalRetentionPolicy,
   type ReviewProposalEvent,
   type ReviewProposalStatus,
@@ -4416,6 +4417,90 @@ function isReviewAction(action: unknown): action is ReviewAction {
   return typeof action === "string" && REVIEW_ACTIONS.has(action as ReviewAction);
 }
 
+const REVIEW_PROPOSAL_STATUSES: ReadonlySet<ReviewProposalStatus> = new Set([
+  "pending",
+  "approved",
+  "declined",
+  "edited",
+  "superseded",
+  "expired",
+  "failed",
+]);
+
+const REVIEW_OPERATION_TYPES: ReadonlySet<ReviewOperation["action"]> = new Set([
+  "memory_write",
+  "memory_log",
+  "memory_update_status",
+]);
+
+type ReviewListArgs = {
+  status?: ReviewProposalStatus;
+  filters: {
+    namespace?: string;
+    operationType?: ReviewOperation["action"];
+  };
+};
+
+function parseReviewListArgs(
+  reviewArgs: Record<string, unknown>,
+): { ok: true; value: ReviewListArgs } | { ok: false; error: string } {
+  const status = reviewArgs.status;
+  if (status !== undefined && (
+    typeof status !== "string"
+    || !REVIEW_PROPOSAL_STATUSES.has(status as ReviewProposalStatus)
+  )) {
+    return { ok: false, error: "Invalid proposal status filter." };
+  }
+
+  let namespace: string | undefined;
+  if (reviewArgs.namespace !== undefined) {
+    if (typeof reviewArgs.namespace !== "string") {
+      return { ok: false, error: "Invalid namespace filter." };
+    }
+    const namespaceCheck = validateNamespace(reviewArgs.namespace);
+    if (!namespaceCheck.valid) return { ok: false, error: namespaceCheck.error! };
+    namespace = reviewArgs.namespace;
+  }
+
+  let operationType: ReviewOperation["action"] | undefined;
+  if (reviewArgs.operation_type !== undefined) {
+    if (
+      typeof reviewArgs.operation_type !== "string"
+      || !REVIEW_OPERATION_TYPES.has(reviewArgs.operation_type as ReviewOperation["action"])
+    ) {
+      return { ok: false, error: "Invalid proposal operation_type filter." };
+    }
+    operationType = reviewArgs.operation_type as ReviewOperation["action"];
+  }
+
+  return {
+    ok: true,
+    value: {
+      status: status as ReviewProposalStatus | undefined,
+      filters: {
+        ...(namespace !== undefined ? { namespace } : {}),
+        ...(operationType !== undefined ? { operationType } : {}),
+      },
+    },
+  };
+}
+
+function parseReviewAccess(
+  rawScope: unknown,
+  sessionId: string | undefined,
+): { ok: true; value: ReviewProposalAccess } | { ok: false; error: string } {
+  if (rawScope !== undefined && rawScope !== "session" && rawScope !== "principal") {
+    return { ok: false, error: 'scope must be "session" or "principal".' };
+  }
+  return {
+    ok: true,
+    value: {
+      scope: (rawScope as ReviewProposalAccess["scope"]) ?? "session",
+      sessionId,
+    },
+  };
+}
+
 function shouldSkipSuccessfulToolCallTelemetry(
   name: string | undefined,
   args: unknown,
@@ -6828,7 +6913,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_extract",
     description:
-      "Suggest reviewable memory operations from explicit conversation signals. Use this after `memory_orient` when you have messy notes or transcript text and want proposed `memory_log`, `memory_write`, or `memory_update_status` calls. By default this is suggestion-only. Pass `persist:true` to save the proposals in the durable, principal-scoped review inbox without changing memory truth; then inspect or act on them with `memory_review`.\n\nUse `memory_extract` when you have unstructured text and are unsure what (if anything) is worth persisting or where it belongs. When you already know the single decision or event to record, skip extraction and call `memory_log` directly. Extraction never silently approves its own proposals.",
+      "Suggest reviewable memory operations from explicit conversation signals. Use this after `memory_orient` when you have messy notes or transcript text and want proposed `memory_log`, `memory_write`, or `memory_update_status` calls. By default this is suggestion-only. Pass `persist:true` to save the proposals in the durable, principal-and-session-scoped review inbox without changing memory truth; a stable server-derived session is required. Then inspect or act on them with `memory_review`.\n\nUse `memory_extract` when you have unstructured text and are unsure what (if anything) is worth persisting or where it belongs. When you already know the single decision or event to record, skip extraction and call `memory_log` directly. Extraction never silently approves its own proposals.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -6869,13 +6954,19 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_review",
     description:
-      "Review durable proposals created by `memory_extract persist:true`. The queue is strictly scoped to the creating principal. Use `list` or `get` to inspect, `preview` for the exact operation, freshness preconditions, and pure-read approval-effect fields, `edit` or `decline` while reviewing, `approve` to apply through the normal authorization/classification/secret/CAS gates, and `prepare_undo` to create a second review proposal that corrects an approved state or log while preserving history. Successful preview responses include `preview_wrote_memory:false`, `approval_would_write_memory:true|false`, `approval_status` in `would_write|would_conflict|duplicate_noop|not_approvable`, optional `approval_error { code, message }`, and optional `persisted_status` when Munin is showing a derived effective status such as `expired` without mutating the stored row. When retention has already purged a terminal proposal payload, preview still returns the truthful non-writing terminal outcome but omits `exact_operation` because no retained payload remains to display. Request-level preview errors such as `validation_error`, `not_found`, or `payload_expired` omit those effect fields because no preview payload is available to describe. Successful preview responses are metering-free and return no legacy `writes_memory` field. No action except `approve` changes memory truth.",
+      "Review durable proposals created by `memory_extract persist:true`. By default every action is scoped to the current server-derived session and principal; a known proposal ID from another session is indistinguishable from a missing ID. Pass `scope:\"principal\"` explicitly to list, inspect, or act on proposals from other sessions of the same principal; this never expands to another principal. Legacy rows without a creator session are available only in explicit principal scope. Use `list` or `get` to inspect, `preview` for the exact operation, freshness preconditions, and pure-read approval-effect fields, `edit` or `decline` while reviewing, `approve` to apply through the normal authorization/classification/secret/CAS gates, and `prepare_undo` to create a second review proposal that corrects an approved state or log while preserving history. List filters `namespace` and `operation_type` are exact-match filters. Successful preview responses include `preview_wrote_memory:false`, `approval_would_write_memory:true|false`, `approval_status` in `would_write|would_conflict|duplicate_noop|not_approvable`, optional `approval_error { code, message }`, and optional `persisted_status` when Munin is showing a derived effective status such as `expired` without mutating the stored row. When retention has already purged a terminal proposal payload, preview still returns the truthful non-writing terminal outcome but omits `exact_operation` because no retained payload remains to display. Request-level preview errors such as `validation_error`, `not_found`, or `payload_expired` omit those effect fields because no preview payload is available to describe. Successful preview responses are metering-free and return no legacy `writes_memory` field. No action except `approve` changes memory truth.",
     inputSchema: {
       type: "object" as const,
       properties: {
         action: {
           type: "string",
           enum: ["list", "get", "preview", "edit", "approve", "decline", "prepare_undo"],
+        },
+        scope: {
+          type: "string",
+          enum: ["session", "principal"],
+          description:
+            "Optional review scope. Defaults to the current server-derived session. Use principal only for intentional same-principal cross-session review.",
         },
         proposal_id: {
           type: "string",
@@ -6885,6 +6976,15 @@ const TOOL_DEFINITIONS = [
           type: "string",
           enum: ["pending", "approved", "declined", "edited", "superseded", "expired", "failed"],
           description: "Optional list filter.",
+        },
+        namespace: {
+          type: "string",
+          description: "Optional list filter. Exact target namespace match; namespace access is still enforced.",
+        },
+        operation_type: {
+          type: "string",
+          enum: ["memory_write", "memory_log", "memory_update_status"],
+          description: "Optional list filter. Exact proposal operation/action type match.",
         },
         limit: {
           type: "integer",
@@ -7946,7 +8046,16 @@ export function registerTools(
   ctx: AccessContext = ownerContext(),
   runtimeConfig?: LibrarianRuntimeConfig,
   reviewRetention: ReviewProposalRetentionPolicy = {},
+  reviewSessionIdOverride?: string | null,
 ): void {
+  // A missing argument from an in-process server factory gets one fresh,
+  // server-owned run ID. HTTP explicitly passes null when it has no stable
+  // server-derived session, which keeps that transport fail-closed instead of
+  // collapsing callers into a shared implicit session.
+  const reviewSessionId = reviewSessionIdOverride === null
+    ? undefined
+    : reviewSessionIdOverride ?? sessionId ?? randomUUID();
+
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: TOOL_DEFINITIONS,
   }));
@@ -8807,6 +8916,13 @@ export function registerTools(
               };
 
               if (extractArgs.persist === true) {
+                if (!reviewSessionId) {
+                  return errResult(
+                    "extract",
+                    "session_required",
+                    "Durable review proposals require a stable server-derived session.",
+                  );
+                }
                 if (extractArgs.conversation_text.length > maxContentSize) {
                   return errResult(
                     "extract",
@@ -8853,6 +8969,7 @@ export function registerTools(
                     ])];
                     const created = createReviewProposal(db, {
                       creatorPrincipalId: ctx.principalId,
+                      creatorSessionId: reviewSessionId,
                       operation: prepared.operation,
                       classification: prepared.classification,
                       confidence: suggestion.confidence,
@@ -8904,33 +9021,34 @@ export function registerTools(
                   "action must be list, get, preview, edit, approve, decline, or prepare_undo.",
                 );
               }
+              const accessResult = parseReviewAccess(reviewArgs.scope, reviewSessionId);
+              if (!accessResult.ok) {
+                return errResult(
+                  "review",
+                  "validation_error",
+                  accessResult.error,
+                );
+              }
+              const reviewAccess = accessResult.value;
               const now = nowUTC();
               if (action !== "preview") {
                 pruneReviewProposals(db, now, reviewRetention);
               }
 
               if (action === "list") {
-                const status = reviewArgs.status;
-                if (
-                  status !== undefined
-                  && ![
-                    "pending",
-                    "approved",
-                    "declined",
-                    "edited",
-                    "superseded",
-                    "expired",
-                    "failed",
-                  ].includes(status as string)
-                ) {
-                  return errResult("review", "validation_error", "Invalid proposal status filter.");
+                const listArgs = parseReviewListArgs(reviewArgs);
+                if (!listArgs.ok) {
+                  return errResult("review", "validation_error", listArgs.error);
                 }
+                const { status, filters } = listArgs.value;
                 const limit = clampOptionalLimit(reviewArgs.limit, 100) ?? 20;
                 const listed = listReviewProposals(
                   db,
                   ctx.principalId,
                   status as ReviewProposalStatus | undefined,
                   limit,
+                  reviewAccess,
+                  filters,
                 );
                 const visible = listed.filter((proposal) =>
                   reviewProposalVisible(db, ctx, proposal));
@@ -8952,6 +9070,8 @@ export function registerTools(
                   db,
                   ctx.principalId,
                   staleThreshold,
+                  reviewAccess,
+                  filters,
                 )) {
                   if (
                     !canRead(ctx, row.target_namespace)
@@ -8990,6 +9110,7 @@ export function registerTools(
                 db,
                 reviewArgs.proposal_id,
                 ctx.principalId,
+                reviewAccess,
               );
               if (!proposal || !reviewProposalVisible(db, ctx, proposal)) {
                 return errResult(
@@ -9007,6 +9128,7 @@ export function registerTools(
                     db,
                     proposal.id,
                     ctx.principalId,
+                    reviewAccess,
                   ).map(presentReviewEvent),
                 });
               }
@@ -9101,6 +9223,7 @@ export function registerTools(
                     classification: prepared.classification,
                     injectionFlags,
                   },
+                  reviewAccess,
                 );
                 if (result.status === "invalid_transition") {
                   return errResult(
@@ -9135,6 +9258,7 @@ export function registerTools(
                   ctx.principalId,
                   reviewArgs.reason,
                   now,
+                  reviewAccess,
                 );
                 if (result.status === "invalid_transition") {
                   return errResult(
@@ -9147,6 +9271,13 @@ export function registerTools(
               }
 
               if (action === "prepare_undo") {
+                if (!reviewSessionId) {
+                  return errResult(
+                    "review",
+                    "session_required",
+                    "Preparing an undo requires a stable server-derived session.",
+                  );
+                }
                 if (typeof reviewArgs.reason !== "string" || !reviewArgs.reason.trim()) {
                   return errResult(
                     "review",
@@ -9243,6 +9374,7 @@ export function registerTools(
                 const injectionFlags = scanForInjection(prepared.content);
                 const created = createUndoReviewProposal(db, proposal.id, {
                   creatorPrincipalId: ctx.principalId,
+                  creatorSessionId: reviewSessionId,
                   operation: prepared.operation,
                   classification: prepared.classification,
                   confidence: 1,
@@ -9260,7 +9392,7 @@ export function registerTools(
                   injectionFlags,
                   createdAt: now,
                   expiresAt: addUtcDays(now, REVIEW_PROPOSAL_TTL_DAYS),
-                });
+                }, reviewAccess);
                 if (!created) {
                   return errResult(
                     "review",
@@ -9343,6 +9475,7 @@ export function registerTools(
                         currentProposal.id,
                         ctx.principalId,
                         now,
+                        reviewAccess,
                       );
                       if (!marked) {
                         throw new Error(
@@ -9353,6 +9486,7 @@ export function registerTools(
                     return applied;
                   },
                   now,
+                  reviewAccess,
                 );
               } catch {
                 return errResult(

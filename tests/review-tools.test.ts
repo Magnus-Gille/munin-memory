@@ -17,19 +17,33 @@ function makeCall(
   db: ReturnType<typeof initDatabase>,
   ctx: AccessContext = ownerContext(),
   reviewRetention: ReviewProposalRetentionPolicy = {},
+  sessionId?: string | null,
 ) {
   const server = new Server(
     { name: "review-tools-test", version: "0.0.1" },
     { capabilities: { tools: {} } },
   );
-  registerTools(server, db, undefined, ctx, undefined, reviewRetention);
+  registerTools(
+    server,
+    db,
+    sessionId ?? undefined,
+    ctx,
+    undefined,
+    reviewRetention,
+    sessionId === null ? null : undefined,
+  );
   return async (name: string, args: Record<string, unknown> = {}) => {
     const handler = (
       server as unknown as { _requestHandlers: Map<string, Function> }
     )._requestHandlers.get("tools/call");
     const response = await handler!({
       method: "tools/call",
-      params: { name, arguments: args },
+      params: {
+        name,
+        arguments: name === "memory_review" && sessionId === undefined && args.scope === undefined
+          ? { ...args, scope: "principal" }
+          : args,
+      },
     });
     return JSON.parse((response as { content: Array<{ text: string }> }).content[0].text);
   };
@@ -954,6 +968,213 @@ describe("memory_extract durable review proposals", () => {
 });
 
 describe("memory_review lifecycle and isolation", () => {
+  it("isolates same-principal sessions and requires explicit principal scope for cross-session review", async () => {
+    const db = initDatabase(":memory:");
+    const sessionA = makeCall(db, ownerContext(), {}, "server-session-a");
+    const sessionB = makeCall(db, ownerContext(), {}, "server-session-b");
+
+    const createdA = await sessionA("memory_extract", {
+      conversation_text: "We decided to keep session A private.",
+      namespace_hint: "projects/session-a",
+      persist: true,
+    }) as { proposals: Array<{ id: string }> };
+    const createdB = await sessionB("memory_extract", {
+      conversation_text: "We decided to keep session B private.",
+      namespace_hint: "projects/session-b",
+      persist: true,
+    }) as { proposals: Array<{ id: string }> };
+    const proposalA = createdA.proposals[0].id;
+    const proposalB = createdB.proposals[0].id;
+
+    const defaultList = await sessionB("memory_review", { action: "list" }) as {
+      proposals: Array<Record<string, unknown>>;
+    };
+    expect(defaultList.proposals.map((proposal) => proposal.id)).toEqual([proposalB]);
+    expect(defaultList.proposals[0]).toHaveProperty("creator_session_id");
+
+    for (const action of ["get", "preview", "edit", "approve", "decline", "prepare_undo"] as const) {
+      const result = await sessionB("memory_review", {
+        action,
+        proposal_id: proposalA,
+        ...(action === "edit" ? {
+          reason: "foreign edit must not apply",
+          operation: {
+            action: "memory_log",
+            namespace: "projects/session-a",
+            content: "foreign edit payload",
+          },
+        } : {}),
+        ...(action === "decline" || action === "prepare_undo"
+          ? { reason: "foreign action must not apply" }
+          : {}),
+      }) as Record<string, unknown>;
+      expect(result).toMatchObject({ error: "not_found", code: "not_found" });
+      expect(JSON.stringify(result)).not.toContain("session-a");
+      expect(JSON.stringify(result)).not.toContain("foreign edit payload");
+    }
+    expect(db.prepare("SELECT status FROM review_proposals WHERE id = ?").get(proposalA))
+      .toEqual({ status: "pending" });
+    expect(db.prepare(
+      "SELECT COUNT(*) AS count FROM review_proposal_events WHERE proposal_id = ?",
+    ).get(proposalA)).toEqual({ count: 1 });
+
+    const principalList = await sessionB("memory_review", {
+      action: "list",
+      scope: "principal",
+    }) as { proposals: Array<Record<string, unknown>> };
+    expect(principalList.proposals.map((proposal) => proposal.id).sort())
+      .toEqual([proposalA, proposalB].sort());
+    expect(principalList.proposals.map((proposal) => proposal.creator_session_id))
+      .toEqual(expect.arrayContaining(["server-session-a", "server-session-b"]));
+
+    const principalGet = await sessionB("memory_review", {
+      action: "get",
+      scope: "principal",
+      proposal_id: proposalA,
+    }) as { id: string; events: Array<Record<string, unknown>> };
+    expect(principalGet.id).toBe(proposalA);
+    expect(principalGet.events).toHaveLength(1);
+
+    const edited = await sessionB("memory_review", {
+      action: "edit",
+      scope: "principal",
+      proposal_id: proposalA,
+      reason: "explicit same-principal review",
+      operation: {
+        action: "memory_log",
+        namespace: "projects/session-a",
+        content: "edited by explicit principal scope",
+      },
+    }) as { status: string };
+    expect(edited.status).toBe("edited");
+    const declined = await sessionB("memory_review", {
+      action: "decline",
+      scope: "principal",
+      proposal_id: proposalA,
+      reason: "explicit same-principal decline",
+    }) as { status: string };
+    expect(declined.status).toBe("declined");
+    expect(db.prepare("SELECT status FROM review_proposals WHERE id = ?").get(proposalA))
+      .toEqual({ status: "declined" });
+    expect((await sessionB("memory_review", {
+      action: "get",
+      scope: "principal",
+      proposal_id: proposalA,
+    }) as { events: Array<Record<string, unknown>> }).events.map((event) => event.event_type))
+      .toEqual(["created", "edited", "declined"]);
+
+    const undoSource = await sessionA("memory_extract", {
+      conversation_text: "We decided to keep a proposal for cross-session undo coverage.",
+      namespace_hint: "projects/session-a",
+      persist: true,
+    }) as { proposals: Array<{ id: string }> };
+    const sourceId = undoSource.proposals[0].id;
+    expect(await sessionB("memory_review", {
+      action: "approve",
+      scope: "principal",
+      proposal_id: sourceId,
+    })).toMatchObject({ status: "approved" });
+    const undo = await sessionB("memory_review", {
+      action: "prepare_undo",
+      scope: "principal",
+      proposal_id: sourceId,
+      reason: "explicit same-principal undo preparation",
+    }) as { undo_proposal_id: string; status: string };
+    expect(undo.status).toBe("pending");
+    expect(await sessionA("memory_review", {
+      action: "get",
+      proposal_id: undo.undo_proposal_id,
+    })).toMatchObject({ error: "not_found", code: "not_found" });
+    expect(await sessionB("memory_review", {
+      action: "get",
+      proposal_id: undo.undo_proposal_id,
+    })).toMatchObject({ id: undo.undo_proposal_id, status: "pending" });
+    expect(await sessionB("memory_review", {
+      action: "approve",
+      proposal_id: undo.undo_proposal_id,
+    })).toMatchObject({ status: "approved" });
+    expect(db.prepare("SELECT status FROM review_proposals WHERE id = ?").get(sourceId))
+      .toEqual({ status: "superseded" });
+    db.close();
+  });
+
+  it("applies exact namespace and operation filters, keeps legacy rows principal-only, and fails closed without a session", async () => {
+    const db = initDatabase(":memory:");
+    const session = makeCall(db, ownerContext(), {}, "filter-session");
+    const noSession = makeCall(db, ownerContext(), {}, null);
+
+    const logProposal = await session("memory_extract", {
+      conversation_text: "We decided to keep the filter log.",
+      namespace_hint: "projects/filter-logs",
+      persist: true,
+    }) as { proposals: Array<{ id: string }> };
+    const edited = await session("memory_review", {
+      action: "edit",
+      proposal_id: logProposal.proposals[0].id,
+      reason: "make this a state proposal",
+      operation: {
+        action: "memory_write",
+        namespace: "projects/filter-state",
+        key: "status",
+        content: "filter state",
+      },
+    }) as { status: string };
+    expect(edited.status).toBe("edited");
+    const second = await session("memory_extract", {
+      conversation_text: "We decided to keep another filter log.",
+      namespace_hint: "projects/filter-logs",
+      persist: true,
+    }) as { proposals: Array<{ id: string }> };
+
+    const namespaceFiltered = await session("memory_review", {
+      action: "list",
+      namespace: "projects/filter-logs",
+    }) as { proposals: Array<Record<string, unknown>> };
+    expect(namespaceFiltered.proposals).toHaveLength(1);
+    expect(namespaceFiltered.proposals[0].target_namespace).toBe("projects/filter-logs");
+    const operationFiltered = await session("memory_review", {
+      action: "list",
+      operation_type: "memory_write",
+    }) as { proposals: Array<Record<string, unknown>> };
+    expect(operationFiltered.proposals).toHaveLength(1);
+    expect(operationFiltered.proposals[0].operation_type).toBe("memory_write");
+    expect(await session("memory_review", {
+      action: "list",
+      namespace: "projects/filter-logs",
+      operation_type: "memory_log",
+    })).toMatchObject({ proposals: [{ id: second.proposals[0].id }] });
+
+    expect(await session("memory_review", {
+      action: "list",
+      namespace: "projects/filter-logs/../other",
+    })).toMatchObject({ error: "validation_error" });
+    expect(await session("memory_review", {
+      action: "list",
+      operation_type: "memory_delete",
+    })).toMatchObject({ error: "validation_error" });
+
+    db.prepare("UPDATE review_proposals SET creator_session_id = NULL WHERE id = ?")
+      .run(second.proposals[0].id);
+    expect((await session("memory_review", { action: "list" }) as { proposals: unknown[] }).proposals)
+      .toHaveLength(1);
+    const legacyPrincipal = await session("memory_review", {
+      action: "list",
+      scope: "principal",
+    }) as { proposals: Array<Record<string, unknown>> };
+    expect(legacyPrincipal.proposals.map((proposal) => proposal.id))
+      .toContain(second.proposals[0].id);
+
+    const failedCapture = await noSession("memory_extract", {
+      conversation_text: "We decided this cannot be durably captured without a session.",
+      namespace_hint: "projects/no-session",
+      persist: true,
+    }) as Record<string, unknown>;
+    expect(failedCapture).toMatchObject({ error: "session_required" });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM review_proposals").get())
+      .toEqual({ count: 2 });
+    db.close();
+  });
+
   it("approves exactly once and duplicate approval is idempotent", async () => {
     const db = initDatabase(":memory:");
     const call = makeCall(db);
@@ -2111,79 +2332,87 @@ describe("reviewed undo", () => {
   });
 
   it("keeps superseded originals aligned after reviewed undo and payload purge", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-01T12:00:00.000Z"));
     const db = initDatabase(":memory:");
-    const call = makeCall(db);
-    const original = writeState(
-      db,
-      "projects/munin-memory",
-      "architecture",
-      "Original architecture",
-      ["architecture"],
-      "owner",
-    );
-    const extracted = await call("memory_extract", {
-      conversation_text: "We decided to replace the architecture note again.",
-      namespace_hint: "projects/munin-memory",
-      persist: true,
-    }) as { proposals: Array<{ id: string }> };
-    const proposalId = extracted.proposals[0].id;
-    await call("memory_review", {
-      action: "edit",
-      proposal_id: proposalId,
-      reason: "target the architecture state",
-      operation: {
-        action: "memory_write",
-        namespace: "projects/munin-memory",
-        key: "architecture",
-        content: "Replacement architecture",
-        tags: ["architecture"],
-        expected_updated_at: original.updated_at,
-      },
-    });
-    await call("memory_review", {
-      action: "approve",
-      proposal_id: proposalId,
-    });
-    const prepared = await call("memory_review", {
-      action: "prepare_undo",
-      proposal_id: proposalId,
-      reason: "restore prior architecture after review",
-    }) as { undo_proposal_id: string };
-    await call("memory_review", {
-      action: "approve",
-      proposal_id: prepared.undo_proposal_id,
-    });
-    pruneReviewProposals(db, "2026-09-02T12:00:00.000Z");
+    try {
+      const call = makeCall(db);
+      const original = writeState(
+        db,
+        "projects/munin-memory",
+        "architecture",
+        "Original architecture",
+        ["architecture"],
+        "owner",
+      );
+      const extracted = await call("memory_extract", {
+        conversation_text: "We decided to replace the architecture note again.",
+        namespace_hint: "projects/munin-memory",
+        persist: true,
+      }) as { proposals: Array<{ id: string }> };
+      const proposalId = extracted.proposals[0].id;
+      await call("memory_review", {
+        action: "edit",
+        proposal_id: proposalId,
+        reason: "target the architecture state",
+        operation: {
+          action: "memory_write",
+          namespace: "projects/munin-memory",
+          key: "architecture",
+          content: "Replacement architecture",
+          tags: ["architecture"],
+          expected_updated_at: original.updated_at,
+        },
+      });
+      vi.advanceTimersByTime(1000);
+      await call("memory_review", {
+        action: "approve",
+        proposal_id: proposalId,
+      });
+      const prepared = await call("memory_review", {
+        action: "prepare_undo",
+        proposal_id: proposalId,
+        reason: "restore prior architecture after review",
+      }) as { undo_proposal_id: string };
+      vi.advanceTimersByTime(1000);
+      await call("memory_review", {
+        action: "approve",
+        proposal_id: prepared.undo_proposal_id,
+      });
+      pruneReviewProposals(db, "2026-09-02T12:00:00.000Z");
 
-    const preview = await call("memory_review", {
-      action: "preview",
-      proposal_id: proposalId,
-    }) as {
-      status: string;
-      approval_status: string;
-      approval_error?: { code: string; message: string };
-    };
+      const preview = await call("memory_review", {
+        action: "preview",
+        proposal_id: proposalId,
+      }) as {
+        status: string;
+        approval_status: string;
+        approval_error?: { code: string; message: string };
+      };
 
-    expect(preview).toMatchObject({
-      status: "superseded",
-      approval_status: "not_approvable",
-      approval_error: {
-        code: "invalid_transition",
+      expect(preview).toMatchObject({
+        status: "superseded",
+        approval_status: "not_approvable",
+        approval_error: {
+          code: "invalid_transition",
+          message: "A superseded proposal cannot be approved.",
+        },
+      });
+      expect(preview).not.toHaveProperty("exact_operation");
+
+      const rejected = await call("memory_review", {
+        action: "approve",
+        proposal_id: proposalId,
+      }) as { error: string; message: string };
+
+      expect(rejected).toMatchObject({
+        error: "invalid_transition",
         message: "A superseded proposal cannot be approved.",
-      },
-    });
-    expect(preview).not.toHaveProperty("exact_operation");
-
-    const rejected = await call("memory_review", {
-      action: "approve",
-      proposal_id: proposalId,
-    }) as { error: string; message: string };
-
-    expect(rejected).toMatchObject({
-      error: "invalid_transition",
-      message: "A superseded proposal cannot be approved.",
-    });
-    db.close();
+      });
+    } finally {
+      db.close();
+      vi.useRealTimers();
+    }
   });
 
   it("protects a higher-classification prior snapshot and restores its classification", async () => {

@@ -1058,6 +1058,30 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 26,
+    description: "Isolate durable review proposals by server-derived creator session (#271)",
+    up: (db) => {
+      const columns = db.prepare("PRAGMA table_info(review_proposals)").all() as Array<{
+        name: string;
+      }>;
+      if (!columns.some(({ name }) => name === "creator_session_id")) {
+        db.exec("ALTER TABLE review_proposals ADD COLUMN creator_session_id TEXT");
+      }
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_review_proposals_creator_session_status_updated
+          ON review_proposals(
+            creator_principal_id,
+            creator_session_id,
+            status,
+            target_namespace,
+            operation_type,
+            updated_at DESC,
+            id
+          );
+      `);
+    },
+  },
 ];
 
 /**

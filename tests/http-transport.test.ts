@@ -34,7 +34,7 @@ function jsonRpcHeaders(token = LEGACY_API_KEY) {
 }
 
 async function initializeClient(appInstance: ReturnType<typeof createHttpApp>["app"], token = LEGACY_API_KEY) {
-  await supertest(appInstance)
+  return supertest(appInstance)
     .post("/mcp")
     .set(jsonRpcHeaders(token))
     .send({
@@ -68,8 +68,65 @@ function parseToolContent<T>(body: string): T {
   return JSON.parse(content[0].text) as T;
 }
 
+async function callHttpTool(
+  token: string,
+  id: number,
+  name: string,
+  arguments_: Record<string, unknown>,
+  runHandle?: string,
+) {
+  const headers: Record<string, string> = {
+    ...jsonRpcHeaders(token),
+    "mcp-protocol-version": "2025-03-26",
+  };
+  if (runHandle !== undefined) headers["mcp-session-id"] = runHandle;
+  return supertest(app)
+    .post("/mcp")
+    .set(headers)
+    .send({
+      jsonrpc: "2.0",
+      id,
+      method: "tools/call",
+      params: { name, arguments: arguments_ },
+    })
+    .expect(200);
+}
+
 function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
+}
+
+function insertOAuthRunToken(token: string, clientId: string, principalId = "owner"): void {
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO oauth_clients (client_id, created_at, updated_at)
+     VALUES (?, ?, ?)`,
+  ).run(clientId, now, now);
+  db.prepare(
+    `INSERT INTO oauth_tokens
+     (token, token_type, client_id, scopes, expires_at, created_at, principal_id)
+     VALUES (?, 'access', ?, '[]', ?, ?, ?)`,
+  ).run(hashToken(token), clientId, Math.floor(Date.now() / 1000) + 3600, now, principalId);
+}
+
+function insertOAuthPrincipal(principalId: string): void {
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO principals
+     (id, principal_id, principal_type, namespace_rules, created_at)
+     VALUES (?, ?, 'family', ?, ?)`,
+  ).run(
+    randomUUID(),
+    principalId,
+    JSON.stringify([{ pattern: "*", permissions: "rw" }]),
+    now,
+  );
+}
+
+function flipHexCharacter(value: string): string {
+  const last = value.at(-1);
+  if (!last) throw new Error("Cannot tamper with an empty hexadecimal value");
+  return `${value.slice(0, -1)}${last === "0" ? "1" : "0"}`;
 }
 
 let db: Database.Database;
@@ -158,14 +215,251 @@ describe("stateless HTTP transport", () => {
     const parsedContent = JSON.parse(content[0].text) as { namespaces: unknown[] };
 
     expect(Array.isArray(parsedContent.namespaces)).toBe(true);
+
+    const durableResponse = await supertest(app)
+      .post("/mcp")
+      .set({
+        ...jsonRpcHeaders(),
+        "mcp-protocol-version": "2025-03-26",
+      })
+      .send({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: {
+          name: "memory_extract",
+          arguments: {
+            conversation_text: "We decided this stateless request must not capture durable memory.",
+            namespace_hint: "projects/http-stateless",
+            persist: true,
+          },
+        },
+      })
+      .expect(200);
+    expect(parseToolContent<Record<string, unknown>>(durableResponse.text)).toMatchObject({
+      error: "session_required",
+    });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM review_proposals").get())
+      .toEqual({ count: 0 });
+
     expect(requestLogs.at(-1)).toMatchObject({
       method: "POST",
       rpcMethod: "tools/call",
-      toolName: "memory_list",
+      toolName: "memory_extract",
       authType: "bearer",
       clientId: "legacy",
       status: 200,
     });
+  });
+
+  it("isolates same-credential review runs with server-issued MCP handles", async () => {
+    const token = "oauth-run-token-shared";
+    insertOAuthRunToken(token, "http-review-client-shared");
+
+    const extract = async (id: number, namespace: string, runHandle?: string) =>
+      callHttpTool(token, id, "memory_extract", {
+        conversation_text: `We decided to preserve durable HTTP review isolation for ${namespace}.`,
+        namespace_hint: namespace,
+        persist: true,
+      }, runHandle);
+
+    const initializeResponseA = await initializeClient(app, token);
+    const initializeResponseB = await initializeClient(app, token);
+    const handleA = initializeResponseA.headers["mcp-session-id"];
+    const handleB = initializeResponseB.headers["mcp-session-id"];
+    expect(handleA).toMatch(/^munin-run-v1\.[0-9a-f]{32}\.[0-9a-f]{64}$/);
+    expect(handleB).toMatch(/^munin-run-v1\.[0-9a-f]{32}\.[0-9a-f]{64}$/);
+    expect(handleB).not.toBe(handleA);
+
+    const responseA = await extract(3, "projects/http-review-a", handleA);
+    const responseB = await extract(4, "projects/http-review-b", handleB);
+    const proposalA = parseToolContent<{ proposals: Array<{ id: string }> }>(responseA.text).proposals[0].id;
+    const proposalB = parseToolContent<{ proposals: Array<{ id: string }> }>(responseB.text).proposals[0].id;
+    const list = async (id: number, runHandle: string) => parseToolContent<{
+      proposals: Array<{ id: string }>;
+    }>((await callHttpTool(token, id, "memory_review", { action: "list" }, runHandle)).text);
+
+    expect((await list(5, handleA)).proposals.map((proposal) => proposal.id)).toEqual([proposalA]);
+    expect((await list(6, handleB)).proposals.map((proposal) => proposal.id)).toEqual([proposalB]);
+
+    const invalidHandleResponse = await extract(7, "projects/http-review-invalid", "caller-chosen-shared-session");
+    expect(parseToolContent<Record<string, unknown>>(invalidHandleResponse.text)).toMatchObject({
+      error: "session_required",
+    });
+    expect(invalidHandleResponse.headers["mcp-session-id"]).toBeUndefined();
+  });
+
+  it("rejects a review handle replayed with a different credential for the same principal", async () => {
+    const tokenA = "oauth-run-token-owner-a";
+    const tokenB = "oauth-run-token-owner-b";
+    insertOAuthRunToken(tokenA, "http-review-client-owner-a");
+    insertOAuthRunToken(tokenB, "http-review-client-owner-b");
+
+    const initializeResponse = await initializeClient(app, tokenA);
+    const handle = initializeResponse.headers["mcp-session-id"];
+    expect(handle).toMatch(/^munin-run-v1\.[0-9a-f]{32}\.[0-9a-f]{64}$/);
+
+    const replayResponse = await callHttpTool(tokenB, 2, "memory_extract", {
+      conversation_text: "This replay must not create a proposal under the other owner credential.",
+      namespace_hint: "projects/http-review-replay",
+      persist: true,
+    }, handle);
+
+    expect(parseToolContent<Record<string, unknown>>(replayResponse.text)).toMatchObject({
+      error: "session_required",
+    });
+    expect(replayResponse.headers["mcp-session-id"]).toBeUndefined();
+    expect(db.prepare("SELECT COUNT(*) AS count FROM review_proposals").get())
+      .toEqual({ count: 0 });
+  });
+
+  it("rejects a review handle replayed by a different principal", async () => {
+    const ownerToken = "oauth-run-token-owner-principal";
+    const otherPrincipal = "http-review-peer";
+    const otherToken = "oauth-run-token-other-principal";
+    insertOAuthRunToken(ownerToken, "http-review-client-owner-principal");
+    insertOAuthPrincipal(otherPrincipal);
+    insertOAuthRunToken(otherToken, "http-review-client-other-principal", otherPrincipal);
+
+    const initializeResponse = await initializeClient(app, ownerToken);
+    const handle = initializeResponse.headers["mcp-session-id"];
+    expect(handle).toBeDefined();
+
+    const replayResponse = await callHttpTool(otherToken, 2, "memory_extract", {
+      conversation_text: "This replay must not create a proposal for a different principal.",
+      namespace_hint: "projects/http-review-principal-replay",
+      persist: true,
+    }, handle);
+
+    expect(parseToolContent<Record<string, unknown>>(replayResponse.text)).toMatchObject({
+      error: "session_required",
+    });
+    expect(replayResponse.headers["mcp-session-id"]).toBeUndefined();
+    expect(db.prepare("SELECT COUNT(*) AS count FROM review_proposals").get())
+      .toEqual({ count: 0 });
+  });
+
+  it.each([
+    ["run ID", (prefix: string, runId: string, signature: string) =>
+      `${prefix}.${flipHexCharacter(runId)}.${signature}`],
+    ["signature", (prefix: string, runId: string, signature: string) =>
+      `${prefix}.${runId}.${flipHexCharacter(signature)}`],
+  ] as const)("rejects a handle with a tampered %s", async (_label, tamper) => {
+    const token = "oauth-run-token-tampered-handle";
+    insertOAuthRunToken(token, "http-review-client-tampered-handle");
+
+    const initializeResponse = await initializeClient(app, token);
+    const handle = initializeResponse.headers["mcp-session-id"] as string;
+    const [prefix, runId, signature] = handle.split(".");
+    const tamperedHandle = tamper(prefix, runId, signature);
+
+    const replayResponse = await callHttpTool(token, 2, "memory_extract", {
+      conversation_text: "This tampered handle must not create a proposal.",
+      namespace_hint: "projects/http-review-tampered",
+      persist: true,
+    }, tamperedHandle);
+
+    expect(parseToolContent<Record<string, unknown>>(replayResponse.text)).toMatchObject({
+      error: "session_required",
+    });
+    expect(replayResponse.headers["mcp-session-id"]).toBeUndefined();
+    expect(db.prepare("SELECT COUNT(*) AS count FROM review_proposals").get())
+      .toEqual({ count: 0 });
+  });
+
+  it("keeps cross-run undo authorization same-principal and explicit", async () => {
+    const token = "oauth-undo-run-token";
+    insertOAuthRunToken(token, "http-undo-client");
+
+    const sourceResponse = await callHttpTool(token, 1, "memory_extract", {
+      conversation_text: "We decided to preserve the HTTP cross-run undo boundary.",
+      namespace_hint: "projects/http-undo",
+      persist: true,
+    });
+    const sourceHandle = sourceResponse.headers["mcp-session-id"];
+    expect(sourceHandle).toBeDefined();
+    const sourceId = parseToolContent<{ proposals: Array<{ id: string }> }>(sourceResponse.text).proposals[0].id;
+    expect(parseToolContent<Record<string, unknown>>(
+      (await callHttpTool(token, 2, "memory_review", {
+        action: "approve",
+        proposal_id: sourceId,
+      }, sourceHandle)).text,
+    )).toMatchObject({ status: "approved" });
+
+    const runBResponse = await callHttpTool(token, 3, "memory_review", { action: "list" });
+    const runBHandle = runBResponse.headers["mcp-session-id"];
+    expect(runBHandle).toBeDefined();
+    const undo = parseToolContent<{ undo_proposal_id: string; status: string }>(
+      (await callHttpTool(token, 4, "memory_review", {
+        action: "prepare_undo",
+        scope: "principal",
+        proposal_id: sourceId,
+        reason: "explicit cross-run undo preparation",
+      }, runBHandle)).text,
+    );
+    expect(undo.status).toBe("pending");
+
+    expect(parseToolContent<Record<string, unknown>>(
+      (await callHttpTool(token, 5, "memory_review", {
+        action: "get",
+        proposal_id: undo.undo_proposal_id,
+      }, sourceHandle)).text,
+    )).toMatchObject({ error: "not_found", code: "not_found" });
+    expect(parseToolContent<Record<string, unknown>>(
+      (await callHttpTool(token, 6, "memory_review", {
+        action: "approve",
+        proposal_id: undo.undo_proposal_id,
+      }, runBHandle)).text,
+    )).toMatchObject({ status: "approved" });
+    expect(db.prepare("SELECT status FROM review_proposals WHERE id = ?").get(sourceId))
+      .toEqual({ status: "superseded" });
+  });
+
+  it("persists retrieval analytics without a caller MCP session header", async () => {
+    await supertest(app)
+      .post("/mcp")
+      .set({ ...jsonRpcHeaders(), "mcp-protocol-version": "2025-03-26" })
+      .send({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "memory_write",
+          arguments: {
+            namespace: "projects/http-analytics",
+            key: "retrieval-event",
+            content: "analytics persistence regression",
+          },
+        },
+      })
+      .expect(200);
+
+    await supertest(app)
+      .post("/mcp")
+      .set({ ...jsonRpcHeaders(), "mcp-protocol-version": "2025-03-26" })
+      .send({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: {
+          name: "memory_query",
+          arguments: {
+            query: "analytics persistence regression",
+            namespace: "projects/http-analytics",
+            search_mode: "lexical",
+          },
+        },
+      })
+      .expect(200);
+
+    const event = db.prepare(
+      `SELECT session_id, tool_name
+       FROM retrieval_events
+       ORDER BY timestamp DESC
+       LIMIT 1`,
+    ).get() as { session_id: string; tool_name: string } | undefined;
+    expect(event?.tool_name).toBe("memory_query");
+    expect(event?.session_id).toMatch(/^[0-9a-f]{32}$/);
   });
 
   it("keeps unauthenticated requests rejected", async () => {

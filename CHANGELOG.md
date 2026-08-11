@@ -10,6 +10,19 @@ changelog is the canonical record of what moved.
 
 ### Changed
 
+- **`memory_review` proposals are isolated by creator session/run (#271).** Durable
+  proposals now retain a server-derived creator session, and list/get/preview/edit/
+  approve/decline/undo actions default to the current session plus principal. A
+  known foreign-session ID returns the same non-leaking `not_found` response as an
+  unknown ID. `scope:"principal"` is an explicit same-principal cross-session
+  opt-in; it never expands across principals. Lists support exact `namespace` and
+  `operation_type` filters. Legacy rows with no session remain principal-scope-only
+  until their normal retention lifecycle removes them. Authenticated OAuth and
+  agent-token HTTP requests that omit `Mcp-Session-Id` receive a fresh random,
+  signed server-issued run handle and must echo it for subsequent review actions.
+  Handles are bound to the authenticated principal and credential; static bearer
+  callers and requests with invalid presented handles fail closed, so neither can
+  capture durable review proposals.
 - **`memory_query` pagination snapshots are now bounded operational writes with authenticated opaque cursors (#268).**
   Multi-page query results now persist a server-side snapshot only when more than one page is actually needed, with a documented 5-minute TTL instead of a long-lived cache entry. Active snapshots are capped per principal and globally, expired rows are cleaned via the indexed `expires_at` range during startup and periodic maintenance for both transports, and a caller may evict only its own oldest active snapshots before the server throws `capacity_exceeded` rather than deleting another principal's cursor. Expiry pruning, caller-owned capacity eviction, and snapshot creation are atomic, so a failed creation cannot discard existing cursors. Query cursors bind snapshot identity and frozen position with an HMAC under a per-row random secret; the current access shape is bound separately through exact versioned canonical JSON (stored in the legacy `access_fingerprint` column), with fixed field order and sorted namespace rules rather than password-style hashing. Resumes reject tampered, access-mismatched, expired, or out-of-range cursors safely while still allowing `limit` changes and exact partial override replays that normalize back to the stored request shape. Resumed pages keep the frozen membership/order and explanation scores/reasons against newer writes or later status changes but re-check current deletion, expiry, authorization, and redaction before returning each page, so `total_matched`, `returned`, and `has_more` stay truthful even when snapshot members disappear after page 1. Semantic `total_matched` is exact over currently retrievable active-model indexed candidates, while hybrid totals are exact over the lexical plus currently retrievable semantic union; entries without compatible embeddings remain eligible for hybrid lexical matches. Those mode contracts define retrieval candidates; server-policy canonical orientation and blocked/needs-attention injections become members of the final frozen result set and count in `total_matched`. Hybrid `expired_filtered_count` counts unique expired candidate IDs across both retrieval legs.
 - **`memory_history` now exposes explicit sync bootstrap state alongside older-page navigation (#268).**
