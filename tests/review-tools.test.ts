@@ -1089,6 +1089,12 @@ describe("memory_review lifecycle and isolation", () => {
       action: "get",
       proposal_id: undo.undo_proposal_id,
     })).toMatchObject({ id: undo.undo_proposal_id, status: "pending" });
+    expect(await sessionB("memory_review", {
+      action: "approve",
+      proposal_id: undo.undo_proposal_id,
+    })).toMatchObject({ status: "approved" });
+    expect(db.prepare("SELECT status FROM review_proposals WHERE id = ?").get(sourceId))
+      .toEqual({ status: "superseded" });
     db.close();
   });
 

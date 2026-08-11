@@ -679,7 +679,16 @@ export function markReviewProposalSuperseded(
   now: string,
   access?: ReviewProposalAccess,
 ): boolean {
-  const original = getOwnedProposalRow(db, originalProposalId, principalId, access);
+  // The undo proposal is authorized in the caller's current scope, but its
+  // linked original may have been prepared from another session under the
+  // same principal. Keep the lookup principal-scoped without broadening the
+  // principalId check.
+  const original = getOwnedProposalRow(
+    db,
+    originalProposalId,
+    principalId,
+    { scope: "principal" },
+  );
   const undo = getOwnedProposalRow(db, undoProposalId, principalId, access);
   if (
     !original ||

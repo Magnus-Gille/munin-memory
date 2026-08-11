@@ -72,6 +72,19 @@ function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
+function insertOAuthRunToken(token: string, clientId: string, principalId = "owner"): void {
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO oauth_clients (client_id, created_at, updated_at)
+     VALUES (?, ?, ?)`,
+  ).run(clientId, now, now);
+  db.prepare(
+    `INSERT INTO oauth_tokens
+     (token, token_type, client_id, scopes, expires_at, created_at, principal_id)
+     VALUES (?, 'access', ?, '[]', ?, ?, ?)`,
+  ).run(hashToken(token), clientId, Math.floor(Date.now() / 1000) + 3600, now, principalId);
+}
+
 let db: Database.Database;
 let app: ReturnType<typeof createHttpApp>["app"];
 let requestLogs: RequestLogEntry[];
@@ -193,6 +206,113 @@ describe("stateless HTTP transport", () => {
       clientId: "legacy",
       status: 200,
     });
+  });
+
+  it("isolates review sessions by authenticated run token, not caller session headers", async () => {
+    const tokenA = "oauth-run-token-a";
+    const tokenB = "oauth-run-token-b";
+    insertOAuthRunToken(tokenA, "http-review-client-a");
+    insertOAuthRunToken(tokenB, "http-review-client-b");
+
+    const extract = async (token: string, id: number, namespace: string) => {
+      const response = await supertest(app)
+        .post("/mcp")
+        .set({
+          ...jsonRpcHeaders(token),
+          "mcp-protocol-version": "2025-03-26",
+          // Both callers present the same untrusted transport value. Review
+          // visibility must still follow the authenticated run token.
+          "mcp-session-id": "caller-chosen-shared-session",
+        })
+        .send({
+          jsonrpc: "2.0",
+          id,
+          method: "tools/call",
+          params: {
+            name: "memory_extract",
+            arguments: {
+              conversation_text: `We decided to preserve durable HTTP review isolation for ${namespace}.`,
+              namespace_hint: namespace,
+              persist: true,
+            },
+          },
+        })
+        .expect(200);
+      return parseToolContent<{ proposals: Array<{ id: string }> }>(response.text);
+    };
+
+    const createdA = await extract(tokenA, 1, "projects/http-review-a");
+    const createdB = await extract(tokenB, 2, "projects/http-review-b");
+    const proposalA = createdA.proposals[0].id;
+    const proposalB = createdB.proposals[0].id;
+
+    const list = async (token: string, id: number) => {
+      const response = await supertest(app)
+        .post("/mcp")
+        .set({
+          ...jsonRpcHeaders(token),
+          "mcp-protocol-version": "2025-03-26",
+          "mcp-session-id": "caller-chosen-shared-session",
+        })
+        .send({
+          jsonrpc: "2.0",
+          id,
+          method: "tools/call",
+          params: { name: "memory_review", arguments: { action: "list" } },
+        })
+        .expect(200);
+      return parseToolContent<{ proposals: Array<{ id: string }> }>(response.text);
+    };
+
+    expect((await list(tokenA, 3)).proposals.map((proposal) => proposal.id)).toEqual([proposalA]);
+    expect((await list(tokenB, 4)).proposals.map((proposal) => proposal.id)).toEqual([proposalB]);
+  });
+
+  it("persists retrieval analytics without a caller MCP session header", async () => {
+    await supertest(app)
+      .post("/mcp")
+      .set({ ...jsonRpcHeaders(), "mcp-protocol-version": "2025-03-26" })
+      .send({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "memory_write",
+          arguments: {
+            namespace: "projects/http-analytics",
+            key: "retrieval-event",
+            content: "analytics persistence regression",
+          },
+        },
+      })
+      .expect(200);
+
+    await supertest(app)
+      .post("/mcp")
+      .set({ ...jsonRpcHeaders(), "mcp-protocol-version": "2025-03-26" })
+      .send({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: {
+          name: "memory_query",
+          arguments: {
+            query: "analytics persistence regression",
+            namespace: "projects/http-analytics",
+            search_mode: "lexical",
+          },
+        },
+      })
+      .expect(200);
+
+    const event = db.prepare(
+      `SELECT session_id, tool_name
+       FROM retrieval_events
+       ORDER BY timestamp DESC
+       LIMIT 1`,
+    ).get() as { session_id: string; tool_name: string } | undefined;
+    expect(event?.tool_name).toBe("memory_query");
+    expect(event?.session_id).toMatch(/^[0-9a-f]{32}$/);
   });
 
   it("keeps unauthenticated requests rejected", async () => {

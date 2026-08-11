@@ -8,7 +8,13 @@ import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import express from "express";
 import type { Request, Response, NextFunction } from "express";
 import { createServer, IncomingMessage } from "node:http";
-import { timingSafeEqual, randomUUID, createHmac, randomBytes } from "node:crypto";
+import {
+  timingSafeEqual,
+  randomUUID,
+  createHash,
+  createHmac,
+  randomBytes,
+} from "node:crypto";
 import { pathToFileURL } from "node:url";
 import {
   initDatabase,
@@ -555,21 +561,36 @@ function getRateLimitIdentity(
   };
 }
 
+function deriveAnalyticsSessionId(clientId: string): string {
+  const bucketMs = 30 * 60 * 1000;
+  const bucket = Math.floor(Date.now() / bucketMs);
+  return createHash("sha256")
+    .update(`${clientId}:${bucket}`)
+    .digest("hex")
+    .slice(0, 32);
+}
+
 /**
- * Derive the review creator identity from a stable transport session token.
- * The token is caller-presented, but the durable proposal value is an HMAC
- * under a process-local server secret and is bound to the authenticated
- * principal. A caller cannot choose or spoof the stored creator session ID;
- * callers without a stable token receive no review session at all.
+ * Derive the review creator identity from an authenticated, server-issued
+ * run token. The durable proposal value is an HMAC under a process-local
+ * server secret and is bound to the authenticated principal and token. A
+ * caller cannot choose or spoof the stored creator session ID; callers using
+ * static bearer keys, or without a verified token, receive no review session.
  */
 function deriveReviewSessionId(
   secret: Buffer,
   principalId: string,
-  presentedSessionId: string | undefined,
+  authInfo: Pick<ExtendedAuthInfo, "authMethod" | "token"> | undefined,
 ): string | undefined {
-  if (!presentedSessionId || !principalId) return undefined;
+  if (
+    !principalId
+    || !authInfo?.token
+    || (authInfo.authMethod !== "oauth" && authInfo.authMethod !== "agent_token")
+  ) {
+    return undefined;
+  }
   return createHmac("sha256", secret)
-    .update(`${principalId}\0${presentedSessionId}`)
+    .update(`${principalId}\0${authInfo.token}`)
     .digest("hex")
     .slice(0, 32);
 }
@@ -931,19 +952,23 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
       authInfo?.authMethod ?? "oauth",
       authInfo?.transportTypeHint,
     );
-    const mcpSessionId = deriveReviewSessionId(
+    // Analytics correlation may use the caller's transport header (or the
+    // legacy time-bucket fallback), but review authorization must use only a
+    // server-verified run identity. Keep these identities independent so a
+    // missing review identity fails closed without dropping retrieval events.
+    const analyticsSessionId = getSessionHeader(req)
+      ?? deriveAnalyticsSessionId(authInfo?.clientId ?? "anonymous");
+    const reviewSessionId = deriveReviewSessionId(
       reviewSessionSecret,
       accessContext.principalId,
-      getSessionHeader(req),
+      authInfo,
     );
-    // Null is intentional: registerTools must not invent a shared session for
-    // a stateless HTTP caller that omitted the stable transport token.
     const mcpServer = createMcpServer(
       database,
-      mcpSessionId,
+      analyticsSessionId,
       accessContext,
       runtimeConfig,
-      mcpSessionId ?? null,
+      reviewSessionId ?? null,
     );
 
     try {
