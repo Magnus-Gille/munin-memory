@@ -371,6 +371,50 @@ describe("getInsightsByEntry", () => {
     expect(projectsOnly.some((r) => r.entry_id === entryB.id)).toBe(false);
   });
 
+  it("keeps deleted retrieval results as anonymous rows only when unscoped", () => {
+    writeState(db, "projects/deleted-insight", "status", "will be deleted", ["active"]);
+    const entry = db
+      .prepare("SELECT id FROM entries WHERE namespace = 'projects/deleted-insight' AND key = 'status'")
+      .get() as { id: string };
+
+    logRetrievalEvent(db, {
+      sessionId: "session-insights-orphan",
+      toolName: "memory_query",
+      queryText: "deleted",
+      resultIds: [entry.id],
+      resultNamespaces: ["projects/deleted-insight"],
+      resultRanks: [1],
+    });
+    logRetrievalOutcome(db, "session-insights-orphan", {
+      outcomeType: "opened_result",
+      entryId: entry.id,
+      namespace: "projects/deleted-insight",
+    });
+    logRetrievalOutcome(db, "session-insights-orphan", {
+      outcomeType: "write_in_result_namespace",
+      namespace: "projects/deleted-insight",
+    });
+    db.prepare("DELETE FROM entries WHERE id = ?").run(entry.id);
+
+    const unscoped = getInsightsByEntry(db, undefined, 1, 20);
+    const orphan = unscoped.find((row) => row.entry_id === entry.id);
+    expect(orphan).toMatchObject({
+      entry_id: entry.id,
+      namespace: null,
+      key: null,
+      content_preview: null,
+      impressions: 1,
+      opens: 1,
+      write_outcomes: 1,
+      followthrough_events: 1,
+    });
+    expect(orphan?.updated_at).toBe("");
+
+    // A namespace scope has no surviving entry namespace to match, so the
+    // anonymous historical row must not cross that boundary.
+    expect(getInsightsByEntry(db, "projects/", 1, 20)).toEqual([]);
+  });
+
   it("scopes entries before expansion and keeps same-event outcomes in their namespace", () => {
     writeState(db, "projects/scoped-insights", "status", "scoped target", ["active"]);
     writeState(db, "clients/unrelated", "status", "unrelated small", ["active"]);

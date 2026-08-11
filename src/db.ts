@@ -3578,8 +3578,9 @@ export function getInsightsByEntry(
   const clampedLimit = Math.min(Math.max(limit, 1), MAX_QUERY_LIMIT);
 
   // Build namespace filter clause for the scoped entry set. Keeping this filter
-  // in its own CTE means unrelated entries never enter json_each() expansion or
-  // the event/outcome joins below.
+  // in its own materialized CTE means the namespace index is consulted before
+  // result_ids are expanded. An unscoped, untracked call intentionally keeps a
+  // LEFT JOIN below so deleted entries remain visible as anonymous rows.
   let nsFilter = "";
   const nsParams: unknown[] = [];
   if (namespace) {
@@ -3598,13 +3599,54 @@ export function getInsightsByEntry(
     ? trackedPatternsToSqlLike(trackedPatterns, "e.namespace")
     : { clause: "", params: [] as string[] };
   const trackedFilter = tracked.clause ? `AND ${tracked.clause}` : "";
+  const hasEntryScope = Boolean(namespace || restrictToTracked);
+
+  // result_namespaces is a denormalized event hint, so only use it to discard
+  // events that are provably outside the requested scope. Empty metadata is a
+  // legacy shape and must remain eligible; the entry-id join below is the
+  // authoritative match. This prevents expanding result_ids for unrelated
+  // events without changing behavior for older telemetry rows.
+  let eventScopeFilter = "";
+  const eventScopeParams: unknown[] = [];
+  if (hasEntryScope) {
+    const eventScopeParts: string[] = [];
+    if (namespace) {
+      if (namespace.endsWith("/")) {
+        const filter = buildNamespacePrefixRangeFilter("rn.value", namespace);
+        eventScopeParts.push(filter.clause);
+        eventScopeParams.push(...filter.params);
+      } else {
+        eventScopeParts.push("rn.value = ?");
+        eventScopeParams.push(namespace);
+      }
+    }
+    if (restrictToTracked) {
+      const eventTracked = trackedPatternsToSqlLike(trackedPatterns, "rn.value");
+      eventScopeParts.push(eventTracked.clause);
+      eventScopeParams.push(...eventTracked.params);
+    }
+    const eventScopeClause = eventScopeParts.length > 0
+      ? eventScopeParts.length === 1
+        ? eventScopeParts[0]
+        : `(${eventScopeParts.join(" AND ")})`
+      : "1";
+    eventScopeFilter = `
+        AND (
+          json_array_length(rev.result_namespaces) = 0
+          OR EXISTS (
+            SELECT 1
+            FROM json_each(rev.result_namespaces) AS rn
+            WHERE ${eventScopeClause}
+          )
+        )`;
+  }
 
   // Optional rolling-window filter on impression event timestamp
   const sinceFilter = since ? "AND rev.timestamp >= ?" : "";
   const sinceParams: unknown[] = since ? [since] : [];
 
-  const sql = `
-    WITH scoped_entries AS (
+  const scopedEntriesCte = hasEntryScope ? `
+    scoped_entries AS MATERIALIZED (
       SELECT
         e.id,
         e.namespace,
@@ -3619,37 +3661,39 @@ export function getInsightsByEntry(
       WHERE TRUE
         ${nsFilter}
         ${trackedFilter}
-    ),
-    impressions_cte AS (
-      -- One row per (entry_id, event_id) from query/attention events with results
+    ),` : "";
+  const scopedImpressions = hasEntryScope
+    ? `
       SELECT
         se.id AS entry_id,
-        rev.id AS event_id
-      FROM scoped_entries se
-      JOIN retrieval_events rev
-      JOIN json_each(rev.result_ids) AS e_json ON e_json.value = se.id
+        ce.event_id
+      FROM candidate_events ce
+      CROSS JOIN json_each(ce.result_ids) AS e_json
+      JOIN scoped_entries se ON se.id = e_json.value`
+    : `
+      SELECT
+        e_json.value AS entry_id,
+        ce.event_id
+      FROM candidate_events ce
+      CROSS JOIN json_each(ce.result_ids) AS e_json`;
+  const entryJoin = hasEntryScope
+    ? "JOIN scoped_entries e ON e.id = imp.entry_id"
+    : "LEFT JOIN entries e ON e.id = imp.entry_id";
+
+  const sql = `
+    WITH${scopedEntriesCte}
+    candidate_events AS MATERIALIZED (
+      -- Apply indexed event/time predicates before JSON expansion. There is no
+      -- native SQLite index for array members, so json_each() is unavoidable
+      -- for the remaining candidate events.
+      SELECT rev.id AS event_id, rev.result_ids
+      FROM retrieval_events rev
       WHERE rev.tool_name IN ('memory_query', 'memory_attention')
         AND json_array_length(rev.result_ids) > 0
         ${sinceFilter}
+        ${eventScopeFilter}
     ),
-    outcomes_cte AS (
-      -- Keep outcomes tied to the same retrieval events as the scoped
-      -- impressions. Explicitly namespace-scoped write/log outcomes are
-      -- matched to the source entry namespace below; NULL namespaces retain
-      -- the legacy event-level association.
-      SELECT ro.entry_id, ro.retrieval_event_id, ro.outcome_type, ro.namespace, ro.timestamp
-      FROM retrieval_outcomes ro
-      JOIN (SELECT DISTINCT event_id FROM impressions_cte) imp_events
-        ON imp_events.event_id = ro.retrieval_event_id
-      WHERE ro.outcome_type IN (
-        'opened_result', 'write_in_result_namespace', 'log_in_result_namespace'
-      )
-    ),
-    opens_cte AS (
-      SELECT oc.entry_id, oc.retrieval_event_id
-      FROM outcomes_cte oc
-      WHERE oc.outcome_type = 'opened_result'
-        AND oc.entry_id IS NOT NULL
+    impressions_cte AS (${scopedImpressions}
     )
     SELECT
       imp.entry_id,
@@ -3660,39 +3704,39 @@ export function getInsightsByEntry(
       SUBSTR(e.content, 1, 60) AS content_preview,
       e.tags AS tags,
       COUNT(DISTINCT imp.event_id) AS impressions,
-      COUNT(DISTINCT op.retrieval_event_id) AS opens,
+      COUNT(DISTINCT ro_open.retrieval_event_id) AS opens,
       COUNT(DISTINCT CASE WHEN ro_w.outcome_type = 'write_in_result_namespace' THEN ro_w.retrieval_event_id END) AS write_outcomes,
       COUNT(DISTINCT CASE WHEN ro_l.outcome_type = 'log_in_result_namespace' THEN ro_l.retrieval_event_id END) AS log_outcomes,
       -- followthrough_events: distinct impression events where ANY follow-through action occurred.
-      -- Counting a single combined column avoids double-counting events that have multiple
-      -- outcome types (e.g. both opened_result AND write_in_result_namespace), which would
-      -- inflate (opens + write_outcomes + log_outcomes) / impressions above 1.0.
       COUNT(DISTINCT CASE
-        WHEN op.retrieval_event_id IS NOT NULL
+        WHEN ro_open.retrieval_event_id IS NOT NULL
           OR ro_w.retrieval_event_id IS NOT NULL
           OR ro_l.retrieval_event_id IS NOT NULL
         THEN imp.event_id
       END) AS followthrough_events,
       COUNT(DISTINCT CASE
-        WHEN op.retrieval_event_id IS NOT NULL
+        WHEN ro_open.retrieval_event_id IS NOT NULL
           AND e.updated_at IS NOT NULL
           AND (julianday(ro_open.timestamp) - julianday(e.updated_at)) > 14
-        THEN op.retrieval_event_id
+        THEN ro_open.retrieval_event_id
       END) AS opened_when_stale_count,
       e.created_at,
       COALESCE(e.updated_at, '') AS updated_at
     FROM impressions_cte imp
-    JOIN scoped_entries e ON e.id = imp.entry_id
-    LEFT JOIN opens_cte op ON op.entry_id = imp.entry_id AND op.retrieval_event_id = imp.event_id
-    LEFT JOIN outcomes_cte ro_open ON ro_open.entry_id = imp.entry_id
+    ${entryJoin}
+    -- Direct event-keyed joins keep outcome lookups on
+    -- idx_retrieval_outcomes_event; do not materialize a broad outcomes CTE.
+    LEFT JOIN retrieval_outcomes ro_open ON ro_open.retrieval_event_id = imp.event_id
       AND ro_open.outcome_type = 'opened_result'
-      AND ro_open.retrieval_event_id = imp.event_id
-    LEFT JOIN outcomes_cte ro_w ON ro_w.retrieval_event_id = imp.event_id
+      AND ro_open.entry_id = imp.entry_id
+    LEFT JOIN retrieval_outcomes ro_w ON ro_w.retrieval_event_id = imp.event_id
       AND ro_w.outcome_type = 'write_in_result_namespace'
-      AND (ro_w.namespace IS NULL OR ro_w.namespace = e.namespace)
-    LEFT JOIN outcomes_cte ro_l ON ro_l.retrieval_event_id = imp.event_id
+      -- A deleted entry has no namespace, so preserve the historical unscoped
+      -- event-level association for its anonymous row.
+      AND (e.namespace IS NULL OR ro_w.namespace IS NULL OR ro_w.namespace = e.namespace)
+    LEFT JOIN retrieval_outcomes ro_l ON ro_l.retrieval_event_id = imp.event_id
       AND ro_l.outcome_type = 'log_in_result_namespace'
-      AND (ro_l.namespace IS NULL OR ro_l.namespace = e.namespace)
+      AND (e.namespace IS NULL OR ro_l.namespace IS NULL OR ro_l.namespace = e.namespace)
     GROUP BY imp.entry_id, e.namespace, e.updated_at
     HAVING COUNT(DISTINCT imp.event_id) >= ?
     ORDER BY impressions DESC
@@ -3701,7 +3745,7 @@ export function getInsightsByEntry(
 
   return db
     .prepare(sql)
-    .all(...nsParams, ...tracked.params, ...sinceParams, minImpressions, clampedLimit) as EntryInsightRow[];
+    .all(...nsParams, ...tracked.params, ...sinceParams, ...eventScopeParams, minImpressions, clampedLimit) as EntryInsightRow[];
 }
 
 /**
@@ -5233,40 +5277,44 @@ export function countUnusedSurfaces(
     ? trackedPatternsToSqlLike(trackedPatterns, "e.namespace")
     : { clause: "", params: [] as string[] };
   const trackedFilter = tracked.clause ? `AND ${tracked.clause}` : "";
+  const eventTracked = restrictToTracked
+    ? trackedPatternsToSqlLike(trackedPatterns, "rn.value")
+    : { clause: "", params: [] as string[] };
+  const eventScopeFilter = restrictToTracked
+    ? `
+        AND (
+          json_array_length(rev.result_namespaces) = 0
+          OR EXISTS (
+            SELECT 1
+            FROM json_each(rev.result_namespaces) AS rn
+            WHERE ${eventTracked.clause}
+          )
+        )`
+    : "";
 
   const sinceFilter = since ? "AND rev.timestamp >= ?" : "";
   const sinceParams: unknown[] = since ? [since] : [];
 
   const sql = `
-    WITH scoped_entries AS (
+    WITH scoped_entries AS MATERIALIZED (
       SELECT e.id, e.namespace
       FROM entries e
       WHERE TRUE
         ${trackedFilter}
     ),
-    impressions_cte AS (
-      SELECT se.id AS entry_id, rev.id AS event_id
-      FROM scoped_entries se
-      JOIN retrieval_events rev
-      JOIN json_each(rev.result_ids) AS e_json ON e_json.value = se.id
+    candidate_events AS MATERIALIZED (
+      SELECT rev.id AS event_id, rev.result_ids
+      FROM retrieval_events rev
       WHERE rev.tool_name IN ('memory_query', 'memory_attention')
         AND json_array_length(rev.result_ids) > 0
         ${sinceFilter}
+        ${eventScopeFilter}
     ),
-    outcomes_cte AS (
-      SELECT ro.entry_id, ro.retrieval_event_id, ro.outcome_type, ro.namespace
-      FROM retrieval_outcomes ro
-      JOIN (SELECT DISTINCT event_id FROM impressions_cte) imp_events
-        ON imp_events.event_id = ro.retrieval_event_id
-      WHERE ro.outcome_type IN (
-        'opened_result', 'write_in_result_namespace', 'log_in_result_namespace'
-      )
-    ),
-    opens_cte AS (
-      SELECT oc.entry_id, oc.retrieval_event_id
-      FROM outcomes_cte oc
-      WHERE oc.outcome_type = 'opened_result'
-        AND oc.entry_id IS NOT NULL
+    impressions_cte AS (
+      SELECT se.id AS entry_id, ce.event_id
+      FROM candidate_events ce
+      CROSS JOIN json_each(ce.result_ids) AS e_json
+      JOIN scoped_entries se ON se.id = e_json.value
     ),
     per_entry AS (
       SELECT
@@ -5280,13 +5328,15 @@ export function countUnusedSurfaces(
         END) AS followthrough_events
       FROM impressions_cte imp
       JOIN scoped_entries e ON e.id = imp.entry_id
-      LEFT JOIN opens_cte op ON op.entry_id = imp.entry_id AND op.retrieval_event_id = imp.event_id
-      LEFT JOIN outcomes_cte ro_w ON ro_w.retrieval_event_id = imp.event_id
+      LEFT JOIN retrieval_outcomes op ON op.retrieval_event_id = imp.event_id
+        AND op.outcome_type = 'opened_result'
+        AND op.entry_id = imp.entry_id
+      LEFT JOIN retrieval_outcomes ro_w ON ro_w.retrieval_event_id = imp.event_id
         AND ro_w.outcome_type = 'write_in_result_namespace'
-        AND (ro_w.namespace IS NULL OR ro_w.namespace = e.namespace)
-      LEFT JOIN outcomes_cte ro_l ON ro_l.retrieval_event_id = imp.event_id
+        AND (e.namespace IS NULL OR ro_w.namespace IS NULL OR ro_w.namespace = e.namespace)
+      LEFT JOIN retrieval_outcomes ro_l ON ro_l.retrieval_event_id = imp.event_id
         AND ro_l.outcome_type = 'log_in_result_namespace'
-        AND (ro_l.namespace IS NULL OR ro_l.namespace = e.namespace)
+        AND (e.namespace IS NULL OR ro_l.namespace IS NULL OR ro_l.namespace = e.namespace)
       GROUP BY imp.entry_id
     )
     SELECT COUNT(*) AS cnt
@@ -5296,7 +5346,7 @@ export function countUnusedSurfaces(
 
   const row = db
     .prepare(sql)
-    .get(...tracked.params, ...sinceParams, minImpressions) as { cnt: number } | undefined;
+    .get(...tracked.params, ...sinceParams, ...eventTracked.params, minImpressions) as { cnt: number } | undefined;
   return row?.cnt ?? 0;
 }
 
