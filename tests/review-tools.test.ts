@@ -2326,79 +2326,87 @@ describe("reviewed undo", () => {
   });
 
   it("keeps superseded originals aligned after reviewed undo and payload purge", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-01T12:00:00.000Z"));
     const db = initDatabase(":memory:");
-    const call = makeCall(db);
-    const original = writeState(
-      db,
-      "projects/munin-memory",
-      "architecture",
-      "Original architecture",
-      ["architecture"],
-      "owner",
-    );
-    const extracted = await call("memory_extract", {
-      conversation_text: "We decided to replace the architecture note again.",
-      namespace_hint: "projects/munin-memory",
-      persist: true,
-    }) as { proposals: Array<{ id: string }> };
-    const proposalId = extracted.proposals[0].id;
-    await call("memory_review", {
-      action: "edit",
-      proposal_id: proposalId,
-      reason: "target the architecture state",
-      operation: {
-        action: "memory_write",
-        namespace: "projects/munin-memory",
-        key: "architecture",
-        content: "Replacement architecture",
-        tags: ["architecture"],
-        expected_updated_at: original.updated_at,
-      },
-    });
-    await call("memory_review", {
-      action: "approve",
-      proposal_id: proposalId,
-    });
-    const prepared = await call("memory_review", {
-      action: "prepare_undo",
-      proposal_id: proposalId,
-      reason: "restore prior architecture after review",
-    }) as { undo_proposal_id: string };
-    await call("memory_review", {
-      action: "approve",
-      proposal_id: prepared.undo_proposal_id,
-    });
-    pruneReviewProposals(db, "2026-09-02T12:00:00.000Z");
+    try {
+      const call = makeCall(db);
+      const original = writeState(
+        db,
+        "projects/munin-memory",
+        "architecture",
+        "Original architecture",
+        ["architecture"],
+        "owner",
+      );
+      const extracted = await call("memory_extract", {
+        conversation_text: "We decided to replace the architecture note again.",
+        namespace_hint: "projects/munin-memory",
+        persist: true,
+      }) as { proposals: Array<{ id: string }> };
+      const proposalId = extracted.proposals[0].id;
+      await call("memory_review", {
+        action: "edit",
+        proposal_id: proposalId,
+        reason: "target the architecture state",
+        operation: {
+          action: "memory_write",
+          namespace: "projects/munin-memory",
+          key: "architecture",
+          content: "Replacement architecture",
+          tags: ["architecture"],
+          expected_updated_at: original.updated_at,
+        },
+      });
+      vi.advanceTimersByTime(1000);
+      await call("memory_review", {
+        action: "approve",
+        proposal_id: proposalId,
+      });
+      const prepared = await call("memory_review", {
+        action: "prepare_undo",
+        proposal_id: proposalId,
+        reason: "restore prior architecture after review",
+      }) as { undo_proposal_id: string };
+      vi.advanceTimersByTime(1000);
+      await call("memory_review", {
+        action: "approve",
+        proposal_id: prepared.undo_proposal_id,
+      });
+      pruneReviewProposals(db, "2026-09-02T12:00:00.000Z");
 
-    const preview = await call("memory_review", {
-      action: "preview",
-      proposal_id: proposalId,
-    }) as {
-      status: string;
-      approval_status: string;
-      approval_error?: { code: string; message: string };
-    };
+      const preview = await call("memory_review", {
+        action: "preview",
+        proposal_id: proposalId,
+      }) as {
+        status: string;
+        approval_status: string;
+        approval_error?: { code: string; message: string };
+      };
 
-    expect(preview).toMatchObject({
-      status: "superseded",
-      approval_status: "not_approvable",
-      approval_error: {
-        code: "invalid_transition",
+      expect(preview).toMatchObject({
+        status: "superseded",
+        approval_status: "not_approvable",
+        approval_error: {
+          code: "invalid_transition",
+          message: "A superseded proposal cannot be approved.",
+        },
+      });
+      expect(preview).not.toHaveProperty("exact_operation");
+
+      const rejected = await call("memory_review", {
+        action: "approve",
+        proposal_id: proposalId,
+      }) as { error: string; message: string };
+
+      expect(rejected).toMatchObject({
+        error: "invalid_transition",
         message: "A superseded proposal cannot be approved.",
-      },
-    });
-    expect(preview).not.toHaveProperty("exact_operation");
-
-    const rejected = await call("memory_review", {
-      action: "approve",
-      proposal_id: proposalId,
-    }) as { error: string; message: string };
-
-    expect(rejected).toMatchObject({
-      error: "invalid_transition",
-      message: "A superseded proposal cannot be approved.",
-    });
-    db.close();
+      });
+    } finally {
+      db.close();
+      vi.useRealTimers();
+    }
   });
 
   it("protects a higher-classification prior snapshot and restores its classification", async () => {
