@@ -1,0 +1,22 @@
+[Unit]
+Description=Report failed Munin Memory NAS backup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=<user>
+# Keep this separate from the backup process so systemd can report failures
+# that happen after a timeout or SIGKILL. The helper is deliberately best effort
+# and emits only a fixed generic status message.
+WorkingDirectory=<ops-dir>
+ExecStart=<ops-dir>/scripts/nas-backup-status.sh fail
+EnvironmentFile=-<ops-dir>/.env
+StandardOutput=journal
+StandardError=journal
+
+# The alert needs only the network and the optional ops environment file.
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=false
+PrivateTmp=yes

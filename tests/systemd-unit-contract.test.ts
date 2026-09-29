@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const publicTemplate = readFileSync(join(repoRoot, "munin-memory.service"), "utf8");
 const backupTemplate = readFileSync(join(repoRoot, "munin-backup.service"), "utf8");
+const backupAlertTemplate = readFileSync(join(repoRoot, "munin-backup-alert.service"), "utf8");
 const offsiteTemplate = readFileSync(join(repoRoot, "munin-offsite.service"), "utf8");
 const opsInstaller = readFileSync(join(repoRoot, "scripts", "install-ops.sh"), "utf8");
 const fleetUnitPath = join(repoRoot, "systemd", "munin-memory.service");
@@ -48,8 +49,13 @@ describe("systemd deployment-unit contract", () => {
   it("keeps backup units portable and rendered by the ops installer", () => {
     expect(backupTemplate).toContain("User=<user>");
     expect(backupTemplate).toContain("ExecStart=<ops-dir>/scripts/backup-to-nas.sh");
+    expect(backupTemplate).toContain("OnFailure=munin-backup-alert.service");
+    expect(backupAlertTemplate).toContain("ExecStart=<ops-dir>/scripts/nas-backup-status.sh fail");
+    expect(backupAlertTemplate).toContain("EnvironmentFile=-<ops-dir>/.env");
     expect(offsiteTemplate).toContain("ReadWritePaths=<home-dir>/.munin-memory");
-    expect(`${backupTemplate}\n${offsiteTemplate}`).not.toMatch(/\/home\/[a-z0-9._-]+\//i);
+    expect(`${backupTemplate}\n${backupAlertTemplate}\n${offsiteTemplate}`).not.toMatch(/\/home\/[a-z0-9._-]+\//i);
+    expect(opsInstaller).toContain("nas-backup-status.sh");
+    expect(opsInstaller).toContain("munin-backup-alert.service");
     for (const placeholder of ["<user>", "<home-dir>", "<ops-dir>"]) {
       expect(opsInstaller).toContain(`s|${placeholder}|`);
     }

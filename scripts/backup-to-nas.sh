@@ -42,9 +42,26 @@ MODE="${MUNIN_BACKUP_MODE:-}"
 MOUNTPOINT_BIN="${MUNIN_MOUNTPOINT_BIN:-mountpoint}"
 SSH_BIN="${MUNIN_SSH_BIN:-ssh}"
 RSYNC_BIN="${MUNIN_RSYNC_BIN:-rsync}"
+STATUS_BIN="${MUNIN_NAS_BACKUP_STATUS_BIN:-$(dirname "${BASH_SOURCE[0]}")/nas-backup-status.sh}"
 
 KEEP_DAILY="${MUNIN_BACKUP_KEEP_DAILY:-14}"
 KEEP_SUNDAYS="${MUNIN_BACKUP_KEEP_SUNDAYS:-4}"
+
+# Report ordinary failures to the dedicated Heimdall status. This is best
+# effort: the backup result must remain the authoritative exit status, and the
+# OnFailure unit covers processes that systemd terminates before this trap can
+# run (for example TimeoutStartSec or SIGKILL).
+cleanup() {
+    local rc=$?
+    if [ "$rc" -ne 0 ]; then
+        "$STATUS_BIN" fail >/dev/null 2>&1 || true
+    fi
+    if [ -n "${LOCAL_TMP:-}" ]; then
+        rm -f "$LOCAL_TMP" "${LOCAL_TMP}-journal" "${LOCAL_TMP}-wal" "${LOCAL_TMP}-shm"
+    fi
+    return "$rc"
+}
+trap cleanup EXIT
 
 # ── Mode resolution ──────────────────────────────────────────────────────────
 if [ -z "$MODE" ]; then
@@ -101,12 +118,6 @@ fi
 TIMESTAMP=$(date -u +%Y-%m-%d-%H%M)
 FILENAME="memory-${TIMESTAMP}.db"
 LOCAL_TMP="${STAGING_DIR}/${FILENAME}"
-
-# Remove the staging snapshot on EVERY exit path, not just the successful one,
-# and take sqlite's sidecars with it: `.backup` leaves a <file>-journal (and can
-# leave -wal/-shm) next to the snapshot, so removing only $LOCAL_TMP strands
-# them. Observed for real — an interrupted run left an orphaned -journal behind.
-trap 'rm -f "$LOCAL_TMP" "${LOCAL_TMP}-journal" "${LOCAL_TMP}-wal" "${LOCAL_TMP}-shm"' EXIT
 
 # ── Portable stat ────────────────────────────────────────────────────────────
 # The flavour is detected ONCE and never mixed: GNU spells the format `-c`,
@@ -365,4 +376,5 @@ else
 fi
 
 # ── 5. Staging cleanup is handled by the EXIT trap. ──────────────────────────
+"$STATUS_BIN" pass >/dev/null 2>&1 || true
 echo "$(date -Iseconds) Backup complete: ${FILENAME} (mode=${MODE})"

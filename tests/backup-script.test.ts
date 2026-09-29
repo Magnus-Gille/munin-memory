@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const backupScript = join(repoRoot, "scripts", "backup-to-nas.sh");
+const statusScript = join(repoRoot, "scripts", "nas-backup-status.sh");
 const backupUnit = readFileSync(join(repoRoot, "munin-backup.service"), "utf8");
 
 const scratchDirs: string[] = [];
@@ -155,6 +156,7 @@ describe("backup destination safety", () => {
 
     // Stub ssh/rsync as local filesystem operations against `landed`.
     const sshLog = join(scratch, "ssh.log");
+    const statusLog = join(scratch, "status.log");
     writeExecutable(
       join(binDir, "fake-ssh"),
       `#!/bin/bash\nhost="$1"; shift\necho "$host :: $*" >> "${sshLog}"\nif [[ "$*" == *"stat -c"* ]]; then\n  f=$(printf '%s' "$*" | sed -nE "s/.*'([^']*memory-[^']*\\.db)'.*/\\1/p" | head -1)\n  b=$(basename "$f")\n  wc -c < "${landed}/$b" 2>/dev/null | tr -d ' '\n  exit 0\nfi\nexit 0\n`,
@@ -163,6 +165,7 @@ describe("backup destination safety", () => {
       join(binDir, "fake-rsync"),
       `#!/bin/bash\nsrc="\${@: -2:1}"; dst="\${@: -1}"\ncp "$src" "${landed}/$(basename "$dst")"\n`,
     );
+    const statusBin = writeExecutable(join(binDir, "status"), `#!/bin/bash\necho "$1" >> "${statusLog}"\n`);
 
     const result = spawnSync("bash", [backupScript], {
       env: {
@@ -174,6 +177,7 @@ describe("backup destination safety", () => {
         MUNIN_BACKUP_REMOTE_DIR: "/srv/backups/munin",
         MUNIN_SSH_BIN: join(binDir, "fake-ssh"),
         MUNIN_RSYNC_BIN: join(binDir, "fake-rsync"),
+        MUNIN_NAS_BACKUP_STATUS_BIN: statusBin,
       },
       encoding: "utf8",
     });
@@ -181,6 +185,7 @@ describe("backup destination safety", () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("mode=remote");
     expect(spawnSync("ls", [landed], { encoding: "utf8" }).stdout).toMatch(/memory-\d{4}-\d{2}-\d{2}-\d{4}\.db/);
+    expect(readFileSync(statusLog, "utf8").trim()).toBe("pass");
   });
 
   it("fails when the remote copy does not match the snapshot size", () => {
@@ -188,8 +193,10 @@ describe("backup destination safety", () => {
     // destination under the expected name. Verify, do not trust the exit status.
     const scratch = makeScratch();
     const binDir = join(scratch, "bin");
+    const statusLog = join(scratch, "status.log");
     mkdirSync(binDir, { recursive: true });
     stubSqlite3(binDir);
+    const statusBin = writeExecutable(join(binDir, "status"), `#!/bin/bash\necho "$1" >> "${statusLog}"\n`);
     writeExecutable(join(binDir, "fake-ssh"), `#!/bin/bash\nif [[ "$*" == *"stat -c"* ]]; then echo 1; fi\nexit 0\n`);
     writeExecutable(join(binDir, "fake-rsync"), `#!/bin/bash\nexit 0\n`);
 
@@ -203,6 +210,7 @@ describe("backup destination safety", () => {
         MUNIN_BACKUP_REMOTE_DIR: "/srv/backups/munin",
         MUNIN_SSH_BIN: join(binDir, "fake-ssh"),
         MUNIN_RSYNC_BIN: join(binDir, "fake-rsync"),
+        MUNIN_NAS_BACKUP_STATUS_BIN: statusBin,
       },
       encoding: "utf8",
     });
@@ -210,6 +218,130 @@ describe("backup destination safety", () => {
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("did not land intact");
     expect(result.stderr).toContain("Retention was NOT run");
+    expect(readFileSync(statusLog, "utf8").trim()).toBe("fail");
+  });
+
+  it("publishes the exact fixed status payload without putting the token in curl argv", () => {
+    const scratch = makeScratch();
+    const binDir = join(scratch, "bin");
+    const argsPath = join(scratch, "curl-args");
+    const headerPath = join(scratch, "curl-header");
+    const bodyPath = join(scratch, "curl-body");
+    mkdirSync(binDir, { recursive: true });
+    writeExecutable(
+      join(binDir, "curl"),
+      `#!/bin/bash
+printf '%s\\n' "$@" > "${argsPath}"
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --header|-H)
+      shift
+      case "$1" in @*) cat "\${1#@}" > "${headerPath}" ;; esac
+      ;;
+    --data-raw)
+      shift
+      printf '%s' "$1" > "${bodyPath}"
+      ;;
+  esac
+  shift
+done
+`,
+    );
+
+    const result = spawnSync("bash", [statusScript, "pass"], {
+      env: {
+        ...process.env,
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HEIMDALL_HUB_URL: "https://heimdall.example.invalid/status",
+        HEIMDALL_FLEET_TOKEN: "secret-token-must-not-be-argv",
+      },
+      encoding: "utf8",
+    });
+
+    expect(result.status).toBe(0);
+    expect(readFileSync(bodyPath, "utf8")).toBe(
+      '{"service":"munin","panel":"nas-backup","kind":"status","label":"NAS backup","state":"pass","message":"NAS backup completed successfully"}',
+    );
+    expect(readFileSync(headerPath, "utf8")).toBe("Authorization: Bearer secret-token-must-not-be-argv\n");
+    expect(readFileSync(argsPath, "utf8")).not.toContain("secret-token-must-not-be-argv");
+  });
+
+  it("publishes the exact fixed fail payload without putting the token in curl argv", () => {
+    const scratch = makeScratch();
+    const binDir = join(scratch, "bin");
+    const argsPath = join(scratch, "curl-args");
+    const headerPath = join(scratch, "curl-header");
+    const bodyPath = join(scratch, "curl-body");
+    mkdirSync(binDir, { recursive: true });
+    writeExecutable(
+      join(binDir, "curl"),
+      `#!/bin/bash
+printf '%s\\n' "$@" > "${argsPath}"
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --header|-H)
+      shift
+      case "$1" in @*) cat "\${1#@}" > "${headerPath}" ;; esac
+      ;;
+    --data-raw)
+      shift
+      printf '%s' "$1" > "${bodyPath}"
+      ;;
+  esac
+  shift
+done
+`,
+    );
+
+    const result = spawnSync("bash", [statusScript, "fail"], {
+      env: {
+        ...process.env,
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HEIMDALL_HUB_URL: "https://heimdall.example.invalid/status",
+        HEIMDALL_FLEET_TOKEN: "secret-token-must-not-be-argv",
+      },
+      encoding: "utf8",
+    });
+
+    expect(result.status).toBe(0);
+    expect(readFileSync(bodyPath, "utf8")).toBe(
+      '{"service":"munin","panel":"nas-backup","kind":"status","label":"NAS backup","state":"fail","message":"NAS backup failed"}',
+    );
+    expect(readFileSync(headerPath, "utf8")).toBe("Authorization: Bearer secret-token-must-not-be-argv\n");
+    expect(readFileSync(argsPath, "utf8")).not.toContain("secret-token-must-not-be-argv");
+  });
+
+  it("treats a missing status configuration and transport failure as best effort", () => {
+    const scratch = makeScratch();
+    const binDir = join(scratch, "bin");
+    const marker = join(scratch, "curl-called");
+    mkdirSync(binDir, { recursive: true });
+    writeExecutable(join(binDir, "curl"), `#!/bin/bash\ntouch "${marker}"\nexit 7\n`);
+
+    const missingEnv = {
+      ...process.env,
+      PATH: `${binDir}:${process.env.PATH ?? ""}`,
+    };
+    delete missingEnv.HEIMDALL_HUB_URL;
+    delete missingEnv.HEIMDALL_FLEET_TOKEN;
+    const missing = spawnSync("bash", [statusScript, "fail"], {
+      env: missingEnv,
+      encoding: "utf8",
+    });
+    expect(missing.status).toBe(0);
+    expect(existsSync(marker)).toBe(false);
+
+    const transport = spawnSync("bash", [statusScript, "fail"], {
+      env: {
+        ...process.env,
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HEIMDALL_HUB_URL: "https://heimdall.example.invalid/status",
+        HEIMDALL_FLEET_TOKEN: "token",
+      },
+      encoding: "utf8",
+    });
+    expect(transport.status).toBe(0);
+    expect(existsSync(marker)).toBe(true);
   });
 
   it("fails closed when the remote size probe returns non-numeric output", () => {

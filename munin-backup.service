@@ -2,6 +2,7 @@
 Description=Munin Memory backup (remote host or mounted volume)
 After=network-online.target
 Wants=network-online.target
+OnFailure=munin-backup-alert.service
 
 [Service]
 Type=oneshot

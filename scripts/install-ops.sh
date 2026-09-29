@@ -24,8 +24,8 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OPS_USER="${MUNIN_OPS_USER:-$(id -un)}"
 OPS_HOME="${MUNIN_OPS_HOME:-$HOME}"
 OPS_DIR="${MUNIN_OPS_DIR:-${OPS_HOME}/munin-ops}"
-SCRIPTS=(backup-to-nas.sh offsite-backup.sh offsite-snapshot.sh)
-UNITS=(munin-backup.service munin-backup.timer munin-offsite.service munin-offsite.timer)
+SCRIPTS=(backup-to-nas.sh nas-backup-status.sh offsite-backup.sh offsite-snapshot.sh)
+UNITS=(munin-backup.service munin-backup-alert.service munin-backup.timer munin-offsite.service munin-offsite.timer)
 
 # ── Backup destination-model guard ───────────────────────────────────────────
 # backup-to-nas.sh exists in two INCOMPATIBLE destination models: it either
