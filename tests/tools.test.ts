@@ -327,6 +327,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   db.close();
   cleanupTestDb();
 });
@@ -3898,6 +3899,8 @@ describe("Librarian Pattern B enforcement for derived tools", () => {
   });
 
   it("keeps visible log commitments visible when only a hidden terminal status resolves the namespace", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(COMMITMENTS_TEST_NOW);
     const namespace = "projects/mixed-visibility-resolved";
     const publishDate = commitmentTestDate(20);
     const commitmentText = `We will publish the public notes by ${publishDate}.`;

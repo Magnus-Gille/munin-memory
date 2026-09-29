@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { initDatabase, readState, writeState } from "../src/db.js";
 import { ownerContext, type AccessContext } from "../src/access.js";
@@ -12,6 +12,17 @@ import {
   pruneReviewProposals,
   type ReviewProposalRetentionPolicy,
 } from "../src/review-inbox.js";
+
+const REVIEW_TEST_NOW = new Date("2026-07-23T10:00:00.000Z");
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+function useReviewTestClock(): void {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(REVIEW_TEST_NOW);
+}
 
 function makeCall(
   db: ReturnType<typeof initDatabase>,
@@ -172,6 +183,7 @@ describe("memory_extract durable review proposals", () => {
   });
 
   it("reports preview and approval write effects for every proposal action", async () => {
+    useReviewTestClock();
     const db = initDatabase(":memory:");
     const call = makeCall(db);
     const cases = [
@@ -858,6 +870,7 @@ describe("memory_extract durable review proposals", () => {
   });
 
   it("emits internal_error telemetry when preview raises unexpectedly", async () => {
+    useReviewTestClock();
     const db = initDatabase(":memory:");
     const created = createReviewProposal(db, {
       creatorPrincipalId: "owner",
@@ -1281,6 +1294,7 @@ describe("memory_review lifecycle and isolation", () => {
   });
 
   it("redacts source references when the creator no longer has source access", async () => {
+    useReviewTestClock();
     const db = initDatabase(":memory:");
     const source = writeState(
       db,
@@ -1448,6 +1462,7 @@ describe("memory_review lifecycle and isolation", () => {
   });
 
   it("reports preview target conflicts with a truthful approval code and matches approval", async () => {
+    useReviewTestClock();
     const db = initDatabase(":memory:");
     const call = makeCall(db);
     writeState(
@@ -1524,6 +1539,7 @@ describe("memory_review lifecycle and isolation", () => {
   });
 
   it("keeps preview and approve aligned when source and target conflicts coexist", async () => {
+    useReviewTestClock();
     const db = initDatabase(":memory:");
     const sourceContent =
       "## Phase\nActive\n\n## Current Work\nOriginal source\n\n## Blockers\nNone\n\n## Next Steps\n- Verify";
@@ -1976,6 +1992,7 @@ describe("memory_review lifecycle and isolation", () => {
   });
 
   it("keeps rejection-path previews durably side-effect free", async () => {
+    useReviewTestClock();
     const secret = `ghp_${"e".repeat(36)}`;
     const internalWriterContext: AccessContext = {
       principalId: "classifier",
@@ -2124,6 +2141,7 @@ describe("memory_review lifecycle and isolation", () => {
   });
 
   it("safens instruction-shaped preview approval errors and flags them as untrusted", async () => {
+    useReviewTestClock();
     const db = initDatabase(":memory:");
     const created = createReviewProposal(db, {
       creatorPrincipalId: "owner",
@@ -2161,6 +2179,7 @@ describe("memory_review lifecycle and isolation", () => {
   });
 
   it("safens instruction-shaped direct approve rejections and flags them as untrusted", async () => {
+    useReviewTestClock();
     const db = initDatabase(":memory:");
     const created = createReviewProposal(db, {
       creatorPrincipalId: "owner",
@@ -2417,6 +2436,7 @@ describe("reviewed undo", () => {
   });
 
   it("protects a higher-classification prior snapshot and restores its classification", async () => {
+    useReviewTestClock();
     const db = initDatabase(":memory:");
     const prior = writeState(
       db,
