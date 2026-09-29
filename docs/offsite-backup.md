@@ -64,6 +64,23 @@ MIMIR_OFFSITE_MAX_DELETE_PCT=25
 The `MIMIR_OFFSITE_*` prefix is retained for compatibility with the shared
 backup implementation. It does not require the Mimir service.
 
+## NAS backup status
+
+The separate `munin-backup.service` job publishes a fixed, generic status to
+the Heimdall `nas-backup` panel when `HEIMDALL_HUB_URL` and
+`HEIMDALL_FLEET_TOKEN` are present in the optional ops `.env`. The status
+transport is best effort and never changes the backup result. The `pass`
+status is sent only after the destination has been verified and retention has
+completed; ordinary failures send `fail`. A systemd `OnFailure` unit sends the
+same `fail` status when the backup is terminated by a timeout or unexpected
+process kill before the script can report it. Intentionally stopping the unit
+with `systemctl stop` is an administrative stop, not a failed transition, so it
+does not trigger `OnFailure`. The bearer token is supplied to `curl` through a
+file descriptor and is not placed in command arguments or logs.
+
+`scripts/install-ops.sh` installs the status helper and both backup units into
+the dedicated ops directory. Re-run it after updating the checkout.
+
 ## Install and verify
 
 ```bash

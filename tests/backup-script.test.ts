@@ -3,13 +3,23 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const backupScript = join(repoRoot, "scripts", "backup-to-nas.sh");
+const statusScript = join(repoRoot, "scripts", "nas-backup-status.sh");
 const backupUnit = readFileSync(join(repoRoot, "munin-backup.service"), "utf8");
 
 const scratchDirs: string[] = [];
+
+function scriptEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env, MUNIN_NAS_BACKUP_STATUS_BIN: "true" };
+  // Failure-path fixtures must never publish to an operator's real dashboard.
+  // Tests of reporting explicitly supply their own helper or synthetic values.
+  delete env.HEIMDALL_HUB_URL;
+  delete env.HEIMDALL_FLEET_TOKEN;
+  return env;
+}
 
 function makeScratch(): string {
   const dir = mkdtempSync(join(tmpdir(), "munin-backup-safety-"));
@@ -52,6 +62,7 @@ exit 0
 }
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   while (scratchDirs.length > 0) {
     const dir = scratchDirs.pop();
     if (dir) rmSync(dir, { recursive: true, force: true });
@@ -59,8 +70,47 @@ afterEach(() => {
 });
 
 describe("backup destination safety", () => {
+  it("keeps inherited temporary paths intact when configuration fails before staging", () => {
+    const scratch = makeScratch();
+    const inherited = join(scratch, "caller-owned.db");
+    const statusLog = join(scratch, "status.log");
+    const statusBin = writeExecutable(join(scratch, "status"), `#!/bin/bash\necho "$1" >> "${statusLog}"\nexit 23\n`);
+    for (const suffix of ["", "-journal", "-wal", "-shm"]) {
+      writeFileSync(`${inherited}${suffix}`, "caller-owned");
+    }
+    const result = spawnSync("bash", [backupScript], {
+      env: { ...scriptEnv(), LOCAL_TMP: inherited, MUNIN_BACKUP_MODE: "invalid", MUNIN_NAS_BACKUP_STATUS_BIN: statusBin },
+      encoding: "utf8",
+    });
+    expect(result.status).toBe(64);
+    expect(readFileSync(statusLog, "utf8").trim()).toBe("fail");
+    for (const suffix of ["", "-journal", "-wal", "-shm"]) {
+      expect(existsSync(`${inherited}${suffix}`)).toBe(true);
+    }
+  });
+
+  it("isolates script fixtures from inherited dashboard configuration and status hooks", () => {
+    const scratch = makeScratch();
+    const marker = join(scratch, "unexpected-status-call");
+    const binDir = join(scratch, "bin");
+    mkdirSync(binDir);
+    const fakeCurl = writeExecutable(join(binDir, "curl"), `#!/bin/bash\ntouch "${marker}"\nexit 0\n`);
+    vi.stubEnv("HEIMDALL_HUB_URL", "https://heimdall.example.invalid/status");
+    vi.stubEnv("HEIMDALL_FLEET_TOKEN", "synthetic-test-token");
+    vi.stubEnv("MUNIN_NAS_BACKUP_STATUS_BIN", fakeCurl);
+    const env = { ...scriptEnv(), PATH: `${binDir}:${process.env.PATH ?? ""}` };
+    const backup = spawnSync("bash", [backupScript], { env: { ...env, MUNIN_BACKUP_MODE: "invalid" }, encoding: "utf8" });
+    const status = spawnSync("bash", [statusScript, "fail"], { env, encoding: "utf8" });
+    expect(backup.status).toBe(64);
+    expect(status.status).toBe(0);
+    expect(existsSync(marker)).toBe(false);
+    expect(env.HEIMDALL_HUB_URL).toBeUndefined();
+    expect(env.HEIMDALL_FLEET_TOKEN).toBeUndefined();
+    expect(env.MUNIN_NAS_BACKUP_STATUS_BIN).toBe("true");
+  });
+
   it("fails closed before snapshotting when no destination is explicitly configured", () => {
-    const env = { ...process.env, HOME: "/tmp/munin-backup-test-home" };
+    const env = { ...scriptEnv(), HOME: "/tmp/munin-backup-test-home" };
     delete env.MUNIN_BACKUP_DIR;
 
     const result = spawnSync("bash", [backupScript], { env, encoding: "utf8" });
@@ -71,7 +121,7 @@ describe("backup destination safety", () => {
 
   it("fails closed when no mount root is explicitly configured", () => {
     const env = {
-      ...process.env,
+      ...scriptEnv(),
       HOME: "/tmp/munin-backup-test-home",
       MUNIN_BACKUP_DIR: "/tmp/munin-backup-test-mount/munin-memory",
     };
@@ -85,7 +135,7 @@ describe("backup destination safety", () => {
 
   it("fails before snapshotting when the configured mount is not active", () => {
     const env = {
-      ...process.env,
+      ...scriptEnv(),
       HOME: "/tmp/munin-backup-test-home",
       MUNIN_BACKUP_DIR: "/tmp/munin-memory",
       MUNIN_BACKUP_MOUNT: "/tmp",
@@ -100,7 +150,7 @@ describe("backup destination safety", () => {
 
   it("rejects a destination outside the configured mount root", () => {
     const env = {
-      ...process.env,
+      ...scriptEnv(),
       HOME: "/tmp/munin-backup-test-home",
       MUNIN_BACKUP_DIR: "/var/tmp/munin-memory",
       MUNIN_BACKUP_MOUNT: "/tmp",
@@ -115,7 +165,7 @@ describe("backup destination safety", () => {
 
   it("rejects the system root as a backup mount", () => {
     const env = {
-      ...process.env,
+      ...scriptEnv(),
       HOME: "/tmp/munin-backup-test-home",
       MUNIN_BACKUP_DIR: "/tmp/munin-memory",
       MUNIN_BACKUP_MOUNT: "/",
@@ -130,7 +180,7 @@ describe("backup destination safety", () => {
 
   it("requires the destination to be a strict child of the mount root", () => {
     const env = {
-      ...process.env,
+      ...scriptEnv(),
       HOME: "/tmp/munin-backup-test-home",
       MUNIN_BACKUP_DIR: "/tmp",
       MUNIN_BACKUP_MOUNT: "/tmp",
@@ -143,7 +193,12 @@ describe("backup destination safety", () => {
     expect(result.stderr).toContain("must be a child of MUNIN_BACKUP_MOUNT");
   });
 
-  it("infers remote mode and pushes to the configured host", () => {
+  it.each([
+    { statusExit: 0, retentionExit: 0, expectedExit: 0, expectedStatus: "pass" },
+    { statusExit: 23, retentionExit: 0, expectedExit: 0, expectedStatus: "pass" },
+    { statusExit: 0, retentionExit: 75, expectedExit: 75, expectedStatus: "fail" },
+    { statusExit: 23, retentionExit: 75, expectedExit: 75, expectedStatus: "fail" },
+  ])("preserves remote backup outcome with status exit $statusExit and retention exit $retentionExit", ({ statusExit, retentionExit, expectedExit, expectedStatus }) => {
     // Remote mode had no test coverage at all before the two destination models
     // were unified: the deployed script hardcoded its host, so nothing exercised it.
     const scratch = makeScratch();
@@ -155,18 +210,20 @@ describe("backup destination safety", () => {
 
     // Stub ssh/rsync as local filesystem operations against `landed`.
     const sshLog = join(scratch, "ssh.log");
+    const statusLog = join(scratch, "status.log");
     writeExecutable(
       join(binDir, "fake-ssh"),
-      `#!/bin/bash\nhost="$1"; shift\necho "$host :: $*" >> "${sshLog}"\nif [[ "$*" == *"stat -c"* ]]; then\n  f=$(printf '%s' "$*" | sed -nE "s/.*'([^']*memory-[^']*\\.db)'.*/\\1/p" | head -1)\n  b=$(basename "$f")\n  wc -c < "${landed}/$b" 2>/dev/null | tr -d ' '\n  exit 0\nfi\nexit 0\n`,
+      `#!/bin/bash\nhost="$1"; shift\necho "$host :: $*" >> "${sshLog}"\nif [[ "$*" == *"stat -c"* ]]; then\n  f=$(printf '%s' "$*" | sed -nE "s/.*'([^']*memory-[^']*\\.db)'.*/\\1/p" | head -1)\n  b=$(basename "$f")\n  wc -c < "${landed}/$b" 2>/dev/null | tr -d ' '\n  exit 0\nfi\nif [[ "$*" == *"bash -s"* ]]; then exit ${retentionExit}; fi\nexit 0\n`,
     );
     writeExecutable(
       join(binDir, "fake-rsync"),
       `#!/bin/bash\nsrc="\${@: -2:1}"; dst="\${@: -1}"\ncp "$src" "${landed}/$(basename "$dst")"\n`,
     );
+    const statusBin = writeExecutable(join(binDir, "status"), `#!/bin/bash\necho "$1" >> "${statusLog}"\nexit ${statusExit}\n`);
 
     const result = spawnSync("bash", [backupScript], {
       env: {
-        ...process.env,
+        ...scriptEnv(),
         PATH: `${binDir}:${process.env.PATH ?? ""}`,
         HOME: scratch,
         MUNIN_BACKUP_DB: makeDummyDb(scratch),
@@ -174,13 +231,15 @@ describe("backup destination safety", () => {
         MUNIN_BACKUP_REMOTE_DIR: "/srv/backups/munin",
         MUNIN_SSH_BIN: join(binDir, "fake-ssh"),
         MUNIN_RSYNC_BIN: join(binDir, "fake-rsync"),
+        MUNIN_NAS_BACKUP_STATUS_BIN: statusBin,
       },
       encoding: "utf8",
     });
 
-    expect(result.status).toBe(0);
+    expect(result.status).toBe(expectedExit);
     expect(result.stdout).toContain("mode=remote");
     expect(spawnSync("ls", [landed], { encoding: "utf8" }).stdout).toMatch(/memory-\d{4}-\d{2}-\d{2}-\d{4}\.db/);
+    expect(readFileSync(statusLog, "utf8").trim()).toBe(expectedStatus);
   });
 
   it("fails when the remote copy does not match the snapshot size", () => {
@@ -188,14 +247,16 @@ describe("backup destination safety", () => {
     // destination under the expected name. Verify, do not trust the exit status.
     const scratch = makeScratch();
     const binDir = join(scratch, "bin");
+    const statusLog = join(scratch, "status.log");
     mkdirSync(binDir, { recursive: true });
     stubSqlite3(binDir);
+    const statusBin = writeExecutable(join(binDir, "status"), `#!/bin/bash\necho "$1" >> "${statusLog}"\n`);
     writeExecutable(join(binDir, "fake-ssh"), `#!/bin/bash\nif [[ "$*" == *"stat -c"* ]]; then echo 1; fi\nexit 0\n`);
     writeExecutable(join(binDir, "fake-rsync"), `#!/bin/bash\nexit 0\n`);
 
     const result = spawnSync("bash", [backupScript], {
       env: {
-        ...process.env,
+        ...scriptEnv(),
         PATH: `${binDir}:${process.env.PATH ?? ""}`,
         HOME: scratch,
         MUNIN_BACKUP_DB: makeDummyDb(scratch),
@@ -203,13 +264,138 @@ describe("backup destination safety", () => {
         MUNIN_BACKUP_REMOTE_DIR: "/srv/backups/munin",
         MUNIN_SSH_BIN: join(binDir, "fake-ssh"),
         MUNIN_RSYNC_BIN: join(binDir, "fake-rsync"),
+        MUNIN_NAS_BACKUP_STATUS_BIN: statusBin,
       },
       encoding: "utf8",
     });
 
-    expect(result.status).not.toBe(0);
+    expect(result.status).toBe(69);
     expect(result.stderr).toContain("did not land intact");
     expect(result.stderr).toContain("Retention was NOT run");
+    expect(readFileSync(statusLog, "utf8").trim()).toBe("fail");
+  });
+
+  it("publishes the exact fixed status payload without putting the token in curl argv", () => {
+    const scratch = makeScratch();
+    const binDir = join(scratch, "bin");
+    const argsPath = join(scratch, "curl-args");
+    const headerPath = join(scratch, "curl-header");
+    const bodyPath = join(scratch, "curl-body");
+    mkdirSync(binDir, { recursive: true });
+    writeExecutable(
+      join(binDir, "curl"),
+      `#!/bin/bash
+printf '%s\\n' "$@" > "${argsPath}"
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --header|-H)
+      shift
+      case "$1" in @*) cat "\${1#@}" > "${headerPath}" ;; esac
+      ;;
+    --data-raw)
+      shift
+      printf '%s' "$1" > "${bodyPath}"
+      ;;
+  esac
+  shift
+done
+`,
+    );
+
+    const result = spawnSync("bash", [statusScript, "pass"], {
+      env: {
+        ...scriptEnv(),
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HEIMDALL_HUB_URL: "https://heimdall.example.invalid/status",
+        HEIMDALL_FLEET_TOKEN: "secret-token-must-not-be-argv",
+      },
+      encoding: "utf8",
+    });
+
+    expect(result.status).toBe(0);
+    expect(readFileSync(bodyPath, "utf8")).toBe(
+      '{"service":"munin","panel":"nas-backup","kind":"status","label":"NAS backup","state":"pass","message":"NAS backup completed successfully"}',
+    );
+    expect(readFileSync(headerPath, "utf8")).toBe("Authorization: Bearer secret-token-must-not-be-argv\n");
+    expect(readFileSync(argsPath, "utf8")).not.toContain("secret-token-must-not-be-argv");
+  });
+
+  it("publishes the exact fixed fail payload without putting the token in curl argv", () => {
+    const scratch = makeScratch();
+    const binDir = join(scratch, "bin");
+    const argsPath = join(scratch, "curl-args");
+    const headerPath = join(scratch, "curl-header");
+    const bodyPath = join(scratch, "curl-body");
+    mkdirSync(binDir, { recursive: true });
+    writeExecutable(
+      join(binDir, "curl"),
+      `#!/bin/bash
+printf '%s\\n' "$@" > "${argsPath}"
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --header|-H)
+      shift
+      case "$1" in @*) cat "\${1#@}" > "${headerPath}" ;; esac
+      ;;
+    --data-raw)
+      shift
+      printf '%s' "$1" > "${bodyPath}"
+      ;;
+  esac
+  shift
+done
+`,
+    );
+
+    const result = spawnSync("bash", [statusScript, "fail"], {
+      env: {
+        ...scriptEnv(),
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HEIMDALL_HUB_URL: "https://heimdall.example.invalid/status",
+        HEIMDALL_FLEET_TOKEN: "secret-token-must-not-be-argv",
+      },
+      encoding: "utf8",
+    });
+
+    expect(result.status).toBe(0);
+    expect(readFileSync(bodyPath, "utf8")).toBe(
+      '{"service":"munin","panel":"nas-backup","kind":"status","label":"NAS backup","state":"fail","message":"NAS backup failed"}',
+    );
+    expect(readFileSync(headerPath, "utf8")).toBe("Authorization: Bearer secret-token-must-not-be-argv\n");
+    expect(readFileSync(argsPath, "utf8")).not.toContain("secret-token-must-not-be-argv");
+  });
+
+  it("treats a missing status configuration and transport failure as best effort", () => {
+    const scratch = makeScratch();
+    const binDir = join(scratch, "bin");
+    const marker = join(scratch, "curl-called");
+    mkdirSync(binDir, { recursive: true });
+    writeExecutable(join(binDir, "curl"), `#!/bin/bash\ntouch "${marker}"\nexit 7\n`);
+
+    const missingEnv = {
+      ...scriptEnv(),
+      PATH: `${binDir}:${process.env.PATH ?? ""}`,
+    };
+    delete missingEnv.HEIMDALL_HUB_URL;
+    delete missingEnv.HEIMDALL_FLEET_TOKEN;
+    const missing = spawnSync("bash", [statusScript, "fail"], {
+      env: missingEnv,
+      encoding: "utf8",
+    });
+    expect(missing.status).toBe(0);
+    expect(existsSync(marker)).toBe(false);
+
+    const transport = spawnSync("bash", [statusScript, "fail"], {
+      env: {
+        ...scriptEnv(),
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+        HEIMDALL_HUB_URL: "https://heimdall.example.invalid/status",
+        HEIMDALL_FLEET_TOKEN: "token",
+      },
+      encoding: "utf8",
+    });
+    expect(transport.status).toBe(0);
+    expect(existsSync(marker)).toBe(true);
   });
 
   it("fails closed when the remote size probe returns non-numeric output", () => {
@@ -228,7 +414,7 @@ describe("backup destination safety", () => {
 
     const result = spawnSync("bash", [backupScript], {
       env: {
-        ...process.env,
+        ...scriptEnv(),
         PATH: `${binDir}:${process.env.PATH ?? ""}`,
         HOME: scratch,
         MUNIN_BACKUP_DB: makeDummyDb(scratch),
@@ -249,7 +435,7 @@ describe("backup destination safety", () => {
     const scratch = makeScratch();
     const result = spawnSync("bash", [backupScript], {
       env: {
-        ...process.env,
+        ...scriptEnv(),
         HOME: scratch,
         MUNIN_BACKUP_DB: makeDummyDb(scratch),
         MUNIN_BACKUP_MODE: "remote",
@@ -263,7 +449,7 @@ describe("backup destination safety", () => {
   it("rejects an unknown destination mode instead of guessing", () => {
     const scratch = makeScratch();
     const result = spawnSync("bash", [backupScript], {
-      env: { ...process.env, HOME: scratch, MUNIN_BACKUP_MODE: "nas" },
+      env: { ...scriptEnv(), HOME: scratch, MUNIN_BACKUP_MODE: "nas" },
       encoding: "utf8",
     });
     expect(result.status).not.toBe(0);
@@ -309,7 +495,7 @@ exit 1
 
     const result = spawnSync("bash", [backupScript], {
       env: {
-        ...process.env,
+        ...scriptEnv(),
         PATH: `${binDir}:${process.env.PATH ?? ""}`,
         HOME: scratch,
         MUNIN_BACKUP_DB: makeDummyDb(scratch),
@@ -354,7 +540,7 @@ exit 1
 
     const result = spawnSync("bash", [backupScript], {
       env: {
-        ...process.env,
+        ...scriptEnv(),
         PATH: `${binDir}:${process.env.PATH ?? ""}`,
         HOME: scratch,
         MUNIN_BACKUP_DB: makeDummyDb(scratch),
@@ -387,7 +573,7 @@ exit 1
 
     const result = spawnSync("bash", [backupScript], {
       env: {
-        ...process.env,
+        ...scriptEnv(),
         PATH: `${binDir}:${process.env.PATH ?? ""}`,
         HOME: scratch,
         MUNIN_BACKUP_DB: makeDummyDb(scratch),
