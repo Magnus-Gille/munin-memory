@@ -8,6 +8,15 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Added
+
+- **Optional Heimdall status for NAS backups.** When `HEIMDALL_HUB_URL` and
+  `HEIMDALL_FLEET_TOKEN` are set in the ops environment, the backup publishes a
+  fixed generic pass/fail status to the `nas-backup` panel. Delivery is best
+  effort and cannot change the backup result. A systemd `OnFailure` alert covers
+  timeouts and unexpected process kills; intentional `systemctl stop` does not
+  trigger it. `scripts/install-ops.sh` installs the status helper and alert unit.
+
 ### Changed
 
 - **`memory_review` proposals are isolated by creator session/run (#271).** Durable
