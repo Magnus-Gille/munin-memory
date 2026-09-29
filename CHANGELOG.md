@@ -16,6 +16,7 @@ changelog is the canonical record of what moved.
   effort and cannot change the backup result. A systemd `OnFailure` alert covers
   timeouts and unexpected process kills; intentional `systemctl stop` does not
   trigger it. `scripts/install-ops.sh` installs the status helper and alert unit.
+  Early validation failures leave caller-owned temporary files untouched.
 
 ### Changed
 

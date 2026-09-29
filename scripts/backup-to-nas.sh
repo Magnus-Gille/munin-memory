@@ -47,6 +47,10 @@ STATUS_BIN="${MUNIN_NAS_BACKUP_STATUS_BIN:-$(dirname "${BASH_SOURCE[0]}")/nas-ba
 KEEP_DAILY="${MUNIN_BACKUP_KEEP_DAILY:-14}"
 KEEP_SUNDAYS="${MUNIN_BACKUP_KEEP_SUNDAYS:-4}"
 
+# The early EXIT trap must only remove staging files owned by this invocation,
+# never a LOCAL_TMP value inherited from the caller before validation completes.
+LOCAL_TMP=""
+
 # Report ordinary failures to the dedicated Heimdall status. This is best
 # effort: the backup result must remain the authoritative exit status, and the
 # OnFailure unit covers processes that systemd terminates before this trap can
