@@ -73,10 +73,12 @@ transport is best effort and never changes the backup result. The `pass`
 status is sent only after the destination has been verified and retention has
 completed; ordinary failures send `fail`. A systemd `OnFailure` unit sends the
 same `fail` status when the backup is terminated by a timeout or unexpected
-process kill before the script can report it. Intentionally stopping the unit
-with `systemctl stop` is an administrative stop, not a failed transition, so it
-does not trigger `OnFailure`. The bearer token is supplied to `curl` through a
-file descriptor and is not placed in command arguments or logs.
+process kill before the script can report it. Stopping an in-progress oneshot
+backup with `systemctl stop` may terminate it with SIGTERM and trigger
+`OnFailure`. Current units do not suppress failure reporting for administrative
+stops. See [systemd.service `SuccessExitStatus`](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html#SuccessExitStatus=).
+The bearer token is supplied to `curl` through a file descriptor and is not
+placed in command arguments or logs.
 
 `scripts/install-ops.sh` installs the status helper and both backup units into
 the dedicated ops directory. Re-run it after updating the checkout.
