@@ -326,9 +326,12 @@ The NAS backup can optionally publish a fixed, generic pass/fail status to
 Heimdall's `nas-backup` panel. Set `HEIMDALL_HUB_URL` and
 `HEIMDALL_FLEET_TOKEN` in `~/munin-ops/.env`; status delivery is best effort and
 does not change the backup result. The backup service's `OnFailure` alert covers
-timeouts and unexpected process kills, while an intentional `systemctl stop`
-does not trigger a failure alert. `scripts/install-ops.sh` installs the status
-helper and alert unit with the backup service.
+timeouts and unexpected process kills. Stopping an in-progress oneshot backup
+with `systemctl stop` may terminate it with SIGTERM and trigger `OnFailure`.
+Current units do not suppress failure reporting for administrative stops. See
+[systemd.service `SuccessExitStatus`](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html#SuccessExitStatus=).
+`scripts/install-ops.sh` installs the status helper and alert unit with the
+backup service.
 
 For the broader appliance direction, the project now distinguishes between `full-node` and `zero-appliance` deployments. A Pi Zero 2 W is being treated as a constrained profile that needs explicit hardware validation rather than assumed feature parity. See [docs/appliance-profiles.md](docs/appliance-profiles.md).
 
