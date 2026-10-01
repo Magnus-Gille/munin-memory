@@ -140,12 +140,12 @@ natural-language variant). Two causes are known:
   the query, so they always precede the gold log. Production R@1 therefore
   cannot move on this fixture without a change to that ordering, and a metric
   already at 0 cannot regress. Regression sensitivity on the production path
-  rests on keyword R@5 and MRR.
+  rests on keyword R@5 and MRR. Tracked in #335.
 - No question matches under strict AND, so all 24 use the relaxed OR fallback.
   `buildRelaxedLexicalQuery` splits on every non-ASCII character, which breaks
   Swedish words apart ("gällande" becomes "llande"). This affects both modes;
   the one question that misses in raw mode has such characters in both its
-  project name and its topic.
+  project name and its topic. Tracked in #334.
 
 This version measures lexical ranking on a small synthetic corpus. It does not
 measure the deployed embedding model, live memory truth, client discoverability,
