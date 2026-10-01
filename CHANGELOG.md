@@ -10,6 +10,14 @@ changelog is the canonical record of what moved.
 
 ### Added
 
+- **Unattended generated-decision retrieval evaluation.** A seeded Swedish fact
+  generator supplies known source references without user annotation. The
+  evaluation compares raw lexical retrieval with production ranking, checks
+  evidence-removal controls, reports absolute and per-variant scores, and fails
+  closed on invalid measurements or reproducible baseline regressions. A nightly
+  and change-triggered GitHub workflow retains public-safe reports; no live
+  memory, external model calls, or automatic baseline updates are involved.
+
 - **Optional Heimdall status for NAS backups.** When `HEIMDALL_HUB_URL` and
   `HEIMDALL_FLEET_TOKEN` are set in the ops environment, the backup publishes a
   fixed generic pass/fail status to the `nas-backup` panel. Delivery is best

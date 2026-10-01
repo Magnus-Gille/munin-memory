@@ -72,7 +72,59 @@ from the baseline without a re-bless.
 The production reranker is intentionally *not* gated here: its freshness and
 attention inputs are time-relative and would rot a committed baseline.
 Raw-vs-production parity is guarded separately by `tests/runner-parity.test.ts`.
-Extending the gate to a time-frozen `production_ranker` run is future work.
+The separate generated-decision evaluation below measures time-frozen
+`production_ranker` behavior without changing these raw retrieval gates.
+
+## Continuous generated-decision evaluation
+
+```bash
+npm run benchmark:continuous
+# Optional report destination; baseline remains the committed contract:
+npm run benchmark:continuous -- --output /tmp/munin-eval.json
+```
+
+This unattended, zero-network evaluation generates 12 Swedish project scenarios,
+24 questions, and their required source references from a seeded fact generator.
+Current decisions compete with research states, project statuses, and explicitly
+superseded decisions. Gold references are established before retrieval; no user
+annotation, usage-derived labels, or model judge is required. All inputs are
+synthetic and public-safe. Ephemeral SQLite databases use the real write APIs.
+
+The same questions run through raw lexical retrieval and the production-ranking
+pipeline at its default recency weight. The clock remains fixed across awaited
+queries. Reports separate overall and question-variant R@1, R@5, and MRR, retaining
+each case's ranked logical source references. Removing required evidence must
+produce zero recall while retaining every question. A direct-ID oracle checks
+the scorer only; its perfect score is not evidence of good retrieval.
+
+`.github/workflows/continuous-memory-eval.yml` runs on pushes and pull requests,
+nightly at 03:17 UTC, and manual dispatch. Once merged, it needs no recurring user
+action. Each run publishes a job summary and retains its JSON report for 30 days.
+GitHub scheduled runs can be delayed; consumers must check `run_at` and treat a
+missing or overdue report as unavailable, never as a recent successful run.
+
+The output defaults to the gitignored
+`benchmark/reports/continuous/latest.json`. A committed baseline in
+`continuous/baseline.json` binds the seed, fixture hash, contract, denominator,
+and metric keys. Comparisons fail closed when those differ. Baselines are never
+automatically blessed. A deliberate fixture or contract change needs a reviewed
+baseline change alongside it; routine executions never request human labels.
+
+- Exit **0**: valid measurement, unchanged or improved versus baseline.
+- Exit **1**: a regression reproduced on identical generated inputs.
+- Exit **2**: invalid measurement, incompatible baseline, incomplete results,
+  wrong execution mode, failed controls, or inconsistent repeat.
+
+`status: measured` and `quality_state: unchanged` mean a narrow retrieval result
+was measured and did not regress. They do **not** mean overall memory quality is
+good; absolute scores remain visible even when a weak baseline is stable.
+`status: invalid` always carries `quality_state: not_measured`.
+
+This version measures lexical ranking on a small synthetic corpus. It does not
+measure the deployed embedding model, live memory truth, client discoverability,
+or an agent's final answer. Those require separately identified evaluation lanes;
+production data must not be copied into public CI. Existing lexical and frozen
+hybrid CI gates remain complementary regression signals.
 
 ## End-to-end scorecard
 
