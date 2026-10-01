@@ -30,6 +30,16 @@ describe("withEvaluationClock", () => {
     expect(Date.now).toBe(nativeNow);
   });
 
+  it("returns the frozen instant when Date is called as a plain function", async () => {
+    const nativeDate = globalThis.Date;
+    const anchor = "2026-02-01T12:34:56.789Z";
+    const expected = new nativeDate(anchor).toString();
+
+    await withEvaluationClock(anchor, async () => {
+      expect(Date()).toBe(expected);
+    });
+  });
+
   it("restores the native Date after the callback rejects", async () => {
     const nativeDate = globalThis.Date;
     const nativeNow = Date.now;

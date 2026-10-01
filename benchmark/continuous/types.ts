@@ -80,8 +80,14 @@ export interface EvidenceRemovedControl {
   passed: true;
   question_count: number;
   removed_evidence_count: number;
+  min_results_per_question: Record<RunnerMode, number>;
   raw: ScoringResult;
   production_ranker: ScoringResult;
+}
+
+export interface GoldIntegrityControl {
+  passed: true;
+  checked_row_count: number;
 }
 
 export interface ScorerOracleControl {
@@ -101,6 +107,7 @@ export interface ContinuousEvalReport {
   metrics: Record<string, number>;
   controls: {
     evidence_removed: EvidenceRemovedControl;
+    gold_integrity: GoldIntegrityControl;
     scorer_oracle: ScorerOracleControl;
   };
 }

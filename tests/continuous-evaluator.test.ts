@@ -1,6 +1,12 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { generateDecisionFixture } from "../benchmark/continuous/generator.js";
-import { runContinuousEval } from "../benchmark/continuous/evaluator.js";
+import {
+  assertEvidenceRemoved,
+  assertGoldRow,
+  runContinuousEval,
+} from "../benchmark/continuous/evaluator.js";
+import type { ContinuousEvalQueryResult } from "../benchmark/continuous/types.js";
 
 describe("generated decision retrieval fixture", () => {
   it("uses a validated uint32 seed and generates deterministically", () => {
@@ -41,6 +47,62 @@ describe("generated decision retrieval fixture", () => {
   });
 });
 
+function negativeResult(refs: string[]): ContinuousEvalQueryResult {
+  return {
+    query_id: "q",
+    case_id: "decision-00",
+    variant: "keyword",
+    expected_corpus_ref: "decision-00:current-decision",
+    ranked_corpus_refs: refs,
+    rank: null,
+    scores: {} as ContinuousEvalQueryResult["scores"],
+  };
+}
+
+describe("evidence-removed control check", () => {
+  const evidenceRefs = new Set(["decision-00:current-decision"]);
+
+  it("passes for non-empty decoy-only results and reports the minimum result count", () => {
+    const results = [negativeResult(["decision-00:decoy", "decision-01:decoy"]), negativeResult(["decision-02:decoy"])];
+    expect(assertEvidenceRemoved(results, evidenceRefs, "raw")).toBe(1);
+  });
+
+  it("throws when a removed evidence ref is still returned", () => {
+    const results = [negativeResult(["decision-00:decoy", "decision-00:current-decision"])];
+    expect(() => assertEvidenceRemoved(results, evidenceRefs, "raw")).toThrow(/evidence/);
+  });
+
+  it("throws when a question returned no results", () => {
+    expect(() => assertEvidenceRemoved([negativeResult([])], evidenceRefs, "raw")).toThrow(/no results/);
+  });
+});
+
+describe("gold row integrity check", () => {
+  const fact = generateDecisionFixture().facts[0];
+  const goodRow = {
+    namespace: fact.namespace,
+    entry_type: "log",
+    content: `${fact.case_id} ${fact.chosen_option} ${fact.rejected_option}`,
+  };
+
+  it("passes for a correct log row", () => {
+    expect(() => assertGoldRow(fact, goodRow)).not.toThrow();
+  });
+
+  it("throws for a wrong namespace", () => {
+    expect(() => assertGoldRow(fact, { ...goodRow, namespace: "projects/other" })).toThrow(/namespace/);
+  });
+
+  it("throws for a non-log row", () => {
+    expect(() => assertGoldRow(fact, { ...goodRow, entry_type: "state" })).toThrow(/log/);
+  });
+
+  it("throws when content misses the chosen option", () => {
+    const content = goodRow.content.replace(fact.chosen_option, "");
+    expect(() => assertGoldRow(fact, { ...goodRow, content })).toThrow(/chosen/);
+  });
+});
+
 describe("continuous decision retrieval evaluation", () => {
   it("measures both runners and proves the evidence-removal and scorer controls", async () => {
     const report = await runContinuousEval();
@@ -57,6 +119,17 @@ describe("continuous decision retrieval evaluation", () => {
     expect(report.controls.evidence_removed).toMatchObject({ passed: true, question_count: 24 });
     expect(report.controls.evidence_removed.raw.recallAt10).toBe(0);
     expect(report.controls.evidence_removed.production_ranker.recallAt10).toBe(0);
+    expect(report.controls.evidence_removed.min_results_per_question).toEqual({
+      raw: expect.any(Number),
+      production_ranker: expect.any(Number),
+    });
+    expect(report.controls.evidence_removed.min_results_per_question.raw).toBeGreaterThan(0);
+    expect(report.controls.evidence_removed.min_results_per_question.production_ranker).toBeGreaterThan(0);
+    expect(report.controls.gold_integrity).toEqual({ passed: true, checked_row_count: 12 });
+    const baseline = JSON.parse(readFileSync(new URL("../benchmark/continuous/baseline.json", import.meta.url), "utf8")) as {
+      metrics: Record<string, number>;
+    };
+    expect(report.metrics).toEqual(baseline.metrics);
     expect(report.controls.scorer_oracle).toMatchObject({ passed: true, question_count: 24 });
     expect(report.controls.scorer_oracle.scores.recallAt1).toBe(1);
     expect(report.controls.scorer_oracle.scores.recallAt5).toBe(1);
@@ -73,5 +146,10 @@ describe("continuous decision retrieval evaluation", () => {
     expect(serialized).not.toContain("duration_ms");
     expect(serialized).not.toContain("snapshot_path");
     expect(serialized).not.toContain("result_ids");
+  }, 120_000);
+  it("returns deep-equal reports on consecutive runs", async () => {
+    const first = await runContinuousEval();
+    const second = await runContinuousEval();
+    expect(second).toEqual(first);
   }, 120_000);
 });

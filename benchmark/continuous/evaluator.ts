@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appendLog, initDatabase, writeState } from "../../src/db.js";
+import { appendLog, getById, initDatabase, writeState } from "../../src/db.js";
 import { DEFAULT_SEARCH_RECENCY_WEIGHT } from "../../src/internal/reranker.js";
 import { aggregateScores, scoreQuery } from "../scorer.js";
 import { runBenchmark } from "../runner.js";
@@ -15,6 +15,7 @@ import {
   type ContinuousEvalModeReport,
   type ContinuousEvalQueryResult,
   type ContinuousEvalReport,
+  type DecisionFact,
   type DecisionFixture,
   type DecisionFixtureQuestion,
   type DecisionQuestionVariant,
@@ -257,6 +258,71 @@ function assertZeroRecall(scores: ReturnType<typeof aggregateScores>, label: str
   }
 }
 
+/**
+ * Score the evidence-removed run on corpus refs, not DB IDs: every question must
+ * still return results, and none may be a removed evidence row. Returns the
+ * minimum number of results returned for any question.
+ */
+export function assertEvidenceRemoved(
+  perCase: readonly ContinuousEvalQueryResult[],
+  evidenceRefs: ReadonlySet<string>,
+  label: string,
+): number {
+  let minResults = Number.POSITIVE_INFINITY;
+  for (const result of perCase) {
+    if (result.ranked_corpus_refs.length === 0) {
+      throw new Error(`${label} evidence-removal control returned no results for ${result.query_id}`);
+    }
+    if (result.ranked_corpus_refs.some((ref) => evidenceRefs.has(ref))) {
+      throw new Error(`${label} evidence-removal control returned a removed evidence row for ${result.query_id}`);
+    }
+    minResults = Math.min(minResults, result.ranked_corpus_refs.length);
+  }
+  if (!Number.isFinite(minResults)) throw new Error(`${label} evidence-removal control scored no questions`);
+  return minResults;
+}
+
+/** Confirm a gold row read back from the database is the decision the fact describes. */
+export function assertGoldRow(
+  fact: DecisionFact,
+  row: { namespace: string; entry_type: string; content: string },
+): void {
+  if (row.namespace !== fact.namespace) {
+    throw new Error(`Gold row for ${fact.case_id} has the wrong namespace`);
+  }
+  if (row.entry_type !== "log") {
+    throw new Error(`Gold row for ${fact.case_id} is not a log entry`);
+  }
+  if (!row.content.includes(fact.chosen_option)) {
+    throw new Error(`Gold row for ${fact.case_id} does not contain the chosen option`);
+  }
+  if (!row.content.includes(fact.rejected_option)) {
+    throw new Error(`Gold row for ${fact.case_id} does not contain the rejected option`);
+  }
+  if (!row.content.includes(fact.case_id)) {
+    throw new Error(`Gold row for ${fact.case_id} does not contain its case id`);
+  }
+}
+
+function verifyGoldRows(
+  dbPath: string,
+  fixture: DecisionFixture,
+  actualIdByRef: ReadonlyMap<string, string>,
+): number {
+  const db = initDatabase(dbPath);
+  try {
+    for (const fact of fixture.facts) {
+      const id = actualIdByRef.get(fact.correct_evidence_id);
+      const row = id ? getById(db, id) : null;
+      if (!row) throw new Error(`Gold row for ${fact.case_id} was not found in the database`);
+      assertGoldRow(fact, row);
+    }
+  } finally {
+    db.close();
+  }
+  return fixture.facts.length;
+}
+
 function assertOracleScores(scores: ReturnType<typeof aggregateScores>, questionCount: number): void {
   if (
     scores.recallAt1 !== 1 ||
@@ -295,6 +361,7 @@ export async function runContinuousEval(
   try {
     const positiveDbPath = join(tempDir, "positive.db");
     const positiveIdByRef = await materializeFixture(positiveDbPath, fixture);
+    const goldRowCount = verifyGoldRows(positiveDbPath, fixture, positiveIdByRef);
     const preparedQueries = prepareQueries(fixture, positiveIdByRef);
     if (preparedQueries.length !== questionCount) throw new Error("Prepared query denominator changed");
     const benchmarkQueries = preparedQueries.map((prepared) => prepared.benchmarkQuery);
@@ -338,6 +405,7 @@ export async function runContinuousEval(
     }
 
     const negativeScores = {} as Record<RunnerMode, ReturnType<typeof aggregateScores>>;
+    const negativeMinResults = {} as Record<RunnerMode, number>;
     for (const mode of RUNNER_MODES) {
       const report = await withEvaluationClock(fixture.fixed_now, async () => runBenchmark(
         negativeDbPath,
@@ -356,7 +424,9 @@ export async function runContinuousEval(
         preparedQueries,
       );
       // Normalize every retrieved negative-control ID too; unmapped results fail closed.
-      normalizeModeReport(report, mode, preparedQueries, negativeIdByRef, knownWarnings);
+      // Gold IDs differ between databases, so the falsifiable check scores on corpus refs.
+      const negativeReport = normalizeModeReport(report, mode, preparedQueries, negativeIdByRef, knownWarnings);
+      negativeMinResults[mode] = assertEvidenceRemoved(negativeReport.per_case, evidenceRefs, mode);
       assertZeroRecall(report.overall, mode);
       negativeScores[mode] = report.overall;
     }
@@ -382,8 +452,13 @@ export async function runContinuousEval(
           passed: true,
           question_count: questionCount,
           removed_evidence_count: evidenceRefs.size,
+          min_results_per_question: negativeMinResults,
           raw: negativeScores.raw,
           production_ranker: negativeScores.production_ranker,
+        },
+        gold_integrity: {
+          passed: true,
+          checked_row_count: goldRowCount,
         },
         scorer_oracle: {
           passed: true,

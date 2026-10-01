@@ -26,6 +26,10 @@ export async function withEvaluationClock<T>(
       const args = argumentsList.length === 0 ? [epoch] : argumentsList;
       return Reflect.construct(target, args, newTarget);
     },
+    apply(target) {
+      // Date() called as a plain function ignores arguments and returns the current time string.
+      return new target(epoch).toString();
+    },
     get(target, property, receiver) {
       if (property === "now") return () => epoch;
       return Reflect.get(target, property, receiver);

@@ -13,10 +13,13 @@ changelog is the canonical record of what moved.
 - **Unattended generated-decision retrieval evaluation.** A seeded Swedish fact
   generator supplies known source references without user annotation. The
   evaluation compares raw lexical retrieval with production ranking, checks
-  evidence-removal controls, reports absolute and per-variant scores, and fails
-  closed on invalid measurements or reproducible baseline regressions. A nightly
-  and change-triggered GitHub workflow retains public-safe reports; no live
-  memory, external model calls, or automatic baseline updates are involved.
+  gold-integrity and evidence-removal controls, reports absolute and per-variant
+  scores, and fails closed on invalid measurements or reproducible baseline
+  regressions. A GitHub workflow runs it nightly and on changes to `main` and
+  retains public-safe reports; no live memory, external model calls, or automatic
+  baseline updates are involved. The committed baseline records weak production
+  ranking on this fixture (gold first for 0 of 24 questions); `benchmark/README.md`
+  explains the two known causes.
 
 - **Optional Heimdall status for NAS backups.** When `HEIMDALL_HUB_URL` and
   `HEIMDALL_FLEET_TOKEN` are set in the ops environment, the backup publishes a

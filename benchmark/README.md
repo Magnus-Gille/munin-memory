@@ -93,22 +93,31 @@ synthetic and public-safe. Ephemeral SQLite databases use the real write APIs.
 The same questions run through raw lexical retrieval and the production-ranking
 pipeline at its default recency weight. The clock remains fixed across awaited
 queries. Reports separate overall and question-variant R@1, R@5, and MRR, retaining
-each case's ranked logical source references. Removing required evidence must
-produce zero recall while retaining every question. A direct-ID oracle checks
-the scorer only; its perfect score is not evidence of good retrieval.
+each case's ranked logical source references. Three controls guard the
+measurement itself. Every gold row is read back from the database and checked
+against its generating fact. With the required evidence removed, every question
+must still return results and none of them may be an evidence row. A direct-ID
+oracle checks the scorer only; its perfect score is not evidence of good retrieval.
 
-`.github/workflows/continuous-memory-eval.yml` runs on pushes and pull requests,
-nightly at 03:17 UTC, and manual dispatch. Once merged, it needs no recurring user
-action. Each run publishes a job summary and retains its JSON report for 30 days.
-GitHub scheduled runs can be delayed; consumers must check `run_at` and treat a
-missing or overdue report as unavailable, never as a recent successful run.
+`.github/workflows/continuous-memory-eval.yml` runs on pushes to `main`, pull
+requests targeting `main`, nightly at 03:17 UTC, and manual dispatch. Each run
+publishes a job summary and retains its JSON report for 30 days. Routine runs need
+no user action, with two limits. GitHub scheduled runs can be delayed, and GitHub
+disables schedules in a public repository after 60 days without repository
+activity; consumers must check `run_at` and treat a missing or overdue report as
+unavailable, never as a recent successful run. The fixture is deterministic, so a
+nightly run on unchanged code reproduces the previous numbers: the schedule shows
+the lane still runs, while new information arrives only when code changes.
 
 The output defaults to the gitignored
 `benchmark/reports/continuous/latest.json`. A committed baseline in
 `continuous/baseline.json` binds the seed, fixture hash, contract, denominator,
 and metric keys. Comparisons fail closed when those differ. Baselines are never
 automatically blessed. A deliberate fixture or contract change needs a reviewed
-baseline change alongside it; routine executions never request human labels.
+baseline change alongside it; routine executions never request human labels. An
+improvement also exits 0 and keeps reporting `improved` until the baseline is
+raised in a reviewed change; until then, losing that improvement again is not
+reported as a regression.
 
 - Exit **0**: valid measurement, unchanged or improved versus baseline.
 - Exit **1**: a regression reproduced on identical generated inputs.
@@ -119,6 +128,24 @@ baseline change alongside it; routine executions never request human labels.
 was measured and did not regress. They do **not** mean overall memory quality is
 good; absolute scores remain visible even when a weak baseline is stable.
 `status: invalid` always carries `quality_state: not_measured`.
+
+**What the committed baseline records.** Raw lexical retrieval ranks the gold
+decision first for 19 of 24 questions and within five for 23. The production
+pipeline ranks it first for 0 of 24 and within five for 11 (0 of 12 for the
+natural-language variant). Two causes are known:
+
+- `rerankQueryResults` sorts on a structural score before relevance: a tracked
+  status scores +26, any other state entry +6, and a log -3, and lexical rank
+  only breaks ties. Every scenario has a status and a research state that match
+  the query, so they always precede the gold log. Production R@1 therefore
+  cannot move on this fixture without a change to that ordering, and a metric
+  already at 0 cannot regress. Regression sensitivity on the production path
+  rests on keyword R@5 and MRR.
+- No question matches under strict AND, so all 24 use the relaxed OR fallback.
+  `buildRelaxedLexicalQuery` splits on every non-ASCII character, which breaks
+  Swedish words apart ("gällande" becomes "llande"). This affects both modes;
+  the one question that misses in raw mode has such characters in both its
+  project name and its topic.
 
 This version measures lexical ranking on a small synthetic corpus. It does not
 measure the deployed embedding model, live memory truth, client discoverability,
