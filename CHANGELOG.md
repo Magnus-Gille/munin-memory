@@ -270,17 +270,20 @@ changelog is the canonical record of what moved.
 
 - **Bridge reports the real cause of network failures and retries only read-only requests (#321).**
   When a forwarded request fails with a thrown network error the bridge error now
-  names the cause as an error code, an allowlisted syscall and a fixed description
-  from a constant table instead of only "fetch failed"; no text from the underlying
-  error is included, so host names, addresses, URLs, ports, header values and paths
-  cannot leak. Only read-only requests (non-`tools/call` messages and an allowlist
-  of read tools) are retried, up to twice; writes, unknown tools, batches and
-  unparseable bodies are never retried automatically, for any failure. A failed
-  write says what is known: most likely not applied when every error in the chain
-  proves a connect-phase failure, otherwise that it may or may not have been
-  applied; in both cases check the current state before repeating it. A write that
-  fails after the response started (body read error, HTTP error) gets the same
-  guidance and the request id. The bridge's own timeout is never retried. Each
+  names the cause in a sanitised summary: an error code, an allowlisted syscall and
+  a fixed description from a constant table instead of only "fetch failed". The
+  summary excludes cause-message free text; original SDK, HTTP and body error
+  messages can still be retained. Only read-only requests (non-`tools/call` messages
+  and an allowlist of read tools) are retried after thrown network failures, up to
+  twice; writes, unknown tools, batches and unparseable bodies are not retried after
+  those failures. The existing server-marked `admission-v1` 429 retry remains because
+  it rejects before execution; unmarked 429 responses are still returned without
+  replay. A failed write says what is known: most likely not applied when every error
+  in the chain proves a connect-phase failure, otherwise that it may or may not have
+  been applied; in both cases check the current state before repeating it. A write
+  whose JSON response body cannot be read, or which receives an HTTP error, gets the
+  same guidance and the request id. Asynchronous SSE failures remain outside this
+  guidance. The bridge's own timeout is never retried. Each
   forwarded request carries a random `X-Munin-Request-Id` header, reused across
   retries and shown in bridge errors and stderr; the server logs it as `requestId`
   in the request log line only when it matches `[A-Za-z0-9_-]{8,64}`, and does not

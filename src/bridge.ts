@@ -25,9 +25,10 @@
  *   MUNIN_BRIDGE_RATE_LIMIT_MAX_WAIT_MS — Total 429 wait budget (default: 10000).
  *   MUNIN_BRIDGE_RATE_LIMIT_JITTER_MS — Additive jitter ceiling (default: 250).
  *
- * Failed fetches report a sanitised cause; connection-never-established errors
- * are retried twice for any request, other network errors only for read-only
- * requests. Every request carries X-Munin-Request-Id.
+ * Thrown network failures report a sanitised cause summary and are retried only
+ * for read-only requests, never writes. Server-marked admission-v1 429 responses
+ * remain retryable because they reject before execution. Every request carries
+ * X-Munin-Request-Id.
  */
 
 import * as fs from "node:fs";
