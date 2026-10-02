@@ -5016,6 +5016,30 @@ describe("memory_query", () => {
       expect(result.retrieval.candidate_cap).toBe(500);
     }, 60_000);
 
+    it("relaxed lexical fallback keeps Swedish words whole and expands hyphenated compounds (#334)", async () => {
+      writeState(db, "notes/sv-decision", "beslut", "Beslut: Månvik använder en köbaserad körning med sökfilter för återställning.", []);
+      writeState(db, "notes/sv-other", "annat", "Helt orelaterat innehåll om trädgård.", []);
+      writeState(db, "notes/jev", "jev", "Jev är leverantören vi pratade med.", []);
+
+      type Relaxed = { ok?: boolean; results: Array<{ namespace: string }>; retrieval: { relaxed_lexical?: boolean } };
+
+      // Strict AND fails (several words are absent); relaxed OR over whole words matches.
+      const question = parseToolResponse(await callTool("memory_query", {
+        query: "Vilket beslut gäller för Månvik om sökfilter och oväntadord",
+        search_mode: "lexical",
+      })) as Relaxed;
+      expect(question.retrieval.relaxed_lexical).toBe(true);
+      expect(question.results.map((r) => r.namespace)).toEqual(["notes/sv-decision"]);
+
+      // The entry has "Jev" but not "integration"; the compound is split into parts.
+      const compound = parseToolResponse(await callTool("memory_query", {
+        query: "Jev-integration",
+        search_mode: "lexical",
+      })) as Relaxed;
+      expect(compound.retrieval.relaxed_lexical).toBe(true);
+      expect(compound.results.map((r) => r.namespace)).toContain("notes/jev");
+    });
+
     it("keeps the newest 500 filter-only candidates and flags truncation", async () => {
       for (let i = 0; i < 505; i++) {
         const created = writeState(db, `notes/filter-bound-${String(i).padStart(3, "0")}`, "item", `filter bound ${i}`, ["topic:filter-bound"]);

@@ -792,7 +792,7 @@ function buildQueryAnalyticsVectors(page: QuerySnapshotPage): {
   };
 }
 
-function fuseHybridResults(
+export function fuseHybridResults(
   ftsResults: ReturnType<typeof queryEntriesLexicalScored>,
   semanticResults: ReturnType<typeof queryEntriesSemanticScored>,
 ): HybridQueryResult[] {
@@ -822,7 +822,7 @@ function fuseHybridResults(
     });
   }
 
-  scored.sort((left, right) => right.score - left.score || left.entry.id.localeCompare(right.entry.id));
+  scored.sort(compareHybridResults);
   return scored;
 }
 
@@ -2019,6 +2019,7 @@ import {
   DATE_PATTERN,
   LIFECYCLE_TAGS,
   RELAXED_QUERY_STOPWORDS,
+  compareHybridResults,
   parseTags,
   isStale,
   getFreshnessScore,

@@ -19,6 +19,7 @@ import type {
 import {
   DEFAULT_TRACKED_PATTERNS,
   trackedPatternsToSqlLike,
+  compareHybridResults,
 } from "./internal/retrieval-shared.js";
 import {
   type BareNamespaceMode,
@@ -3267,8 +3268,8 @@ export function queryEntriesHybridScored(
     });
   }
 
-  // Sort by score descending
-  scored.sort((a, b) => b.score - a.score || a.entry.id.localeCompare(b.entry.id));
+  // Score descending; ties by lexical rank, semantic rank, then id
+  scored.sort(compareHybridResults);
 
   return { results: scored.slice(0, limit), ftsRelaxed };
 }

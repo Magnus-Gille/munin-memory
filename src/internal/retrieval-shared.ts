@@ -38,7 +38,53 @@ export const TAG_ALIASES: Record<string, string> = {
 export const RELAXED_QUERY_STOPWORDS = new Set([
   "a", "an", "and", "are", "for", "how", "i", "important", "is", "it",
   "my", "myself", "of", "or", "should", "the", "to", "what",
+  // Swedish function words (compared as lower-cased Unicode, diacritics kept).
+  "och", "att", "det", "den", "som", "för", "med", "är", "var", "vad",
+  "vilket", "vilken", "vilka", "hur", "varför", "när", "där", "har", "hade",
+  "inte", "till", "från", "eller", "men", "vi", "ni", "de", "jag", "du",
+  "han", "hon", "ett", "en", "på", "av", "om", "så", "kan", "ska", "skulle",
 ]);
+
+/**
+ * Split text into Unicode-aware terms: runs of letters, numbers, `_` and `-`.
+ * Input is NFC-normalised and lower-cased so non-ASCII words stay whole.
+ */
+export function splitUnicodeTerms(text: string): string[] {
+  return text
+    .normalize("NFC")
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}_-]+/u)
+    .map((term) => term.trim())
+    .filter((term) => term.length > 0);
+}
+
+interface HybridTieBreakable {
+  score: number;
+  entry: { id: string };
+  lexicalRank?: number;
+  semanticRank?: number;
+}
+
+function compareOptionalRank(a: number | undefined, b: number | undefined): number {
+  if (a === undefined && b === undefined) return 0;
+  if (a === undefined) return 1;
+  if (b === undefined) return -1;
+  return a - b;
+}
+
+/**
+ * Total order for fused hybrid results: score descending, then lexical rank
+ * ascending, then semantic rank ascending (a missing rank sorts after any
+ * present one), then entry id as the final deterministic fallback.
+ */
+export function compareHybridResults(a: HybridTieBreakable, b: HybridTieBreakable): number {
+  return (
+    b.score - a.score ||
+    compareOptionalRank(a.lexicalRank, b.lexicalRank) ||
+    compareOptionalRank(a.semanticRank, b.semanticRank) ||
+    a.entry.id.localeCompare(b.entry.id)
+  );
+}
 
 // --- Functions ---
 
