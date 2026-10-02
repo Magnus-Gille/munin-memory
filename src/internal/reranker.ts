@@ -107,6 +107,29 @@ export function shouldApplyDefaultQuerySuppression(params: QueryParams): boolean
   return !params.namespace && !params.entry_type && (!params.tags || params.tags.length === 0);
 }
 
+/**
+ * Number of best-relevance candidates that structural class and recency may
+ * reorder. Retrieval hands over up to 500 candidates, but structural
+ * reranking (tracked-status boost, entry type, freshness) is not
+ * relevance-aware, so it only operates on the 50 best-relevance candidates, as
+ * it did before #306. Everything after the window keeps retrieval order.
+ */
+export const QUERY_RERANK_WINDOW = 50;
+
+/**
+ * Whether the default suppression drops an entry from the results: `demo`
+ * namespaces and completed-task namespaces, when default suppression applies.
+ * Shared by `rerankQueryResults` and the handler's post-window tail so the
+ * rule exists once.
+ */
+export function isSuppressedByDefaultQueryRules(
+  entry: Entry,
+  completedTasks: Set<string>,
+): boolean {
+  if (entry.namespace === "demo" || entry.namespace.startsWith("demo/")) return true;
+  return completedTasks.has(entry.namespace);
+}
+
 export function isBroadOrientationQuery(query: string, params: QueryParams): boolean {
   if (!shouldApplyDefaultQuerySuppression(params)) return false;
 
@@ -602,10 +625,7 @@ export function rerankQueryResults(
   const searchRecencyWeight = params.search_recency_weight ?? DEFAULT_SEARCH_RECENCY_WEIGHT;
   const suppressDefaults = shouldApplyDefaultQuerySuppression(params);
   const filtered = results.filter((entry) => {
-    if (!suppressDefaults) return true;
-    if (entry.namespace === "demo" || entry.namespace.startsWith("demo/")) return false;
-    if (completedTasks.has(entry.namespace)) return false;
-    return true;
+    return !suppressDefaults || !isSuppressedByDefaultQueryRules(entry, completedTasks);
   });
 
   const scored = filtered

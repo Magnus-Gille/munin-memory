@@ -17,6 +17,8 @@ import {
   injectAttentionQueryEntries,
   resolveSearchRecencyWeight,
   getTrackedStatusAssessments,
+  isSuppressedByDefaultQueryRules,
+  QUERY_RERANK_WINDOW,
 } from "../src/internal/reranker.js";
 import type { Entry, TrackedStatusRow } from "../src/types.js";
 import type { QueryResult } from "../src/types.js";
@@ -1020,5 +1022,22 @@ describe("rerankQueryResults exact-anchor floor (#252)", () => {
     );
     // A tracked status still outranks a bare log on a topical query.
     expect(order[0]!.key).toBe("status");
+  });
+});
+
+describe("default suppression helper and rerank window", () => {
+  const entryIn = (namespace: string) => ({ namespace }) as Entry;
+
+  it("exposes a 50-candidate rerank window", () => {
+    expect(QUERY_RERANK_WINDOW).toBe(50);
+  });
+
+  it("suppresses demo and completed-task namespaces only", () => {
+    const completed = new Set(["projects/done"]);
+    expect(isSuppressedByDefaultQueryRules(entryIn("demo"), completed)).toBe(true);
+    expect(isSuppressedByDefaultQueryRules(entryIn("demo/x"), completed)).toBe(true);
+    expect(isSuppressedByDefaultQueryRules(entryIn("projects/done"), completed)).toBe(true);
+    expect(isSuppressedByDefaultQueryRules(entryIn("demonstration"), completed)).toBe(false);
+    expect(isSuppressedByDefaultQueryRules(entryIn("projects/live"), completed)).toBe(false);
   });
 });

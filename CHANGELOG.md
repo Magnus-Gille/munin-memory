@@ -103,6 +103,20 @@ changelog is the canonical record of what moved.
 
 ### Fixed
 
+- **`memory_query` no longer fails on broad candidate sets and keeps relevance near the top (#346).**
+  Since #306 any retrieval leg with more than 500 candidates returned
+  `query_bound_exceeded`, which broke every unscoped hybrid/semantic query and
+  natural-language lexical queries that fall back to relaxed matching. Each leg,
+  the fused hybrid set and the final set now keep their best 500 in retrieval
+  order; the response carries `retrieval.candidates_truncated: true` and
+  `retrieval.candidate_cap: 500` on every page (omitted when nothing was dropped),
+  and `total_matched` is then a lower bound. The `query_bound_exceeded` error no
+  longer exists. Structural reranking (tracked-status class, entry type, recency)
+  is again limited to the 50 best-relevance candidates (`QUERY_RERANK_WINDOW`), as
+  it was before #306, so a weak match can no longer be lifted onto the first page
+  from far down the candidate list; results after the window keep retrieval order.
+  Inside the window structural class still outranks relevance (#335).
+
 - **Principal provisioning and query-snapshot eviction reject or isolate blank IDs (#268).** `addPrincipal` now rejects blank and whitespace-only IDs at the exported provisioning boundary, while legacy/manual snapshots whose principal ID is the empty string still use an exact per-principal capacity query and cannot evict another principal's cursor.
 - **`memory_review` preview now reports approval write effects truthfully (#272).**
   Preview previously dry-ran terminal status, validation, source freshness, and

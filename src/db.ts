@@ -1603,7 +1603,11 @@ export function listEntriesForDerivation(
  * set. Its private snapshot probe uses a separate internal sentinel cap.
  */
 export const MAX_QUERY_LIMIT = 50;
-/** Exact snapshot pagination refuses broader result sets rather than lying about totals. */
+/**
+ * Maximum candidates a query snapshot keeps. Broader candidate sets are truncated
+ * to the best matches in retrieval order and the response is flagged with
+ * `retrieval.candidates_truncated`, so totals are never presented as exact when they are not.
+ */
 export const MAX_QUERY_SNAPSHOT_MATCHES = 500;
 export const MAX_ACTIVE_QUERY_SNAPSHOTS_PER_PRINCIPAL = 3;
 export const MAX_ACTIVE_QUERY_SNAPSHOTS_GLOBAL = 8;

@@ -84,9 +84,10 @@ physical deletion has not happened yet. Expired rows are physically pruned at st
 and by periodic maintenance for both HTTP and stdio, so during normal runtime cleanup
 may lag logical expiry only until the next maintenance pass (at most the maintenance
 interval, currently 1 minute). Semantic/hybrid queries use an indexed-candidate
-contract. Semantic `total_matched` is exact over currently
+contract. Semantic `total_matched` is exact (unless `retrieval.candidates_truncated`) over currently
 retrievable candidates indexed with the active embedding model; entries without a
-compatible embedding are outside that candidate set. Hybrid totals are exact over the
+compatible embedding are outside that candidate set. Hybrid totals are exact (unless
+`retrieval.candidates_truncated`) over the
 union of lexical matches and those currently retrievable semantic candidates, so a
 missing embedding does not prevent an entry from matching lexically. These mode rules
 define the retrieval candidate set. Server policy may then inject canonical orientation
@@ -94,8 +95,17 @@ entries and blocked/needs-attention statuses before final reranking; those injec
 become members of the frozen result set and count in final `total_matched`. Snapshot
 explanation metadata is frozen from the same scoring inputs as that final order. When
 `include_expired` is false, expired state rows are excluded before the 500-candidate
-exact-pagination bound is checked; with `include_expired: true`, those expired matches
-still count toward the bound. `expired_filtered_count` counts unique candidate IDs across
+cap is applied; with `include_expired: true`, those expired matches
+still count toward the cap. A query never fails because it matches too many
+candidates: each retrieval leg (and the fused hybrid set and the final set) keeps its
+best 500 in retrieval order, and the response then carries
+`retrieval.candidates_truncated: true` and `retrieval.candidate_cap: 500` on every
+page of the snapshot (both fields are omitted when nothing was dropped). In that case
+`total_matched` is a lower bound over the frozen 500; narrow the query or filters for
+an exact total. Truncation is decided only from retrieval already restricted to the
+caller's readable namespaces. Structural reranking (tracked-status class, entry type,
+recency) reorders only the 50 best-relevance candidates; injected entries join that
+window, and results after it keep retrieval order. `expired_filtered_count` counts unique candidate IDs across
 the bounded retrieval probe (including overlapping hybrid legs), not an unbounded corpus
 count. Each returned page is also logged as its
 own retrieval event; continuation pages carry a continuation marker instead of
