@@ -571,7 +571,7 @@ export interface PatchParams {
 }
 
 export type PatchStateResult =
-  | { status: "patched"; id: string }
+  | { status: "patched"; id: string; updated_at: string }
   | { status: "not_found" }
   | { status: "conflict"; message: string; current_updated_at: string }
   | { status: "secret_detected"; error: string };
@@ -686,7 +686,7 @@ export function patchState(
     const patchDetail = patchOps.length > 0 ? patchOps.join(", ") : "no-op";
     insertAuditRow(db, now, agentId, "patch", namespace, key, patchDetail, existing.id);
 
-    return { status: "patched" as const, id: existing.id };
+    return { status: "patched" as const, id: existing.id, updated_at: mutationTime };
   });
 
   return txn.immediate();

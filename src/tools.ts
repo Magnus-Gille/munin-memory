@@ -10379,7 +10379,7 @@ export function registerTools(
                   syncDerivedCommitmentsForEntry(db, patchedEntry, resolveTrackedPatterns(db, ctx));
                 }
 
-                const patchedResponse: Record<string, unknown> = { status: "patched", id: patchResult.id, namespace, key, hint: hintPatch };
+                const patchedResponse: Record<string, unknown> = { status: "patched", id: patchResult.id, namespace, key, updated_at: patchResult.updated_at, hint: hintPatch };
                 const patchWarnings: string[] = [];
                 if (patchReservedRemoved.length > 0) {
                   patchWarnings.push(`Removed reserved tag(s): ${patchReservedRemoved.join(", ")}`);
