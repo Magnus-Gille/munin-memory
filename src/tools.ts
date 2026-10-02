@@ -313,6 +313,10 @@ type QueryResponseMeta = {
     search_recency_weight: number;
     expired_filtered_count: number;
     serialization: "linear" | "boundary";
+    /** Present (true) only when the 500-candidate cap dropped candidates. */
+    candidates_truncated?: true;
+    /** Present together with `candidates_truncated`. */
+    candidate_cap?: number;
   };
 };
 
@@ -683,12 +687,13 @@ function buildStoredMatchMaps(
   return { lexicalById, semanticById, hybridById };
 }
 
-function exactQueryBoundExceeded(messageContext: string) {
-  return errResult(
-    "query",
-    "query_bound_exceeded",
-    `${messageContext} matched more than ${MAX_QUERY_SNAPSHOT_MATCHES} candidates. Exact pagination is bounded; narrow the query or filters and retry.`,
-  );
+/**
+ * Keep the first MAX_QUERY_SNAPSHOT_MATCHES rows of a probe-limited retrieval
+ * leg in the leg's own order. `truncated` is true when the probe returned more.
+ */
+function capQueryCandidates<T>(rows: T[]): { rows: T[]; truncated: boolean } {
+  if (rows.length <= MAX_QUERY_SNAPSHOT_MATCHES) return { rows, truncated: false };
+  return { rows: rows.slice(0, MAX_QUERY_SNAPSHOT_MATCHES), truncated: true };
 }
 
 function buildQuerySnapshotPage(
@@ -2047,6 +2052,8 @@ import {
   injectCanonicalQueryEntries,
   injectAttentionQueryEntries,
   rerankQueryResults,
+  isSuppressedByDefaultQueryRules,
+  QUERY_RERANK_WINDOW,
   resolveSearchRecencyWeight,
   getQueryExplainReasons,
   type TrackedStatusAssessment,
@@ -7333,7 +7340,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_query",
     description:
-      "Search and filter memories with lexical, semantic, or hybrid `search_mode`. Queryless browsing is allowed with filters such as namespace, tags, entry type, or time range; each page `limit` defaults to 10 and caps at 50. Responses report `returned`, exact `total_matched`, `has_more`, and an opaque `next_cursor` when more results remain. Pagination snapshots are created only when more than one page is needed, expire after 5 minutes, and are bounded per principal and globally; a caller may evict its own oldest active snapshots, but resumes fail with `capacity_exceeded` rather than deleting another principal's cursor. Resume with that `cursor`; you may change `limit` on resume, but every other explicit query/filter/mode/serialization argument must be omitted or normalize to the frozen snapshot shape exactly. Semantic `total_matched` is exact over currently retrievable candidates indexed with the active embedding model; entries without a compatible embedding are outside that candidate set. Hybrid totals are exact over the union of lexical matches and those currently retrievable semantic candidates, so entries without embeddings can still match lexically. Those mode rules define the retrieval candidate set; server-policy canonical orientation and blocked/needs-attention entries may then be injected before final reranking. Injected entries become members of the frozen final result set and count in `total_matched`. Namespace filters are literal and case-sensitive: a bare namespace includes descendants (`namespace_scope: subtree`), while a trailing-slash prefix includes only descendants (`namespace_scope: prefix`). Broad retrieval hides expired state unless `include_expired:true`; `explain:true` returns retrieval metadata frozen from the same scoring inputs as the result order. If exact bounded pagination would exceed the server safety cap, the call fails explicitly instead of returning a misleading lower-bound count.",
+      "Search and filter memories with lexical, semantic, or hybrid `search_mode`. Queryless browsing is allowed with filters such as namespace, tags, entry type, or time range; each page `limit` defaults to 10 and caps at 50. Responses report `returned`, `total_matched` (exact unless `retrieval.candidates_truncated` is true), `has_more`, and an opaque `next_cursor` when more results remain. Pagination snapshots are created only when more than one page is needed, expire after 5 minutes, and are bounded per principal and globally; a caller may evict its own oldest active snapshots, but resumes fail with `capacity_exceeded` rather than deleting another principal's cursor. Resume with that `cursor`; you may change `limit` on resume, but every other explicit query/filter/mode/serialization argument must be omitted or normalize to the frozen snapshot shape exactly. Semantic `total_matched` is exact (unless `retrieval.candidates_truncated`) over currently retrievable candidates indexed with the active embedding model; entries without a compatible embedding are outside that candidate set. Hybrid totals are exact (unless `retrieval.candidates_truncated`) over the union of lexical matches and those currently retrievable semantic candidates, so entries without embeddings can still match lexically. Those mode rules define the retrieval candidate set; server-policy canonical orientation and blocked/needs-attention entries may then be injected before final reranking. Structural reranking (tracked-status class, entry type, recency) applies only to the 50 best-relevance candidates; results after that window keep retrieval order. Injected entries become members of the frozen final result set and count in `total_matched`. Namespace filters are literal and case-sensitive: a bare namespace includes descendants (`namespace_scope: subtree`), while a trailing-slash prefix includes only descendants (`namespace_scope: prefix`). Broad retrieval hides expired state unless `include_expired:true`; `explain:true` returns retrieval metadata frozen from the same scoring inputs as the result order. If more than 500 candidates match, the 500 best are kept and pageable, `retrieval.candidates_truncated` is true with `retrieval.candidate_cap: 500`, and `total_matched` is then a lower bound; narrow the query or filters for an exact total.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -11406,7 +11413,7 @@ export function registerTools(
                 if (!namespace && (!tags || tags.length === 0) && !since && !until && !entry_type) {
                   return errResult("query", "validation_error", "Provide either a 'query' string for search, or at least one filter (namespace, tags, entry_type, since, until) to browse.");
                 }
-                let filterResults = queryEntriesByFilter(db, withQueryProbeLimit({
+                const filterProbe = queryEntriesByFilter(db, withQueryProbeLimit({
                   namespaceSelectors: readableNamespaceSelectors,
                   entryType: entry_type,
                   tags,
@@ -11415,9 +11422,9 @@ export function registerTools(
                   since,
                   until,
                 }));
-                if (filterResults.length > MAX_QUERY_SNAPSHOT_MATCHES) {
-                  return exactQueryBoundExceeded("This filter-only browse");
-                }
+                const cappedFilter = capQueryCandidates(filterProbe);
+                const filterResults = cappedFilter.rows;
+                const candidatesTruncated = cappedFilter.truncated;
 
                 const expiredFilteredCount = includeExpired
                   ? 0
@@ -11431,9 +11438,6 @@ export function registerTools(
                     until,
                   }))).size;
                 const visibleResults = filterByAccess(ctx, filterResults);
-                if (visibleResults.length > MAX_QUERY_SNAPSHOT_MATCHES) {
-                  return exactQueryBoundExceeded("This filter-only browse");
-                }
                 const resultIds = visibleResults.map((entry) => entry.id);
                 const responseMeta: QueryResponseMeta = {
                   search_mode: "filter",
@@ -11446,6 +11450,9 @@ export function registerTools(
                     search_recency_weight: 0,
                     expired_filtered_count: expiredFilteredCount,
                     serialization: "linear",
+                    ...(candidatesTruncated
+                      ? { candidates_truncated: true as const, candidate_cap: MAX_QUERY_SNAPSHOT_MATCHES }
+                      : {}),
                   },
                 };
                 const snapshotId = randomBytes(16).toString("hex");
@@ -11540,6 +11547,7 @@ export function registerTools(
               // — indistinguishable from "that is all there was". Say so.
               let fallbackReason: string | null = null;
               let relaxedLexical = false;
+              let candidatesTruncated = false;
               let expiredFilteredCount = 0;
               let results: Entry[] = [];
               let lexicalResults: ReturnType<typeof queryEntriesLexicalScored> = [];
@@ -11612,9 +11620,9 @@ export function registerTools(
                     until,
                     maxDistance: getSemanticMaxDistance(),
                   }));
-                  if (semanticResults.length > MAX_QUERY_SNAPSHOT_MATCHES) {
-                    return exactQueryBoundExceeded("This semantic query");
-                  }
+                  const cappedSemantic = capQueryCandidates(semanticResults);
+                  semanticResults = cappedSemantic.rows;
+                  if (cappedSemantic.truncated) candidatesTruncated = true;
                   expiredFilteredCount = collectSemanticExpiredIds(buf, activeEmbeddingModel).size;
                   results = semanticResults.map((result) => result.entry);
                 }
@@ -11669,9 +11677,11 @@ export function registerTools(
                     until,
                     maxDistance: getSemanticMaxDistance(),
                   }));
-                  if (lexicalResults.length > MAX_QUERY_SNAPSHOT_MATCHES || semanticResults.length > MAX_QUERY_SNAPSHOT_MATCHES) {
-                    return exactQueryBoundExceeded("This hybrid query");
-                  }
+                  const cappedHybridLexical = capQueryCandidates(lexicalResults);
+                  lexicalResults = cappedHybridLexical.rows;
+                  const cappedHybridSemantic = capQueryCandidates(semanticResults);
+                  semanticResults = cappedHybridSemantic.rows;
+                  if (cappedHybridLexical.truncated || cappedHybridSemantic.truncated) candidatesTruncated = true;
                   if (relaxedLexical) {
                     relaxedLexical = true;
                     if (!warning) {
@@ -11686,10 +11696,9 @@ export function registerTools(
                     expiredCandidateIds.add(id);
                   }
                   expiredFilteredCount = expiredCandidateIds.size;
-                  hybridResults = fuseHybridResults(lexicalResults, semanticResults);
-                  if (hybridResults.length > MAX_QUERY_SNAPSHOT_MATCHES) {
-                    return exactQueryBoundExceeded("This hybrid query");
-                  }
+                  const cappedHybrid = capQueryCandidates(fuseHybridResults(lexicalResults, semanticResults));
+                  hybridResults = cappedHybrid.rows;
+                  if (cappedHybrid.truncated) candidatesTruncated = true;
                   results = hybridResults.map((result) => result.entry);
                 }
               }
@@ -11706,9 +11715,9 @@ export function registerTools(
                   since,
                   until,
                 }));
-                if (lexicalResults.length > MAX_QUERY_SNAPSHOT_MATCHES) {
-                  return exactQueryBoundExceeded("This lexical query");
-                }
+                const cappedLexical = capQueryCandidates(lexicalResults);
+                lexicalResults = cappedLexical.rows;
+                candidatesTruncated = cappedLexical.truncated;
                 expiredFilteredCount = collectLexicalExpiredIds(queryText).size;
                 results = lexicalResults.map((result) => result.entry);
 
@@ -11726,9 +11735,9 @@ export function registerTools(
                       until,
                       rawFts5: true,
                     }));
-                    if (lexicalResults.length > MAX_QUERY_SNAPSHOT_MATCHES) {
-                      return exactQueryBoundExceeded("This lexical query");
-                    }
+                    const cappedRelaxed = capQueryCandidates(lexicalResults);
+                    lexicalResults = cappedRelaxed.rows;
+                    candidatesTruncated = cappedRelaxed.truncated;
                     expiredFilteredCount = collectLexicalExpiredIds(relaxedQuery, true).size;
                     results = lexicalResults.map((result) => result.entry);
                     if (results.length > 0 && !warning) {
@@ -11786,29 +11795,48 @@ export function registerTools(
                 ? getTrackedStatusAssessments(db)
                 : undefined;
 
-              results = injectCanonicalQueryEntries(db, results, queryParams);
+              // Structural reranking (tracked-status boost, entry type, recency) is
+              // not relevance-aware, so it may only reorder the QUERY_RERANK_WINDOW
+              // best-relevance candidates. Everything after the window keeps
+              // retrieval order. Injection joins the head.
+              let head = results.slice(0, QUERY_RERANK_WINDOW);
+              let tail = results.slice(QUERY_RERANK_WINDOW);
+              head = injectCanonicalQueryEntries(db, head, queryParams);
               if (trackedStatuses) {
-                results = injectAttentionQueryEntries(results, queryParams, trackedStatuses);
+                head = injectAttentionQueryEntries(head, queryParams, trackedStatuses);
               }
+              const headIds = new Set(head.map((entry) => entry.id));
+              tail = tail.filter((entry) => !headIds.has(entry.id));
 
               // Apply require_lexical_match after injection so injected
               // canonical/attention entries survive; only drop anchorless
               // vector-derived results.
               if (requireLexicalMatch && anchorlessVectorIds.size > 0) {
-                const before = results.length;
-                results = results.filter((entry) => !anchorlessVectorIds.has(entry.id));
-                if (results.length < before && !warning) {
-                  warning = `require_lexical_match dropped ${before - results.length} result(s) with no lexical (FTS5) anchor.`;
+                const before = head.length + tail.length;
+                head = head.filter((entry) => !anchorlessVectorIds.has(entry.id));
+                tail = tail.filter((entry) => !anchorlessVectorIds.has(entry.id));
+                const dropped = before - head.length - tail.length;
+                if (dropped > 0 && !warning) {
+                  warning = `require_lexical_match dropped ${dropped} result(s) with no lexical (FTS5) anchor.`;
                 }
               }
 
-              results = filterByAccess(ctx, results);
-              const completedTasks = shouldApplyDefaultQuerySuppression(queryParams)
+              head = filterByAccess(ctx, head);
+              tail = filterByAccess(ctx, tail);
+              const suppressDefaults = shouldApplyDefaultQuerySuppression(queryParams);
+              const completedTasks = suppressDefaults
                 ? getCompletedTaskNamespaces(db)
                 : new Set<string>();
-              results = rerankQueryResults(results, queryParams, completedTasks, trackedStatuses);
+              if (suppressDefaults) {
+                tail = tail.filter((entry) => !isSuppressedByDefaultQueryRules(entry, completedTasks));
+              }
+              // The tail is access- and suppression-filtered by now, so it may
+              // join the exact-anchor uniqueness count without leaking anything.
+              head = rerankQueryResults(head, queryParams, completedTasks, trackedStatuses, { anchorPool: tail });
+              results = [...head, ...tail];
               if (results.length > MAX_QUERY_SNAPSHOT_MATCHES) {
-                return exactQueryBoundExceeded("This query");
+                results = results.slice(0, MAX_QUERY_SNAPSHOT_MATCHES);
+                candidatesTruncated = true;
               }
 
               const lexicalById = new Map(lexicalResults.map((result) => [result.entry.id, result] as const));
@@ -11828,6 +11856,9 @@ export function registerTools(
                   search_recency_weight: searchRecencyWeight,
                   expired_filtered_count: expiredFilteredCount,
                   serialization,
+                  ...(candidatesTruncated
+                    ? { candidates_truncated: true as const, candidate_cap: MAX_QUERY_SNAPSHOT_MATCHES }
+                    : {}),
                 },
               };
               if (actualMode === "hybrid" && hybridResults.length > 0) {

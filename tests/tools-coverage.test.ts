@@ -899,33 +899,85 @@ describe.skipIf(!vecAvailable)("memory_query semantic and hybrid paths", () => {
     expect(new Set([...first.results, ...second.results].map((result: ToolResponse) => result.id)).size).toBe(55);
   });
 
-  it("fails safely when exact semantic paging would exceed the bounded internal probe", async () => {
-    await seedPagedSemanticCorpus("semantic-bound", 501);
+  for (const searchMode of ["semantic", "hybrid"] as const) {
+    it(`keeps the best 500 ${searchMode} candidates and flags truncation on every page`, async () => {
+      for (let i = 0; i < 505; i++) seedEmbeddedState(`${searchMode}-bound`, i);
 
-    const res = parseToolResponse(await callTool("memory_query", {
-      query: "cat",
-      search_mode: "semantic",
-      namespace: "projects/semantic-bound",
-      limit: 50,
-    }));
+      const pages: ToolResponse[] = [];
+      let page = parseToolResponse(await callTool("memory_query", {
+        query: "cat",
+        search_mode: searchMode,
+        namespace: `projects/${searchMode}-bound`,
+        explain: true,
+        limit: 50,
+      }));
+      pages.push(page);
+      while (page.has_more) {
+        page = parseToolResponse(await callTool("memory_query", { cursor: page.next_cursor, limit: 50 }));
+        pages.push(page);
+      }
 
-    expect(res.ok).toBe(false);
-    expect(res.error).toBe("query_bound_exceeded");
-  });
+      expect(pages[0].ok).toBe(true);
+      expect(pages[0].total_matched).toBe(500);
+      expect(pages).toHaveLength(10);
+      const ids = pages.flatMap((entry) => entry.results.map((result: ToolResponse) => result.id));
+      expect(ids).toHaveLength(500);
+      expect(new Set(ids).size).toBe(500);
+      for (const entry of pages) {
+        expect(entry.retrieval.candidates_truncated).toBe(true);
+        expect(entry.retrieval.candidate_cap).toBe(500);
+      }
+      // Everything after the 50-entry rerank window keeps retrieval (relevance) order.
+      const tailRanks = pages.slice(1).flatMap((entry) => entry.results.map((result: ToolResponse) => (
+        searchMode === "semantic" ? result.match.semantic_rank : result.match.hybrid_score
+      )));
+      expect(tailRanks).toHaveLength(450);
+      for (let i = 1; i < tailRanks.length; i++) {
+        if (searchMode === "semantic") expect(tailRanks[i]).toBeGreaterThan(tailRanks[i - 1]);
+        else expect(tailRanks[i]).toBeLessThanOrEqual(tailRanks[i - 1]);
+      }
+    }, 60_000);
+  }
 
-  it("fails safely when exact hybrid paging would exceed the bounded internal probe", async () => {
-    await seedPagedSemanticCorpus("hybrid-bound", 501);
+  it("truncates a hybrid candidate set that only exceeds 500 once the two legs are fused", async () => {
+    // 300 lexical-only matches (no embedding) plus 300 semantic-only neighbours
+    // (identical vector, no lexical match): each leg stays under 500, the union
+    // does not.
+    for (let i = 0; i < 300; i++) {
+      writeState(db, `projects/fusion-lex/item-${String(i).padStart(3, "0")}`, "status", `cat lexical only ${i}`, ["active"]);
+      const sem = writeState(db, `projects/fusion-sem/item-${String(i).padStart(3, "0")}`, "status", `nearest neighbour ${i}`, ["active"]);
+      storeEmbedding(db, sem.id, embeddingToBuffer(makeEmbedding(1)), getActiveEmbeddingModel());
+    }
 
-    const res = parseToolResponse(await callTool("memory_query", {
+    const pages: ToolResponse[] = [];
+    let page = parseToolResponse(await callTool("memory_query", {
       query: "cat",
       search_mode: "hybrid",
-      namespace: "projects/hybrid-bound",
+      explain: true,
       limit: 50,
     }));
+    pages.push(page);
+    while (page.has_more) {
+      page = parseToolResponse(await callTool("memory_query", { cursor: page.next_cursor, limit: 50 }));
+      pages.push(page);
+    }
 
-    expect(res.ok).toBe(false);
-    expect(res.error).toBe("query_bound_exceeded");
-  });
+    expect(pages[0].ok).toBe(true);
+    expect(pages[0].total_matched).toBe(500);
+    // Both legs contribute to the kept 500 (the seeded cat/dog fixtures are the only overlap).
+    expect(pages[0].search_meta.fts5_matches).toBeGreaterThan(0);
+    expect(pages[0].search_meta.semantic_matches).toBeGreaterThan(0);
+    expect(
+      pages[0].search_meta.fts5_matches + pages[0].search_meta.semantic_matches - pages[0].search_meta.both_matches,
+    ).toBe(500);
+    const ids = pages.flatMap((entry) => entry.results.map((result: ToolResponse) => result.id));
+    expect(ids).toHaveLength(500);
+    expect(new Set(ids).size).toBe(500);
+    for (const entry of pages) {
+      expect(entry.retrieval.candidates_truncated).toBe(true);
+      expect(entry.retrieval.candidate_cap).toBe(500);
+    }
+  }, 60_000);
 
   it("excludes more than 500 expired semantic and hybrid candidates before enforcing the bound", async () => {
     for (let i = 0; i < 501; i += 1) {

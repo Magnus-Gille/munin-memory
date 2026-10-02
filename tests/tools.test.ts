@@ -4951,19 +4951,303 @@ describe("memory_query", () => {
       expect(resumed.has_more).toBe(false);
     });
 
-    it("fails safely when exact paging would exceed the bounded snapshot limit", async () => {
+    type TruncationPage = {
+      ok?: boolean;
+      error?: string;
+      total: number;
+      total_matched: number;
+      returned: number;
+      has_more: boolean;
+      next_cursor: string | null;
+      results: Array<{ id: string; namespace: string; key: string | null; match?: { lexical_rank?: number } }>;
+      retrieval: { candidates_truncated?: boolean; candidate_cap?: number; relaxed_lexical?: boolean };
+    };
+
+    async function collectAllPages(
+      call: (name: string, args?: Record<string, unknown>) => Promise<unknown>,
+      args: Record<string, unknown>,
+    ): Promise<{ pages: TruncationPage[]; ids: string[] }> {
+      const pages: TruncationPage[] = [];
+      let page = parseToolResponse(await call("memory_query", args)) as TruncationPage;
+      pages.push(page);
+      while (page.has_more) {
+        page = parseToolResponse(await call("memory_query", { cursor: page.next_cursor, limit: 50 })) as TruncationPage;
+        pages.push(page);
+      }
+      return { pages, ids: pages.flatMap((entry) => entry.results.map((result) => result.id)) };
+    }
+
+    it("keeps the best 500 lexical candidates and flags truncation on every page", async () => {
       seedPagedLexicalCorpus(501, "bound-page");
 
-      const raw = await callTool("memory_query", {
+      const { pages, ids } = await collectAllPages(callTool, {
         query: "Paged lexical corpus bound-page",
         search_mode: "lexical",
         limit: 50,
       });
-      const result = parseToolResponse(raw) as { ok: boolean; error?: string; message?: string };
 
-      expect(result.ok).toBe(false);
-      expect(result.error).toBe("query_bound_exceeded");
-      expect(result.message).toContain("500");
+      expect(pages[0].ok).not.toBe(false);
+      expect(pages[0].total_matched).toBe(500);
+      expect(pages).toHaveLength(10);
+      expect(pages[pages.length - 1].has_more).toBe(false);
+      expect(ids).toHaveLength(500);
+      expect(new Set(ids).size).toBe(500);
+      for (const page of pages) {
+        expect(page.retrieval.candidates_truncated).toBe(true);
+        expect(page.retrieval.candidate_cap).toBe(500);
+      }
+    }, 60_000);
+
+    it("keeps the best 500 relaxed lexical candidates when the OR query matches more", async () => {
+      for (let i = 0; i < 520; i++) {
+        writeState(db, `notes/relaxed-${String(i).padStart(3, "0")}`, "item", `relaxedtok entry number ${i}`, ["topic:relaxed-bound"]);
+      }
+
+      const result = parseToolResponse(await callTool("memory_query", {
+        query: "relaxedtok nonexistentword",
+        search_mode: "lexical",
+        limit: 50,
+      })) as TruncationPage;
+
+      expect(result.ok).not.toBe(false);
+      expect(result.retrieval.relaxed_lexical).toBe(true);
+      expect(result.total_matched).toBe(500);
+      expect(result.retrieval.candidates_truncated).toBe(true);
+      expect(result.retrieval.candidate_cap).toBe(500);
+    }, 60_000);
+
+    it("keeps the newest 500 filter-only candidates and flags truncation", async () => {
+      for (let i = 0; i < 505; i++) {
+        const created = writeState(db, `notes/filter-bound-${String(i).padStart(3, "0")}`, "item", `filter bound ${i}`, ["topic:filter-bound"]);
+        db.prepare("UPDATE entries SET updated_at = ? WHERE id = ?")
+          .run(new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString(), created.id);
+      }
+
+      const { pages, ids } = await collectAllPages(callTool, { tags: ["topic:filter-bound"], limit: 50 });
+
+      expect(pages[0].ok).not.toBe(false);
+      expect(pages[0].total_matched).toBe(500);
+      expect(ids).toHaveLength(500);
+      expect(new Set(ids).size).toBe(500);
+      const oldest = db.prepare("SELECT id FROM entries WHERE namespace IN ('notes/filter-bound-000','notes/filter-bound-001','notes/filter-bound-002','notes/filter-bound-003','notes/filter-bound-004')")
+        .all() as Array<{ id: string }>;
+      expect(oldest).toHaveLength(5);
+      for (const row of oldest) expect(ids).not.toContain(row.id);
+      for (const page of pages) {
+        expect(page.retrieval.candidates_truncated).toBe(true);
+        expect(page.retrieval.candidate_cap).toBe(500);
+      }
+    }, 60_000);
+
+    it("succeeds with explain over more than 500 candidates", async () => {
+      seedPagedLexicalCorpus(520, "explain-bound");
+
+      const { pages } = await collectAllPages(callTool, {
+        query: "Paged lexical corpus explain-bound",
+        search_mode: "lexical",
+        explain: true,
+        limit: 50,
+      });
+
+      expect(pages[0].ok).not.toBe(false);
+      expect(pages[0].error).toBeUndefined();
+      expect(pages[0].total_matched).toBe(500);
+      expect(pages[0].retrieval.candidates_truncated).toBe(true);
+    }, 60_000);
+
+    it("only reports truncation derived from the caller's readable scope", async () => {
+      for (let i = 0; i < 300; i++) {
+        writeState(db, `shared/trunc-readable/item-${String(i).padStart(3, "0")}`, "item", `scopedtok readable ${i}`, ["topic:scoped-trunc"]);
+      }
+      const hidden: string[] = [];
+      for (let i = 0; i < 400; i++) {
+        const created = writeState(db, `private/trunc-hidden/item-${String(i).padStart(3, "0")}`, "item", `scopedtok hidden ${i}`, ["topic:scoped-trunc"]);
+        hidden.push(created.id);
+      }
+      const readerCall = makeContextCallTool({
+        principalId: "agent:trunc-reader",
+        principalType: "agent",
+        accessibleNamespaces: [{ pattern: "shared/trunc-readable/*", permissions: "read" }],
+        maxClassification: "internal",
+        transportType: "local",
+      }, "trunc-reader");
+
+      const { pages, ids } = await collectAllPages(readerCall, { query: "scopedtok", search_mode: "lexical", limit: 50 });
+
+      expect(pages[0].ok).not.toBe(false);
+      expect(pages[0].total_matched).toBe(300);
+      expect(ids).toHaveLength(300);
+      for (const id of hidden) expect(ids).not.toContain(id);
+      for (const page of pages) {
+        expect(page.retrieval.candidates_truncated).toBeUndefined();
+        expect(page.retrieval.candidate_cap).toBeUndefined();
+      }
+
+      for (let i = 300; i < 520; i++) {
+        writeState(db, `shared/trunc-readable/item-${String(i).padStart(3, "0")}`, "item", `scopedtok readable ${i}`, ["topic:scoped-trunc"]);
+      }
+      const overflow = await collectAllPages(readerCall, { query: "scopedtok", search_mode: "lexical", limit: 50 });
+      expect(overflow.pages[0].total_matched).toBe(500);
+      expect(overflow.pages[0].retrieval.candidates_truncated).toBe(true);
+      for (const id of hidden) expect(overflow.ids).not.toContain(id);
+    }, 60_000);
+
+    describe("relevance window for structural reranking", () => {
+      function seedWindowCorpus() {
+        // Plain notes: "windowtok" repeated 2..61 times, so their lexical ranks are
+        // deterministic and all better than the long single-mention status below.
+        for (let i = 0; i < 60; i++) {
+          writeState(db, `notes/window-${String(i).padStart(2, "0")}`, "item", Array(i + 2).fill("windowtok").join(" "), ["topic:window"]);
+        }
+        const filler = Array(300).fill("filler").join(" ");
+        writeState(db, "projects/window-outside", "status", `windowtok ${filler}`, ["active"]);
+        // Best possible lexical rank for the inside-window status.
+        writeState(db, "projects/window-inside", "status", Array(80).fill("windowtok").join(" "), ["active"]);
+      }
+
+      it("does not let structural reranking pull a weak match from outside the best 50 onto the first page", async () => {
+        seedWindowCorpus();
+
+        const { pages, ids } = await collectAllPages(callTool, {
+          query: "windowtok",
+          search_mode: "lexical",
+          explain: true,
+          limit: 50,
+        });
+        const all = pages.flatMap((page) => page.results);
+        const outside = all.find((entry) => entry.namespace === "projects/window-outside");
+        const inside = all.find((entry) => entry.namespace === "projects/window-inside");
+
+        expect(outside?.match?.lexical_rank).toBeGreaterThan(50);
+        expect(inside?.match?.lexical_rank).toBeLessThanOrEqual(50);
+        expect(pages[0].results[0].namespace).toBe("projects/window-inside");
+        expect(pages[0].results.map((entry) => entry.namespace)).not.toContain("projects/window-outside");
+        expect(ids.indexOf(outside!.id)).toBeGreaterThanOrEqual(50);
+        expect(new Set(ids).size).toBe(ids.length);
+        expect(ids).toHaveLength(62);
+      });
+
+      it("keeps injected blocked statuses first and never repeats ids across pages", async () => {
+        for (let i = 0; i < 70; i++) {
+          writeState(db, `notes/triage-${String(i).padStart(2, "0")}`, "item", `blocked item ${i}`, ["topic:triage-window"]);
+        }
+        // A weak lexical match (one mention buried in filler) so it lands in the
+        // retrieval tail AND is injected into the head: the head/tail
+        // de-duplication is the only thing keeping it from appearing twice.
+        const blocked = writeState(db, "projects/triage-blocked", "status", `blocked ${Array(300).fill("filler").join(" ")}`, ["blocked"]);
+
+        const { pages, ids } = await collectAllPages(callTool, {
+          query: "blocked",
+          search_mode: "lexical",
+          explain: true,
+          limit: 50,
+        });
+        const injected = pages.flatMap((page) => page.results).find((entry) => entry.id === blocked.id);
+
+        expect(injected?.match?.lexical_rank).toBeGreaterThan(50);
+        expect(pages[0].results[0].id).toBe(blocked.id);
+        expect(ids.filter((id) => id === blocked.id)).toHaveLength(1);
+        expect(new Set(ids).size).toBe(ids.length);
+      });
+
+      describe("exact-anchor uniqueness across the whole candidate set", () => {
+        function seedAnchorCorpus(withSecondMatch: boolean) {
+          // Rank 1: short entry repeating the identifier. Fillers match only via
+          // their tag (not in the anchor haystack), so they are candidates that
+          // do not contain the identifier verbatim.
+          writeState(db, "notes/anchor-best", "item", "ancortok ancortok ancortok", []);
+          for (let i = 0; i < 60; i++) {
+            writeState(db, `projects/anchor-filler-${String(i).padStart(2, "0")}`, "status", `## Phase\nActive work ${i}`, ["active", "topic:ancortok"]);
+          }
+          if (withSecondMatch) {
+            writeState(db, "notes/anchor-deep", "item", `ancortok ${Array(300).fill("filler").join(" ")}`, []);
+          }
+        }
+
+        it("does not float the rank-1 entry when the identifier also appears beyond the rerank window", async () => {
+          seedAnchorCorpus(true);
+
+          const { pages } = await collectAllPages(callTool, {
+            query: "ancortok",
+            search_mode: "lexical",
+            explain: true,
+            limit: 50,
+          });
+          const all = pages.flatMap((page) => page.results);
+          const best = all.find((entry) => entry.namespace === "notes/anchor-best");
+          const deep = all.find((entry) => entry.namespace === "notes/anchor-deep");
+
+          expect(best?.match?.lexical_rank).toBe(1);
+          expect(deep?.match?.lexical_rank).toBeGreaterThan(50);
+          expect(pages[0].results[0].namespace).not.toBe("notes/anchor-best");
+          expect(pages[0].results[0].namespace).toMatch(/^projects\/anchor-filler-/);
+        }, 60_000);
+
+        it("still floats the rank-1 entry when the identifier is unique across all candidates", async () => {
+          seedAnchorCorpus(false);
+
+          const { pages } = await collectAllPages(callTool, {
+            query: "ancortok",
+            search_mode: "lexical",
+            explain: true,
+            limit: 50,
+          });
+
+          expect(pages[0].results[0].namespace).toBe("notes/anchor-best");
+          expect(pages[0].results[0].match?.lexical_rank).toBe(1);
+        }, 60_000);
+      });
+
+      it("keeps the final set at 500 and injected entries first when injection pushes it over the cap", async () => {
+        for (let i = 0; i < 500; i++) {
+          writeState(db, `notes/inject-cap-${String(i).padStart(3, "0")}`, "item", `blocked overflowtok ${i}`, ["topic:inject-cap"]);
+        }
+        const blockedIds: string[] = [];
+        for (let i = 0; i < 3; i++) {
+          blockedIds.push(writeState(db, `projects/inject-cap-blocked-${i}`, "status", `Waiting on vendor ${i}.`, ["blocked"]).id);
+        }
+
+        const { pages, ids } = await collectAllPages(callTool, {
+          query: "blocked overflowtok",
+          search_mode: "lexical",
+          limit: 50,
+        });
+
+        expect(pages[0].ok).not.toBe(false);
+        expect(pages[0].total_matched).toBe(500);
+        expect(ids).toHaveLength(500);
+        expect(new Set(ids).size).toBe(500);
+        for (const page of pages) expect(page.retrieval.candidates_truncated).toBe(true);
+        const firstPageIds = pages[0].results.map((entry) => entry.id);
+        for (const id of blockedIds) expect(firstPageIds).toContain(id);
+      }, 60_000);
+
+      it("suppresses demo and completed-task entries that sit in the retrieval tail, unless the query is namespace-scoped", async () => {
+        const filler = Array(300).fill("filler").join(" ");
+        for (let i = 0; i < 60; i++) {
+          writeState(db, `notes/supp-${String(i).padStart(2, "0")}`, "item", Array(i + 2).fill("supptok").join(" "), ["topic:supp"]);
+        }
+        const demo = writeState(db, "demo/supp", "item", `supptok ${filler}`, []);
+        writeState(db, "tasks/20260101-supp-done", "status", `supptok ${filler}`, ["completed"]);
+        const completedId = (db.prepare("SELECT id FROM entries WHERE namespace = 'tasks/20260101-supp-done'").get() as { id: string }).id;
+
+        const unscoped = await collectAllPages(callTool, { query: "supptok", search_mode: "lexical", limit: 50 });
+        expect(unscoped.pages[0].ok).not.toBe(false);
+        expect(unscoped.ids).not.toContain(demo.id);
+        expect(unscoped.ids).not.toContain(completedId);
+        expect(unscoped.ids).toHaveLength(60);
+
+        for (const [namespace, id] of [["demo/supp", demo.id], ["tasks/20260101-supp-done", completedId]] as const) {
+          const scoped = await collectAllPages(callTool, {
+            query: "supptok",
+            search_mode: "lexical",
+            namespace,
+            explain: true,
+            limit: 50,
+          });
+          expect(scoped.ids).toEqual([id]);
+        }
+      }, 60_000);
     });
 
     it("keeps an exact 500-candidate snapshot while probing one extra candidate", async () => {
@@ -4973,13 +5257,15 @@ describe("memory_query", () => {
         query: "Paged lexical corpus exact-bound-page",
         search_mode: "lexical",
         limit: 50,
-      })) as { total_matched: number; returned: number; has_more: boolean };
+      })) as { total_matched: number; returned: number; has_more: boolean; retrieval: Record<string, unknown> };
 
       const snapshotRow = db.prepare(
         "SELECT result_ids FROM query_snapshots ORDER BY created_at DESC, id DESC LIMIT 1",
       ).get() as { result_ids: string };
 
       expect(result).toMatchObject({ total_matched: 500, returned: 50, has_more: true });
+      expect(result.retrieval).not.toHaveProperty("candidates_truncated");
+      expect(result.retrieval).not.toHaveProperty("candidate_cap");
       expect(JSON.parse(snapshotRow.result_ids)).toHaveLength(500);
     });
 

@@ -107,6 +107,29 @@ export function shouldApplyDefaultQuerySuppression(params: QueryParams): boolean
   return !params.namespace && !params.entry_type && (!params.tags || params.tags.length === 0);
 }
 
+/**
+ * Number of best-relevance candidates that structural class and recency may
+ * reorder. Retrieval hands over up to 500 candidates, but structural
+ * reranking (tracked-status boost, entry type, freshness) is not
+ * relevance-aware, so it only operates on the 50 best-relevance candidates, as
+ * it did before #306. Everything after the window keeps retrieval order.
+ */
+export const QUERY_RERANK_WINDOW = 50;
+
+/**
+ * Whether the default suppression drops an entry from the results: `demo`
+ * namespaces and completed-task namespaces, when default suppression applies.
+ * Shared by `rerankQueryResults` and the handler's post-window tail so the
+ * rule exists once.
+ */
+export function isSuppressedByDefaultQueryRules(
+  entry: Entry,
+  completedTasks: Set<string>,
+): boolean {
+  if (entry.namespace === "demo" || entry.namespace.startsWith("demo/")) return true;
+  return completedTasks.has(entry.namespace);
+}
+
 export function isBroadOrientationQuery(query: string, params: QueryParams): boolean {
   if (!shouldApplyDefaultQuerySuppression(params)) return false;
 
@@ -555,6 +578,7 @@ function applyExactAnchorFloor(
   bestRelevance: Entry | undefined,
   queryLower: string,
   params: QueryParams,
+  anchorPool: readonly Entry[] = [],
 ): Array<{ entry: Entry; heuristic: number }> {
   if (!bestRelevance || ranked.length < 2) return ranked;
   if (!queryLower.trim()) return ranked;
@@ -568,10 +592,19 @@ function applyExactAnchorFloor(
 
   // Unique anchor only: if more than one candidate carries every term, the
   // caller described a subject rather than naming one entry, and the existing
-  // structural/recency ordering is the right answer.
+  // structural/recency ordering is the right answer. The count also covers
+  // `anchorPool` (eligible candidates outside the reranked window), so an
+  // identifier that recurs deeper in the candidate set is not mistaken for a
+  // unique one.
   let matchCount = 0;
   for (const item of ranked) {
     if (entryContainsAllTerms(item.entry, terms)) {
+      matchCount += 1;
+      if (matchCount > 1) return ranked;
+    }
+  }
+  for (const entry of anchorPool) {
+    if (entryContainsAllTerms(entry, terms)) {
       matchCount += 1;
       if (matchCount > 1) return ranked;
     }
@@ -589,6 +622,10 @@ function applyExactAnchorFloor(
  * Rerank query results by heuristic score + freshness, applying the
  * default suppression filter when appropriate.
  *
+ * `options.anchorPool` lists additional eligible candidates that are not
+ * reranked (already access- and suppression-filtered by the caller); they only
+ * count toward the exact-anchor uniqueness check.
+ *
  * Exported for the benchmark runner's production_ranker mode.
  */
 export function rerankQueryResults(
@@ -596,16 +633,14 @@ export function rerankQueryResults(
   params: QueryParams,
   completedTasks: Set<string>,
   trackedStatuses?: Map<string, TrackedStatusAssessment>,
+  options?: { anchorPool?: readonly Entry[] },
 ): Entry[] {
   const query = params.query ?? "";
   const queryLower = query.toLowerCase();
   const searchRecencyWeight = params.search_recency_weight ?? DEFAULT_SEARCH_RECENCY_WEIGHT;
   const suppressDefaults = shouldApplyDefaultQuerySuppression(params);
   const filtered = results.filter((entry) => {
-    if (!suppressDefaults) return true;
-    if (entry.namespace === "demo" || entry.namespace.startsWith("demo/")) return false;
-    if (completedTasks.has(entry.namespace)) return false;
-    return true;
+    return !suppressDefaults || !isSuppressedByDefaultQueryRules(entry, completedTasks);
   });
 
   const scored = filtered
@@ -636,7 +671,7 @@ export function rerankQueryResults(
   // `filtered[0]` is the best-relevance candidate: the retrieval layer hands
   // results over in fusion/lexical rank order, and the structural sort below
   // preserves that order only as its final tie-break.
-  return applyExactAnchorFloor(scored, filtered[0], queryLower, params).map((item) => item.entry);
+  return applyExactAnchorFloor(scored, filtered[0], queryLower, params, options?.anchorPool).map((item) => item.entry);
 }
 
 export function resolveSearchRecencyWeight(params: QueryParams): { ok: true; value: number } | { ok: false; error: string } {
