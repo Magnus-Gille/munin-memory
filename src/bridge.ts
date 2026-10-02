@@ -231,6 +231,8 @@ export interface FetchWithTimeoutOptions {
   retry?: BridgeRateLimitRetryConfig;
   networkRetry?: BridgeNetworkRetryConfig;
   uuid?: () => string;
+  /** Called with the id of every forwarded request (the bridge reports the latest one). */
+  onRequestId?: (requestId: string) => void;
 }
 
 function nonNegativeInteger(
@@ -389,98 +391,161 @@ export const BRIDGE_NEVER_RETRY_TOOL_NAMES: readonly string[] = [
   "memory_consolidate",
 ];
 
-/** The connection was never established, so the server cannot have seen the request. */
-export const FETCH_NOT_SENT_CODES: readonly string[] = [
-  "ECONNREFUSED",
-  "ENOTFOUND",
-  "EAI_AGAIN",
-  "UND_ERR_CONNECT_TIMEOUT",
-  "EHOSTUNREACH",
-  "ENETUNREACH",
+/**
+ * Fixed descriptions for network error codes. Cause reporting never passes free
+ * text from an error through; only these constants are shown.
+ * scripts/stdio-bridge.mjs carries an identical copy (tests assert equality);
+ * keep the two tables in sync.
+ */
+export const FETCH_ERROR_DESCRIPTIONS: Readonly<Record<string, string>> = {
+  ECONNREFUSED: "connection refused",
+  ECONNRESET: "connection reset by peer",
+  EPIPE: "broken pipe",
+  ETIMEDOUT: "connection timed out",
+  EHOSTUNREACH: "host unreachable",
+  ENETUNREACH: "network unreachable",
+  ENOTFOUND: "host name could not be resolved",
+  EAI_AGAIN: "temporary name resolution failure",
+  UND_ERR_SOCKET: "connection closed unexpectedly",
+  UND_ERR_CONNECT_TIMEOUT: "connect timeout",
+  UND_ERR_HEADERS_TIMEOUT: "timed out waiting for response headers",
+  UND_ERR_BODY_TIMEOUT: "timed out waiting for response body",
+  UND_ERR_ABORTED: "request aborted",
+  CERT_HAS_EXPIRED: "TLS certificate problem",
+  DEPTH_ZERO_SELF_SIGNED_CERT: "TLS certificate problem",
+  SELF_SIGNED_CERT_IN_CHAIN: "TLS certificate problem",
+  UNABLE_TO_VERIFY_LEAF_SIGNATURE: "TLS certificate problem",
+  ERR_TLS_CERT_ALTNAME_INVALID: "TLS certificate problem",
+};
+
+/** Syscalls that may be shown (also mirrored in scripts/stdio-bridge.mjs). */
+export const FETCH_ERROR_SYSCALLS: readonly string[] = [
+  "connect",
+  "getaddrinfo",
+  "read",
+  "write",
 ];
 
-export type FetchFailureKind = "not-sent" | "possibly-sent";
+/** Where a failed fetch stopped, as far as the error chain proves. */
+export type FetchFailureKind = "connect-phase" | "unknown-phase";
 
 const MAX_CAUSE_DEPTH = 5;
-const MAX_REASON_LENGTH = 120;
+const MAX_AGGREGATE_MEMBERS = 5;
+const MAX_CAUSE_NODES = 12;
+const MAX_SUMMARY_LENGTH = 300;
+const CODE_PATTERN = /^[A-Za-z0-9_]{1,64}$/;
+const NAME_PATTERN = /^[A-Za-z][A-Za-z0-9]{0,40}$/;
 
-/** The cause chain below `error` (or `error` itself when it has no cause). */
-function causeNodes(error: unknown): unknown[] {
-  if (!(error instanceof Error) || error.cause === undefined) return [error];
+function prop(node: unknown, key: string): unknown {
+  return typeof node === "object" && node !== null
+    ? (node as Record<string, unknown>)[key]
+    : undefined;
+}
+
+/**
+ * The error objects to inspect: the cause chain (bounded depth) with
+ * AggregateError members (bounded count) in place of the aggregate itself.
+ * Without `skipRoot` the thrown error is included.
+ */
+function causeNodes(error: unknown, skipRoot: boolean): unknown[] {
   const nodes: unknown[] = [];
-  let current: unknown = error.cause;
-  while (current !== undefined && nodes.length < MAX_CAUSE_DEPTH) {
-    nodes.push(current);
-    current = current instanceof Error ? current.cause : undefined;
+  const visit = (node: unknown, depth: number): void => {
+    if (depth > MAX_CAUSE_DEPTH || nodes.length >= MAX_CAUSE_NODES) return;
+    if (typeof node !== "object" || node === null) return;
+    const members = prop(node, "errors");
+    if (Array.isArray(members) && members.length > 0) {
+      for (const member of members.slice(0, MAX_AGGREGATE_MEMBERS)) {
+        visit(member, depth + 1);
+      }
+    } else {
+      nodes.push(node);
+    }
+    visit(prop(node, "cause"), depth + 1);
+  };
+  if (skipRoot && typeof error === "object" && error !== null && prop(error, "cause") !== undefined) {
+    visit(prop(error, "cause"), 1);
+  } else {
+    visit(error, 0);
   }
   return nodes;
 }
 
-function stringProp(node: unknown, key: string): string | undefined {
-  if (typeof node !== "object" || node === null) return undefined;
-  const value = (node as Record<string, unknown>)[key];
-  return typeof value === "string" && /^[A-Za-z0-9_]{1,64}$/.test(value)
-    ? value
-    : undefined;
-}
-
-/** Strip anything that could identify a host, address, path or credential. */
-function sanitizeReason(text: string): string {
-  const cleaned = text
-    .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "[url]")
-    .replace(/\b(Bearer|Basic)\s+\S+/gi, "$1 [redacted]")
-    .replace(/\b(ENOTFOUND|EAI_AGAIN)\s+\S+/g, "$1 [host]")
-    .replace(/\[?(?:[0-9a-f]{0,4}:){2,}[0-9a-f]{0,4}\]?(?::\d+)?/gi, "[addr]")
-    .replace(/\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b/g, "[addr]")
-    .replace(/(?:^|(?<=\s))(?:[A-Za-z]:)?(?:[\\/][^\s\\/:]+)+/g, "[path]")
-    .replace(/\b(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?\b/gi, "[host]")
-    .replace(/\blocalhost(?::\d+)?\b/gi, "[host]")
-    .replace(/\bport\s+\d+\b/gi, "port [n]")
-    .replace(/:\d{2,5}\b/g, "")
-    .replace(/\b[A-Za-z0-9_-]{32,}\b/g, "[redacted]")
-    .replace(/\s+/g, " ")
-    .trim();
-  return cleaned.length > MAX_REASON_LENGTH
-    ? `${cleaned.slice(0, MAX_REASON_LENGTH)}...`
-    : cleaned;
+function describeNode(node: unknown): string | undefined {
+  const code = prop(node, "code");
+  if (typeof code === "string" && CODE_PATTERN.test(code)) {
+    const description = Object.hasOwn(FETCH_ERROR_DESCRIPTIONS, code)
+      ? FETCH_ERROR_DESCRIPTIONS[code]
+      : "unrecognised network error";
+    const syscall = prop(node, "syscall");
+    const shown =
+      typeof syscall === "string" && FETCH_ERROR_SYSCALLS.includes(syscall)
+        ? ` ${syscall}`
+        : "";
+    return `${code}${shown}: ${description}`;
+  }
+  const name = prop(node, "name");
+  const ctorName = prop(prop(node, "constructor"), "name");
+  const label = typeof name === "string" ? name : ctorName;
+  return typeof label === "string" && NAME_PATTERN.test(label) ? label : undefined;
 }
 
 /**
- * Describe the cause chain of a thrown fetch error without leaking URLs, host
- * names, addresses, ports, header values, tokens or file paths.
+ * Describe the cause chain of a thrown fetch error as `<code> [<syscall>]:
+ * <fixed description>` parts. No text from the error itself is ever included.
  */
 export function sanitizeFetchCause(error: unknown): string {
   const parts: string[] = [];
-  for (const node of causeNodes(error)) {
-    const code = stringProp(node, "code");
-    const syscall = stringProp(node, "syscall");
-    let reason = "";
-    if (typeof node === "string") {
-      reason = sanitizeReason(node);
-    } else if (typeof node === "object" && node !== null) {
-      const message = (node as Record<string, unknown>).message;
-      reason = typeof message === "string" ? sanitizeReason(message) : "";
-    }
-    const head = [code, syscall].filter(Boolean).join(" ");
-    if (reason === code) reason = "";
-    const text = head && reason ? `${head}: ${reason}` : head || reason;
-    if (text) parts.push(text);
+  for (const node of causeNodes(error, true)) {
+    const text = describeNode(node);
+    if (text !== undefined && parts[parts.length - 1] !== text) parts.push(text);
   }
-  return parts.length > 0 ? parts.join(" <- ") : "unknown error";
+  const summary = parts.join(" <- ");
+  if (summary === "") return "unknown error";
+  return summary.length > MAX_SUMMARY_LENGTH
+    ? `${summary.slice(0, MAX_SUMMARY_LENGTH - 3)}...`
+    : summary;
 }
 
-/** Classify by the first error code found on the cause chain. */
-export function classifyFetchFailure(error: unknown): FetchFailureKind {
-  let current: unknown = error;
-  for (let depth = 0; depth <= MAX_CAUSE_DEPTH; depth++) {
-    const code = stringProp(current, "code");
-    if (code !== undefined) {
-      return FETCH_NOT_SENT_CODES.includes(code) ? "not-sent" : "possibly-sent";
-    }
-    if (!(current instanceof Error) || current.cause === undefined) break;
-    current = current.cause;
+function isConnectPhaseNode(code: string, syscall: unknown): boolean {
+  if (code === "UND_ERR_CONNECT_TIMEOUT") return true;
+  if (["ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH", "ETIMEDOUT"].includes(code)) {
+    return syscall === "connect";
   }
-  return "possibly-sent";
+  if (code === "ENOTFOUND" || code === "EAI_AGAIN") return syscall === "getaddrinfo";
+  return false;
+}
+
+/**
+ * Used only to choose the wording of the error, never to decide on a retry.
+ * "connect-phase" requires positive evidence on every error object in the chain
+ * that carries a code (AggregateError: every member); anything else, including
+ * no code at all, is "unknown-phase".
+ */
+export function classifyFetchFailure(error: unknown): FetchFailureKind {
+  let sawCode = false;
+  for (const node of causeNodes(error, false)) {
+    const code = prop(node, "code");
+    if (code === undefined) continue;
+    if (typeof code !== "string" || !CODE_PATTERN.test(code)) return "unknown-phase";
+    sawCode = true;
+    if (!isConnectPhaseNode(code, prop(node, "syscall"))) return "unknown-phase";
+  }
+  return sawCode ? "connect-phase" : "unknown-phase";
+}
+
+/** True only when repeating the JSON-RPC message cannot change memory. */
+export function isReadOnlyJsonRpcMessage(parsed: unknown): boolean {
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return false;
+  }
+  const rpc = parsed as { method?: unknown; params?: unknown };
+  if (typeof rpc.method !== "string") return false;
+  if (rpc.method !== "tools/call") return true;
+  const name =
+    typeof rpc.params === "object" && rpc.params !== null
+      ? (rpc.params as { name?: unknown }).name
+      : undefined;
+  return typeof name === "string" && BRIDGE_RETRY_SAFE_TOOL_NAMES.includes(name);
 }
 
 /** True only when repeating the request cannot change memory. */
@@ -499,18 +564,12 @@ export function isReadOnlyBridgeRequest(init?: {
   } catch {
     return false;
   }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return false;
-  }
-  const rpc = parsed as { method?: unknown; params?: unknown };
-  if (typeof rpc.method !== "string") return false;
-  if (rpc.method !== "tools/call") return true;
-  const name =
-    typeof rpc.params === "object" && rpc.params !== null
-      ? (rpc.params as { name?: unknown }).name
-      : undefined;
-  return typeof name === "string" && BRIDGE_RETRY_SAFE_TOOL_NAMES.includes(name);
+  return isReadOnlyJsonRpcMessage(parsed);
 }
+
+export const WRITE_OUTCOME_UNKNOWN_GUIDANCE =
+  "the request may or may not have been applied; check the current state " +
+  "(for example with memory_read or memory_history) before repeating it";
 
 export interface BridgeNetworkRetryConfig {
   maxRetries: number;
@@ -542,14 +601,15 @@ export class BridgeNetworkError extends Error {
   }) {
     const attempts = `${opts.attempts} attempt${opts.attempts === 1 ? "" : "s"}`;
     let outcome: string;
-    if (opts.kind === "not-sent") {
-      outcome = `the request did not reach the server (${attempts})`;
-    } else if (opts.readOnly) {
+    if (opts.readOnly) {
       outcome = `the read-only request was not confirmed after ${attempts}; it is safe to repeat`;
-    } else {
+    } else if (opts.kind === "connect-phase") {
       outcome =
-        "the request may or may not have been applied; check the current state " +
-        "(for example with memory_read or memory_history) before repeating it";
+        "the connection could not be established, so the request was most likely not applied; " +
+        "if in doubt, check the current state (for example with memory_read or memory_history) " +
+        "before repeating it";
+    } else {
+      outcome = WRITE_OUTCOME_UNKNOWN_GUIDANCE;
     }
     super(
       `network error (${opts.causeSummary}); ${outcome} [request id ${opts.requestId}]`,
@@ -563,7 +623,11 @@ export class BridgeNetworkError extends Error {
   }
 }
 
-/** Message text for errors reported to the MCP client (keeps the cause visible). */
+/**
+ * Message text for errors reported to the MCP client. Other errors keep their
+ * own message (as SDK and HTTP-status errors always did); a cause is appended
+ * only as the controlled summary, never as free text.
+ */
 export function formatBridgeErrorMessage(error: Error): string {
   if (error instanceof BridgeNetworkError || error.cause === undefined) {
     return error.message;
@@ -586,6 +650,7 @@ export function createFetchWithTimeout(
 
   return async (input, init) => {
     const requestId = uuid();
+    options.onRequestId?.(requestId);
     const headers = new Headers(init?.headers);
     headers.set(BRIDGE_REQUEST_ID_HEADER, requestId);
     const readOnly = isReadOnlyBridgeRequest(init);
@@ -626,7 +691,9 @@ export function createFetchWithTimeout(
           if (controller.signal.aborted) throw err;
           const kind = classifyFetchFailure(err);
           const causeSummary = sanitizeFetchCause(err);
-          const retryable = kind === "not-sent" || readOnly;
+          // Writes are never retried: no network error proves the server did
+          // not apply the request.
+          const retryable = readOnly;
           const baseDelay =
             networkRetry.delaysMs[
               Math.min(networkRetriesUsed, networkRetry.delaysMs.length - 1)
@@ -715,6 +782,8 @@ export interface BridgeConfig {
   stdio: TransportLike;
   log?: (msg: string) => void;
   onExit?: (code: number) => void;
+  /** Id of the most recent forwarded HTTP request (the send queue is sequential). */
+  getLastRequestId?: () => string | undefined;
 }
 
 export function createBridge(config: BridgeConfig) {
@@ -724,6 +793,7 @@ export function createBridge(config: BridgeConfig) {
     log = (msg: string) =>
       process.stderr.write(`[munin-bridge] ${msg}\n`),
     onExit = (code: number) => process.exit(code),
+    getLastRequestId,
   } = config;
 
   let httpClient = createHttpTransport();
@@ -764,6 +834,8 @@ export function createBridge(config: BridgeConfig) {
 
   function wireHttpHandlers(client: TransportLike): void {
     client.onmessage = forwardToStdio;
+    // Asynchronous stream (SSE) errors arrive here without any request context:
+    // they are only logged, with no outcome guidance or request id.
     client.onerror = (err) => log(`Remote: ${err.message}`);
     // Transport-identity-scoped onclose: only cleanup if this is still the active transport.
     // During reconnect, the old transport is replaced — its onclose must NOT trigger cleanup.
@@ -858,6 +930,22 @@ export function createBridge(config: BridgeConfig) {
     }
   }
 
+  /**
+   * Error text for a failed forward. Failures after the wrapper returned (for
+   * example while the response body is read) are not BridgeNetworkErrors, so
+   * add the outcome guidance for writes and the request id here.
+   */
+  function describeSendFailure(error: Error, message: JSONRPCMessage): string {
+    let text = `Bridge error: ${formatBridgeErrorMessage(error)}`;
+    if (error instanceof BridgeNetworkError) return text;
+    if (!isReadOnlyJsonRpcMessage(message)) {
+      text += `; ${WRITE_OUTCOME_UNKNOWN_GUIDANCE}`;
+    }
+    const requestId = getLastRequestId?.();
+    if (requestId) text += ` [request id ${requestId}]`;
+    return text;
+  }
+
   async function processSendQueue(): Promise<void> {
     if (sending) return;
     sending = true;
@@ -909,7 +997,7 @@ export function createBridge(config: BridgeConfig) {
               id: message.id,
               error: {
                 code: -32000,
-                message: `Bridge error: ${formatBridgeErrorMessage(error)}`,
+                message: describeSendFailure(error, message),
               },
             });
           } catch {
@@ -985,7 +1073,13 @@ async function main(): Promise<void> {
   }
   authHeaders["X-Munin-Client-Id"] = resolveBridgeClientId();
 
-  const fetchWithTimeout = createFetchWithTimeout(requestTimeoutMs, { log });
+  let lastRequestId: string | undefined;
+  const fetchWithTimeout = createFetchWithTimeout(requestTimeoutMs, {
+    log,
+    onRequestId: (id) => {
+      lastRequestId = id;
+    },
+  });
 
   const bridge = createBridge({
     stdio: new StdioServerTransport() as TransportLike,
@@ -996,6 +1090,7 @@ async function main(): Promise<void> {
       }) as TransportLike,
     log,
     onExit: (code) => process.exit(code),
+    getLastRequestId: () => lastRequestId,
   });
 
   process.on("SIGINT", () => {

@@ -162,55 +162,82 @@ async function forwardToRemote(message) {
 }
 
 // --- Fetch failure cause reporting (reporting only; mirrors src/bridge.ts) ---
+// Never passes free text from an error through: only a code, an allowlisted
+// syscall and a fixed description. The table and syscall list below must stay
+// identical to FETCH_ERROR_DESCRIPTIONS / FETCH_ERROR_SYSCALLS in src/bridge.ts
+// (tests/bridge.test.ts asserts equality).
 
-function sanitizeReason(text) {
-  const cleaned = String(text)
-    .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "[url]")
-    .replace(/\b(Bearer|Basic)\s+\S+/gi, "$1 [redacted]")
-    .replace(/\b(ENOTFOUND|EAI_AGAIN)\s+\S+/g, "$1 [host]")
-    .replace(/\[?(?:[0-9a-f]{0,4}:){2,}[0-9a-f]{0,4}\]?(?::\d+)?/gi, "[addr]")
-    .replace(/\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b/g, "[addr]")
-    .replace(/(?:^|(?<=\s))(?:[A-Za-z]:)?(?:[\\/][^\s\\/:]+)+/g, "[path]")
-    .replace(/\b(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?\b/gi, "[host]")
-    .replace(/\blocalhost(?::\d+)?\b/gi, "[host]")
-    .replace(/\bport\s+\d+\b/gi, "port [n]")
-    .replace(/:\d{2,5}\b/g, "")
-    .replace(/\b[A-Za-z0-9_-]{32,}\b/g, "[redacted]")
-    .replace(/\s+/g, " ")
-    .trim();
-  return cleaned.length > 120 ? `${cleaned.slice(0, 120)}...` : cleaned;
-}
+// BEGIN FETCH_ERROR_DESCRIPTIONS
+const FETCH_ERROR_DESCRIPTIONS = {
+  ECONNREFUSED: "connection refused",
+  ECONNRESET: "connection reset by peer",
+  EPIPE: "broken pipe",
+  ETIMEDOUT: "connection timed out",
+  EHOSTUNREACH: "host unreachable",
+  ENETUNREACH: "network unreachable",
+  ENOTFOUND: "host name could not be resolved",
+  EAI_AGAIN: "temporary name resolution failure",
+  UND_ERR_SOCKET: "connection closed unexpectedly",
+  UND_ERR_CONNECT_TIMEOUT: "connect timeout",
+  UND_ERR_HEADERS_TIMEOUT: "timed out waiting for response headers",
+  UND_ERR_BODY_TIMEOUT: "timed out waiting for response body",
+  UND_ERR_ABORTED: "request aborted",
+  CERT_HAS_EXPIRED: "TLS certificate problem",
+  DEPTH_ZERO_SELF_SIGNED_CERT: "TLS certificate problem",
+  SELF_SIGNED_CERT_IN_CHAIN: "TLS certificate problem",
+  UNABLE_TO_VERIFY_LEAF_SIGNATURE: "TLS certificate problem",
+  ERR_TLS_CERT_ALTNAME_INVALID: "TLS certificate problem",
+};
+// END FETCH_ERROR_DESCRIPTIONS
+const FETCH_ERROR_SYSCALLS = ["connect", "getaddrinfo", "read", "write"];
 
 function describeFetchError(err) {
+  const prop = (node, key) =>
+    typeof node === "object" && node !== null ? node[key] : undefined;
   const nodes = [];
-  if (err instanceof Error && err.cause !== undefined) {
-    let cur = err.cause;
-    while (cur !== undefined && nodes.length < 5) {
-      nodes.push(cur);
-      cur = cur instanceof Error ? cur.cause : undefined;
+  const visit = (node, depth) => {
+    if (depth > 5 || nodes.length >= 12) return;
+    if (typeof node !== "object" || node === null) return;
+    const members = prop(node, "errors");
+    if (Array.isArray(members) && members.length > 0) {
+      for (const member of members.slice(0, 5)) visit(member, depth + 1);
+    } else {
+      nodes.push(node);
     }
+    visit(prop(node, "cause"), depth + 1);
+  };
+  if (typeof err === "object" && err !== null && prop(err, "cause") !== undefined) {
+    visit(prop(err, "cause"), 1);
   } else {
-    nodes.push(err);
+    visit(err, 0);
   }
   const parts = [];
   for (const node of nodes) {
-    const prop = (k) =>
-      node && typeof node === "object" && typeof node[k] === "string" &&
-      /^[A-Za-z0-9_]{1,64}$/.test(node[k])
-        ? node[k]
-        : undefined;
-    const code = prop("code");
-    const syscall = prop("syscall");
-    let reason = "";
-    if (typeof node === "string") reason = sanitizeReason(node);
-    else if (node && typeof node === "object" && typeof node.message === "string")
-      reason = sanitizeReason(node.message);
-    const head = [code, syscall].filter(Boolean).join(" ");
-    if (reason === code) reason = "";
-    const text = head && reason ? `${head}: ${reason}` : head || reason;
-    if (text) parts.push(text);
+    let text;
+    const code = prop(node, "code");
+    if (typeof code === "string" && /^[A-Za-z0-9_]{1,64}$/.test(code)) {
+      const description = Object.hasOwn(FETCH_ERROR_DESCRIPTIONS, code)
+        ? FETCH_ERROR_DESCRIPTIONS[code]
+        : "unrecognised network error";
+      const syscall = prop(node, "syscall");
+      const shown =
+        typeof syscall === "string" && FETCH_ERROR_SYSCALLS.includes(syscall)
+          ? ` ${syscall}`
+          : "";
+      text = `${code}${shown}: ${description}`;
+    } else {
+      const name = prop(node, "name");
+      const label =
+        typeof name === "string" ? name : prop(prop(node, "constructor"), "name");
+      if (typeof label === "string" && /^[A-Za-z][A-Za-z0-9]{0,40}$/.test(label)) {
+        text = label;
+      }
+    }
+    if (text !== undefined && parts[parts.length - 1] !== text) parts.push(text);
   }
-  return parts.length > 0 ? parts.join(" <- ") : "unknown error";
+  const summary = parts.join(" <- ");
+  if (summary === "") return "unknown error";
+  return summary.length > 300 ? `${summary.slice(0, 297)}...` : summary;
 }
 
 // --- Queue processor ---

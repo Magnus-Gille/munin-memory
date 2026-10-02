@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { StreamableHTTPClientTransport, StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import { readFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
@@ -16,7 +17,9 @@ import {
   BridgeNetworkError,
   BRIDGE_RETRY_SAFE_TOOL_NAMES,
   BRIDGE_NEVER_RETRY_TOOL_NAMES,
-  FETCH_NOT_SENT_CODES,
+  FETCH_ERROR_DESCRIPTIONS,
+  FETCH_ERROR_SYSCALLS,
+  formatBridgeErrorMessage,
   classifyFetchFailure,
   isReadOnlyBridgeRequest,
   sanitizeFetchCause,
@@ -2067,80 +2070,259 @@ function toolCallBody(name: string): string {
   return rpcBody("tools/call", { name, arguments: {} });
 }
 
+function chainError(...nodes: Array<Record<string, unknown>>): TypeError {
+  // Build a cause chain from outermost to innermost node.
+  let cause: unknown;
+  for (const props of [...nodes].reverse()) {
+    cause = Object.assign(new Error("free text that must never be reported", { cause }), props);
+  }
+  return new TypeError("fetch failed", { cause });
+}
+
 describe("sanitizeFetchCause", () => {
-  it("keeps code and syscall but removes address and port", () => {
-    const text = sanitizeFetchCause(
-      fetchError("ECONNREFUSED", "connect ECONNREFUSED 127.0.0.1:3030", "connect"),
+  it("reports code, allowlisted syscall and a fixed description only", () => {
+    expect(
+      sanitizeFetchCause(
+        fetchError("ECONNREFUSED", "connect ECONNREFUSED 127.0.0.1:3030", "connect"),
+      ),
+    ).toBe("ECONNREFUSED connect: connection refused");
+    expect(sanitizeFetchCause(fetchError("ECONNRESET", "read ECONNRESET", "read"))).toBe(
+      "ECONNRESET read: connection reset by peer",
     );
-    expect(text).toContain("ECONNREFUSED");
-    expect(text).toContain("connect");
-    expect(text).not.toContain("127.0.0.1");
-    expect(text).not.toContain("3030");
   });
 
-  it("removes IPv6 addresses, host names, URLs and file paths", () => {
+  it("describes every table code with its fixed text", () => {
+    for (const [code, description] of Object.entries(FETCH_ERROR_DESCRIPTIONS)) {
+      expect(sanitizeFetchCause(fetchError(code, "ignored"))).toBe(`${code}: ${description}`);
+    }
+    for (const code of [
+      "ECONNREFUSED", "ECONNRESET", "EPIPE", "ETIMEDOUT", "EHOSTUNREACH", "ENETUNREACH",
+      "ENOTFOUND", "EAI_AGAIN", "UND_ERR_SOCKET", "UND_ERR_CONNECT_TIMEOUT",
+      "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT", "UND_ERR_ABORTED",
+      "CERT_HAS_EXPIRED", "DEPTH_ZERO_SELF_SIGNED_CERT", "SELF_SIGNED_CERT_IN_CHAIN",
+      "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "ERR_TLS_CERT_ALTNAME_INVALID",
+    ]) {
+      expect(FETCH_ERROR_DESCRIPTIONS).toHaveProperty(code);
+    }
+    expect(FETCH_ERROR_DESCRIPTIONS.CERT_HAS_EXPIRED).toBe("TLS certificate problem");
+  });
+
+  it("does not leak host names from TLS errors", () => {
     const text = sanitizeFetchCause(
       fetchError(
-        "ENOTFOUND",
-        "getaddrinfo ENOTFOUND munin.example.com at https://munin.example.com/mcp?x=1 via [::1]:3030 reading /Users/me/.creds/token.json",
+        "ERR_TLS_CERT_ALTNAME_INVALID",
+        "Host: munin is not in the cert's altnames: DNS:other",
       ),
     );
-    for (const leaked of ["munin.example.com", "https://", "::1", "3030", "/Users", "token.json"]) {
+    expect(text).toBe("ERR_TLS_CERT_ALTNAME_INVALID: TLS certificate problem");
+    expect(text).not.toContain("munin");
+    expect(text).not.toContain("other");
+  });
+
+  it("does not leak quoted paths and drops non-allowlisted syscalls", () => {
+    const text = sanitizeFetchCause(
+      fetchError("ENOENT", "ENOENT: no such file or directory, open '/private/customer/data'", "open"),
+    );
+    expect(text).toBe("ENOENT: unrecognised network error");
+    for (const leaked of ["private", "customer", "data", "open"]) {
       expect(text).not.toContain(leaked);
     }
-    expect(text).toContain("ENOTFOUND");
   });
 
-  it("removes bearer tokens and long opaque strings", () => {
-    const text = sanitizeFetchCause(
-      fetchError("EPROTO", `bad Bearer abc123secret and ${"x".repeat(40)}`),
+  it("does not leak URLs, addresses or tokens from free text", () => {
+    const hostile =
+      "GET https://munin.example.com/mcp?token=s3cr3t via 10.1.2.3:3030 and [2001:db8::1]:443 with Bearer abc123secret";
+    for (const code of [undefined, "ESOMETHING"]) {
+      const text = sanitizeFetchCause(fetchError(code, hostile));
+      for (const leaked of [
+        "munin", "example", "https", "s3cr3t", "10.1.2.3", "3030", "2001", "db8", "443",
+        "Bearer", "abc123secret",
+      ]) {
+        expect(text).not.toContain(leaked);
+      }
+    }
+  });
+
+  it("shows an unknown code alone with a generic description", () => {
+    expect(sanitizeFetchCause(fetchError("ESOMETHINGELSE", "x"))).toBe(
+      "ESOMETHINGELSE: unrecognised network error",
     );
-    expect(text).not.toContain("abc123secret");
-    expect(text).not.toContain("xxxxxxxxxxxxxxxx");
   });
 
-  it("walks nested causes", () => {
-    const inner = Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET" });
-    const middle = new Error("socket error", { cause: inner });
-    const outer = new TypeError("fetch failed", { cause: middle });
-    const text = sanitizeFetchCause(outer);
-    expect(text).toContain("socket error");
-    expect(text).toContain("UND_ERR_SOCKET: other side closed");
+  it("falls back to the constructor name when there is no code", () => {
+    expect(sanitizeFetchCause(fetchError(undefined, "x"))).toBe("Error");
+    expect(sanitizeFetchCause(new TypeError("fetch failed"))).toBe("TypeError");
+    expect(
+      sanitizeFetchCause(chainError({ name: "bad name with spaces and 10.0.0.1" })),
+    ).toBe("unknown error");
   });
 
-  it("handles non-Error causes", () => {
+  it("ignores a code that is not a plain identifier", () => {
+    expect(
+      sanitizeFetchCause(chainError({ code: "ECONN REFUSED 10.0.0.1", name: "Nope!" })),
+    ).toBe("unknown error");
+  });
+
+  it("contributes nothing for non-object causes", () => {
     expect(sanitizeFetchCause(new TypeError("fetch failed", { cause: "boom at 10.0.0.1:80" }))).toBe(
-      "boom at [addr]",
+      "unknown error",
     );
     expect(sanitizeFetchCause(new TypeError("fetch failed", { cause: 42 }))).toBe("unknown error");
   });
 
-  it("falls back to the error itself when there is no cause", () => {
-    expect(sanitizeFetchCause(new TypeError("fetch failed"))).toBe("fetch failed");
+  it("walks nested causes and collapses adjacent duplicates", () => {
+    const text = sanitizeFetchCause(
+      chainError(
+        { name: "Error" },
+        { code: "UND_ERR_SOCKET" },
+        { code: "ECONNRESET", syscall: "read" },
+        { code: "ECONNRESET", syscall: "read" },
+      ),
+    );
+    expect(text).toBe(
+      "Error <- UND_ERR_SOCKET: connection closed unexpectedly <- ECONNRESET read: connection reset by peer",
+    );
+  });
+
+  it("reports the members of an AggregateError", () => {
+    const aggregate = Object.assign(
+      new AggregateError([
+        Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:1"), { code: "ECONNREFUSED", syscall: "connect" }),
+        Object.assign(new Error("connect ECONNREFUSED ::1:1"), { code: "EHOSTUNREACH", syscall: "connect" }),
+      ]),
+      { code: "ECONNREFUSED" },
+    );
+    const text = sanitizeFetchCause(new TypeError("fetch failed", { cause: aggregate }));
+    expect(text).toBe(
+      "ECONNREFUSED connect: connection refused <- EHOSTUNREACH connect: host unreachable",
+    );
+  });
+
+  it("is bounded and fast for hostile input", () => {
+    const huge = "A".repeat(100_000);
+    const members = Array.from({ length: 1000 }, () =>
+      Object.assign(new Error(huge), { code: "ECONNREFUSED", syscall: "connect" }),
+    );
+    let deep: unknown;
+    for (let i = 0; i < 1000; i++) deep = Object.assign(new Error(huge, { cause: deep }), { code: "EPIPE" });
+    const started = Date.now();
+    const a = sanitizeFetchCause(new TypeError(huge, { cause: new AggregateError(members, huge) }));
+    const b = sanitizeFetchCause(new TypeError(huge, { cause: deep }));
+    const c = sanitizeFetchCause(fetchError(undefined, huge));
+    expect(Date.now() - started).toBeLessThan(500);
+    for (const text of [a, b, c]) {
+      expect(text.length).toBeLessThanOrEqual(300);
+      expect(text).not.toContain("AAAA");
+    }
+  });
+});
+
+describe("formatBridgeErrorMessage", () => {
+  it("returns a BridgeNetworkError message unchanged", () => {
+    const error = new BridgeNetworkError({
+      kind: "unknown-phase",
+      readOnly: false,
+      requestId: "rid",
+      attempts: 1,
+      causeSummary: "EPIPE write: broken pipe",
+    });
+    expect(formatBridgeErrorMessage(error)).toBe(error.message);
+  });
+
+  it("keeps error.message for other errors and appends only the controlled cause summary", () => {
+    const error = new Error("Streamable HTTP error", {
+      cause: Object.assign(new Error("Host: munin is not in the cert's altnames: DNS:other"), {
+        code: "ERR_TLS_CERT_ALTNAME_INVALID",
+      }),
+    });
+    const text = formatBridgeErrorMessage(error);
+    expect(text).toBe(
+      "Streamable HTTP error (ERR_TLS_CERT_ALTNAME_INVALID: TLS certificate problem)",
+    );
+    expect(formatBridgeErrorMessage(new Error("plain"))).toBe("plain");
   });
 });
 
 describe("classifyFetchFailure", () => {
-  it.each(FETCH_NOT_SENT_CODES.map((c) => [c]))("%s is not-sent", (code) => {
-    expect(classifyFetchFailure(fetchError(code, "x"))).toBe("not-sent");
+  it.each([
+    ["UND_ERR_CONNECT_TIMEOUT", undefined],
+    ["UND_ERR_CONNECT_TIMEOUT", "connect"],
+    ["ECONNREFUSED", "connect"],
+    ["EHOSTUNREACH", "connect"],
+    ["ENETUNREACH", "connect"],
+    ["ETIMEDOUT", "connect"],
+    ["ENOTFOUND", "getaddrinfo"],
+    ["EAI_AGAIN", "getaddrinfo"],
+  ])("%s with syscall %s is connect-phase", (code, syscall) => {
+    expect(classifyFetchFailure(fetchError(code, "x", syscall))).toBe("connect-phase");
   });
 
   it.each([
-    ["UND_ERR_SOCKET"],
-    ["ECONNRESET"],
-    ["EPIPE"],
-    ["UND_ERR_BODY_TIMEOUT"],
-    ["UND_ERR_HEADERS_TIMEOUT"],
-    ["ESOMETHINGELSE"],
-  ])("%s is possibly-sent", (code) => {
-    expect(classifyFetchFailure(fetchError(code, "x"))).toBe("possibly-sent");
+    ["ECONNREFUSED", undefined],
+    ["ECONNREFUSED", "read"],
+    ["EHOSTUNREACH", "read"],
+    ["ENETUNREACH", "write"],
+    ["ETIMEDOUT", "read"],
+    ["ENOTFOUND", "connect"],
+    ["EAI_AGAIN", undefined],
+    ["UND_ERR_SOCKET", undefined],
+    ["UND_ERR_SOCKET", "connect"],
+    ["ECONNRESET", "read"],
+    ["EPIPE", "write"],
+    ["UND_ERR_BODY_TIMEOUT", undefined],
+    ["UND_ERR_HEADERS_TIMEOUT", undefined],
+    ["ESOMETHINGELSE", "connect"],
+  ])("%s with syscall %s is unknown-phase", (code, syscall) => {
+    expect(classifyFetchFailure(fetchError(code, "x", syscall))).toBe("unknown-phase");
   });
 
-  it("treats a missing cause or code as possibly-sent", () => {
-    expect(classifyFetchFailure(new TypeError("fetch failed"))).toBe("possibly-sent");
-    expect(classifyFetchFailure(fetchError(undefined, "x"))).toBe("possibly-sent");
+  it("is unknown-phase when no node carries a code", () => {
+    expect(classifyFetchFailure(new TypeError("fetch failed"))).toBe("unknown-phase");
+    expect(classifyFetchFailure(fetchError(undefined, "x"))).toBe("unknown-phase");
+    expect(classifyFetchFailure(new TypeError("fetch failed", { cause: "ECONNREFUSED" }))).toBe(
+      "unknown-phase",
+    );
+  });
+
+  it("requires every coded node in the chain to be connect-phase", () => {
+    expect(
+      classifyFetchFailure(
+        chainError({ code: "ECONNREFUSED", syscall: "connect" }, { code: "ECONNRESET", syscall: "read" }),
+      ),
+    ).toBe("unknown-phase");
+    expect(
+      classifyFetchFailure(
+        chainError({ code: "ECONNREFUSED", syscall: "connect" }, { code: "ETIMEDOUT", syscall: "connect" }),
+      ),
+    ).toBe("connect-phase");
+    // An invalid (hostile) code is not positive evidence.
+    expect(classifyFetchFailure(chainError({ code: "ECONNREFUSED connect", syscall: "connect" }))).toBe(
+      "unknown-phase",
+    );
+  });
+
+  it("judges an AggregateError by its members", () => {
+    const connect = (code: string) =>
+      Object.assign(new Error("x"), { code, syscall: "connect" });
+    const allConnect = new AggregateError([connect("ECONNREFUSED"), connect("ETIMEDOUT")]);
+    expect(classifyFetchFailure(new TypeError("fetch failed", { cause: allConnect }))).toBe(
+      "connect-phase",
+    );
+    // Node puts a code without a syscall on the aggregate itself; that is not evidence against.
+    Object.assign(allConnect, { code: "ECONNREFUSED" });
+    expect(classifyFetchFailure(new TypeError("fetch failed", { cause: allConnect }))).toBe(
+      "connect-phase",
+    );
+    const mixed = new AggregateError([
+      connect("ECONNREFUSED"),
+      Object.assign(new Error("x"), { code: "ECONNRESET", syscall: "read" }),
+    ]);
+    expect(classifyFetchFailure(new TypeError("fetch failed", { cause: mixed }))).toBe(
+      "unknown-phase",
+    );
   });
 });
+
 
 describe("isReadOnlyBridgeRequest", () => {
   it("treats GET and DELETE without a body as read-only", () => {
@@ -2207,12 +2389,12 @@ describe("createFetchWithTimeout network retry", () => {
     });
   }
 
-  it("retries a not-sent failure for a write with the same body and request id", async () => {
+  it("retries a connect failure for a read-only request with the same body and request id", async () => {
     const fetchFn = vi
       .fn()
       .mockRejectedValueOnce(fetchError("ECONNREFUSED", "connect ECONNREFUSED 127.0.0.1:3030", "connect"))
       .mockResolvedValueOnce(okResponse());
-    const body = toolCallBody("memory_log");
+    const body = toolCallBody("memory_query");
     const result = await make(fetchFn)("https://example.com/mcp", {
       method: "POST",
       body,
@@ -2233,6 +2415,44 @@ describe("createFetchWithTimeout network retry", () => {
     expect(logs.join("\n")).not.toContain("example.com");
   });
 
+  it.each([
+    ["memory_log"],
+    ["memory_write"],
+    ["memory_update_status"],
+  ])("never retries %s after a connect-phase failure", async (name) => {
+    const fetchFn = vi
+      .fn()
+      .mockRejectedValue(fetchError("ECONNREFUSED", "connect ECONNREFUSED 127.0.0.1:3030", "connect"));
+    const err = await make(fetchFn)("https://example.com/mcp", {
+      method: "POST",
+      body: toolCallBody(name),
+    }).catch((e: Error) => e);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+    expect(err).toBeInstanceOf(BridgeNetworkError);
+    expect((err as BridgeNetworkError).kind).toBe("connect-phase");
+    expect((err as Error).message).toBe(
+      "network error (ECONNREFUSED connect: connection refused); the connection could not be established, " +
+        "so the request was most likely not applied; if in doubt, check the current state " +
+        "(for example with memory_read or memory_history) before repeating it [request id req-id-1234]",
+    );
+  });
+
+  it("never retries a write after EHOSTUNREACH on an established socket and says the outcome is unknown", async () => {
+    const fetchFn = vi.fn().mockRejectedValue(fetchError("EHOSTUNREACH", "read EHOSTUNREACH", "read"));
+    const err = await make(fetchFn)("https://example.com/mcp", {
+      method: "POST",
+      body: toolCallBody("memory_log"),
+    }).catch((e: Error) => e);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+    expect((err as BridgeNetworkError).kind).toBe("unknown-phase");
+    expect((err as Error).message).toBe(
+      "network error (EHOSTUNREACH read: host unreachable); the request may or may not have been applied; " +
+        "check the current state (for example with memory_read or memory_history) before repeating it [request id req-id-1234]",
+    );
+  });
+
   it("uses 150ms then 500ms backoff plus jitter", async () => {
     const fetchFn = vi.fn().mockRejectedValue(fetchError("ECONNREFUSED", "x"));
     await expect(
@@ -2242,21 +2462,21 @@ describe("createFetchWithTimeout network retry", () => {
     expect(fetchFn).toHaveBeenCalledTimes(3);
   });
 
-  it("reports did-not-reach-server when not-sent retries are exhausted", async () => {
+  it("retries a connect failure for a read tool and reports exhaustion as safe to repeat", async () => {
     const fetchFn = vi.fn().mockRejectedValue(fetchError("ECONNREFUSED", "connect ECONNREFUSED 127.0.0.1:3030", "connect"));
     const err = await make(fetchFn)("https://example.com/mcp", {
       method: "POST",
-      body: toolCallBody("memory_write"),
+      body: toolCallBody("memory_query"),
     }).catch((e: Error) => e);
     expect(err).toBeInstanceOf(BridgeNetworkError);
     expect((err as Error).message).toBe(
-      "network error (ECONNREFUSED connect: connect ECONNREFUSED [addr]); the request did not reach the server (3 attempts) [request id req-id-1234]",
+      "network error (ECONNREFUSED connect: connection refused); the read-only request was not confirmed after 3 attempts; it is safe to repeat [request id req-id-1234]",
     );
     expect(fetchFn).toHaveBeenCalledTimes(3);
   });
 
   it.each([["tools/list"], ["initialize"], ["ping"]])(
-    "retries a possibly-sent failure for %s",
+    "retries an unknown-phase failure for %s",
     async (method) => {
       const fetchFn = vi
         .fn()
@@ -2268,7 +2488,7 @@ describe("createFetchWithTimeout network retry", () => {
     },
   );
 
-  it("retries a possibly-sent failure for an allowlisted read tool", async () => {
+  it("retries an unknown-phase failure for an allowlisted read tool", async () => {
     const fetchFn = vi
       .fn()
       .mockRejectedValueOnce(fetchError("ECONNRESET", "read ECONNRESET", "read"))
@@ -2277,7 +2497,7 @@ describe("createFetchWithTimeout network retry", () => {
     expect(fetchFn).toHaveBeenCalledTimes(2);
   });
 
-  it("retries a possibly-sent failure for a GET", async () => {
+  it("retries an unknown-phase failure for a GET", async () => {
     const fetchFn = vi
       .fn()
       .mockRejectedValueOnce(fetchError("UND_ERR_SOCKET", "other side closed"))
@@ -2286,14 +2506,14 @@ describe("createFetchWithTimeout network retry", () => {
     expect(fetchFn).toHaveBeenCalledTimes(2);
   });
 
-  it("gives the read-only message when a possibly-sent read exhausts retries", async () => {
+  it("gives the read-only message when an unknown-phase read exhausts retries", async () => {
     const fetchFn = vi.fn().mockRejectedValue(fetchError("UND_ERR_SOCKET", "other side closed"));
     const err = await make(fetchFn)("https://example.com/mcp", {
       method: "POST",
       body: toolCallBody("memory_read"),
     }).catch((e: Error) => e);
     expect((err as Error).message).toBe(
-      "network error (UND_ERR_SOCKET: other side closed); the read-only request was not confirmed after 3 attempts; it is safe to repeat [request id req-id-1234]",
+      "network error (UND_ERR_SOCKET: connection closed unexpectedly); the read-only request was not confirmed after 3 attempts; it is safe to repeat [request id req-id-1234]",
     );
     expect(fetchFn).toHaveBeenCalledTimes(3);
     expect(logs.at(-1)).toContain("Request failed");
@@ -2305,7 +2525,7 @@ describe("createFetchWithTimeout network retry", () => {
     ["an unknown tool", toolCallBody("memory_something_new")],
     ["a batch", `[${rpcBody("ping")}]`],
     ["an unparseable body", "{nope"],
-  ])("does not retry a possibly-sent failure for %s", async (_label, body) => {
+  ])("does not retry an unknown-phase failure for %s", async (_label, body) => {
     const fetchFn = vi.fn().mockRejectedValue(fetchError("UND_ERR_SOCKET", "other side closed"));
     const err = await make(fetchFn)("https://example.com/mcp", { method: "POST", body }).catch(
       (e: Error) => e,
@@ -2314,7 +2534,7 @@ describe("createFetchWithTimeout network retry", () => {
     expect(sleep).not.toHaveBeenCalled();
     expect(err).toBeInstanceOf(BridgeNetworkError);
     expect((err as Error).message).toBe(
-      "network error (UND_ERR_SOCKET: other side closed); the request may or may not have been applied; check the current state (for example with memory_read or memory_history) before repeating it [request id req-id-1234]",
+      "network error (UND_ERR_SOCKET: connection closed unexpectedly); the request may or may not have been applied; check the current state (for example with memory_read or memory_history) before repeating it [request id req-id-1234]",
     );
   });
 
@@ -2415,5 +2635,144 @@ describe("createFetchWithTimeout network retry", () => {
     expect(message).toMatch(/^Bridge error: /);
     expect(message).toContain("ECONNRESET");
     expect(message).not.toContain("10.1.2.3");
+  });
+});
+
+describe("failures while the response is read", () => {
+  const GUIDANCE =
+    "the request may or may not have been applied; check the current state " +
+    "(for example with memory_read or memory_history) before repeating it";
+
+  async function forward(toolName: string, makeResponse: () => Response) {
+    const fetchFn = vi.fn(async () => makeResponse());
+    let lastRequestId: string | undefined;
+    const wrapped = createFetchWithTimeout(5000, {
+      fetchFn: fetchFn as unknown as typeof fetch,
+      sleep: async () => {},
+      random: () => 0,
+      uuid: () => "req-id-body",
+      onRequestId: (id) => {
+        lastRequestId = id;
+      },
+    });
+    const http = new StreamableHTTPClientTransport(new URL("https://example.com/mcp"), {
+      fetch: wrapped,
+    });
+    const sent: JSONRPCMessage[] = [];
+    const stdio = createMockTransport({
+      send: vi.fn(async (m: JSONRPCMessage) => {
+        sent.push(m);
+      }),
+    });
+    createBridge({
+      stdio,
+      createHttpTransport: () => http as unknown as TransportLike,
+      log: () => {},
+      onExit: () => {},
+      getLastRequestId: () => lastRequestId,
+    });
+    stdio.onmessage!({
+      jsonrpc: "2.0",
+      id: 11,
+      method: "tools/call",
+      params: { name: toolName, arguments: {} },
+    });
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    return {
+      fetchFn,
+      message: (sent[0] as { error: { message: string } }).error.message,
+    };
+  }
+
+  const brokenJsonResponse = () =>
+    new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.error(new TypeError("terminated"));
+        },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+
+  it("adds the unknown-outcome guidance and request id for a write, sent exactly once", async () => {
+    const { fetchFn, message } = await forward("memory_log", brokenJsonResponse);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(message).toBe(`Bridge error: terminated; ${GUIDANCE} [request id req-id-body]`);
+  });
+
+  it("does not add the write guidance for a read-only call but keeps the request id", async () => {
+    const { fetchFn, message } = await forward("memory_query", brokenJsonResponse);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(message).toBe("Bridge error: terminated [request id req-id-body]");
+    expect(message).not.toContain("may or may not");
+  });
+
+  it("applies the guidance to HTTP status errors on writes", async () => {
+    const { message } = await forward(
+      "memory_write",
+      () => new Response("boom", { status: 500 }),
+    );
+    expect(message).toContain("Bridge error: ");
+    expect(message).toContain(GUIDANCE);
+    expect(message).toContain("[request id req-id-body]");
+  });
+
+  it("does not duplicate the guidance or request id for a BridgeNetworkError", async () => {
+    const http = createMockTransport({
+      send: vi.fn().mockRejectedValue(
+        new BridgeNetworkError({
+          kind: "unknown-phase",
+          readOnly: false,
+          requestId: "rid-1",
+          attempts: 1,
+          causeSummary: "EPIPE write: broken pipe",
+        }),
+      ),
+    });
+    const sent: JSONRPCMessage[] = [];
+    const stdio = createMockTransport({
+      send: vi.fn(async (m: JSONRPCMessage) => {
+        sent.push(m);
+      }),
+    });
+    createBridge({
+      stdio,
+      createHttpTransport: () => http,
+      log: () => {},
+      onExit: () => {},
+      getLastRequestId: () => "rid-1",
+    });
+    stdio.onmessage!({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "memory_log" } });
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    const message = (sent[0] as { error: { message: string } }).error.message;
+    expect(message.split("may or may not")).toHaveLength(2);
+    expect(message.split("request id")).toHaveLength(2);
+  });
+});
+
+describe("stdio-bridge.mjs cause description table", () => {
+  it("is identical to the TypeScript table", () => {
+    const text = readFileSync(
+      path.join(import.meta.dirname, "..", "scripts", "stdio-bridge.mjs"),
+      "utf8",
+    );
+    const match = text.match(
+      /\/\/ BEGIN FETCH_ERROR_DESCRIPTIONS[^\n]*\n[^{]*(\{[\s\S]*?\n\});?\n\/\/ END FETCH_ERROR_DESCRIPTIONS/,
+    );
+    expect(match).not.toBeNull();
+    const mjsTable = new Function(`return ${match![1]}`)() as Record<string, string>;
+    expect(mjsTable).toEqual({ ...FETCH_ERROR_DESCRIPTIONS });
+  });
+
+  it("uses the same syscall allowlist", () => {
+    const text = readFileSync(
+      path.join(import.meta.dirname, "..", "scripts", "stdio-bridge.mjs"),
+      "utf8",
+    );
+    const match = text.match(/FETCH_ERROR_SYSCALLS = \[([^\]]*)\]/);
+    expect(match).not.toBeNull();
+    expect(match![1]!.split(",").map((x) => x.trim().replace(/"/g, ""))).toEqual([
+      ...FETCH_ERROR_SYSCALLS,
+    ]);
   });
 });

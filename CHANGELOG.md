@@ -268,20 +268,24 @@ changelog is the canonical record of what moved.
   cannot alone identify a step, and different non-empty reference sets never
   pair. A genuinely removed step still resolves.
 
-- **Bridge reports the real cause of network failures and retries only when safe (#321).**
+- **Bridge reports the real cause of network failures and retries only read-only requests (#321).**
   When a forwarded request fails with a thrown network error the bridge error now
-  names the sanitised cause (error code, syscall and a short reason; addresses,
-  host names, URLs, ports, header values and paths are removed) instead of only
-  "fetch failed". Failures where the connection was never established are retried
-  up to twice for any request. Failures on an established connection are retried
-  only for read-only requests (non-`tools/call` messages and an allowlist of read
-  tools); writes, unknown tools, batches and unparseable bodies are never retried
-  and the error states that the request may or may not have been applied. The
-  bridge's own timeout is never retried. Each forwarded request carries a random
-  `X-Munin-Request-Id` header, reused across retries and shown in bridge errors and
-  stderr; the server logs it as `requestId` in the request log line only when it
-  matches `[A-Za-z0-9_-]{8,64}`, and does not use it for anything else.
-  `scripts/stdio-bridge.mjs` gains the cause reporting only.
+  names the cause as an error code, an allowlisted syscall and a fixed description
+  from a constant table instead of only "fetch failed"; no text from the underlying
+  error is included, so host names, addresses, URLs, ports, header values and paths
+  cannot leak. Only read-only requests (non-`tools/call` messages and an allowlist
+  of read tools) are retried, up to twice; writes, unknown tools, batches and
+  unparseable bodies are never retried automatically, for any failure. A failed
+  write says what is known: most likely not applied when every error in the chain
+  proves a connect-phase failure, otherwise that it may or may not have been
+  applied; in both cases check the current state before repeating it. A write that
+  fails after the response started (body read error, HTTP error) gets the same
+  guidance and the request id. The bridge's own timeout is never retried. Each
+  forwarded request carries a random `X-Munin-Request-Id` header, reused across
+  retries and shown in bridge errors and stderr; the server logs it as `requestId`
+  in the request log line only when it matches `[A-Za-z0-9_-]{8,64}`, and does not
+  use it for anything else. `scripts/stdio-bridge.mjs` gains the cause reporting
+  only (identical table, tested).
 
 ## [0.6.1] — 2026-07-25
 
