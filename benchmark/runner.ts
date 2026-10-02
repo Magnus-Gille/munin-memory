@@ -18,11 +18,13 @@ import {
   queryEntriesSemanticScored,
   getCompletedTaskNamespaces,
   setVecLoaded,
+  MAX_QUERY_SNAPSHOT_MATCHES,
 } from "../src/db.js";
-import { generateEmbedding, embeddingToBuffer, initEmbeddings, getActiveEmbeddingModel } from "../src/embeddings.js";
+import { generateEmbedding, embeddingToBuffer, initEmbeddings, getActiveEmbeddingModel, getSemanticMaxDistance } from "../src/embeddings.js";
 import {
   buildRelaxedLexicalQuery,
-  QUERY_RERANK_OVERFETCH_MULTIPLIER,
+  QUERY_RERANK_WINDOW,
+  isSuppressedByDefaultQueryRules,
   DEFAULT_SEARCH_RECENCY_WEIGHT,
   shouldApplyDefaultQuerySuppression,
   getTrackedStatusAssessments,
@@ -30,6 +32,8 @@ import {
   injectAttentionQueryEntries,
   rerankQueryResults,
 } from "../src/internal/reranker.js";
+import { withQueryProbeLimit } from "../src/internal/query-probe.js";
+import { fuseHybridResults } from "../src/internal/hybrid-fusion.js";
 import type { Entry, QueryParams } from "../src/types.js";
 import {
   scoreQuery,
@@ -302,11 +306,12 @@ export interface RunBenchmarkOptions {
    * - `"raw"` — calls `src/db.ts` query functions directly with
    *   `limit=10`. Faster, no rerank, no injectors. Useful for isolating
    *   retrieval-recall changes from ranker behavior.
-   * - `"production_ranker"` — over-fetches by `QUERY_RERANK_OVERFETCH_MULTIPLIER`
-   *   and runs results through the same canonical/attention injectors +
+   * - `"production_ranker"` — probes and caps each source at 500 candidates,
+   *   excludes expired state, applies the configured semantic cutoff and
+   *   runs the first 50 results through the same canonical/attention injectors +
    *   `rerankQueryResults` + completed-task filter that `memory_query`
    *   uses in production, then slices to the requested limit. End-to-end
-   *   parity with what production users see.
+   *   parity with default owner-visible queries.
    */
   runnerMode?: RunnerMode;
   /**
@@ -402,9 +407,8 @@ function scoreByNamespace(
  *
  * `limit` controls the per-source fetch size:
  * - raw mode: pass the user-facing limit (typically 10)
- * - production_ranker: pass `requestedLimit * QUERY_RERANK_OVERFETCH_MULTIPLIER`
- *   (clamped to 50 by `queryEntriesLexicalScored` internally) so the
- *   reranker has room to reorder.
+ * - production_ranker: the limit is replaced with the production 501-row
+ *   probe, then each leg and the fused result are capped at 500 candidates.
  */
 export async function executeQuery(
   db: Database.Database,
@@ -414,9 +418,18 @@ export async function executeQuery(
   queryEmbeddingProvider?: (queryText: string) => Float32Array | null,
   scopeNamespace?: string,
   queryEmbeddingModel?: string,
+  runnerMode: RunnerMode = "raw",
 ): Promise<{ entries: Entry[]; relaxed: boolean; effectiveMode: SearchMode }> {
+  const production = runnerMode === "production_ranker";
+  const fetchLimit = production ? MAX_QUERY_SNAPSHOT_MATCHES + 1 : limit;
+  const includeExpired = !production;
+  const retrievalOptions = <T extends object>(options: T): T =>
+    production ? withQueryProbeLimit(options) : options;
+  const capCandidates = <T>(rows: T[]): T[] =>
+    production ? rows.slice(0, MAX_QUERY_SNAPSHOT_MATCHES) : rows;
+  const lexical = () => runLexical(db, query, fetchLimit, scopeNamespace, production);
   if (mode === "lexical") {
-    return runLexical(db, query, limit, scopeNamespace);
+    return lexical();
   }
 
   // Derive the effective query embedding model for the mixed-space guard:
@@ -442,24 +455,27 @@ export async function executeQuery(
     const emb = await embedQuery();
     if (!emb) {
       // Mirror memory_query's per-query semantic→lexical degradation
-      // (src/tools.ts:5828-5831): when embedding generation fails, fall
+      // (including the relaxed lexical fallback): when embedding generation fails, fall
       // back to lexical with the same strict-then-relaxed sequence so
       // the report's actual_mode and the result IDs both stay parity
       // with production. Previous behavior (return empty) was a silent
       // divergence — M3 from the PR 2b internal review.
-      const fallback = await runLexical(db, query, limit, scopeNamespace);
+      const fallback = lexical();
       return { ...fallback, effectiveMode: "lexical" };
     }
     const buf = embeddingToBuffer(emb);
-    const results = queryEntriesSemanticScored(db, {
+    const results = queryEntriesSemanticScored(db, retrievalOptions({
       queryEmbedding: buf,
       queryEmbeddingModel: effectiveQueryEmbeddingModel,
       namespace: scopeNamespace,
-      limit,
-      includeExpired: true,
-      ...(scopeNamespace ? { exactNamespaceScan: true } : {}),
-    });
-    return { entries: results.map((r) => r.entry), relaxed: false, effectiveMode: "semantic" };
+      limit: fetchLimit,
+      includeExpired,
+      maxDistance: production ? getSemanticMaxDistance() : undefined,
+      // Raw evaluation keeps its namespace-local exact KNN path. Production
+      // mode must use the same scoped KNN implementation as memory_query.
+      ...(!production && scopeNamespace ? { exactNamespaceScan: true } : {}),
+    }));
+    return { entries: capCandidates(results).map((r) => r.entry), relaxed: false, effectiveMode: "semantic" };
   }
 
   // hybrid
@@ -468,11 +484,36 @@ export async function executeQuery(
     // memory_query degrades hybrid→lexical on embedding failure (strict
     // first, then relaxed). Mirror it. Previously we ran strict-only
     // without the relaxed fallback, which is a subtle parity gap.
-    const fallback = await runLexical(db, query, limit, scopeNamespace);
+    const fallback = lexical();
     return { ...fallback, effectiveMode: "lexical" };
   }
   const buf = embeddingToBuffer(emb);
   const relaxedQuery = buildRelaxedLexicalQuery(query);
+  if (production) {
+    // Cap each leg before RRF, as memory_query does. The 501st row is only
+    // a truncation sentinel and must not contribute to fusion or reranking.
+    let lexicalResults = queryEntriesLexicalScored(db, retrievalOptions({
+      query, limit: fetchLimit, includeExpired, namespace: scopeNamespace,
+    }));
+    let relaxed = false;
+    if (lexicalResults.length === 0 && relaxedQuery) {
+      lexicalResults = queryEntriesLexicalScored(db, retrievalOptions({
+        query: relaxedQuery, limit: fetchLimit, includeExpired,
+        rawFts5: true, namespace: scopeNamespace,
+      }));
+      relaxed = lexicalResults.length > 0;
+    }
+    const semanticResults = queryEntriesSemanticScored(db, retrievalOptions({
+      queryEmbedding: buf,
+      queryEmbeddingModel: effectiveQueryEmbeddingModel,
+      limit: fetchLimit,
+      includeExpired,
+      namespace: scopeNamespace,
+      maxDistance: getSemanticMaxDistance(),
+    }));
+    const fused = fuseHybridResults(capCandidates(lexicalResults), capCandidates(semanticResults));
+    return { entries: capCandidates(fused).map((r) => r.entry), relaxed, effectiveMode: "hybrid" };
+  }
   const hybridScored = queryEntriesHybridScored(db, {
     ftsOptions: { query, limit, includeExpired: true, namespace: scopeNamespace },
     semanticOptions: {
@@ -504,42 +545,47 @@ function runLexical(
   query: string,
   limit: number,
   scopeNamespace?: string,
+  production = false,
 ): { entries: Entry[]; relaxed: boolean; effectiveMode: "lexical" } {
-  let results = queryEntriesLexicalScored(db, {
+  const retrievalOptions = <T extends object>(options: T): T =>
+    production ? withQueryProbeLimit(options) : options;
+  let results = queryEntriesLexicalScored(db, retrievalOptions({
     query,
     limit,
-    includeExpired: true,
+    includeExpired: !production,
     namespace: scopeNamespace,
-  });
+  }));
   let relaxed = false;
   if (results.length === 0) {
     const relaxedQuery = buildRelaxedLexicalQuery(query);
     if (relaxedQuery) {
-      results = queryEntriesLexicalScored(db, {
+      results = queryEntriesLexicalScored(db, retrievalOptions({
         query: relaxedQuery,
         limit,
-        includeExpired: true,
+        includeExpired: !production,
         rawFts5: true,
         namespace: scopeNamespace,
-      });
+      }));
       relaxed = results.length > 0;
     }
   }
-  return { entries: results.map((r) => r.entry), relaxed, effectiveMode: "lexical" };
+  return { entries: (production ? results.slice(0, MAX_QUERY_SNAPSHOT_MATCHES) : results).map((r) => r.entry), relaxed, effectiveMode: "lexical" };
 }
 
 /**
- * Replicate the production rerank pipeline from `src/tools.ts:5924-5936`,
+ * Replicate the production memory_query rerank pipeline,
  * minus `filterByAccess` (the benchmark always runs as owner). Called
  * per-query so `shouldApplyDefaultQuerySuppression` is evaluated against
  * each query's params — caching the tracked-status / completed-task maps
  * across queries would be incorrect because the predicate gate differs.
  *
  * The pipeline order is load-bearing:
- *   1. Inject canonical entries (reference-index, owner profile, …)
- *   2. Inject blocked/attention statuses if the query is a triage query
- *   3. Filter completed-task namespaces if default suppression applies
- *   4. Rerank by heuristic + freshness, then slice to requestedLimit
+ *   1. Split the best 50 candidates from the retrieval-ordered tail
+ *   2. Inject canonical entries (reference-index, owner profile, …)
+ *   3. Inject blocked/attention statuses if the query is a triage query
+ *   4. Filter completed-task namespaces if default suppression applies
+ *   5. Rerank the head, counting eligible tail entries for anchor uniqueness
+ *   6. Append the tail, cap at 500, then slice to requestedLimit
  *
  * Any divergence from this order is a parity bug — the parity test in
  * `tests/runner-parity.test.ts` is the safety net.
@@ -558,17 +604,22 @@ export function applyProductionReranker(
 
   const trackedStatuses = applyDefaults ? getTrackedStatusAssessments(db) : undefined;
 
-  let results: Entry[] = injectCanonicalQueryEntries(db, rawResults, queryParams);
+  let head = rawResults.slice(0, QUERY_RERANK_WINDOW);
+  let tail = rawResults.slice(QUERY_RERANK_WINDOW);
+  head = injectCanonicalQueryEntries(db, head, queryParams);
   if (trackedStatuses) {
-    results = injectAttentionQueryEntries(results, queryParams, trackedStatuses);
+    head = injectAttentionQueryEntries(head, queryParams, trackedStatuses);
   }
+  const headIds = new Set(head.map((entry) => entry.id));
+  tail = tail.filter((entry) => !headIds.has(entry.id));
   const completedTasks = applyDefaults
     ? getCompletedTaskNamespaces(db)
     : new Set<string>();
-  return rerankQueryResults(results, queryParams, completedTasks, trackedStatuses).slice(
-    0,
-    requestedLimit,
-  );
+  if (applyDefaults) {
+    tail = tail.filter((entry) => !isSuppressedByDefaultQueryRules(entry, completedTasks));
+  }
+  head = rerankQueryResults(head, queryParams, completedTasks, trackedStatuses, { anchorPool: tail });
+  return [...head, ...tail].slice(0, Math.min(requestedLimit, MAX_QUERY_SNAPSHOT_MATCHES));
 }
 
 /**
@@ -782,15 +833,9 @@ async function runBenchmarkInner(
         : [query.search_mode];
 
     for (const mode of modes) {
-      // Per-query limit and fetch size. Raw mode uses a tight limit=10
-      // (preserving PR 2a behavior). production_ranker over-fetches by
-      // QUERY_RERANK_OVERFETCH_MULTIPLIER so the rerank pipeline has the
-      // same candidate window as memory_query.
+      // Raw retrieval keeps its historical top-10 path; production mode
+      // probes the same bounded candidate set as memory_query.
       const requestedLimit = 10;
-      const internalLimit =
-        effectiveRunnerMode === "production_ranker"
-          ? Math.min(requestedLimit * QUERY_RERANK_OVERFETCH_MULTIPLIER, 50)
-          : requestedLimit;
 
       // Pre-flight: if embeddings init returned unavailable, every
       // semantic/hybrid query degrades to lexical. We still pass the
@@ -804,30 +849,27 @@ async function runBenchmarkInner(
         db,
         query.query,
         mode,
-        internalLimit,
+        requestedLimit,
         options.queryEmbeddingProvider,
         query.scope_namespace,
         options.queryEmbeddingModel,
+        effectiveRunnerMode,
       );
       const actualMode = effectiveMode;
 
       let finalEntries: Entry[];
       if (effectiveRunnerMode === "production_ranker") {
         // Build the QueryParams memory_query would synthesize from the
-        // request. Mirror src/tools.ts:5788-5800. The benchmark doesn't
-        // carry namespace/entry_type/tags filters per-query today, so
-        // those stay undefined and the suppression heuristics fire as
-        // they would for a bare query string. The runner sets
-        // `explain: false`, which means the `|| explain` clause in
-        // memory_query at src/tools.ts:5924 is dead here — runner
-        // gating reduces to `shouldApplyDefaultQuerySuppression` alone.
+        // request. The benchmark carries an optional namespace scope but
+        // no entry-type/tag filters or explain request. Default suppression
+        // therefore follows the same query and namespace predicate.
         const queryParams: QueryParams = {
           query: query.query,
           namespace: query.scope_namespace,
           limit: requestedLimit,
           search_mode: actualMode,
           search_recency_weight: searchRecencyWeight ?? DEFAULT_SEARCH_RECENCY_WEIGHT,
-          include_expired: true,
+          include_expired: false,
           explain: false,
         };
         finalEntries = applyProductionReranker(db, rawEntries, queryParams, requestedLimit);
