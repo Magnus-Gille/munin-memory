@@ -10,6 +10,7 @@ import {
   appendLog,
   queryEntriesSemantic,
   queryEntriesSemanticScored,
+  queryEntriesLexicalScored,
   queryEntriesHybrid,
   queryEntriesHybridScored,
   vecLoaded,
@@ -43,6 +44,7 @@ import {
   _forceCircuitBreakerTrippedForTesting,
 } from "../src/embeddings.js";
 import { executeQuery } from "../benchmark/runner.js";
+import { fuseHybridResults } from "../src/tools.js";
 
 const TEST_DB_PATH = "/tmp/munin-memory-embeddings-test.db";
 const EMBEDDING_DIM = 384;
@@ -522,6 +524,32 @@ describe("hybrid RRF search", () => {
     expect(entryIds).toHaveLength(51);
     expect(semanticResults).toHaveLength(50);
     expect(hybridResults.results).toHaveLength(50);
+  });
+
+  it.skipIf(!vecAvailable)("breaks equal fused scores by lexical rank, and both fusion paths agree (#340)", () => {
+    // Lexical-only entries (no embedding) and semantic-only entries (no keyword)
+    // tie at equal ranks; ids are chosen so id order would interleave them wrongly.
+    const lex1 = writeState(db, "test/ns", "zz-lex1", "tietoken tietoken tietoken", []).id;
+    const lex2 = writeState(db, "test/ns", "zz-lex2", "tietoken filler words here to dilute the match", []).id;
+    const sem1 = writeState(db, "test/ns", "aa-sem1", "nothing in common one", []).id;
+    const sem2 = writeState(db, "test/ns", "aa-sem2", "nothing in common two", []).id;
+    storeEmbedding(db, sem1, embeddingToBuffer(makeEmbedding(1)), "test");
+    storeEmbedding(db, sem2, embeddingToBuffer(makeEmbedding(1.5)), "test");
+    db.prepare("UPDATE entries SET embedding_status = 'generated' WHERE id IN (?, ?)").run(sem1, sem2);
+
+    const ftsOptions = { query: "tietoken", limit: 50, includeExpired: true };
+    const semanticOptions = { queryEmbedding: embeddingToBuffer(makeEmbedding(1)), limit: 50, includeExpired: true };
+
+    const lexical = queryEntriesLexicalScored(db, ftsOptions);
+    const semantic = queryEntriesSemanticScored(db, semanticOptions);
+    expect(lexical.map((r) => r.entry.id)).toEqual([lex1, lex2]);
+    expect(semantic.map((r) => r.entry.id)).toEqual([sem1, sem2]);
+
+    const expected = [lex1, sem1, lex2, sem2];
+    const fromHandler = fuseHybridResults(lexical, semantic).map((r) => r.entry.id);
+    const fromRunner = queryEntriesHybridScored(db, { ftsOptions, semanticOptions }).results.map((r) => r.entry.id);
+    expect(fromHandler).toEqual(expected);
+    expect(fromRunner).toEqual(expected);
   });
 
   it.skipIf(!vecAvailable)("ranks entries present in both FTS and vec higher", () => {

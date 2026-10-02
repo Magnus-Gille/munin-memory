@@ -211,6 +211,83 @@ describe("buildRelaxedLexicalQuery", () => {
     expect(result).not.toContain('"it"');
     expect(result).toContain('"active"');
   });
+
+  it("keeps non-ASCII words whole and drops Swedish stopwords (#334)", () => {
+    expect(buildRelaxedLexicalQuery("återställning säkerhetskopia Björkro")).toBe(
+      '"återställning" OR "säkerhetskopia" OR "björkro"',
+    );
+    expect(buildRelaxedLexicalQuery("Vilket är det senaste gällande beslutet för Månvik om sökfilter")).toBe(
+      '"senaste" OR "gällande" OR "beslutet" OR "månvik" OR "sökfilter"',
+    );
+    expect(buildRelaxedLexicalQuery("varför valde vi köbaserad körning")).toBe(
+      '"valde" OR "köbaserad" OR "körning"',
+    );
+  });
+
+  it("adds the parts of hyphenated and underscored compounds (#334)", () => {
+    expect(buildRelaxedLexicalQuery("Jev-integration i Munin")).toBe(
+      '"jev-integration" OR "jev" OR "integration" OR "munin"',
+    );
+    expect(buildRelaxedLexicalQuery("foo_bar-baz qux")).toBe(
+      '"foo_bar-baz" OR "foo" OR "bar" OR "baz" OR "qux"',
+    );
+  });
+
+  it("returns null when fewer than two terms remain, including stopword-only queries", () => {
+    expect(buildRelaxedLexicalQuery("vad är det för något")).toBeNull();
+    expect(buildRelaxedLexicalQuery("och att det som för med")).toBeNull();
+    expect(buildRelaxedLexicalQuery("Björkro och")).toBeNull();
+  });
+
+  it("never emits characters that could break out of the quoted terms", () => {
+    const result = buildRelaxedLexicalQuery("alpha\u0000beta\u0007 gamma\n\tdelta !@#$%^&+=[]{}<>|\\/?~`' 🚀rocket 😀 smile\u200bword");
+    expect(result).not.toBeNull();
+    // Every term is a quoted run of letters/digits/_/- and nothing else.
+    expect(result).toMatch(/^"[\p{L}\p{N}_-]+"( OR "[\p{L}\p{N}_-]+")*$/u);
+    expect(result).toContain('"alpha"');
+    expect(result).toContain('"beta"');
+    expect(result).toContain('"rocket"');
+    expect(result).toContain('"smile"');
+  });
+
+  it("leaves plain English queries unchanged", () => {
+    expect(buildRelaxedLexicalQuery("What is the SQLite deployment target")).toBe(
+      '"sqlite" OR "deployment" OR "target"',
+    );
+  });
+});
+
+describe("Unicode query terms for explain and anchors (#334)", () => {
+  it("explain reasons treat a Swedish identifier as one term", () => {
+    appendLog(db, "testing/sv-explain", "Beslut om sökfilter i Björkro", []);
+    const entry = getById(db, (db.prepare("SELECT id FROM entries WHERE namespace='testing/sv-explain'").get() as { id: string }).id)!;
+    const match: NonNullable<QueryResult["match"]> = {
+      heuristic_score: 0, freshness_score: 0.5, reasons: [],
+    };
+    // Old ASCII split produced "rkro" (a substring) instead of the whole word.
+    const reasons = getQueryExplainReasons(entry, "björkro", undefined, match);
+    expect(reasons).toContain("matched term: björkro");
+    expect(reasons).not.toContain("matched term: rkro");
+  });
+
+  it("exact-anchor floor treats a Swedish identifier as one anchor term", () => {
+    appendLog(db, "testing/sv-anchor", "Milestone: kodnamnet är björkro-14.", []);
+    appendLog(db, "testing/sv-decoy", "Note about the rkro-14 unit.", []);
+    const get = (ns: string) => getById(db, (db.prepare("SELECT id FROM entries WHERE namespace=?").get(ns) as { id: string }).id)!;
+    const anchor = get("testing/sv-anchor");
+    const decoy = get("testing/sv-decoy");
+    const noise: Entry[] = [];
+    for (let i = 0; i < 6; i++) {
+      writeState(db, `projects/svnoise-${i}`, "status", `## Phase\nActive work ${i}`, ["active"]);
+      noise.push(get(`projects/svnoise-${i}`));
+    }
+    const order = rerankQueryResults(
+      [anchor, decoy, ...noise],
+      { query: "björkro" } as Parameters<typeof rerankQueryResults>[1],
+      new Set(),
+    );
+    expect(order[0]!.id).toBe(anchor.id);
+  });
 });
 
 // --- shouldApplyDefaultQuerySuppression ---

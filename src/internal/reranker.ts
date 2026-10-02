@@ -23,6 +23,7 @@ import {
   findPassedForwardDate,
   isTrackedNamespace,
   RELAXED_QUERY_STOPWORDS,
+  splitUnicodeTerms,
 } from "./retrieval-shared.js";
 import type {
   Entry,
@@ -84,11 +85,19 @@ export function buildRelaxedLexicalQuery(query: string): string | null {
   if (query.includes("\"")) return null;
   if (/\b(AND|OR|NOT|NEAR)\b|[:()*]/.test(query)) return null;
 
-  const terms = query
-    .toLowerCase()
-    .split(/[^a-z0-9_-]+/i)
-    .map((term) => term.trim())
-    .filter((term) => term.length >= 3 && !RELAXED_QUERY_STOPWORDS.has(term));
+  const isUsable = (term: string): boolean =>
+    term.length >= 3 && !RELAXED_QUERY_STOPWORDS.has(term);
+  const terms: string[] = [];
+  for (const term of splitUnicodeTerms(query)) {
+    if (isUsable(term)) terms.push(term);
+    // FTS5 unicode61 treats `-` and `_` as separators, so a quoted compound is
+    // a phrase; also offer the parts so a single part can match.
+    if (/[-_]/.test(term)) {
+      for (const part of term.split(/[-_]+/)) {
+        if (isUsable(part)) terms.push(part);
+      }
+    }
+  }
 
   const uniqueTerms = [...new Set(terms)];
   if (uniqueTerms.length < 2) return null;
@@ -561,7 +570,7 @@ const ANCHOR_MIN_TERM_LENGTH = 4;
  * naming a specific thing rather than describing a topic.
  */
 function anchorTerms(queryLower: string): string[] {
-  return (queryLower.match(/[a-z0-9][a-z0-9_-]*/g) ?? []).filter(
+  return (queryLower.match(/[\p{L}\p{N}][\p{L}\p{N}_-]*/gu) ?? []).filter(
     (term) => term.length >= ANCHOR_MIN_TERM_LENGTH || /\d/.test(term),
   );
 }
@@ -779,9 +788,7 @@ export function resolveSearchRecencyWeight(params: QueryParams): { ok: true; val
 }
 
 function findMatchedQueryTerm(entry: Entry, queryLower: string): string | undefined {
-  const queryTerms = queryLower
-    .split(/[^a-z0-9_-]+/i)
-    .map((term) => term.trim())
+  const queryTerms = splitUnicodeTerms(queryLower)
     .filter((term) => term.length >= 4 && !RELAXED_QUERY_STOPWORDS.has(term));
   const contentLower = entry.content.toLowerCase();
   const namespaceLower = entry.namespace.toLowerCase();

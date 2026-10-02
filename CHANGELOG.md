@@ -118,6 +118,20 @@ changelog is the canonical record of what moved.
 
 ### Fixed
 
+- **Relaxed lexical fallback keeps non-ASCII words whole (#334).** When a strict
+  query matches nothing, the OR fallback now splits on anything that is not a
+  Unicode letter, number, `_` or `-`, so words such as `återställning` or
+  `Björkro` are no longer broken into unmatchable fragments. Hyphenated and
+  underscored compounds also contribute their parts (`Jev-integration` also
+  searches `jev` and `integration`), common Swedish function words are ignored,
+  and the explain-reason and exact-anchor term matching use the same Unicode-aware
+  terms.
+- **Equal hybrid fusion scores are ordered by relevance, not by entry id (#340).**
+  Ties in the reciprocal-rank-fusion score now break by lexical rank, then
+  semantic rank (an entry missing from a leg sorts after one present in it), and
+  only then by entry id, so the order stays fully deterministic. `memory_query`
+  and the benchmark runner share one comparator.
+
 - **`memory_query` no longer fails on broad candidate sets and keeps relevance near the top (#346).**
   Since #306 any retrieval leg with more than 500 candidates returned
   `query_bound_exceeded`. It failed whenever a leg held more than 500 candidates,
