@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
 import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
 import {
@@ -12,8 +12,10 @@ import {
   replaceCrossReferences,
   getCrossReferences,
 } from "../src/db.js";
+import { createTestStorage } from "./helpers/test-storage.js";
 
-const TEST_DB_PATH = "/tmp/munin-memory-consolidation-test.db";
+const TEST_STORAGE = createTestStorage("consolidation-db");
+const TEST_DB_PATH = TEST_STORAGE.path;
 
 function cleanupTestDb() {
   for (const suffix of ["", "-wal", "-shm"]) {
@@ -33,6 +35,8 @@ afterEach(() => {
   db.close();
   cleanupTestDb();
 });
+
+afterAll(TEST_STORAGE.cleanup);
 
 // Helper: insert a log entry at a specific timestamp by appending then overriding created_at
 function appendLogAndSetTime(

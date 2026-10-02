@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
 import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
 import * as sqliteVec from "sqlite-vec";
@@ -17,8 +17,10 @@ import {
   createReviewProposal,
   pruneReviewProposals,
 } from "../src/review-inbox.js";
+import { createTestStorage } from "./helpers/test-storage.js";
 
-const TEST_DB_PATH = "/tmp/munin-memory-migrations-test.db";
+const TEST_STORAGE = createTestStorage("migrations");
+const TEST_DB_PATH = TEST_STORAGE.path;
 
 function cleanupTestDb() {
   for (const suffix of ["", "-wal", "-shm"]) {
@@ -64,6 +66,8 @@ beforeEach(() => {
 afterEach(() => {
   cleanupTestDb();
 });
+
+afterAll(TEST_STORAGE.cleanup);
 
 describe("runMigrations", () => {
   it("creates schema_version table", () => {

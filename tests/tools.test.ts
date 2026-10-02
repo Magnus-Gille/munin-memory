@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
 import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -31,8 +31,10 @@ import { _setApiKey, _consolidationConfig, resetConsolidationCircuitBreaker, get
 import { _embeddingConfig, isEmbeddingCircuitBreakerTripped, getActiveEmbeddingDtype, _forceCircuitBreakerTrippedForTesting, resetCircuitBreaker } from "../src/embeddings.js";
 import { LIFECYCLE_TAGS } from "../src/internal/retrieval-shared.js";
 import type { LibrarianRuntimeConfig } from "../src/librarian.js";
+import { createTestStorage } from "./helpers/test-storage.js";
 
-const TEST_DB_PATH = "/tmp/munin-memory-tools-test.db";
+const TEST_STORAGE = createTestStorage("tools");
+const TEST_DB_PATH = TEST_STORAGE.path;
 const RETROSPECTIVE_CI_FIX_LOG =
   "Follow-up CI fix committed and pushed on 2026-03-12 as b74ed58 after GitHub Actions failed on prettier --check. Root cause: six TypeScript files from the security hardening commit were not Prettier-formatted. Local verification after formatting: npm run build, npm test (131/131), and npm run format:check all passed before pushing.";
 const COMMITMENTS_TEST_NOW = new Date("2026-08-01T12:00:00.000Z");
@@ -52,6 +54,8 @@ function cleanupTestDb() {
 
 let db: Database.Database;
 let server: Server;
+
+afterAll(TEST_STORAGE.cleanup);
 
 type SchemaNode = {
   type?: string | string[];

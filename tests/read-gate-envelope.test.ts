@@ -18,14 +18,16 @@
 // (b) the source entry carries `untrusted`/`source:external` (benign text, tag-driven).
 // Both triggers are tested per tool, alongside a benign-and-clean control.
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll } from "vitest";
 import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { initDatabase, addCrossReferences } from "../src/db.js";
 import { registerTools } from "../src/tools.js";
+import { createTestStorage } from "./helpers/test-storage.js";
 
-const TEST_DB_PATH = "/tmp/munin-memory-read-gate-envelope-test.db";
+const TEST_STORAGE = createTestStorage("read-gate-envelope");
+const TEST_DB_PATH = TEST_STORAGE.path;
 
 function cleanupTestDb() {
   for (const suffix of ["", "-wal", "-shm"]) {
@@ -35,6 +37,8 @@ function cleanupTestDb() {
 }
 
 let db: Database.Database;
+
+afterAll(TEST_STORAGE.cleanup);
 let server: Server;
 
 async function callTool(name: string, args: Record<string, unknown> = {}): Promise<unknown> {

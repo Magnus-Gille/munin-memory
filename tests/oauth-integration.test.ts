@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll } from "vitest";
 import { createHash, randomBytes } from "node:crypto";
 import { unlinkSync, existsSync } from "node:fs";
 import express from "express";
@@ -9,10 +9,14 @@ import { mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { initDatabase } from "../src/db.js";
 import { MuninOAuthProvider } from "../src/oauth.js";
+import { createTestStorage } from "./helpers/test-storage.js";
 
-const TEST_DB_PATH = "/tmp/munin-memory-oauth-integ-test.db";
+const TEST_STORAGE = createTestStorage("oauth-integration");
+const TEST_DB_PATH = TEST_STORAGE.path;
 const LEGACY_API_KEY = "integration-test-api-key";
 const ISSUER_URL = "https://test.example.com";
+
+afterAll(TEST_STORAGE.cleanup);
 
 function cleanupTestDb() {
   for (const suffix of ["", "-wal", "-shm"]) {

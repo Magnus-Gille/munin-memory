@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll } from "vitest";
 import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -17,8 +17,11 @@ import {
   getActiveEmbeddingModel,
 } from "../src/embeddings.js";
 import { registerTools } from "../src/tools.js";
+import { createTestStorage } from "./helpers/test-storage.js";
 
-const TEST_DB_PATH = "/tmp/munin-memory-semantic-threshold-test.db";
+const TEST_STORAGE = createTestStorage("semantic-threshold");
+const TEST_DB_PATH = TEST_STORAGE.path;
+const PROBE_STORAGE = createTestStorage("semantic-threshold-probe");
 const EMBEDDING_DIM = 384;
 
 function cleanupTestDb() {
@@ -49,14 +52,10 @@ function mockExtractor(text: string) {
   return Promise.resolve({ data: makeEmbedding(42) });
 }
 
-const probeDb = initDatabase("/tmp/munin-memory-semantic-threshold-probe.db");
+const probeDb = initDatabase(PROBE_STORAGE.path);
 const vecAvailable = vecLoaded();
 probeDb.close();
 cleanupTestDb();
-for (const suffix of ["", "-wal", "-shm"]) {
-  const p = "/tmp/munin-memory-semantic-threshold-probe.db" + suffix;
-  if (existsSync(p)) unlinkSync(p);
-}
 
 let db: Database.Database;
 let server: Server;
@@ -86,6 +85,11 @@ afterEach(() => {
   _setExtractorForTesting(null);
   db.close();
   cleanupTestDb();
+});
+
+afterAll(() => {
+  TEST_STORAGE.cleanup();
+  PROBE_STORAGE.cleanup();
 });
 
 function seedEntry(namespace: string, key: string, content: string, seed: number, tags: string[] = []) {
