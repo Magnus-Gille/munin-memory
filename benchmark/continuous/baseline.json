@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "contract_id": "munin-decision-retrieval-v1",
+  "fixture_sha256": "4819a18bd090a757165b48e50494eb7374ab44f22763b498e2f2722284fe633b",
+  "seed": 1297436233,
+  "question_count": 24,
+  "metrics": {
+    "raw.overall.recall_at_1": 0.7916666666666666,
+    "raw.overall.recall_at_5": 0.9583333333333334,
+    "raw.overall.mrr": 0.861111111111111,
+    "raw.keyword.recall_at_1": 0.6666666666666666,
+    "raw.keyword.recall_at_5": 1,
+    "raw.keyword.mrr": 0.8055555555555555,
+    "raw.swedish_natural_language.recall_at_1": 0.9166666666666666,
+    "raw.swedish_natural_language.recall_at_5": 0.9166666666666666,
+    "raw.swedish_natural_language.mrr": 0.9166666666666666,
+    "production_ranker.overall.recall_at_1": 0,
+    "production_ranker.overall.recall_at_5": 0.4583333333333333,
+    "production_ranker.overall.mrr": 0.1527777777777778,
+    "production_ranker.keyword.recall_at_1": 0,
+    "production_ranker.keyword.recall_at_5": 0.9166666666666666,
+    "production_ranker.keyword.mrr": 0.3055555555555556,
+    "production_ranker.swedish_natural_language.recall_at_1": 0,
+    "production_ranker.swedish_natural_language.recall_at_5": 0,
+    "production_ranker.swedish_natural_language.mrr": 0
+  }
+}

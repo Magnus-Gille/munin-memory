@@ -42,6 +42,7 @@
     "benchmark:ci-gate": "tsx benchmark/ci-gate.ts",
     "benchmark:ci-gate:hybrid": "tsx benchmark/ci-gate.ts --hybrid",
     "benchmark:ci-gate:embeddings": "tsx benchmark/ci-gate/generate-embeddings.ts",
+    "benchmark:continuous": "node --import tsx benchmark/continuous/run.ts",
     "benchmark:derive": "tsx scripts/derive-benchmark-queries.ts",
     "benchmark:curate": "tsx scripts/curate-benchmark-query.ts",
     "benchmark:synthesize": "tsx scripts/generate-synthetic-queries.ts",

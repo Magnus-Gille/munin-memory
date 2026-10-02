@@ -1,0 +1,50 @@
+name: Continuous memory evaluation
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Scheduled, manual and push runs all use refs/heads/main; keep them from cancelling each other.
+concurrency:
+  group: continuous-memory-eval-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Evaluate generated Swedish decisions against production ranking
+        run: npm run benchmark:continuous
+      - name: Publish measured or invalid report in the job summary
+        if: always()
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+          const file = 'benchmark/reports/continuous/latest.json';
+          const report = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {status: 'invalid', quality_state: 'not_measured', error: 'Evaluation did not produce a report.'};
+          appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Generated decision retrieval\n\nState: **${report.status} / ${report.quality_state}**\n\nThis is a narrow lexical retrieval signal, not an overall memory-quality grade.\n\n\`\`\`json\n${JSON.stringify(report.metrics ?? {error: report.error}, null, 2)}\n\`\`\`\n`);
+          NODE
+      - name: Retain diagnostic report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: continuous-memory-eval
+          path: benchmark/reports/continuous/latest.json
+          retention-days: 30
+          if-no-files-found: warn
