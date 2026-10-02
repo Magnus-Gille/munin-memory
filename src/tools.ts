@@ -7379,7 +7379,7 @@ const TOOL_DEFINITIONS = [
         search_recency_weight: {
           type: "number",
           description:
-            `Optional. Scales a bounded recency lift from 0 to 1 (0 disables it): at most about ten places at 1 and about two at the default ${DEFAULT_SEARCH_RECENCY_WEIGHT}, so newer entries are not always first. Broad orientation and attention-triage queries instead use newest-first among entries of equal structural score when the weight is above 0. Default ${DEFAULT_SEARCH_RECENCY_WEIGHT}. Only affects query-based search, not filter-only browsing.`,
+            `Optional. Scales a bounded recency adjustment from 0 to 1 (0 disables it): up to ten positions' worth of sort-key adjustment at 1 and about two at the default ${DEFAULT_SEARCH_RECENCY_WEIGHT}, so newer entries are not always first, and an entry's final place also depends on how its neighbours were adjusted. Broad orientation and attention-triage queries instead use newest-first among entries of equal structural score when the weight is above 0. Default ${DEFAULT_SEARCH_RECENCY_WEIGHT}. Only affects query-based search, not filter-only browsing.`,
         },
         include_expired: {
           type: "boolean",

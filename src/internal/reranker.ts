@@ -527,8 +527,9 @@ const DEMOTED_HEURISTIC_CEILING = -10;
 
 /**
  * Relevance-anchored ordering (#335, #248). Outside orientation and triage
- * queries each candidate starts at its incoming relevance index and may move
- * only a bounded number of positions:
+ * queries each candidate starts at its incoming relevance index and its sort
+ * key is adjusted by a bounded amount (its final place also depends on how its
+ * neighbours were adjusted):
  *   structural lift = clamp(heuristic / RANK_STRUCTURAL_DIVISOR,
  *                           -RANK_STRUCTURAL_MAX_DEMOTION, +RANK_STRUCTURAL_MAX_LIFT)
  *   recency lift    = search_recency_weight * RANK_RECENCY_MAX_LIFT * r
