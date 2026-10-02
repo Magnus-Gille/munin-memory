@@ -525,6 +525,31 @@ export function injectAttentionQueryEntries(
 /** Heuristic at or below this marks deliberately demoted content (tombstones). */
 const DEMOTED_HEURISTIC_CEILING = -10;
 
+/**
+ * Relevance-anchored ordering (#335, #248). Outside orientation and triage
+ * queries each candidate starts at its incoming relevance index and its sort
+ * key is adjusted by a bounded amount (its final place also depends on how its
+ * neighbours were adjusted):
+ *   structural lift = clamp(heuristic / RANK_STRUCTURAL_DIVISOR,
+ *                           -RANK_STRUCTURAL_MAX_DEMOTION, +RANK_STRUCTURAL_MAX_LIFT)
+ *   recency lift    = search_recency_weight * RANK_RECENCY_MAX_LIFT * r
+ * where r in [0, 1] is the relative `updated_at` rank among the candidates.
+ */
+/** Heuristic points per position of structural lift. */
+export const RANK_STRUCTURAL_DIVISOR = 5;
+/** Most positions a structural class can move an entry up. */
+export const RANK_STRUCTURAL_MAX_LIFT = 5;
+/** Most positions a structural class can move an entry down. */
+export const RANK_STRUCTURAL_MAX_DEMOTION = 1;
+/** Positions the newest candidate gains at `search_recency_weight` 1. */
+export const RANK_RECENCY_MAX_LIFT = 10;
+/**
+ * Sort keys are rounded to this many units per position before comparison, so
+ * floating-point noise cannot reorder candidates and the comparator stays a
+ * strict total order.
+ */
+const RANK_KEY_SCALE = 1e6;
+
 /** Longest query, in searchable terms, still treated as an identifier lookup. */
 const ANCHOR_MAX_TERMS = 3;
 
@@ -618,32 +643,16 @@ function applyExactAnchorFloor(
   return [promoted, ...ranked.slice(0, currentIndex), ...ranked.slice(currentIndex + 1)];
 }
 
-/**
- * Rerank query results by heuristic score + freshness, applying the
- * default suppression filter when appropriate.
- *
- * `options.anchorPool` lists additional eligible candidates that are not
- * reranked (already access- and suppression-filtered by the caller); they only
- * count toward the exact-anchor uniqueness check.
- *
- * Exported for the benchmark runner's production_ranker mode.
- */
-export function rerankQueryResults(
-  results: Entry[],
-  params: QueryParams,
-  completedTasks: Set<string>,
-  trackedStatuses?: Map<string, TrackedStatusAssessment>,
-  options?: { anchorPool?: readonly Entry[] },
-): Entry[] {
-  const query = params.query ?? "";
-  const queryLower = query.toLowerCase();
-  const searchRecencyWeight = params.search_recency_weight ?? DEFAULT_SEARCH_RECENCY_WEIGHT;
-  const suppressDefaults = shouldApplyDefaultQuerySuppression(params);
-  const filtered = results.filter((entry) => {
-    return !suppressDefaults || !isSuppressedByDefaultQueryRules(entry, completedTasks);
-  });
+type RankedItem = { entry: Entry; heuristic: number };
 
-  const scored = filtered
+/** Orientation/triage ordering: structural heuristic first, relevance last. */
+function rankStructuralFirst(
+  filtered: Entry[],
+  queryLower: string,
+  searchRecencyWeight: number,
+  trackedStatuses?: Map<string, TrackedStatusAssessment>,
+): RankedItem[] {
+  return filtered
     .map((entry, index) => ({
       entry,
       index,
@@ -667,11 +676,93 @@ export function rerankQueryResults(
       return a.index - b.index;
     })
     .map((item) => ({ entry: item.entry, heuristic: item.heuristic }));
+}
+
+/**
+ * Relevance-anchored ordering with bounded structural and recency lifts.
+ * Recency uses only the stored `updated_at` strings (never the clock), so the
+ * order is the same whenever it runs (#74).
+ */
+function rankRelevanceAnchored(
+  filtered: Entry[],
+  queryLower: string,
+  searchRecencyWeight: number,
+  trackedStatuses?: Map<string, TrackedStatusAssessment>,
+): RankedItem[] {
+  const distinct = [...new Set(filtered.map((entry) => entry.updated_at))].sort();
+  const recencyRank = new Map<string, number>();
+  distinct.forEach((timestamp, position) => {
+    recencyRank.set(timestamp, distinct.length > 1 ? position / (distinct.length - 1) : 0);
+  });
+
+  return filtered
+    .map((entry, index) => {
+      const heuristic = getQueryHeuristicScore(entry, queryLower, trackedStatuses);
+      const demoted = heuristic <= DEMOTED_HEURISTIC_CEILING;
+      const structuralLift = demoted
+        ? 0
+        : Math.max(
+            -RANK_STRUCTURAL_MAX_DEMOTION,
+            Math.min(RANK_STRUCTURAL_MAX_LIFT, heuristic / RANK_STRUCTURAL_DIVISOR),
+          );
+      const recencyLift = searchRecencyWeight * RANK_RECENCY_MAX_LIFT * (recencyRank.get(entry.updated_at) ?? 0);
+      const key = Math.round((index - structuralLift - recencyLift) * RANK_KEY_SCALE);
+      return { entry, index, heuristic, demoted, key };
+    })
+    .sort((a, b) => {
+      if (a.demoted !== b.demoted) return a.demoted ? 1 : -1;
+      if (!a.demoted && a.key !== b.key) return a.key - b.key;
+      return a.index - b.index;
+    })
+    .map((item) => ({ entry: item.entry, heuristic: item.heuristic }));
+}
+
+/**
+ * Rerank query results by heuristic score + freshness, applying the
+ * default suppression filter when appropriate.
+ *
+ * `options.anchorPool` lists additional eligible candidates that are not
+ * reranked (already access- and suppression-filtered by the caller); they only
+ * count toward the exact-anchor uniqueness check.
+ *
+ * Exported for the benchmark runner's production_ranker mode.
+ */
+export function rerankQueryResults(
+  results: Entry[],
+  params: QueryParams,
+  completedTasks: Set<string>,
+  trackedStatuses?: Map<string, TrackedStatusAssessment>,
+  options?: { anchorPool?: readonly Entry[] },
+): Entry[] {
+  const query = params.query ?? "";
+  const queryLower = query.toLowerCase();
+  const searchRecencyWeight = normalizeSearchRecencyWeight(params.search_recency_weight);
+  const suppressDefaults = shouldApplyDefaultQuerySuppression(params);
+  const filtered = results.filter((entry) => {
+    return !suppressDefaults || !isSuppressedByDefaultQueryRules(entry, completedTasks);
+  });
+
+  const structuralFirst = isBroadOrientationQuery(queryLower, params) || isAttentionTriageQuery(queryLower, params);
+  const scored = structuralFirst
+    ? rankStructuralFirst(filtered, queryLower, searchRecencyWeight, trackedStatuses)
+    : rankRelevanceAnchored(filtered, queryLower, searchRecencyWeight, trackedStatuses);
 
   // `filtered[0]` is the best-relevance candidate: the retrieval layer hands
-  // results over in fusion/lexical rank order, and the structural sort below
-  // preserves that order only as its final tie-break.
+  // results over in fusion/lexical rank order, and the ranking above
+  // keeps that order as its anchor (structural-first queries: final tie-break).
   return applyExactAnchorFloor(scored, filtered[0], queryLower, params, options?.anchorPool).map((item) => item.entry);
+}
+
+/**
+ * Reranker-boundary guard for callers that bypass the MCP handler's validation
+ * (for example the benchmark runner). A missing or non-finite weight falls back
+ * to the default; a finite weight is clamped to [0, 1]. Unlike
+ * `resolveSearchRecencyWeight` it never reports an error, so NaN or Infinity
+ * cannot reach the sort keys and break the comparator's total order.
+ */
+export function normalizeSearchRecencyWeight(weight: number | undefined): number {
+  if (typeof weight !== "number" || !Number.isFinite(weight)) return DEFAULT_SEARCH_RECENCY_WEIGHT;
+  return Math.min(1, Math.max(0, weight));
 }
 
 export function resolveSearchRecencyWeight(params: QueryParams): { ok: true; value: number } | { ok: false; error: string } {

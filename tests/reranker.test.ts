@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { existsSync, unlinkSync } from "node:fs";
 import type Database from "better-sqlite3";
 import { initDatabase, writeState, appendLog, getById } from "../src/db.js";
@@ -19,6 +19,10 @@ import {
   getTrackedStatusAssessments,
   isSuppressedByDefaultQueryRules,
   QUERY_RERANK_WINDOW,
+  RANK_STRUCTURAL_DIVISOR,
+  RANK_STRUCTURAL_MAX_LIFT,
+  RANK_STRUCTURAL_MAX_DEMOTION,
+  RANK_RECENCY_MAX_LIFT,
 } from "../src/internal/reranker.js";
 import type { Entry, TrackedStatusRow } from "../src/types.js";
 import type { QueryResult } from "../src/types.js";
@@ -1052,6 +1056,209 @@ describe("rerankQueryResults exact-anchor pool (candidates outside the reranked 
     const { anchor, noise } = anchorSetup();
     const order = rerankQueryResults([anchor, ...noise], params, new Set(), undefined, { anchorPool: [noise[0]!] });
     expect(order[0]!.id).toBe(anchor.id);
+  });
+});
+
+describe("rerankQueryResults relevance-anchored ordering (#335, #248)", () => {
+  type Params = Parameters<typeof rerankQueryResults>[1];
+  const BASE = Date.parse("2024-01-01T00:00:00.000Z");
+
+  let seq = 0;
+  function synth(
+    label: string,
+    kind: "log" | "state" | "tracked" | "tombstone" | "reference-index",
+    updatedAt = new Date(BASE).toISOString(),
+  ): Entry {
+    seq += 1;
+    const base = {
+      id: `anchored-${seq}-${label}`,
+      tags: "[]",
+      agent_id: "default",
+      owner_principal_id: null,
+      created_at: updatedAt,
+      updated_at: updatedAt,
+      valid_until: null,
+      classification: "internal",
+      embedding_status: "pending",
+      embedding_model: null,
+    };
+    switch (kind) {
+      // heuristic -3 (log)
+      case "log":
+        return { ...base, namespace: `notes/${label}`, key: null, entry_type: "log", content: `log ${label}` } as Entry;
+      // heuristic 6 (state)
+      case "state":
+        return { ...base, namespace: `notes/${label}`, key: "item", entry_type: "state", content: `state ${label}` } as Entry;
+      // heuristic 6 + 20 = 26 (tracked status), lift capped at 5
+      case "tracked":
+        return { ...base, namespace: `projects/${label}`, key: "status", entry_type: "state", content: `tracked ${label}` } as Entry;
+      // heuristic 6 - 30 = -24 (demoted)
+      case "tombstone":
+        return { ...base, namespace: `notes/${label}`, key: "item", entry_type: "state", content: `TOMBSTONE ${label}` } as Entry;
+      // heuristic 6 + 10 = 16, lift 3.2
+      case "reference-index":
+        return { ...base, namespace: "meta", key: "reference-index", entry_type: "state", content: `index ${label}` } as Entry;
+    }
+  }
+
+  const q = (extra: Record<string, unknown> = {}) => ({ query: "quokka", ...extra }) as Params;
+  const labels = (entries: Entry[]) => entries.map((e) => e.namespace.split("/").pop() ?? e.namespace);
+  const rank = (entries: Entry[], params: Params) => rerankQueryResults(entries, params, new Set());
+
+  it("lifts a tracked status at most five places and not to the top from far away", () => {
+    // Logs L0..L7 have key i + 0.6 (log lift -0.6 => key = i + 0.6). Tracked status
+    // lift = min(5, 26/5 = 5.2) = 5.
+    const mk = (trackedAt: number) => {
+      const entries: Entry[] = [];
+      for (let i = 0; i < 8; i++) entries.push(i === trackedAt ? synth("T", "tracked") : synth(`L${i}`, "log"));
+      return entries;
+    };
+    // i = 7: key 2 -> after L0 (0.6), L1 (1.6), before L2 (2.6).
+    expect(labels(rank(mk(7), q({ search_recency_weight: 0 }))).slice(0, 4)).toEqual(["L0", "L1", "T", "L2"]);
+    // i = 3: key -2 -> first. i = 5: key 0 -> before L0 (0.6), first.
+    expect(labels(rank(mk(3), q({ search_recency_weight: 0 })))[0]).toBe("T");
+    expect(labels(rank(mk(5), q({ search_recency_weight: 0 })))[0]).toBe("T");
+  });
+
+  it("lets a state entry overtake a log directly above it but not one two places above", () => {
+    // state key = i - 1.2; log key = i + 0.6.
+    // [log, state]: state 1 - 1.2 = -0.2 < log 0.6 -> state first.
+    const above = rank([synth("log", "log"), synth("state", "state")], q({ search_recency_weight: 0 }));
+    expect(labels(above)).toEqual(["state", "log"]);
+    // [log, filler-log, state]: state 2 - 1.2 = 0.8 > log 0.6 -> log stays first.
+    const two = rank([synth("log", "log"), synth("log2", "log"), synth("state", "state")], q({ search_recency_weight: 0 }));
+    expect(labels(two)[0]).toBe("log");
+    expect(labels(two)).toEqual(["log", "state", "log2"]); // log2 key 1.6
+  });
+
+  it("bounds the recency lift by the weight", () => {
+    // Ten same-class state entries (lift 1.2 each). The newest sits at index 9;
+    // all others share the oldest timestamp (r = 0, r = 1 for the newest).
+    const old = new Date(BASE).toISOString();
+    const fresh = new Date(BASE + 86_400_000).toISOString();
+    const mk = () => Array.from({ length: 10 }, (_, i) => synth(`S${i}`, "state", i === 9 ? fresh : old));
+    const incoming = labels(mk());
+
+    // weight 0: order equals incoming.
+    expect(labels(rank(mk(), q({ search_recency_weight: 0 })))).toEqual(incoming);
+    // default 0.2: lift 0.2 * 10 * 1 = 2; key 9 - 1.2 - 2 = 5.8 ties S7 (7 - 1.2 = 5.8) -> S7 wins on index,
+    // so the newest lands at position 8 (index 8), never first.
+    const byDefault = labels(rank(mk(), q()));
+    expect(byDefault.indexOf("S9")).toBe(8);
+    expect(byDefault[0]).toBe("S0");
+    // weight 1: lift 10; key 9 - 1.2 - 10 = -2.2 < S0's -1.2 -> first.
+    expect(labels(rank(mk(), q({ search_recency_weight: 1 })))[0]).toBe("S9");
+  });
+
+  it("pins the documented displacement: a log can end five places down behind five tracked statuses", () => {
+    // Weight 0, equal timestamps. Log at index 0: heuristic -3, lift -0.6, key 0 + 0.6 = 0.6.
+    // Tracked statuses at indexes 1..5: lift 5 each (26 / 5 = 5.2, capped), keys
+    // 1 - 5 = -4, 2 - 5 = -3, 3 - 5 = -2, 4 - 5 = -1, 5 - 5 = 0. All are below 0.6, so the
+    // log (own demotion at most one place) ends at index 5: its neighbours moved up too.
+    const entries = [synth("log", "log"), ...["T1", "T2", "T3", "T4", "T5"].map((l) => synth(l, "tracked"))];
+    const order = labels(rank(entries, q({ search_recency_weight: 0 })));
+    expect(order).toEqual(["T1", "T2", "T3", "T4", "T5", "log"]);
+    expect(order.indexOf("log")).toBe(5);
+  });
+
+  it("normalises an invalid search_recency_weight at the reranker boundary", () => {
+    const mk = () => [
+      synth("A", "state", new Date(BASE + 3 * 86_400_000).toISOString()),
+      synth("B", "log", new Date(BASE + 9 * 86_400_000).toISOString()),
+      synth("C", "state", new Date(BASE).toISOString()),
+      synth("D", "log", new Date(BASE + 5 * 86_400_000).toISOString()),
+      synth("E", "tracked", new Date(BASE + 1 * 86_400_000).toISOString()),
+      synth("F", "state", new Date(BASE + 7 * 86_400_000).toISOString()),
+      synth("G", "log", new Date(BASE + 2 * 86_400_000).toISOString()),
+    ];
+    const cases: Array<[number, number]> = [
+      [Number.NaN, 0.2],
+      [Number.POSITIVE_INFINITY, 0.2],
+      [Number.NEGATIVE_INFINITY, 0.2],
+      [2, 1],
+      [-1, 0],
+    ];
+    for (const [bad, normalised] of cases) {
+      const input = mk();
+      const first = labels(rank(input, q({ search_recency_weight: bad })));
+      const second = labels(rank(input, q({ search_recency_weight: bad })));
+      expect([...first].sort()).toEqual(labels(input).sort());
+      expect(second).toEqual(first);
+      expect(first).toEqual(labels(rank(input, q({ search_recency_weight: normalised }))));
+    }
+  });
+
+  it("sorts a demoted entry after every non-demoted candidate", () => {
+    // Heuristic 6 - 30 = -24 <= -10: no lift, sorted last whatever its index.
+    const order = rank([synth("T", "tombstone"), synth("A", "state"), synth("B", "log")], q({ search_recency_weight: 0 }));
+    expect(labels(order)).toEqual(["A", "B", "T"]);
+    const order2 = rank([synth("T1", "tombstone"), synth("T2", "tombstone"), synth("A", "log")], q());
+    expect(labels(order2)).toEqual(["A", "T1", "T2"]);
+  });
+
+  it("keeps structural-first ordering for orientation and triage queries", () => {
+    const mk = () => {
+      const entries: Entry[] = [];
+      for (let i = 0; i < 7; i++) entries.push(synth(`L${i}`, "log"));
+      entries.push(synth("T", "tracked"));
+      return entries;
+    };
+    for (const query of ["orient me on the situation", "what needs attention"]) {
+      expect(labels(rank(mk(), { query, search_recency_weight: 0 } as Params))[0]).toBe("T");
+    }
+  });
+
+  it("is independent of the clock", () => {
+    const old = new Date(BASE).toISOString();
+    const fresh = new Date(BASE + 86_400_000).toISOString();
+    const mk = () => [
+      synth("A", "log", old),
+      synth("B", "state", fresh),
+      synth("C", "state", old),
+      synth("D", "tracked", fresh),
+      synth("E", "log", old),
+    ];
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(BASE + 1000));
+      const early = labels(rank(mk(), q()));
+      vi.setSystemTime(new Date(BASE + 400 * 86_400_000));
+      const late = labels(rank(mk(), q()));
+      expect(late).toEqual(early);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still lets options.anchorPool suppress the exact-anchor promotion", () => {
+    const anchor = { ...synth("anchor", "log"), content: "the canary token is zarquon-flimflam-42" } as Entry;
+    const noise = [1, 2, 3, 4].map((n) => synth(`N${n}`, "tracked"));
+    const pooled = { ...synth("pooled", "log"), content: "also zarquon-flimflam-42" } as Entry;
+    const params = { query: "zarquon-flimflam-42", search_recency_weight: 0 } as Params;
+    // Without a pool the unique anchor is promoted to first.
+    expect(rerankQueryResults([anchor, ...noise], params, new Set())[0]!.id).toBe(anchor.id);
+    // anchor key 0 + 0.6 = 0.6; tracked N1 key 1 - 5 = -4 -> first when the pool blocks promotion.
+    const withPool = rerankQueryResults([anchor, ...noise], params, new Set(), undefined, { anchorPool: [pooled] });
+    expect(withPool[0]!.id).not.toBe(anchor.id);
+    expect(withPool[0]!.id).toBe(noise[0]!.id);
+  });
+
+  it("treats mathematically equal keys as tied on incoming index despite floating-point noise", () => {
+    // A: state at index 0, lift 6/5 = 1.2, key -1.2.
+    // C: reference-index at index 2, heuristic 16, lift 16/5 = 3.2, key 2 - 3.2.
+    // Mathematically both are -1.2, but in doubles 2 - 3.2 = -1.2000000000000002 < -1.2,
+    // so a raw comparison would put C first. Tied on key -> index order: A, C.
+    // B is a log at index 1: heuristic -3, lift -0.6, key 1 + 0.6 = 1.6 (last).
+    expect(2 - 16 / 5).toBeLessThan(0 - 6 / 5);
+    const order = rank(
+      [synth("A", "state"), synth("B", "log"), synth("C", "reference-index")],
+      q({ search_recency_weight: 0 }),
+    );
+    expect(labels(order)).toEqual(["A", "meta", "B"]);
+  });
+
+  it("exports the documented constants", () => {
+    expect([RANK_STRUCTURAL_DIVISOR, RANK_STRUCTURAL_MAX_LIFT, RANK_STRUCTURAL_MAX_DEMOTION, RANK_RECENCY_MAX_LIFT]).toEqual([5, 5, 1, 10]);
   });
 });
 
