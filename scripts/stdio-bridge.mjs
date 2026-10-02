@@ -148,13 +148,69 @@ async function forwardToRemote(message) {
       }
     }
   } catch (err) {
-    log(`Fetch error: ${err.message}`);
+    const detail =
+      err instanceof Error && err.cause !== undefined
+        ? `${err.message} (${describeFetchError(err)})`
+        : err.message;
+    log(`Fetch error: ${detail}`);
     if (!notification) {
       writeStdout(
-        jsonRpcError(message.id, -32000, `Bridge error: ${err.message}`),
+        jsonRpcError(message.id, -32000, `Bridge error: ${detail}`),
       );
     }
   }
+}
+
+// --- Fetch failure cause reporting (reporting only; mirrors src/bridge.ts) ---
+
+function sanitizeReason(text) {
+  const cleaned = String(text)
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "[url]")
+    .replace(/\b(Bearer|Basic)\s+\S+/gi, "$1 [redacted]")
+    .replace(/\b(ENOTFOUND|EAI_AGAIN)\s+\S+/g, "$1 [host]")
+    .replace(/\[?(?:[0-9a-f]{0,4}:){2,}[0-9a-f]{0,4}\]?(?::\d+)?/gi, "[addr]")
+    .replace(/\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b/g, "[addr]")
+    .replace(/(?:^|(?<=\s))(?:[A-Za-z]:)?(?:[\\/][^\s\\/:]+)+/g, "[path]")
+    .replace(/\b(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?\b/gi, "[host]")
+    .replace(/\blocalhost(?::\d+)?\b/gi, "[host]")
+    .replace(/\bport\s+\d+\b/gi, "port [n]")
+    .replace(/:\d{2,5}\b/g, "")
+    .replace(/\b[A-Za-z0-9_-]{32,}\b/g, "[redacted]")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned.length > 120 ? `${cleaned.slice(0, 120)}...` : cleaned;
+}
+
+function describeFetchError(err) {
+  const nodes = [];
+  if (err instanceof Error && err.cause !== undefined) {
+    let cur = err.cause;
+    while (cur !== undefined && nodes.length < 5) {
+      nodes.push(cur);
+      cur = cur instanceof Error ? cur.cause : undefined;
+    }
+  } else {
+    nodes.push(err);
+  }
+  const parts = [];
+  for (const node of nodes) {
+    const prop = (k) =>
+      node && typeof node === "object" && typeof node[k] === "string" &&
+      /^[A-Za-z0-9_]{1,64}$/.test(node[k])
+        ? node[k]
+        : undefined;
+    const code = prop("code");
+    const syscall = prop("syscall");
+    let reason = "";
+    if (typeof node === "string") reason = sanitizeReason(node);
+    else if (node && typeof node === "object" && typeof node.message === "string")
+      reason = sanitizeReason(node.message);
+    const head = [code, syscall].filter(Boolean).join(" ");
+    if (reason === code) reason = "";
+    const text = head && reason ? `${head}: ${reason}` : head || reason;
+    if (text) parts.push(text);
+  }
+  return parts.length > 0 ? parts.join(" <- ") : "unknown error";
 }
 
 // --- Queue processor ---

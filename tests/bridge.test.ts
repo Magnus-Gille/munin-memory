@@ -13,8 +13,16 @@ import {
   parseRetryAfterMs,
   resolveBridgeClientId,
   BridgeRateLimitRetryExhaustedError,
+  BridgeNetworkError,
+  BRIDGE_RETRY_SAFE_TOOL_NAMES,
+  BRIDGE_NEVER_RETRY_TOOL_NAMES,
+  FETCH_NOT_SENT_CODES,
+  classifyFetchFailure,
+  isReadOnlyBridgeRequest,
+  sanitizeFetchCause,
   type TransportLike,
 } from "../src/bridge.js";
+import { REGISTERED_TOOL_NAMES } from "../src/tools.js";
 
 // --- Mock transport factory ---
 
@@ -1088,7 +1096,9 @@ describe("createFetchWithTimeout", () => {
     const callArgs = mockFetch.mock.calls[0];
     expect(callArgs[0]).toBe("https://example.com/mcp");
     expect((callArgs[1] as RequestInit).method).toBe("POST");
-    expect((callArgs[1] as RequestInit).headers).toEqual(headers);
+    const sentHeaders = new Headers((callArgs[1] as RequestInit).headers);
+    expect(sentHeaders.get("authorization")).toBe("Bearer tok");
+    expect(sentHeaders.get("x-munin-request-id")).toMatch(/^[0-9a-f-]{36}$/);
     vi.unstubAllGlobals();
   });
 
@@ -2036,5 +2046,374 @@ describe("createBridge start", () => {
     await bridge.start();
 
     expect(callOrder).toEqual(["http", "stdio"]);
+  });
+});
+
+// --- Network failure reporting and safe retry ---
+
+function fetchError(code: string | undefined, message: string, syscall?: string): TypeError {
+  const cause = Object.assign(new Error(message), {
+    ...(code ? { code } : {}),
+    ...(syscall ? { syscall } : {}),
+  });
+  return new TypeError("fetch failed", { cause });
+}
+
+function rpcBody(method: string, params?: unknown): string {
+  return JSON.stringify({ jsonrpc: "2.0", id: 1, method, params });
+}
+
+function toolCallBody(name: string): string {
+  return rpcBody("tools/call", { name, arguments: {} });
+}
+
+describe("sanitizeFetchCause", () => {
+  it("keeps code and syscall but removes address and port", () => {
+    const text = sanitizeFetchCause(
+      fetchError("ECONNREFUSED", "connect ECONNREFUSED 127.0.0.1:3030", "connect"),
+    );
+    expect(text).toContain("ECONNREFUSED");
+    expect(text).toContain("connect");
+    expect(text).not.toContain("127.0.0.1");
+    expect(text).not.toContain("3030");
+  });
+
+  it("removes IPv6 addresses, host names, URLs and file paths", () => {
+    const text = sanitizeFetchCause(
+      fetchError(
+        "ENOTFOUND",
+        "getaddrinfo ENOTFOUND munin.example.com at https://munin.example.com/mcp?x=1 via [::1]:3030 reading /Users/me/.creds/token.json",
+      ),
+    );
+    for (const leaked of ["munin.example.com", "https://", "::1", "3030", "/Users", "token.json"]) {
+      expect(text).not.toContain(leaked);
+    }
+    expect(text).toContain("ENOTFOUND");
+  });
+
+  it("removes bearer tokens and long opaque strings", () => {
+    const text = sanitizeFetchCause(
+      fetchError("EPROTO", `bad Bearer abc123secret and ${"x".repeat(40)}`),
+    );
+    expect(text).not.toContain("abc123secret");
+    expect(text).not.toContain("xxxxxxxxxxxxxxxx");
+  });
+
+  it("walks nested causes", () => {
+    const inner = Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET" });
+    const middle = new Error("socket error", { cause: inner });
+    const outer = new TypeError("fetch failed", { cause: middle });
+    const text = sanitizeFetchCause(outer);
+    expect(text).toContain("socket error");
+    expect(text).toContain("UND_ERR_SOCKET: other side closed");
+  });
+
+  it("handles non-Error causes", () => {
+    expect(sanitizeFetchCause(new TypeError("fetch failed", { cause: "boom at 10.0.0.1:80" }))).toBe(
+      "boom at [addr]",
+    );
+    expect(sanitizeFetchCause(new TypeError("fetch failed", { cause: 42 }))).toBe("unknown error");
+  });
+
+  it("falls back to the error itself when there is no cause", () => {
+    expect(sanitizeFetchCause(new TypeError("fetch failed"))).toBe("fetch failed");
+  });
+});
+
+describe("classifyFetchFailure", () => {
+  it.each(FETCH_NOT_SENT_CODES.map((c) => [c]))("%s is not-sent", (code) => {
+    expect(classifyFetchFailure(fetchError(code, "x"))).toBe("not-sent");
+  });
+
+  it.each([
+    ["UND_ERR_SOCKET"],
+    ["ECONNRESET"],
+    ["EPIPE"],
+    ["UND_ERR_BODY_TIMEOUT"],
+    ["UND_ERR_HEADERS_TIMEOUT"],
+    ["ESOMETHINGELSE"],
+  ])("%s is possibly-sent", (code) => {
+    expect(classifyFetchFailure(fetchError(code, "x"))).toBe("possibly-sent");
+  });
+
+  it("treats a missing cause or code as possibly-sent", () => {
+    expect(classifyFetchFailure(new TypeError("fetch failed"))).toBe("possibly-sent");
+    expect(classifyFetchFailure(fetchError(undefined, "x"))).toBe("possibly-sent");
+  });
+});
+
+describe("isReadOnlyBridgeRequest", () => {
+  it("treats GET and DELETE without a body as read-only", () => {
+    expect(isReadOnlyBridgeRequest({ method: "GET" })).toBe(true);
+    expect(isReadOnlyBridgeRequest({ method: "DELETE" })).toBe(true);
+    expect(isReadOnlyBridgeRequest({ method: "DELETE", body: "{}" })).toBe(false);
+  });
+
+  it("treats non-tools/call single messages as read-only", () => {
+    for (const method of ["initialize", "tools/list", "ping", "notifications/initialized"]) {
+      expect(isReadOnlyBridgeRequest({ method: "POST", body: rpcBody(method) })).toBe(true);
+    }
+  });
+
+  it("allows allowlisted tools only", () => {
+    for (const name of BRIDGE_RETRY_SAFE_TOOL_NAMES) {
+      expect(isReadOnlyBridgeRequest({ method: "POST", body: toolCallBody(name) })).toBe(true);
+    }
+    for (const name of [...BRIDGE_NEVER_RETRY_TOOL_NAMES, "memory_unknown_tool"]) {
+      expect(isReadOnlyBridgeRequest({ method: "POST", body: toolCallBody(name) })).toBe(false);
+    }
+  });
+
+  it("treats batches, bad JSON, non-string bodies and responses as writes", () => {
+    expect(isReadOnlyBridgeRequest({ method: "POST", body: `[${rpcBody("ping")}]` })).toBe(false);
+    expect(isReadOnlyBridgeRequest({ method: "POST", body: "{not json" })).toBe(false);
+    expect(isReadOnlyBridgeRequest({ method: "POST", body: new Uint8Array([1]) })).toBe(false);
+    expect(
+      isReadOnlyBridgeRequest({ method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }) }),
+    ).toBe(false);
+    expect(isReadOnlyBridgeRequest({ method: "POST", body: toolCallBody("") })).toBe(false);
+    expect(isReadOnlyBridgeRequest({ method: "POST" })).toBe(false);
+  });
+
+  it("forces a retry decision for every registered tool", () => {
+    const decided = new Set([...BRIDGE_RETRY_SAFE_TOOL_NAMES, ...BRIDGE_NEVER_RETRY_TOOL_NAMES]);
+    const undecided = REGISTERED_TOOL_NAMES.filter((name) => !decided.has(name));
+    expect(undecided).toEqual([]);
+    const overlap = BRIDGE_RETRY_SAFE_TOOL_NAMES.filter((n) => BRIDGE_NEVER_RETRY_TOOL_NAMES.includes(n));
+    expect(overlap).toEqual([]);
+    const stale = [...decided].filter((n) => !REGISTERED_TOOL_NAMES.includes(n));
+    expect(stale).toEqual([]);
+  });
+});
+
+describe("createFetchWithTimeout network retry", () => {
+  const okResponse = () => new Response("ok", { status: 200 });
+  let sleep: ReturnType<typeof vi.fn<(d: number, s: AbortSignal) => Promise<void>>>;
+  let logs: string[];
+
+  beforeEach(() => {
+    sleep = vi.fn<(d: number, s: AbortSignal) => Promise<void>>().mockResolvedValue(undefined);
+    logs = [];
+  });
+
+  function make(fetchFn: typeof fetch, extra: Record<string, unknown> = {}) {
+    return createFetchWithTimeout(5000, {
+      fetchFn,
+      sleep,
+      random: () => 0,
+      uuid: () => "req-id-1234",
+      log: (m) => logs.push(m),
+      ...extra,
+    });
+  }
+
+  it("retries a not-sent failure for a write with the same body and request id", async () => {
+    const fetchFn = vi
+      .fn()
+      .mockRejectedValueOnce(fetchError("ECONNREFUSED", "connect ECONNREFUSED 127.0.0.1:3030", "connect"))
+      .mockResolvedValueOnce(okResponse());
+    const body = toolCallBody("memory_log");
+    const result = await make(fetchFn)("https://example.com/mcp", {
+      method: "POST",
+      body,
+      headers: { "content-type": "application/json" },
+    });
+    expect(result.status).toBe(200);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    const [first, second] = fetchFn.mock.calls.map((c) => c[1] as RequestInit);
+    expect(second.body).toBe(body);
+    expect(first.body).toBe(body);
+    expect(new Headers(first.headers).get("x-munin-request-id")).toBe("req-id-1234");
+    expect(new Headers(second.headers).get("x-munin-request-id")).toBe("req-id-1234");
+    expect(new Headers(second.headers).get("content-type")).toBe("application/json");
+    expect(sleep).toHaveBeenCalledWith(150, expect.any(AbortSignal));
+    expect(logs[0]).toContain("retry 1/2");
+    expect(logs[0]).toContain("req-id-1234");
+    expect(logs.join("\n")).not.toContain("127.0.0.1");
+    expect(logs.join("\n")).not.toContain("example.com");
+  });
+
+  it("uses 150ms then 500ms backoff plus jitter", async () => {
+    const fetchFn = vi.fn().mockRejectedValue(fetchError("ECONNREFUSED", "x"));
+    await expect(
+      make(fetchFn, { random: () => 0.5 })("https://example.com/mcp", { method: "POST", body: rpcBody("ping") }),
+    ).rejects.toBeInstanceOf(BridgeNetworkError);
+    expect(sleep.mock.calls.map((c) => c[0])).toEqual([175, 525]);
+    expect(fetchFn).toHaveBeenCalledTimes(3);
+  });
+
+  it("reports did-not-reach-server when not-sent retries are exhausted", async () => {
+    const fetchFn = vi.fn().mockRejectedValue(fetchError("ECONNREFUSED", "connect ECONNREFUSED 127.0.0.1:3030", "connect"));
+    const err = await make(fetchFn)("https://example.com/mcp", {
+      method: "POST",
+      body: toolCallBody("memory_write"),
+    }).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(BridgeNetworkError);
+    expect((err as Error).message).toBe(
+      "network error (ECONNREFUSED connect: connect ECONNREFUSED [addr]); the request did not reach the server (3 attempts) [request id req-id-1234]",
+    );
+    expect(fetchFn).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([["tools/list"], ["initialize"], ["ping"]])(
+    "retries a possibly-sent failure for %s",
+    async (method) => {
+      const fetchFn = vi
+        .fn()
+        .mockRejectedValueOnce(fetchError("UND_ERR_SOCKET", "other side closed"))
+        .mockResolvedValueOnce(okResponse());
+      const result = await make(fetchFn)("https://example.com/mcp", { method: "POST", body: rpcBody(method) });
+      expect(result.status).toBe(200);
+      expect(fetchFn).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("retries a possibly-sent failure for an allowlisted read tool", async () => {
+    const fetchFn = vi
+      .fn()
+      .mockRejectedValueOnce(fetchError("ECONNRESET", "read ECONNRESET", "read"))
+      .mockResolvedValueOnce(okResponse());
+    await make(fetchFn)("https://example.com/mcp", { method: "POST", body: toolCallBody("memory_query") });
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries a possibly-sent failure for a GET", async () => {
+    const fetchFn = vi
+      .fn()
+      .mockRejectedValueOnce(fetchError("UND_ERR_SOCKET", "other side closed"))
+      .mockResolvedValueOnce(okResponse());
+    await make(fetchFn)("https://example.com/mcp", { method: "GET" });
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it("gives the read-only message when a possibly-sent read exhausts retries", async () => {
+    const fetchFn = vi.fn().mockRejectedValue(fetchError("UND_ERR_SOCKET", "other side closed"));
+    const err = await make(fetchFn)("https://example.com/mcp", {
+      method: "POST",
+      body: toolCallBody("memory_read"),
+    }).catch((e: Error) => e);
+    expect((err as Error).message).toBe(
+      "network error (UND_ERR_SOCKET: other side closed); the read-only request was not confirmed after 3 attempts; it is safe to repeat [request id req-id-1234]",
+    );
+    expect(fetchFn).toHaveBeenCalledTimes(3);
+    expect(logs.at(-1)).toContain("Request failed");
+  });
+
+  it.each([
+    ["memory_log", toolCallBody("memory_log")],
+    ["memory_write", toolCallBody("memory_write")],
+    ["an unknown tool", toolCallBody("memory_something_new")],
+    ["a batch", `[${rpcBody("ping")}]`],
+    ["an unparseable body", "{nope"],
+  ])("does not retry a possibly-sent failure for %s", async (_label, body) => {
+    const fetchFn = vi.fn().mockRejectedValue(fetchError("UND_ERR_SOCKET", "other side closed"));
+    const err = await make(fetchFn)("https://example.com/mcp", { method: "POST", body }).catch(
+      (e: Error) => e,
+    );
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+    expect(err).toBeInstanceOf(BridgeNetworkError);
+    expect((err as Error).message).toBe(
+      "network error (UND_ERR_SOCKET: other side closed); the request may or may not have been applied; check the current state (for example with memory_read or memory_history) before repeating it [request id req-id-1234]",
+    );
+  });
+
+  it("does not retry the bridge's own timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchFn = vi.fn((_input: unknown, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(fetchErrorFrom(init.signal!.reason)));
+        }),
+      );
+      function fetchErrorFrom(reason: unknown) {
+        return Object.assign(new TypeError("fetch failed", { cause: reason }), {});
+      }
+      const wrapped = createFetchWithTimeout(100, {
+        fetchFn: fetchFn as unknown as typeof fetch,
+        sleep,
+        uuid: () => "req-id-1234",
+      });
+      const pending = wrapped("https://example.com/mcp", { method: "POST", body: rpcBody("ping") });
+      const settled = pending.catch((e: Error) => e);
+      await vi.advanceTimersByTimeAsync(150);
+      const err = await settled;
+      expect(err).not.toBeInstanceOf(BridgeNetworkError);
+      expect(fetchFn).toHaveBeenCalledTimes(1);
+      expect(sleep).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops retrying when the backoff would exceed the timeout budget", async () => {
+    const fetchFn = vi.fn().mockRejectedValue(fetchError("ECONNREFUSED", "x"));
+    const wrapped = createFetchWithTimeout(100, {
+      fetchFn,
+      sleep,
+      random: () => 0,
+      uuid: () => "req-id-1234",
+    });
+    await expect(
+      wrapped("https://example.com/mcp", { method: "POST", body: rpcBody("ping") }),
+    ).rejects.toBeInstanceOf(BridgeNetworkError);
+    // 150ms first backoff already exceeds the 100ms budget.
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps 429 and network retry budgets independent", async () => {
+    const throttled = () =>
+      new Response("limited", {
+        status: 429,
+        headers: { "Retry-After": "0", "X-Munin-Rate-Limit": "admission-v1" },
+      });
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(throttled())
+      .mockRejectedValueOnce(fetchError("ECONNREFUSED", "x"))
+      .mockResolvedValueOnce(okResponse());
+    const result = await make(fetchFn)("https://example.com/mcp", { method: "POST", body: rpcBody("ping") });
+    expect(result.status).toBe(200);
+    expect(fetchFn).toHaveBeenCalledTimes(3);
+  });
+
+  it("still raises the 429 exhaustion error unchanged", async () => {
+    const fetchFn = vi.fn().mockImplementation(async () =>
+      new Response("limited", {
+        status: 429,
+        headers: { "Retry-After": "0", "X-Munin-Rate-Limit": "admission-v1" },
+      }),
+    );
+    await expect(
+      make(fetchFn, { retry: { maxRetries: 1, maxWaitMs: 5000, jitterMs: 0 } })("https://example.com/mcp", {
+        method: "POST",
+        body: rpcBody("ping"),
+      }),
+    ).rejects.toBeInstanceOf(BridgeRateLimitRetryExhaustedError);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports the cause through the bridge error message", async () => {
+    const sent: JSONRPCMessage[] = [];
+    const http = createMockTransport({
+      send: vi.fn().mockRejectedValue(fetchError("ECONNRESET", "read ECONNRESET 10.1.2.3:443", "read")),
+    });
+    const stdio = createMockTransport({
+      send: vi.fn(async (m: JSONRPCMessage) => {
+        sent.push(m);
+      }),
+    });
+    createBridge({
+      stdio,
+      createHttpTransport: () => http,
+      log: () => {},
+      onExit: () => {},
+    });
+    stdio.onmessage!({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "memory_log" } });
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    const message = (sent[0] as { error: { message: string } }).error.message;
+    expect(message).toMatch(/^Bridge error: /);
+    expect(message).toContain("ECONNRESET");
+    expect(message).not.toContain("10.1.2.3");
   });
 });

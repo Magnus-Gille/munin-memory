@@ -146,6 +146,8 @@ export interface RequestLogEntry {
   authType: "bearer" | "oauth" | "none";
   clientId?: string;
   sessionId?: string;
+  /** Client-supplied correlation id (untrusted; logged only when well-formed). */
+  requestId?: string;
   status: number;
   durationMs: number;
   rateLimit?: {
@@ -516,6 +518,15 @@ function getSessionHeader(req: Request): string | undefined {
   return header;
 }
 
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{8,64}$/;
+
+/** Return the X-Munin-Request-Id header only when it is a well-formed token. */
+export function getRequestIdHeader(req: Request): string | undefined {
+  const header = req.headers["x-munin-request-id"];
+  const value = Array.isArray(header) ? header[0] : header;
+  return value !== undefined && REQUEST_ID_PATTERN.test(value) ? value : undefined;
+}
+
 function getClientRateLimitHeader(req: Request): string | undefined {
   const header = req.headers["x-munin-client-id"];
   const value = Array.isArray(header) ? header[0] : header;
@@ -679,6 +690,7 @@ function attachRequestLogger(
 } {
   const startTime = Date.now();
   const sessionId = getSessionHeader(req);
+  const requestId = getRequestIdHeader(req);
   const authContext = getRequestAuthLogContext(req.auth);
   let rpcMethod: string | undefined;
   let toolName: string | undefined;
@@ -694,6 +706,7 @@ function attachRequestLogger(
       toolName,
       ...authContext,
       sessionId,
+      requestId,
       status: res.statusCode,
       durationMs: Date.now() - startTime,
       rateLimit,

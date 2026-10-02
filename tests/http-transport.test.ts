@@ -3,10 +3,12 @@ import { existsSync, unlinkSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import supertest from "supertest";
+import type { Request } from "express";
 import { initDatabase } from "../src/db.js";
 import {
   createHttpApp,
   getRequestAuthLogContext,
+  getRequestIdHeader,
   type RequestLogEntry,
 } from "../src/index.js";
 import { MCP_SERVER_INSTRUCTIONS } from "../src/tools.js";
@@ -846,5 +848,56 @@ describe("HTTP tenant service-token attribution", () => {
       toolName: "memory_history",
       status: 200,
     });
+  });
+});
+
+describe("X-Munin-Request-Id request logging", () => {
+  async function postWithRequestId(value: string) {
+    await supertest(app)
+      .post("/mcp")
+      .set({ ...jsonRpcHeaders(), "X-Munin-Request-Id": value })
+      .send({ jsonrpc: "2.0", id: 1, method: "ping" });
+    return requestLogs.at(-1);
+  }
+
+  it("logs a well-formed request id as requestId", async () => {
+    const id = "0b9f3c1e-6d2a-4f7e-9a51-2c8d7e4b1a36";
+    const entry = await postWithRequestId(id);
+    expect(entry?.path).toBe("/mcp");
+    expect(entry?.requestId).toBe(id);
+  });
+
+  it("does not log an over-long request id", async () => {
+    const entry = await postWithRequestId("a".repeat(65));
+    expect(entry?.path).toBe("/mcp");
+    expect(entry?.requestId).toBeUndefined();
+  });
+
+  it.each([["has space in it"], ['quote"inside-id'], ["short"]])(
+    "ignores a malformed request id (%s)",
+    async (value) => {
+      const entry = await postWithRequestId(value);
+      expect(entry?.path).toBe("/mcp");
+      expect(entry?.requestId).toBeUndefined();
+    },
+  );
+
+  it("rejects values containing newlines or control characters", () => {
+    for (const value of ["abcdefgh\nINJECT", "abcdefgh\r\n", "abcdefgh\u0000"]) {
+      expect(
+        getRequestIdHeader({
+          headers: { "x-munin-request-id": value },
+        } as unknown as Request),
+      ).toBeUndefined();
+    }
+  });
+
+  it("does not require the header", async () => {
+    await supertest(app)
+      .post("/mcp")
+      .set(jsonRpcHeaders())
+      .send({ jsonrpc: "2.0", id: 1, method: "ping" });
+    expect(requestLogs.at(-1)?.path).toBe("/mcp");
+    expect(requestLogs.at(-1)?.requestId).toBeUndefined();
   });
 });

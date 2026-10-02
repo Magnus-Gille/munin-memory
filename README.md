@@ -274,6 +274,18 @@ budget, and 250 ms maximum jitter. Override these with
 `MUNIN_BRIDGE_RATE_LIMIT_JITTER_MS`. Authentication failures (401/403) and other
 HTTP failures are never retried by this path.
 
+Thrown network errors are reported with a sanitised cause (error code, syscall and a
+short reason; no URLs, hosts, addresses, ports, headers or paths). Failures where the
+connection was never established (`ECONNREFUSED`, `ENOTFOUND`, `EAI_AGAIN`, connect
+timeout, `EHOSTUNREACH`, `ENETUNREACH`) are retried up to twice (about 150 ms then
+500 ms plus jitter, within the request timeout). Failures on an established
+connection (for example `UND_ERR_SOCKET`, `ECONNRESET`) are retried only for read-only
+requests; a write that fails this way is not repeated and the error says it may or may
+not have been applied, so check with `memory_read` or `memory_history` first. The
+bridge's own timeout is never retried. Each request carries an `X-Munin-Request-Id`
+header (reused across retries) that appears in bridge errors and stderr; the server
+logs it as `requestId` when well-formed and otherwise ignores it.
+
 ## Grimnir ecosystem
 
 Munin is the persistent-memory component in the broader Grimnir ecosystem. Hugin
