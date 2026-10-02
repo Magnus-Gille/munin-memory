@@ -20,6 +20,13 @@ changelog is the canonical record of what moved.
 
 ### Changed
 
+- **`memory_query` ordering stays anchored to relevance (#335, #248).** Inside the
+  50-candidate rerank window, a structural class (tracked status, entry type) now moves
+  an entry at most five places up or one place down from its relevance position, and
+  recency moves it by `search_recency_weight` x 10 places at most (about two at the
+  default), instead of structural class and newest-first overriding relevance. Recency
+  is computed from `updated_at` values only, never the clock. Broad orientation and
+  attention-triage queries keep the existing structural-first ordering.
 - **`memory_review` proposals are isolated by creator session/run (#271).** Durable
   proposals now retain a server-derived creator session, and list/get/preview/edit/
   approve/decline/undo actions default to the current session plus principal. A

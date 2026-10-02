@@ -525,6 +525,30 @@ export function injectAttentionQueryEntries(
 /** Heuristic at or below this marks deliberately demoted content (tombstones). */
 const DEMOTED_HEURISTIC_CEILING = -10;
 
+/**
+ * Relevance-anchored ordering (#335, #248). Outside orientation and triage
+ * queries each candidate starts at its incoming relevance index and may move
+ * only a bounded number of positions:
+ *   structural lift = clamp(heuristic / RANK_STRUCTURAL_DIVISOR,
+ *                           -RANK_STRUCTURAL_MAX_DEMOTION, +RANK_STRUCTURAL_MAX_LIFT)
+ *   recency lift    = search_recency_weight * RANK_RECENCY_MAX_LIFT * r
+ * where r in [0, 1] is the relative `updated_at` rank among the candidates.
+ */
+/** Heuristic points per position of structural lift. */
+export const RANK_STRUCTURAL_DIVISOR = 5;
+/** Most positions a structural class can move an entry up. */
+export const RANK_STRUCTURAL_MAX_LIFT = 5;
+/** Most positions a structural class can move an entry down. */
+export const RANK_STRUCTURAL_MAX_DEMOTION = 1;
+/** Positions the newest candidate gains at `search_recency_weight` 1. */
+export const RANK_RECENCY_MAX_LIFT = 10;
+/**
+ * Sort keys are rounded to this many units per position before comparison, so
+ * floating-point noise cannot reorder candidates and the comparator stays a
+ * strict total order.
+ */
+const RANK_KEY_SCALE = 1e6;
+
 /** Longest query, in searchable terms, still treated as an identifier lookup. */
 const ANCHOR_MAX_TERMS = 3;
 
@@ -618,6 +642,80 @@ function applyExactAnchorFloor(
   return [promoted, ...ranked.slice(0, currentIndex), ...ranked.slice(currentIndex + 1)];
 }
 
+type RankedItem = { entry: Entry; heuristic: number };
+
+/** Orientation/triage ordering: structural heuristic first, relevance last. */
+function rankStructuralFirst(
+  filtered: Entry[],
+  queryLower: string,
+  searchRecencyWeight: number,
+  trackedStatuses?: Map<string, TrackedStatusAssessment>,
+): RankedItem[] {
+  return filtered
+    .map((entry, index) => ({
+      entry,
+      index,
+      heuristic: getQueryHeuristicScore(entry, queryLower, trackedStatuses),
+    }))
+    .sort((a, b) => {
+      if (b.heuristic !== a.heuristic) return b.heuristic - a.heuristic;
+      // Recency tie-break by EXACT updated_at, not the float freshness score.
+      // getFreshnessScore clamps age to >= 0, so any entry whose updated_at is
+      // at/after the instant the ranker reads the clock collapses to freshness
+      // 1.0. Two entries written ~1ms apart therefore compare *equal* when
+      // ranked immediately (both clamped) but *distinct* when ranked a few ms
+      // later — so the order depended on WHEN the ranker ran. memory_query and
+      // the benchmark runner run milliseconds apart, so they disagreed on
+      // score-tied recent entries under load (the #74 parity flake). The
+      // stored updated_at is fixed data and order-equivalent to freshness for
+      // already-aged entries, so rankings over real corpora are unchanged.
+      if (searchRecencyWeight > 0 && a.entry.updated_at !== b.entry.updated_at) {
+        return a.entry.updated_at < b.entry.updated_at ? 1 : -1; // newer first
+      }
+      return a.index - b.index;
+    })
+    .map((item) => ({ entry: item.entry, heuristic: item.heuristic }));
+}
+
+/**
+ * Relevance-anchored ordering with bounded structural and recency lifts.
+ * Recency uses only the stored `updated_at` strings (never the clock), so the
+ * order is the same whenever it runs (#74).
+ */
+function rankRelevanceAnchored(
+  filtered: Entry[],
+  queryLower: string,
+  searchRecencyWeight: number,
+  trackedStatuses?: Map<string, TrackedStatusAssessment>,
+): RankedItem[] {
+  const distinct = [...new Set(filtered.map((entry) => entry.updated_at))].sort();
+  const recencyRank = new Map<string, number>();
+  distinct.forEach((timestamp, position) => {
+    recencyRank.set(timestamp, distinct.length > 1 ? position / (distinct.length - 1) : 0);
+  });
+
+  return filtered
+    .map((entry, index) => {
+      const heuristic = getQueryHeuristicScore(entry, queryLower, trackedStatuses);
+      const demoted = heuristic <= DEMOTED_HEURISTIC_CEILING;
+      const structuralLift = demoted
+        ? 0
+        : Math.max(
+            -RANK_STRUCTURAL_MAX_DEMOTION,
+            Math.min(RANK_STRUCTURAL_MAX_LIFT, heuristic / RANK_STRUCTURAL_DIVISOR),
+          );
+      const recencyLift = searchRecencyWeight * RANK_RECENCY_MAX_LIFT * (recencyRank.get(entry.updated_at) ?? 0);
+      const key = Math.round((index - structuralLift - recencyLift) * RANK_KEY_SCALE);
+      return { entry, index, heuristic, demoted, key };
+    })
+    .sort((a, b) => {
+      if (a.demoted !== b.demoted) return a.demoted ? 1 : -1;
+      if (!a.demoted && a.key !== b.key) return a.key - b.key;
+      return a.index - b.index;
+    })
+    .map((item) => ({ entry: item.entry, heuristic: item.heuristic }));
+}
+
 /**
  * Rerank query results by heuristic score + freshness, applying the
  * default suppression filter when appropriate.
@@ -643,34 +741,14 @@ export function rerankQueryResults(
     return !suppressDefaults || !isSuppressedByDefaultQueryRules(entry, completedTasks);
   });
 
-  const scored = filtered
-    .map((entry, index) => ({
-      entry,
-      index,
-      heuristic: getQueryHeuristicScore(entry, queryLower, trackedStatuses),
-    }))
-    .sort((a, b) => {
-      if (b.heuristic !== a.heuristic) return b.heuristic - a.heuristic;
-      // Recency tie-break by EXACT updated_at, not the float freshness score.
-      // getFreshnessScore clamps age to >= 0, so any entry whose updated_at is
-      // at/after the instant the ranker reads the clock collapses to freshness
-      // 1.0. Two entries written ~1ms apart therefore compare *equal* when
-      // ranked immediately (both clamped) but *distinct* when ranked a few ms
-      // later — so the order depended on WHEN the ranker ran. memory_query and
-      // the benchmark runner run milliseconds apart, so they disagreed on
-      // score-tied recent entries under load (the #74 parity flake). The
-      // stored updated_at is fixed data and order-equivalent to freshness for
-      // already-aged entries, so rankings over real corpora are unchanged.
-      if (searchRecencyWeight > 0 && a.entry.updated_at !== b.entry.updated_at) {
-        return a.entry.updated_at < b.entry.updated_at ? 1 : -1; // newer first
-      }
-      return a.index - b.index;
-    })
-    .map((item) => ({ entry: item.entry, heuristic: item.heuristic }));
+  const structuralFirst = isBroadOrientationQuery(queryLower, params) || isAttentionTriageQuery(queryLower, params);
+  const scored = structuralFirst
+    ? rankStructuralFirst(filtered, queryLower, searchRecencyWeight, trackedStatuses)
+    : rankRelevanceAnchored(filtered, queryLower, searchRecencyWeight, trackedStatuses);
 
   // `filtered[0]` is the best-relevance candidate: the retrieval layer hands
-  // results over in fusion/lexical rank order, and the structural sort below
-  // preserves that order only as its final tie-break.
+  // results over in fusion/lexical rank order, and the ranking above
+  // keeps that order as its anchor (structural-first queries: final tie-break).
   return applyExactAnchorFloor(scored, filtered[0], queryLower, params, options?.anchorPool).map((item) => item.entry);
 }
 

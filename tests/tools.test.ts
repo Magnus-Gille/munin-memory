@@ -5764,6 +5764,41 @@ describe("memory_query", () => {
     expect(result.retrieval.search_recency_weight).toBe(0.2);
   });
 
+  it("keeps the most relevant entry first by default when the least relevant is the newest (#335)", async () => {
+    const count = 12;
+    for (let k = 0; k < count; k++) {
+      // Entry 0 is the most relevant (short, dense in query terms); relevance falls with k.
+      const dense = Array.from({ length: count - k }, () => "quartzite gravel").join(" ");
+      const filler = Array.from({ length: k * 6 }, (_, n) => `filler${n}`).join(" ");
+      await callTool("memory_write", {
+        namespace: `research/relevance-${String(k).padStart(2, "0")}`,
+        key: "notes",
+        content: `${dense} ${filler}`.trim(),
+      });
+      // The least relevant entry (k = count - 1) is the newest.
+      db.prepare("UPDATE entries SET updated_at = ? WHERE namespace = ?").run(
+        new Date(Date.UTC(2024, 0, 1 + k)).toISOString(),
+        `research/relevance-${String(k).padStart(2, "0")}`,
+      );
+    }
+
+    const firstFor = async (extra: Record<string, unknown>) => {
+      const raw = await callTool("memory_query", {
+        query: "quartzite gravel",
+        search_mode: "lexical",
+        limit: 5,
+        ...extra,
+      });
+      const parsed = parseToolResponse(raw) as { results: Array<{ namespace: string }> };
+      return parsed.results.map((r) => r.namespace);
+    };
+
+    const byDefault = await firstFor({});
+    const noRecency = await firstFor({ search_recency_weight: 0 });
+    expect(byDefault[0]).toBe("research/relevance-00");
+    expect(byDefault[0]).toBe(noRecency[0]);
+  });
+
   it("search_recency_weight 0 preserves previous candidate ordering", async () => {
     await callTool("memory_write", {
       namespace: "projects/old-recency",

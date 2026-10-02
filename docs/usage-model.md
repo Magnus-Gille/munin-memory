@@ -111,6 +111,13 @@ count. Each returned page is also logged as its
 own retrieval event; continuation pages carry a continuation marker instead of
 retroactively marking the prior page as a query reformulation.
 
+Inside the rerank window ordering stays anchored to relevance: each candidate starts at its
+retrieval position, a structural class (tracked status, entry type) can move it at most
+five places up or one place down, and recency adds a lift of `search_recency_weight` x 10
+places scaled by its relative `updated_at` rank among the candidates (about two places at
+the default weight; 0 disables it). Tombstone-like entries sort after everything else.
+Broad orientation and attention-triage queries keep the structural-first ordering.
+
 `memory_history` has two paging directions. Cursorless calls are newest-first browsing
 pages: they return `older_cursor` / `has_older` for deeper history plus `sync_cursor`,
 the newest visible audit id in that initial feed (or `0` when the feed is empty), for
