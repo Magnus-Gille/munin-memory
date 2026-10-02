@@ -735,7 +735,7 @@ export function rerankQueryResults(
 ): Entry[] {
   const query = params.query ?? "";
   const queryLower = query.toLowerCase();
-  const searchRecencyWeight = params.search_recency_weight ?? DEFAULT_SEARCH_RECENCY_WEIGHT;
+  const searchRecencyWeight = normalizeSearchRecencyWeight(params.search_recency_weight);
   const suppressDefaults = shouldApplyDefaultQuerySuppression(params);
   const filtered = results.filter((entry) => {
     return !suppressDefaults || !isSuppressedByDefaultQueryRules(entry, completedTasks);
@@ -750,6 +750,18 @@ export function rerankQueryResults(
   // results over in fusion/lexical rank order, and the ranking above
   // keeps that order as its anchor (structural-first queries: final tie-break).
   return applyExactAnchorFloor(scored, filtered[0], queryLower, params, options?.anchorPool).map((item) => item.entry);
+}
+
+/**
+ * Reranker-boundary guard for callers that bypass the MCP handler's validation
+ * (for example the benchmark runner). A missing or non-finite weight falls back
+ * to the default; a finite weight is clamped to [0, 1]. Unlike
+ * `resolveSearchRecencyWeight` it never reports an error, so NaN or Infinity
+ * cannot reach the sort keys and break the comparator's total order.
+ */
+export function normalizeSearchRecencyWeight(weight: number | undefined): number {
+  if (typeof weight !== "number" || !Number.isFinite(weight)) return DEFAULT_SEARCH_RECENCY_WEIGHT;
+  return Math.min(1, Math.max(0, weight));
 }
 
 export function resolveSearchRecencyWeight(params: QueryParams): { ok: true; value: number } | { ok: false; error: string } {

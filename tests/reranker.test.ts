@@ -1146,8 +1146,46 @@ describe("rerankQueryResults relevance-anchored ordering (#335, #248)", () => {
     const byDefault = labels(rank(mk(), q()));
     expect(byDefault.indexOf("S9")).toBe(8);
     expect(byDefault[0]).toBe("S0");
-    // weight 1: lift 10; key -1.2 -> first.
+    // weight 1: lift 10; key 9 - 1.2 - 10 = -2.2 < S0's -1.2 -> first.
     expect(labels(rank(mk(), q({ search_recency_weight: 1 })))[0]).toBe("S9");
+  });
+
+  it("pins the documented displacement: a log can end five places down behind five tracked statuses", () => {
+    // Weight 0, equal timestamps. Log at index 0: heuristic -3, lift -0.6, key 0 + 0.6 = 0.6.
+    // Tracked statuses at indexes 1..5: lift 5 each (26 / 5 = 5.2, capped), keys
+    // 1 - 5 = -4, 2 - 5 = -3, 3 - 5 = -2, 4 - 5 = -1, 5 - 5 = 0. All are below 0.6, so the
+    // log (own demotion at most one place) ends at index 5: its neighbours moved up too.
+    const entries = [synth("log", "log"), ...["T1", "T2", "T3", "T4", "T5"].map((l) => synth(l, "tracked"))];
+    const order = labels(rank(entries, q({ search_recency_weight: 0 })));
+    expect(order).toEqual(["T1", "T2", "T3", "T4", "T5", "log"]);
+    expect(order.indexOf("log")).toBe(5);
+  });
+
+  it("normalises an invalid search_recency_weight at the reranker boundary", () => {
+    const mk = () => [
+      synth("A", "state", new Date(BASE + 3 * 86_400_000).toISOString()),
+      synth("B", "log", new Date(BASE + 9 * 86_400_000).toISOString()),
+      synth("C", "state", new Date(BASE).toISOString()),
+      synth("D", "log", new Date(BASE + 5 * 86_400_000).toISOString()),
+      synth("E", "tracked", new Date(BASE + 1 * 86_400_000).toISOString()),
+      synth("F", "state", new Date(BASE + 7 * 86_400_000).toISOString()),
+      synth("G", "log", new Date(BASE + 2 * 86_400_000).toISOString()),
+    ];
+    const cases: Array<[number, number]> = [
+      [Number.NaN, 0.2],
+      [Number.POSITIVE_INFINITY, 0.2],
+      [Number.NEGATIVE_INFINITY, 0.2],
+      [2, 1],
+      [-1, 0],
+    ];
+    for (const [bad, normalised] of cases) {
+      const input = mk();
+      const first = labels(rank(input, q({ search_recency_weight: bad })));
+      const second = labels(rank(input, q({ search_recency_weight: bad })));
+      expect([...first].sort()).toEqual(labels(input).sort());
+      expect(second).toEqual(first);
+      expect(first).toEqual(labels(rank(input, q({ search_recency_weight: normalised }))));
+    }
   });
 
   it("sorts a demoted entry after every non-demoted candidate", () => {
@@ -1210,7 +1248,7 @@ describe("rerankQueryResults relevance-anchored ordering (#335, #248)", () => {
     // C: reference-index at index 2, heuristic 16, lift 16/5 = 3.2, key 2 - 3.2.
     // Mathematically both are -1.2, but in doubles 2 - 3.2 = -1.2000000000000002 < -1.2,
     // so a raw comparison would put C first. Tied on key -> index order: A, C.
-    // B at index 1 has key 1 - 1.2 = -0.2.
+    // B is a log at index 1: heuristic -3, lift -0.6, key 1 + 0.6 = 1.6 (last).
     expect(2 - 16 / 5).toBeLessThan(0 - 6 / 5);
     const order = rank(
       [synth("A", "state"), synth("B", "log"), synth("C", "reference-index")],

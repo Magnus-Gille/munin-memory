@@ -93,7 +93,9 @@ missing embedding does not prevent an entry from matching lexically. These mode 
 define the retrieval candidate set. Server policy may then inject canonical orientation
 entries and blocked/needs-attention statuses before final reranking; those injected rows
 become members of the frozen result set and count in final `total_matched`. Snapshot
-explanation metadata is frozen from the same scoring inputs as that final order. When
+explanation metadata is frozen with the snapshot: `heuristic_score` is the structural
+input to the ordering, while `freshness_score` is informational (age relative to now) and
+recency in the ordering comes from the relative `updated_at` rank among the candidates. When
 `include_expired` is false, expired state rows are excluded before the 500-candidate
 cap is applied; with `include_expired: true`, those expired matches
 still count toward the cap. A query never fails because it matches too many
@@ -112,11 +114,17 @@ own retrieval event; continuation pages carry a continuation marker instead of
 retroactively marking the prior page as a query reformulation.
 
 Inside the rerank window ordering stays anchored to relevance: each candidate starts at its
-retrieval position, a structural class (tracked status, entry type) can move it at most
-five places up or one place down, and recency adds a lift of `search_recency_weight` x 10
-places scaled by its relative `updated_at` rank among the candidates (about two places at
-the default weight; 0 disables it). Tombstone-like entries sort after everything else.
-Broad orientation and attention-triage queries keep the structural-first ordering.
+retrieval position and its ranking position is adjusted by a bounded amount. A structural
+class (tracked status, entry type) gives up to five positions' worth of lift or one of
+demotion; recency adds a lift of `search_recency_weight` x 10 positions' worth scaled by its
+relative `updated_at` rank among the candidates (about two at the default weight; 0 disables
+it). Entries are then ordered by the adjusted position, so an entry's final place also
+depends on how its neighbours were adjusted: a log at the top followed by five tracked
+statuses ends five places down even though its own demotion is at most one. Entries whose
+structural score is at or below the demotion threshold (a plain tombstone, for example) sort
+after all others; a tombstone that also carries a strong structural boost can stay above it.
+Broad orientation and attention-triage queries keep the structural-first ordering, with
+newest-first among entries of equal structural score when `search_recency_weight` is above 0.
 
 `memory_history` has two paging directions. Cursorless calls are newest-first browsing
 pages: they return `older_cursor` / `has_older` for deeper history plus `sync_cursor`,
