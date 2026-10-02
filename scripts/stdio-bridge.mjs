@@ -148,13 +148,96 @@ async function forwardToRemote(message) {
       }
     }
   } catch (err) {
-    log(`Fetch error: ${err.message}`);
+    const detail =
+      err instanceof Error && err.cause !== undefined
+        ? `${err.message} (${describeFetchError(err)})`
+        : err.message;
+    log(`Fetch error: ${detail}`);
     if (!notification) {
       writeStdout(
-        jsonRpcError(message.id, -32000, `Bridge error: ${err.message}`),
+        jsonRpcError(message.id, -32000, `Bridge error: ${detail}`),
       );
     }
   }
+}
+
+// --- Fetch failure cause reporting (reporting only; mirrors src/bridge.ts) ---
+// Never passes free text from an error through: only a code, an allowlisted
+// syscall and a fixed description. The table and syscall list below must stay
+// identical to FETCH_ERROR_DESCRIPTIONS / FETCH_ERROR_SYSCALLS in src/bridge.ts
+// (tests/bridge.test.ts asserts equality).
+
+// BEGIN FETCH_ERROR_DESCRIPTIONS
+const FETCH_ERROR_DESCRIPTIONS = {
+  ECONNREFUSED: "connection refused",
+  ECONNRESET: "connection reset by peer",
+  EPIPE: "broken pipe",
+  ETIMEDOUT: "connection timed out",
+  EHOSTUNREACH: "host unreachable",
+  ENETUNREACH: "network unreachable",
+  ENOTFOUND: "host name could not be resolved",
+  EAI_AGAIN: "temporary name resolution failure",
+  UND_ERR_SOCKET: "connection closed unexpectedly",
+  UND_ERR_CONNECT_TIMEOUT: "connect timeout",
+  UND_ERR_HEADERS_TIMEOUT: "timed out waiting for response headers",
+  UND_ERR_BODY_TIMEOUT: "timed out waiting for response body",
+  UND_ERR_ABORTED: "request aborted",
+  CERT_HAS_EXPIRED: "TLS certificate problem",
+  DEPTH_ZERO_SELF_SIGNED_CERT: "TLS certificate problem",
+  SELF_SIGNED_CERT_IN_CHAIN: "TLS certificate problem",
+  UNABLE_TO_VERIFY_LEAF_SIGNATURE: "TLS certificate problem",
+  ERR_TLS_CERT_ALTNAME_INVALID: "TLS certificate problem",
+};
+// END FETCH_ERROR_DESCRIPTIONS
+const FETCH_ERROR_SYSCALLS = ["connect", "getaddrinfo", "read", "write"];
+
+function describeFetchError(err) {
+  const prop = (node, key) =>
+    typeof node === "object" && node !== null ? node[key] : undefined;
+  const nodes = [];
+  const visit = (node, depth) => {
+    if (depth > 5 || nodes.length >= 12) return;
+    if (typeof node !== "object" || node === null) return;
+    const members = prop(node, "errors");
+    if (Array.isArray(members) && members.length > 0) {
+      for (const member of members.slice(0, 5)) visit(member, depth + 1);
+    } else {
+      nodes.push(node);
+    }
+    visit(prop(node, "cause"), depth + 1);
+  };
+  if (typeof err === "object" && err !== null && prop(err, "cause") !== undefined) {
+    visit(prop(err, "cause"), 1);
+  } else {
+    visit(err, 0);
+  }
+  const parts = [];
+  for (const node of nodes) {
+    let text;
+    const code = prop(node, "code");
+    if (typeof code === "string" && /^[A-Za-z0-9_]{1,64}$/.test(code)) {
+      const description = Object.hasOwn(FETCH_ERROR_DESCRIPTIONS, code)
+        ? FETCH_ERROR_DESCRIPTIONS[code]
+        : "unrecognised network error";
+      const syscall = prop(node, "syscall");
+      const shown =
+        typeof syscall === "string" && FETCH_ERROR_SYSCALLS.includes(syscall)
+          ? ` ${syscall}`
+          : "";
+      text = `${code}${shown}: ${description}`;
+    } else {
+      const name = prop(node, "name");
+      const label =
+        typeof name === "string" ? name : prop(prop(node, "constructor"), "name");
+      if (typeof label === "string" && /^[A-Za-z][A-Za-z0-9]{0,40}$/.test(label)) {
+        text = label;
+      }
+    }
+    if (text !== undefined && parts[parts.length - 1] !== text) parts.push(text);
+  }
+  const summary = parts.join(" <- ");
+  if (summary === "") return "unknown error";
+  return summary.length > 300 ? `${summary.slice(0, 297)}...` : summary;
 }
 
 // --- Queue processor ---
