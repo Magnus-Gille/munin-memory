@@ -105,8 +105,10 @@ changelog is the canonical record of what moved.
 
 - **`memory_query` no longer fails on broad candidate sets and keeps relevance near the top (#346).**
   Since #306 any retrieval leg with more than 500 candidates returned
-  `query_bound_exceeded`, which broke every unscoped hybrid/semantic query and
-  natural-language lexical queries that fall back to relaxed matching. Each leg,
+  `query_bound_exceeded`. It failed whenever a leg held more than 500 candidates,
+  which on a store with more than 500 embedded entries in scope meant unscoped
+  hybrid and semantic queries, and natural-language lexical queries through the
+  relaxed fallback. Each leg,
   the fused hybrid set and the final set now keep their best 500 in retrieval
   order; the response carries `retrieval.candidates_truncated: true` and
   `retrieval.candidate_cap: 500` on every page (omitted when nothing was dropped),

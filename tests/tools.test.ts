@@ -5131,17 +5131,123 @@ describe("memory_query", () => {
         for (let i = 0; i < 70; i++) {
           writeState(db, `notes/triage-${String(i).padStart(2, "0")}`, "item", `blocked item ${i}`, ["topic:triage-window"]);
         }
-        const blocked = writeState(db, "projects/triage-blocked", "status", "Waiting on a vendor decision.", ["blocked"]);
+        // A weak lexical match (one mention buried in filler) so it lands in the
+        // retrieval tail AND is injected into the head: the head/tail
+        // de-duplication is the only thing keeping it from appearing twice.
+        const blocked = writeState(db, "projects/triage-blocked", "status", `blocked ${Array(300).fill("filler").join(" ")}`, ["blocked"]);
 
         const { pages, ids } = await collectAllPages(callTool, {
-          query: "what is blocked",
+          query: "blocked",
+          search_mode: "lexical",
+          explain: true,
+          limit: 50,
+        });
+        const injected = pages.flatMap((page) => page.results).find((entry) => entry.id === blocked.id);
+
+        expect(injected?.match?.lexical_rank).toBeGreaterThan(50);
+        expect(pages[0].results[0].id).toBe(blocked.id);
+        expect(ids.filter((id) => id === blocked.id)).toHaveLength(1);
+        expect(new Set(ids).size).toBe(ids.length);
+      });
+
+      describe("exact-anchor uniqueness across the whole candidate set", () => {
+        function seedAnchorCorpus(withSecondMatch: boolean) {
+          // Rank 1: short entry repeating the identifier. Fillers match only via
+          // their tag (not in the anchor haystack), so they are candidates that
+          // do not contain the identifier verbatim.
+          writeState(db, "notes/anchor-best", "item", "ancortok ancortok ancortok", []);
+          for (let i = 0; i < 60; i++) {
+            writeState(db, `projects/anchor-filler-${String(i).padStart(2, "0")}`, "status", `## Phase\nActive work ${i}`, ["active", "topic:ancortok"]);
+          }
+          if (withSecondMatch) {
+            writeState(db, "notes/anchor-deep", "item", `ancortok ${Array(300).fill("filler").join(" ")}`, []);
+          }
+        }
+
+        it("does not float the rank-1 entry when the identifier also appears beyond the rerank window", async () => {
+          seedAnchorCorpus(true);
+
+          const { pages } = await collectAllPages(callTool, {
+            query: "ancortok",
+            search_mode: "lexical",
+            explain: true,
+            limit: 50,
+          });
+          const all = pages.flatMap((page) => page.results);
+          const best = all.find((entry) => entry.namespace === "notes/anchor-best");
+          const deep = all.find((entry) => entry.namespace === "notes/anchor-deep");
+
+          expect(best?.match?.lexical_rank).toBe(1);
+          expect(deep?.match?.lexical_rank).toBeGreaterThan(50);
+          expect(pages[0].results[0].namespace).not.toBe("notes/anchor-best");
+          expect(pages[0].results[0].namespace).toMatch(/^projects\/anchor-filler-/);
+        }, 60_000);
+
+        it("still floats the rank-1 entry when the identifier is unique across all candidates", async () => {
+          seedAnchorCorpus(false);
+
+          const { pages } = await collectAllPages(callTool, {
+            query: "ancortok",
+            search_mode: "lexical",
+            explain: true,
+            limit: 50,
+          });
+
+          expect(pages[0].results[0].namespace).toBe("notes/anchor-best");
+          expect(pages[0].results[0].match?.lexical_rank).toBe(1);
+        }, 60_000);
+      });
+
+      it("keeps the final set at 500 and injected entries first when injection pushes it over the cap", async () => {
+        for (let i = 0; i < 500; i++) {
+          writeState(db, `notes/inject-cap-${String(i).padStart(3, "0")}`, "item", `blocked overflowtok ${i}`, ["topic:inject-cap"]);
+        }
+        const blockedIds: string[] = [];
+        for (let i = 0; i < 3; i++) {
+          blockedIds.push(writeState(db, `projects/inject-cap-blocked-${i}`, "status", `Waiting on vendor ${i}.`, ["blocked"]).id);
+        }
+
+        const { pages, ids } = await collectAllPages(callTool, {
+          query: "blocked overflowtok",
           search_mode: "lexical",
           limit: 50,
         });
 
-        expect(pages[0].results[0].id).toBe(blocked.id);
-        expect(new Set(ids).size).toBe(ids.length);
-      });
+        expect(pages[0].ok).not.toBe(false);
+        expect(pages[0].total_matched).toBe(500);
+        expect(ids).toHaveLength(500);
+        expect(new Set(ids).size).toBe(500);
+        for (const page of pages) expect(page.retrieval.candidates_truncated).toBe(true);
+        const firstPageIds = pages[0].results.map((entry) => entry.id);
+        for (const id of blockedIds) expect(firstPageIds).toContain(id);
+      }, 60_000);
+
+      it("suppresses demo and completed-task entries that sit in the retrieval tail, unless the query is namespace-scoped", async () => {
+        const filler = Array(300).fill("filler").join(" ");
+        for (let i = 0; i < 60; i++) {
+          writeState(db, `notes/supp-${String(i).padStart(2, "0")}`, "item", Array(i + 2).fill("supptok").join(" "), ["topic:supp"]);
+        }
+        const demo = writeState(db, "demo/supp", "item", `supptok ${filler}`, []);
+        writeState(db, "tasks/20260101-supp-done", "status", `supptok ${filler}`, ["completed"]);
+        const completedId = (db.prepare("SELECT id FROM entries WHERE namespace = 'tasks/20260101-supp-done'").get() as { id: string }).id;
+
+        const unscoped = await collectAllPages(callTool, { query: "supptok", search_mode: "lexical", limit: 50 });
+        expect(unscoped.pages[0].ok).not.toBe(false);
+        expect(unscoped.ids).not.toContain(demo.id);
+        expect(unscoped.ids).not.toContain(completedId);
+        expect(unscoped.ids).toHaveLength(60);
+
+        for (const [namespace, id] of [["demo/supp", demo.id], ["tasks/20260101-supp-done", completedId]] as const) {
+          const scoped = await collectAllPages(callTool, {
+            query: "supptok",
+            search_mode: "lexical",
+            namespace,
+            explain: true,
+            limit: 50,
+          });
+          expect(scoped.ids).toEqual([id]);
+        }
+      }, 60_000);
     });
 
     it("keeps an exact 500-candidate snapshot while probing one extra candidate", async () => {

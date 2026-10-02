@@ -578,6 +578,7 @@ function applyExactAnchorFloor(
   bestRelevance: Entry | undefined,
   queryLower: string,
   params: QueryParams,
+  anchorPool: readonly Entry[] = [],
 ): Array<{ entry: Entry; heuristic: number }> {
   if (!bestRelevance || ranked.length < 2) return ranked;
   if (!queryLower.trim()) return ranked;
@@ -591,10 +592,19 @@ function applyExactAnchorFloor(
 
   // Unique anchor only: if more than one candidate carries every term, the
   // caller described a subject rather than naming one entry, and the existing
-  // structural/recency ordering is the right answer.
+  // structural/recency ordering is the right answer. The count also covers
+  // `anchorPool` (eligible candidates outside the reranked window), so an
+  // identifier that recurs deeper in the candidate set is not mistaken for a
+  // unique one.
   let matchCount = 0;
   for (const item of ranked) {
     if (entryContainsAllTerms(item.entry, terms)) {
+      matchCount += 1;
+      if (matchCount > 1) return ranked;
+    }
+  }
+  for (const entry of anchorPool) {
+    if (entryContainsAllTerms(entry, terms)) {
       matchCount += 1;
       if (matchCount > 1) return ranked;
     }
@@ -612,6 +622,10 @@ function applyExactAnchorFloor(
  * Rerank query results by heuristic score + freshness, applying the
  * default suppression filter when appropriate.
  *
+ * `options.anchorPool` lists additional eligible candidates that are not
+ * reranked (already access- and suppression-filtered by the caller); they only
+ * count toward the exact-anchor uniqueness check.
+ *
  * Exported for the benchmark runner's production_ranker mode.
  */
 export function rerankQueryResults(
@@ -619,6 +633,7 @@ export function rerankQueryResults(
   params: QueryParams,
   completedTasks: Set<string>,
   trackedStatuses?: Map<string, TrackedStatusAssessment>,
+  options?: { anchorPool?: readonly Entry[] },
 ): Entry[] {
   const query = params.query ?? "";
   const queryLower = query.toLowerCase();
@@ -656,7 +671,7 @@ export function rerankQueryResults(
   // `filtered[0]` is the best-relevance candidate: the retrieval layer hands
   // results over in fusion/lexical rank order, and the structural sort below
   // preserves that order only as its final tie-break.
-  return applyExactAnchorFloor(scored, filtered[0], queryLower, params).map((item) => item.entry);
+  return applyExactAnchorFloor(scored, filtered[0], queryLower, params, options?.anchorPool).map((item) => item.entry);
 }
 
 export function resolveSearchRecencyWeight(params: QueryParams): { ok: true; value: number } | { ok: false; error: string } {

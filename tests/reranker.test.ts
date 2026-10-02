@@ -1025,6 +1025,36 @@ describe("rerankQueryResults exact-anchor floor (#252)", () => {
   });
 });
 
+describe("rerankQueryResults exact-anchor pool (candidates outside the reranked list)", () => {
+  function anchorSetup() {
+    appendLog(db, "testing/pool-anchor", "Milestone: the canary token is zarquon-flimflam-42.", []);
+    const anchor = getById(db, (db.prepare("SELECT id FROM entries WHERE namespace='testing/pool-anchor'").get() as { id: string }).id)!;
+    const noise: Entry[] = [];
+    for (let i = 0; i < 4; i++) {
+      writeState(db, `projects/pool-noise-${i}`, "status", `## Phase\nActive work ${i}`, ["active"]);
+      noise.push(getById(db, (db.prepare("SELECT id FROM entries WHERE namespace=?").get(`projects/pool-noise-${i}`) as { id: string }).id)!);
+    }
+    return { anchor, noise };
+  }
+  const params = { query: "zarquon-flimflam-42" } as Parameters<typeof rerankQueryResults>[1];
+
+  it("does not promote the best entry when a pooled candidate carries every anchor term", () => {
+    const { anchor, noise } = anchorSetup();
+    appendLog(db, "testing/pool-second", "Another note mentioning zarquon-flimflam-42 as well.", []);
+    const second = getById(db, (db.prepare("SELECT id FROM entries WHERE namespace='testing/pool-second'").get() as { id: string }).id)!;
+
+    const order = rerankQueryResults([anchor, ...noise], params, new Set(), undefined, { anchorPool: [second] });
+    expect(order[0]!.id).not.toBe(anchor.id);
+    expect(order).toHaveLength(5);
+  });
+
+  it("still promotes the best entry when the pool holds no other anchor match", () => {
+    const { anchor, noise } = anchorSetup();
+    const order = rerankQueryResults([anchor, ...noise], params, new Set(), undefined, { anchorPool: [noise[0]!] });
+    expect(order[0]!.id).toBe(anchor.id);
+  });
+});
+
 describe("default suppression helper and rerank window", () => {
   const entryIn = (namespace: string) => ({ namespace }) as Entry;
 

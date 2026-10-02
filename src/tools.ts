@@ -11827,10 +11827,12 @@ export function registerTools(
               const completedTasks = suppressDefaults
                 ? getCompletedTaskNamespaces(db)
                 : new Set<string>();
-              head = rerankQueryResults(head, queryParams, completedTasks, trackedStatuses);
               if (suppressDefaults) {
                 tail = tail.filter((entry) => !isSuppressedByDefaultQueryRules(entry, completedTasks));
               }
+              // The tail is access- and suppression-filtered by now, so it may
+              // join the exact-anchor uniqueness count without leaking anything.
+              head = rerankQueryResults(head, queryParams, completedTasks, trackedStatuses, { anchorPool: tail });
               results = [...head, ...tail];
               if (results.length > MAX_QUERY_SNAPSHOT_MATCHES) {
                 results = results.slice(0, MAX_QUERY_SNAPSHOT_MATCHES);
