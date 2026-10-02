@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll } from "vitest";
 import { rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import express from "express";
@@ -8,8 +8,10 @@ import type { DeviceStateData } from "../../src/onboarding/state.js";
 import { MockWifiAdapter } from "../../src/onboarding/wifi.js";
 import { MockApAdapter } from "../../src/onboarding/ap.js";
 import { createWizardRoutes } from "../../src/onboarding/wizard-routes.js";
+import { createTestStorage } from "../helpers/test-storage.js";
 
-const TEST_DIR = "/tmp/munin-wizard-routes-test";
+const TEST_STORAGE = createTestStorage("wizard-routes");
+const TEST_DIR = TEST_STORAGE.dir;
 
 // POST /setup/connect kicks off an untracked background setTimeout that
 // transitions the state file (e.g. to RUNNING_UNCLAIMED) ~100ms after the
@@ -35,6 +37,8 @@ let wifi: MockWifiAdapter;
 let ap: MockApAdapter;
 let transitionCalled: boolean;
 let app: ReturnType<typeof express>;
+
+afterAll(TEST_STORAGE.cleanup);
 
 beforeEach(() => {
   testDir = join(TEST_DIR, String(testCounter++));

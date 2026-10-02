@@ -1,13 +1,17 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
 import { existsSync, unlinkSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DeviceState, hashSecret } from "../../src/onboarding/state.js";
 import type { DeviceStateData } from "../../src/onboarding/state.js";
 import { MockWifiAdapter } from "../../src/onboarding/wifi.js";
 import { ConnectivityWatchdog, WATCHDOG_FALLBACK_THRESHOLD_MS } from "../../src/onboarding/watchdog.js";
+import { createTestStorage } from "../helpers/test-storage.js";
 
-const TEST_DIR = "/tmp/munin-watchdog-test";
+const TEST_STORAGE = createTestStorage("watchdog");
+const TEST_DIR = TEST_STORAGE.dir;
 const STATE_FILE = join(TEST_DIR, "device-state.json");
+
+afterAll(TEST_STORAGE.cleanup);
 
 function cleanup() {
   if (existsSync(STATE_FILE)) unlinkSync(STATE_FILE);

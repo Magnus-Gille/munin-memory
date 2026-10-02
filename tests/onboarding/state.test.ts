@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll } from "vitest";
 import { existsSync, unlinkSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -9,10 +9,14 @@ import {
   deriveDeviceId,
 } from "../../src/onboarding/state.js";
 import type { DeviceStateData, DeviceStateType } from "../../src/onboarding/state.js";
+import { createTestStorage } from "../helpers/test-storage.js";
 
-const TEST_DIR = "/tmp/munin-onboarding-state-test";
+const TEST_STORAGE = createTestStorage("onboarding-state");
+const TEST_DIR = TEST_STORAGE.dir;
 const STATE_FILE = join(TEST_DIR, "device-state.json");
 const ENV_FILE = join(TEST_DIR, ".env");
+
+afterAll(TEST_STORAGE.cleanup);
 
 function cleanup() {
   for (const f of [STATE_FILE, STATE_FILE + ".tmp", ENV_FILE]) {

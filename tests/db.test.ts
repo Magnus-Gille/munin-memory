@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
 import Database from "better-sqlite3";
 import { spawn } from "node:child_process";
 import { unlinkSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -67,9 +67,13 @@ import {
 import { CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX } from "../src/commitment-status.js";
 import { embeddingToBuffer } from "../src/embeddings.js";
 import { namespacePrefixSuccessor } from "../src/internal/namespace-filter.js";
+import { createTestStorage } from "./helpers/test-storage.js";
 
-const TEST_DB_PATH = "/tmp/munin-memory-test.db";
-const VEC_PROBE_PATH = "/tmp/munin-memory-test-vec-probe.db";
+const TEST_STORAGE = createTestStorage("db");
+const TEST_DIR = TEST_STORAGE.dir;
+const TEST_DB_PATH = TEST_STORAGE.path;
+const testDbPath = (filename: string): string => join(TEST_DIR, filename);
+const VEC_PROBE_PATH = testDbPath("vec-probe.db");
 
 function cleanupTestDb() {
   for (const suffix of ["", "-wal", "-shm"]) {
@@ -99,6 +103,8 @@ afterEach(() => {
   db.close();
   cleanupTestDb();
 });
+
+afterAll(TEST_STORAGE.cleanup);
 
 describe("namespacePrefixSuccessor", () => {
   it("advances supplementary-plane code points without using U+FFFF sentinels", () => {
@@ -197,7 +203,7 @@ describe("parsePragmaInt", () => {
   });
 
   it("valid cache_size value applies the PRAGMA; junk value does NOT", () => {
-    const goodDb = initDatabase("/tmp/munin-pragma-good-test.db");
+    const goodDb = initDatabase(testDbPath("pragma-good.db"));
     try {
       // pragma was set via valid "1024" input (zero-appliance profile or direct env)
       // We test the pure helper, then check that a junk value would not be applied.
@@ -213,7 +219,7 @@ describe("parsePragmaInt", () => {
     } finally {
       goodDb.close();
       for (const suffix of ["", "-wal", "-shm"]) {
-        const p = "/tmp/munin-pragma-good-test.db" + suffix;
+        const p = testDbPath("pragma-good.db") + suffix;
         if (existsSync(p)) unlinkSync(p);
       }
     }
@@ -3138,16 +3144,16 @@ describe("getEmbeddingQueueCounts", () => {
 
   beforeEach(() => {
     for (const suffix of ["", "-wal", "-shm"]) {
-      const p = "/tmp/munin-health-embed-test.db" + suffix;
+      const p = testDbPath("health-embed.db") + suffix;
       if (existsSync(p)) unlinkSync(p);
     }
-    db = initDatabase("/tmp/munin-health-embed-test.db");
+    db = initDatabase(testDbPath("health-embed.db"));
   });
 
   afterEach(() => {
     db.close();
     for (const suffix of ["", "-wal", "-shm"]) {
-      const p = "/tmp/munin-health-embed-test.db" + suffix;
+      const p = testDbPath("health-embed.db") + suffix;
       if (existsSync(p)) unlinkSync(p);
     }
   });
@@ -3223,16 +3229,16 @@ describe("getMemorySizeCounts", () => {
 
   beforeEach(() => {
     for (const suffix of ["", "-wal", "-shm"]) {
-      const p = "/tmp/munin-health-size-test.db" + suffix;
+      const p = testDbPath("health-size.db") + suffix;
       if (existsSync(p)) unlinkSync(p);
     }
-    db = initDatabase("/tmp/munin-health-size-test.db");
+    db = initDatabase(testDbPath("health-size.db"));
   });
 
   afterEach(() => {
     db.close();
     for (const suffix of ["", "-wal", "-shm"]) {
-      const p = "/tmp/munin-health-size-test.db" + suffix;
+      const p = testDbPath("health-size.db") + suffix;
       if (existsSync(p)) unlinkSync(p);
     }
   });
@@ -3268,16 +3274,16 @@ describe("getHealthRetrievalMetrics", () => {
 
   beforeEach(() => {
     for (const suffix of ["", "-wal", "-shm"]) {
-      const p = "/tmp/munin-health-retrieval-test.db" + suffix;
+      const p = testDbPath("health-retrieval.db") + suffix;
       if (existsSync(p)) unlinkSync(p);
     }
-    db = initDatabase("/tmp/munin-health-retrieval-test.db");
+    db = initDatabase(testDbPath("health-retrieval.db"));
   });
 
   afterEach(() => {
     db.close();
     for (const suffix of ["", "-wal", "-shm"]) {
-      const p = "/tmp/munin-health-retrieval-test.db" + suffix;
+      const p = testDbPath("health-retrieval.db") + suffix;
       if (existsSync(p)) unlinkSync(p);
     }
   });
@@ -3365,16 +3371,16 @@ describe("getRetrievalLatencyPercentiles", () => {
 
   beforeEach(() => {
     for (const suffix of ["", "-wal", "-shm"]) {
-      const p = "/tmp/munin-health-latency-test.db" + suffix;
+      const p = testDbPath("health-latency.db") + suffix;
       if (existsSync(p)) unlinkSync(p);
     }
-    db = initDatabase("/tmp/munin-health-latency-test.db");
+    db = initDatabase(testDbPath("health-latency.db"));
   });
 
   afterEach(() => {
     db.close();
     for (const suffix of ["", "-wal", "-shm"]) {
-      const p = "/tmp/munin-health-latency-test.db" + suffix;
+      const p = testDbPath("health-latency.db") + suffix;
       if (existsSync(p)) unlinkSync(p);
     }
   });
@@ -3455,16 +3461,16 @@ describe("recordAccessDenied + getAccessDeniedCount7d", () => {
 
   beforeEach(() => {
     for (const suffix of ["", "-wal", "-shm"]) {
-      const p = "/tmp/munin-access-denied-test.db" + suffix;
+      const p = testDbPath("access-denied.db") + suffix;
       if (existsSync(p)) unlinkSync(p);
     }
-    db = initDatabase("/tmp/munin-access-denied-test.db");
+    db = initDatabase(testDbPath("access-denied.db"));
   });
 
   afterEach(() => {
     db.close();
     for (const suffix of ["", "-wal", "-shm"]) {
-      const p = "/tmp/munin-access-denied-test.db" + suffix;
+      const p = testDbPath("access-denied.db") + suffix;
       if (existsSync(p)) unlinkSync(p);
     }
   });
@@ -3533,16 +3539,16 @@ describe("countUnusedSurfaces — owner gate", () => {
 
   beforeEach(() => {
     for (const suffix of ["", "-wal", "-shm"]) {
-      const p = "/tmp/munin-unused-gate-test.db" + suffix;
+      const p = testDbPath("unused-gate.db") + suffix;
       if (existsSync(p)) unlinkSync(p);
     }
-    db = initDatabase("/tmp/munin-unused-gate-test.db");
+    db = initDatabase(testDbPath("unused-gate.db"));
   });
 
   afterEach(() => {
     db.close();
     for (const suffix of ["", "-wal", "-shm"]) {
-      const p = "/tmp/munin-unused-gate-test.db" + suffix;
+      const p = testDbPath("unused-gate.db") + suffix;
       if (existsSync(p)) unlinkSync(p);
     }
   });
@@ -3562,16 +3568,16 @@ describe("getClassificationDistribution", () => {
 
   beforeEach(() => {
     for (const suffix of ["", "-wal", "-shm"]) {
-      const p = "/tmp/munin-health-class-test.db" + suffix;
+      const p = testDbPath("health-class.db") + suffix;
       if (existsSync(p)) unlinkSync(p);
     }
-    db = initDatabase("/tmp/munin-health-class-test.db");
+    db = initDatabase(testDbPath("health-class.db"));
   });
 
   afterEach(() => {
     db.close();
     for (const suffix of ["", "-wal", "-shm"]) {
-      const p = "/tmp/munin-health-class-test.db" + suffix;
+      const p = testDbPath("health-class.db") + suffix;
       if (existsSync(p)) unlinkSync(p);
     }
   });
@@ -3607,16 +3613,16 @@ describe("getSecurityEventCounts", () => {
 
   beforeEach(() => {
     for (const suffix of ["", "-wal", "-shm"]) {
-      const p = "/tmp/munin-health-security-test.db" + suffix;
+      const p = testDbPath("health-security.db") + suffix;
       if (existsSync(p)) unlinkSync(p);
     }
-    db = initDatabase("/tmp/munin-health-security-test.db");
+    db = initDatabase(testDbPath("health-security.db"));
   });
 
   afterEach(() => {
     db.close();
     for (const suffix of ["", "-wal", "-shm"]) {
-      const p = "/tmp/munin-health-security-test.db" + suffix;
+      const p = testDbPath("health-security.db") + suffix;
       if (existsSync(p)) unlinkSync(p);
     }
   });
@@ -3675,16 +3681,16 @@ describe("getLastSynthesisAt / getAvgConsolidationLatencyMs", () => {
 
   beforeEach(() => {
     for (const suffix of ["", "-wal", "-shm"]) {
-      const p = "/tmp/munin-health-consol-test.db" + suffix;
+      const p = testDbPath("health-consol.db") + suffix;
       if (existsSync(p)) unlinkSync(p);
     }
-    db = initDatabase("/tmp/munin-health-consol-test.db");
+    db = initDatabase(testDbPath("health-consol.db"));
   });
 
   afterEach(() => {
     db.close();
     for (const suffix of ["", "-wal", "-shm"]) {
-      const p = "/tmp/munin-health-consol-test.db" + suffix;
+      const p = testDbPath("health-consol.db") + suffix;
       if (existsSync(p)) unlinkSync(p);
     }
   });

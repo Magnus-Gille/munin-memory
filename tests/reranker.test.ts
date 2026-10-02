@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
 import { existsSync, unlinkSync } from "node:fs";
 import type Database from "better-sqlite3";
 import { initDatabase, writeState, appendLog, getById } from "../src/db.js";
@@ -26,8 +26,10 @@ import {
 } from "../src/internal/reranker.js";
 import type { Entry, TrackedStatusRow } from "../src/types.js";
 import type { QueryResult } from "../src/types.js";
+import { createTestStorage } from "./helpers/test-storage.js";
 
-const TEST_DB_PATH = "/tmp/munin-memory-reranker-test.db";
+const TEST_STORAGE = createTestStorage("reranker");
+const TEST_DB_PATH = TEST_STORAGE.path;
 
 function cleanup() {
   for (const suffix of ["", "-wal", "-shm"]) {
@@ -47,6 +49,8 @@ afterEach(() => {
   db.close();
   cleanup();
 });
+
+afterAll(TEST_STORAGE.cleanup);
 
 /**
  * Regression guard for #74: the recency tie-break must order heuristic-tied

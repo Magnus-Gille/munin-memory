@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll } from "vitest";
 import { existsSync, unlinkSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import express from "express";
@@ -6,8 +6,10 @@ import request from "supertest";
 import { DeviceState, hashSecret } from "../../src/onboarding/state.js";
 import type { DeviceStateData } from "../../src/onboarding/state.js";
 import { createClaimRoutes, createAdminRoutes } from "../../src/onboarding/claim-routes.js";
+import { createTestStorage } from "../helpers/test-storage.js";
 
-const TEST_DIR = "/tmp/munin-claim-routes-test";
+const TEST_STORAGE = createTestStorage("claim-routes");
+const TEST_DIR = TEST_STORAGE.dir;
 const STATE_FILE = join(TEST_DIR, "device-state.json");
 const ENV_FILE = join(TEST_DIR, ".env");
 
@@ -28,6 +30,8 @@ function cleanup() {
 
 const CLAIM_CODE = "HT7K2M";
 const CLAIM_CODE_HASH = hashSecret(CLAIM_CODE);
+
+afterAll(TEST_STORAGE.cleanup);
 
 function makeState(overrides?: Partial<DeviceStateData>): DeviceStateData {
   return {

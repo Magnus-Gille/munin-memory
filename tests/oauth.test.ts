@@ -1,11 +1,13 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll } from "vitest";
 import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
 import { initDatabase } from "../src/db.js";
 import { MuninOAuthProvider, MuninClientsStore, type ExtendedAuthInfo } from "../src/oauth.js";
 import type { OAuthClientInformationFull } from "@modelcontextprotocol/sdk/shared/auth.js";
+import { createTestStorage } from "./helpers/test-storage.js";
 
-const TEST_DB_PATH = "/tmp/munin-memory-oauth-test.db";
+const TEST_STORAGE = createTestStorage("oauth");
+const TEST_DB_PATH = TEST_STORAGE.path;
 
 function cleanupTestDb() {
   for (const suffix of ["", "-wal", "-shm"]) {
@@ -16,6 +18,8 @@ function cleanupTestDb() {
 
 let db: Database.Database;
 let provider: MuninOAuthProvider;
+
+afterAll(TEST_STORAGE.cleanup);
 
 const LEGACY_API_KEY = "test-legacy-api-key-12345";
 const DPA_API_KEY = "test-dpa-api-key-67890";

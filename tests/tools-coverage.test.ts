@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
 import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -17,8 +17,11 @@ import {
   embeddingToBuffer,
   getActiveEmbeddingModel,
 } from "../src/embeddings.js";
+import { createTestStorage } from "./helpers/test-storage.js";
 
-const TEST_DB_PATH = "/tmp/munin-memory-tools-coverage-test.db";
+const TEST_STORAGE = createTestStorage("tools-coverage");
+const TEST_DB_PATH = TEST_STORAGE.path;
+const PROBE_STORAGE = createTestStorage("tools-coverage-probe");
 const EMBEDDING_DIM = 384;
 
 function cleanupTestDb() {
@@ -30,17 +33,17 @@ function cleanupTestDb() {
 
 // Probe vec availability at module load time (before any tests run);
 // skipIf evaluates at suite collection time, before beforeEach.
-const PROBE_DB_PATH = "/tmp/munin-memory-tools-coverage-probe.db";
-const probeDb = initDatabase(PROBE_DB_PATH);
+const probeDb = initDatabase(PROBE_STORAGE.path);
 const vecAvailable = vecLoaded();
 probeDb.close();
-for (const suffix of ["", "-wal", "-shm"]) {
-  const p = PROBE_DB_PATH + suffix;
-  if (existsSync(p)) unlinkSync(p);
-}
 
 let db: Database.Database;
 let server: Server;
+
+afterAll(() => {
+  TEST_STORAGE.cleanup();
+  PROBE_STORAGE.cleanup();
+});
 
 async function callTool(name: string, args: Record<string, unknown> = {}): Promise<unknown> {
   const handler = (server as unknown as { _requestHandlers: Map<string, Function> })._requestHandlers?.get("tools/call");
