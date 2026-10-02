@@ -201,11 +201,14 @@ separate from retrieval reports so answer accuracy cannot be confused with
   for the run.
 - `runner_mode` — which runner code path actually produced the numbers.
   `"raw"` calls `src/db.ts` query functions directly (faster, no rerank,
-  no injectors). `"production_ranker"` (PR 2b) over-fetches per source
-  by `QUERY_RERANK_OVERFETCH_MULTIPLIER` and runs results through the
-  same canonical/attention injectors + `rerankQueryResults` +
-  completed-task filter that `memory_query` uses, then slices to the
-  requested limit. Select via `runnerMode` on `runBenchmark` or
+  no injectors, expired entries included, no semantic-distance cutoff).
+  `"production_ranker"` mirrors the owner-visible default `memory_query`
+  pipeline: probe up to 501 candidates per source, keep the best 500 before
+  hybrid fusion, exclude expired state and apply `MUNIN_SEMANTIC_MAX_DISTANCE`.
+  Canonical/attention injection and reranking operate on the first 50
+  candidates; the remaining candidates keep retrieval order and contribute
+  to exact-anchor uniqueness checks. Completed-task suppression applies to
+  both groups before slicing to the requested limit. Select via `runnerMode` on `runBenchmark` or
   `--runner-mode` on the adapter CLIs.
 - `runner_mode_requested` (PR 2b) — what the caller asked for. Equal to
   `runner_mode` for non-degraded runs. When they differ, the runner

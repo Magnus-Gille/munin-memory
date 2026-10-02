@@ -24,6 +24,8 @@ import {
 } from "./access.js";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { namespaceFilterScope } from "./internal/namespace-filter.js";
+import { fuseHybridResults } from "./internal/hybrid-fusion.js";
+export { fuseHybridResults } from "./internal/hybrid-fusion.js";
 import { withQueryProbeLimit } from "./internal/query-probe.js";
 import {
   writeState,
@@ -790,40 +792,6 @@ function buildQueryAnalyticsVectors(page: QuerySnapshotPage): {
     resultNamespaces: kept.map((entry) => entry.namespace),
     resultRanks: kept.map((entry) => entry.rank),
   };
-}
-
-export function fuseHybridResults(
-  ftsResults: ReturnType<typeof queryEntriesLexicalScored>,
-  semanticResults: ReturnType<typeof queryEntriesSemanticScored>,
-): HybridQueryResult[] {
-  const lexicalById = new Map(ftsResults.map((result) => [result.entry.id, result] as const));
-  const semanticById = new Map(semanticResults.map((result) => [result.entry.id, result] as const));
-  const entryMap = new Map<string, Entry>();
-  for (const result of ftsResults) entryMap.set(result.entry.id, result.entry);
-  for (const result of semanticResults) entryMap.set(result.entry.id, result.entry);
-
-  const allIds = new Set<string>([...lexicalById.keys(), ...semanticById.keys()]);
-  const k = 60;
-  const scored: HybridQueryResult[] = [];
-
-  for (const id of allIds) {
-    const lexical = lexicalById.get(id);
-    const semantic = semanticById.get(id);
-    let score = 0;
-    if (lexical) score += 1 / (k + lexical.rank);
-    if (semantic) score += 1 / (k + semantic.rank);
-    scored.push({
-      entry: entryMap.get(id)!,
-      score,
-      lexicalRank: lexical?.rank,
-      lexicalScore: lexical?.score,
-      semanticRank: semantic?.rank,
-      semanticDistance: semantic?.distance,
-    });
-  }
-
-  scored.sort(compareHybridResults);
-  return scored;
 }
 
 // --- Display timestamp formatting ---
@@ -2019,7 +1987,6 @@ import {
   DATE_PATTERN,
   LIFECYCLE_TAGS,
   RELAXED_QUERY_STOPWORDS,
-  compareHybridResults,
   parseTags,
   isStale,
   getFreshnessScore,

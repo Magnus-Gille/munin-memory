@@ -122,7 +122,6 @@ describe("benchmark runner — production_ranker parity with memory_query", () =
       query,
       search_mode: searchMode,
       limit: 10,
-      include_expired: true,
     });
     const prod = parseMemoryQuery(prodRaw);
     const prodMode = prod.search_mode_actual ?? prod.search_mode;
@@ -155,13 +154,10 @@ describe("benchmark runner — production_ranker parity with memory_query", () =
     expect(report.queries).toHaveLength(1);
     const runnerIds = report.queries[0].result_ids;
 
-    // 3. Parity: both surfaces must agree on the ordered top-k IDs.
-    // We compare the prefix up to min(len) so that limit cutoffs match
-    // exactly — they should already be the same since both apply
-    // requestedLimit=10, but if memory_query returns fewer due to a
-    // post-rerank filter (e.g. ACL), allow the runner to return the
-    // same prefix.
-    expect(runnerIds.slice(0, prodIds.length)).toEqual(prodIds);
+    // 3. Parity: both surfaces must agree on the complete ordered top-k IDs.
+    // A prefix comparison hides surplus runner candidates and lets a broken
+    // production fetch window drift without failing this guard.
+    expect(runnerIds).toEqual(prodIds);
     // Sanity: the runner must record the actual mode the same way.
     if (prodMode !== searchMode) {
       expect(report.queries[0].actual_mode).toBe(prodMode);

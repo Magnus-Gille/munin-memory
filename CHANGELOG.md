@@ -20,6 +20,12 @@ changelog is the canonical record of what moved.
 
 ### Changed
 
+- **Benchmark production-query parity (#343).** `production_ranker` now uses
+  the same 500-candidate cap per retrieval leg, semantic-distance cutoff and
+  default expiry filtering as `memory_query`. It also mirrors the 50-candidate
+  rerank window, suppression and exact-anchor uniqueness checks across the
+  remaining candidates. Raw benchmark retrieval retains its existing behavior.
+
 - **`memory_query` ordering stays anchored to relevance (#335, #248).** Inside the
   50-candidate rerank window, each entry's ranking position is now adjusted by a bounded
   amount (structural class: up to five positions' worth of lift or one of demotion;

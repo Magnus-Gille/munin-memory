@@ -29,6 +29,8 @@ const BENCHMARK_DIR = resolve(__dirname, "..", "benchmark");
 const ALLOWED_RERANKER_IMPORTS = new Set<string>([
   "buildRelaxedLexicalQuery",
   "QUERY_RERANK_OVERFETCH_MULTIPLIER",
+  "QUERY_RERANK_WINDOW",
+  "isSuppressedByDefaultQueryRules",
   "DEFAULT_SEARCH_RECENCY_WEIGHT",
   "shouldApplyDefaultQuerySuppression",
   "getTrackedStatusAssessments",
