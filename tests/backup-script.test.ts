@@ -147,7 +147,7 @@ describe("backup destination safety", () => {
       ...scriptEnv(),
       HOME: testPath("home"),
       MUNIN_BACKUP_DIR: join(mountFixture, "munin-memory"),
-      MUNIN_BACKUP_MOUNT: "/tmp",
+      MUNIN_BACKUP_MOUNT: mountFixture,
       MUNIN_MOUNTPOINT_BIN: "false",
     };
 
