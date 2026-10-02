@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll } from "vitest";
 import { existsSync, unlinkSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
@@ -12,12 +12,16 @@ import {
   type RequestLogEntry,
 } from "../src/index.js";
 import { MCP_SERVER_INSTRUCTIONS } from "../src/tools.js";
+import { createTestStorage } from "./helpers/test-storage.js";
 
-const TEST_DB_PATH = "/tmp/munin-memory-http-transport-test.db";
+const TEST_STORAGE = createTestStorage("http-transport");
+const TEST_DB_PATH = TEST_STORAGE.path;
 const LEGACY_API_KEY = "http-transport-test-api-key";
 const DPA_API_KEY = "http-transport-test-dpa-api-key";
 const CONSUMER_API_KEY = "http-transport-test-consumer-api-key";
 const ISSUER_URL = "https://test.example.com";
+
+afterAll(TEST_STORAGE.cleanup);
 
 function cleanupTestDb() {
   for (const suffix of ["", "-wal", "-shm"]) {

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
 import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
 import {
@@ -37,8 +37,10 @@ import {
 } from "../src/consolidation.js";
 import type { Entry } from "../src/types.js";
 import type { AccessContext } from "../src/access.js";
+import { createTestStorage } from "./helpers/test-storage.js";
 
-const TEST_DB_PATH = "/tmp/munin-memory-consolidation-synthesis-test.db";
+const TEST_STORAGE = createTestStorage("consolidation-synthesis");
+const TEST_DB_PATH = TEST_STORAGE.path;
 
 function cleanupTestDb() {
   for (const suffix of ["", "-wal", "-shm"]) {
@@ -119,6 +121,8 @@ afterEach(async () => {
     }
   }
 });
+
+afterAll(TEST_STORAGE.cleanup);
 
 // ─── buildSynthesisPrompt ────────────────────────────────────────────────────
 

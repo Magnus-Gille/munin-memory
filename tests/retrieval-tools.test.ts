@@ -1,12 +1,14 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll } from "vitest";
 import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { AccessContext } from "../src/access.js";
 import { initDatabase, writeState } from "../src/db.js";
 import { registerTools } from "../src/tools.js";
+import { createTestStorage } from "./helpers/test-storage.js";
 
-const TEST_DB_PATH = "/tmp/munin-memory-retrieval-tools-test.db";
+const TEST_STORAGE = createTestStorage("retrieval-tools");
+const TEST_DB_PATH = TEST_STORAGE.path;
 
 function cleanupTestDb() {
   for (const suffix of ["", "-wal", "-shm"]) {
@@ -17,6 +19,8 @@ function cleanupTestDb() {
 
 let db: Database.Database;
 let server: Server;
+
+afterAll(TEST_STORAGE.cleanup);
 
 async function callTool(name: string, args: Record<string, unknown> = {}): Promise<unknown> {
   const handler = (server as unknown as { _requestHandlers: Map<string, Function> })._requestHandlers?.get("tools/call");

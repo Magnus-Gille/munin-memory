@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi, type MockInstance } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi, type MockInstance } from "vitest";
 import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
@@ -45,8 +45,11 @@ import {
 } from "../src/embeddings.js";
 import { executeQuery } from "../benchmark/runner.js";
 import { fuseHybridResults } from "../src/tools.js";
+import { createTestStorage } from "./helpers/test-storage.js";
 
-const TEST_DB_PATH = "/tmp/munin-memory-embeddings-test.db";
+const TEST_STORAGE = createTestStorage("embeddings");
+const TEST_DB_PATH = TEST_STORAGE.path;
+const PROBE_STORAGE = createTestStorage("embeddings-probe");
 const EMBEDDING_DIM = 384;
 
 function cleanupTestDb() {
@@ -106,14 +109,10 @@ let db: Database.Database;
 
 // Probe vec availability at module load time (before any tests run)
 // skipIf evaluates at suite collection time, before beforeEach
-const probeDb = initDatabase("/tmp/munin-memory-embeddings-probe.db");
+const probeDb = initDatabase(PROBE_STORAGE.path);
 const vecAvailable = vecLoaded();
 probeDb.close();
 cleanupTestDb();
-for (const suffix of ["", "-wal", "-shm"]) {
-  const p = "/tmp/munin-memory-embeddings-probe.db" + suffix;
-  if (existsSync(p)) unlinkSync(p);
-}
 
 beforeEach(() => {
   cleanupTestDb();
@@ -121,6 +120,11 @@ beforeEach(() => {
   resetCircuitBreaker();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   _setExtractorForTesting(mockExtractor as any);
+});
+
+afterAll(() => {
+  TEST_STORAGE.cleanup();
+  PROBE_STORAGE.cleanup();
 });
 
 afterEach(async () => {

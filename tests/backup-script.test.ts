@@ -3,12 +3,19 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { createTestStorage } from "./helpers/test-storage.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const backupScript = join(repoRoot, "scripts", "backup-to-nas.sh");
 const statusScript = join(repoRoot, "scripts", "nas-backup-status.sh");
 const backupUnit = readFileSync(join(repoRoot, "munin-backup.service"), "utf8");
+const TEST_STORAGE = createTestStorage("backup-script");
+const testPath = (name: string): string => join(TEST_STORAGE.dir, name);
+// Keep mount and outside fixtures as distinct siblings under one unique root.
+// This remains outside-safe when TMPDIR itself is /tmp on Linux.
+const mountFixture = join(TEST_STORAGE.dir, "mounted-volume");
+const outsideFixture = join(TEST_STORAGE.dir, "outside-volume");
 
 const scratchDirs: string[] = [];
 
@@ -69,6 +76,8 @@ afterEach(() => {
   }
 });
 
+afterAll(TEST_STORAGE.cleanup);
+
 describe("backup destination safety", () => {
   it("keeps inherited temporary paths intact when configuration fails before staging", () => {
     const scratch = makeScratch();
@@ -110,7 +119,7 @@ describe("backup destination safety", () => {
   });
 
   it("fails closed before snapshotting when no destination is explicitly configured", () => {
-    const env = { ...scriptEnv(), HOME: "/tmp/munin-backup-test-home" };
+    const env = { ...scriptEnv(), HOME: testPath("home") };
     delete env.MUNIN_BACKUP_DIR;
 
     const result = spawnSync("bash", [backupScript], { env, encoding: "utf8" });
@@ -122,8 +131,8 @@ describe("backup destination safety", () => {
   it("fails closed when no mount root is explicitly configured", () => {
     const env = {
       ...scriptEnv(),
-      HOME: "/tmp/munin-backup-test-home",
-      MUNIN_BACKUP_DIR: "/tmp/munin-backup-test-mount/munin-memory",
+      HOME: testPath("home"),
+      MUNIN_BACKUP_DIR: testPath("mount/munin-memory"),
     };
     delete env.MUNIN_BACKUP_MOUNT;
 
@@ -136,9 +145,9 @@ describe("backup destination safety", () => {
   it("fails before snapshotting when the configured mount is not active", () => {
     const env = {
       ...scriptEnv(),
-      HOME: "/tmp/munin-backup-test-home",
-      MUNIN_BACKUP_DIR: "/tmp/munin-memory",
-      MUNIN_BACKUP_MOUNT: "/tmp",
+      HOME: testPath("home"),
+      MUNIN_BACKUP_DIR: join(mountFixture, "munin-memory"),
+      MUNIN_BACKUP_MOUNT: mountFixture,
       MUNIN_MOUNTPOINT_BIN: "false",
     };
 
@@ -151,9 +160,9 @@ describe("backup destination safety", () => {
   it("rejects a destination outside the configured mount root", () => {
     const env = {
       ...scriptEnv(),
-      HOME: "/tmp/munin-backup-test-home",
-      MUNIN_BACKUP_DIR: "/var/tmp/munin-memory",
-      MUNIN_BACKUP_MOUNT: "/tmp",
+      HOME: testPath("home"),
+      MUNIN_BACKUP_DIR: join(outsideFixture, "munin-memory"),
+      MUNIN_BACKUP_MOUNT: mountFixture,
       MUNIN_MOUNTPOINT_BIN: "true",
     };
 
@@ -166,8 +175,8 @@ describe("backup destination safety", () => {
   it("rejects the system root as a backup mount", () => {
     const env = {
       ...scriptEnv(),
-      HOME: "/tmp/munin-backup-test-home",
-      MUNIN_BACKUP_DIR: "/tmp/munin-memory",
+      HOME: testPath("home"),
+      MUNIN_BACKUP_DIR: testPath("munin-memory"),
       MUNIN_BACKUP_MOUNT: "/",
       MUNIN_MOUNTPOINT_BIN: "true",
     };
@@ -181,7 +190,7 @@ describe("backup destination safety", () => {
   it("requires the destination to be a strict child of the mount root", () => {
     const env = {
       ...scriptEnv(),
-      HOME: "/tmp/munin-backup-test-home",
+      HOME: testPath("home"),
       MUNIN_BACKUP_DIR: "/tmp",
       MUNIN_BACKUP_MOUNT: "/tmp",
       MUNIN_MOUNTPOINT_BIN: "true",
