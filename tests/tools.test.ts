@@ -559,6 +559,60 @@ describe("memory_write", () => {
 });
 
 describe("memory_write patch", () => {
+  it("returns the persisted patch timestamp for the next CAS write", async () => {
+    const initialRaw = await callTool("memory_write", {
+      namespace: "projects/patch-cas",
+      key: "notes",
+      content: "version one",
+    });
+    const initial = parseToolResponse(initialRaw) as { updated_at: string };
+
+    const firstPatchRaw = await callTool("memory_write", {
+      namespace: "projects/patch-cas",
+      key: "notes",
+      patch: { content_append: "version two" },
+      expected_updated_at: initial.updated_at,
+    });
+    const firstPatch = parseToolResponse(firstPatchRaw) as {
+      status: string;
+      updated_at?: string;
+    };
+    expect(firstPatch.status).toBe("patched");
+    expect(firstPatch.updated_at).toBeTruthy();
+
+    const readFirstRaw = await callTool("memory_read", {
+      namespace: "projects/patch-cas",
+      key: "notes",
+    });
+    const persistedFirst = parseToolResponse(readFirstRaw) as { updated_at: string };
+    expect(firstPatch.updated_at).toBe(persistedFirst.updated_at);
+
+    const secondPatchRaw = await callTool("memory_write", {
+      namespace: "projects/patch-cas",
+      key: "notes",
+      patch: { content_append: "version three" },
+      expected_updated_at: firstPatch.updated_at,
+    });
+    const secondPatch = parseToolResponse(secondPatchRaw) as {
+      status: string;
+      updated_at?: string;
+    };
+    expect(secondPatch.status).toBe("patched");
+    expect(secondPatch.updated_at).toBeTruthy();
+
+    const stalePatchRaw = await callTool("memory_write", {
+      namespace: "projects/patch-cas",
+      key: "notes",
+      patch: { content_append: "stale" },
+      expected_updated_at: initial.updated_at,
+    });
+    expect(parseToolResponse(stalePatchRaw)).toMatchObject({
+      ok: false,
+      error: "conflict",
+      current_updated_at: secondPatch.updated_at,
+    });
+  });
+
   it("appends content to existing entry", async () => {
     await callTool("memory_write", {
       namespace: "projects/test",

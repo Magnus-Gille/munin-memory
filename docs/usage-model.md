@@ -257,7 +257,8 @@ See [review-inbox.md](review-inbox.md) for lifecycle, retention, and security de
 ### Concurrent state writes
 
 The full-content `memory_write` path has three explicit write modes. Patch writes retain
-their existing optional `expected_updated_at` CAS contract.
+their existing optional `expected_updated_at` CAS contract. A successful patch returns
+its persisted `updated_at`, which callers can pass to the next CAS write.
 
 | Intent | Parameters | Result when the key already exists |
 |--------|------------|------------------------------------|

@@ -20,6 +20,10 @@ changelog is the canonical record of what moved.
 
 ### Changed
 
+- **Successful `memory_write` patches return their new `updated_at` (#278, item 2).**
+  Callers can immediately use the patch response timestamp as the expected version
+  for their next CAS write. Conflict and not-found responses keep their existing shape.
+
 - **Benchmark production-query parity (#343).** `production_ranker` now uses
   the same 500-candidate cap per retrieval leg, semantic-distance cutoff and
   default expiry filtering as `memory_query`. It also mirrors the 50-candidate
