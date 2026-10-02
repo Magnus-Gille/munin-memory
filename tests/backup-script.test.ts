@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { createTestStorage } from "./helpers/test-storage.js";
@@ -12,7 +12,10 @@ const statusScript = join(repoRoot, "scripts", "nas-backup-status.sh");
 const backupUnit = readFileSync(join(repoRoot, "munin-backup.service"), "utf8");
 const TEST_STORAGE = createTestStorage("backup-script");
 const testPath = (name: string): string => join(TEST_STORAGE.dir, name);
-const mountFixture = join("/tmp", `munin-backup-mount-${basename(TEST_STORAGE.dir)}`);
+// Keep mount and outside fixtures as distinct siblings under one unique root.
+// This remains outside-safe when TMPDIR itself is /tmp on Linux.
+const mountFixture = join(TEST_STORAGE.dir, "mounted-volume");
+const outsideFixture = join(TEST_STORAGE.dir, "outside-volume");
 
 const scratchDirs: string[] = [];
 
@@ -158,8 +161,8 @@ describe("backup destination safety", () => {
     const env = {
       ...scriptEnv(),
       HOME: testPath("home"),
-      MUNIN_BACKUP_DIR: testPath("var/munin-memory"),
-      MUNIN_BACKUP_MOUNT: "/tmp",
+      MUNIN_BACKUP_DIR: join(outsideFixture, "munin-memory"),
+      MUNIN_BACKUP_MOUNT: mountFixture,
       MUNIN_MOUNTPOINT_BIN: "true",
     };
 
