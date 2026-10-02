@@ -290,9 +290,9 @@ check with `memory_read` or `memory_history` before repeating it. The same guida
 (and the request id) is added when a write's JSON response body cannot be read or an
 HTTP error occurs. Asynchronous SSE stream failures remain outside this guidance.
 The bridge's own timeout is never retried. Each request carries an
-`X-Munin-Request-Id` header (reused across retries) that appears in
-bridge errors and stderr; the server logs it as `requestId` when well-formed and
-otherwise ignores it.
+`X-Munin-Request-Id` header (reused across retries) that appears in bridge errors
+and network retry and failure stderr logs; the server logs it as `requestId` when
+well-formed and otherwise ignores it.
 
 ## Grimnir ecosystem
 

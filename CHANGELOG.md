@@ -285,7 +285,8 @@ changelog is the canonical record of what moved.
   same guidance and the request id. Asynchronous SSE failures remain outside this
   guidance. The bridge's own timeout is never retried. Each
   forwarded request carries a random `X-Munin-Request-Id` header, reused across
-  retries and shown in bridge errors and stderr; the server logs it as `requestId`
+  retries and shown in bridge errors and network retry and failure stderr logs;
+  the server logs it as `requestId`
   in the request log line only when it matches `[A-Za-z0-9_-]{8,64}`, and does not
   use it for anything else. `scripts/stdio-bridge.mjs` gains the cause reporting
   only (identical table, tested).
