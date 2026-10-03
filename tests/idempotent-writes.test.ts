@@ -97,6 +97,42 @@ describe("durable idempotency for memory writes, logs, and status updates", () =
     db.close();
   });
 
+  it.each(["memory_write", "memory_log"])("replays %s corrections without creating another revision", async (tool) => {
+    const db = initDatabase(":memory:");
+    const call = makeCall(db);
+    const namespace = "testing/replay-correction";
+    const seedArgs = { namespace, content: "Original evidence", ...(tool === "memory_write" ? { key: "note" } : {}) };
+    const seed = await call(tool, seedArgs);
+    const args = { ...seedArgs, content: "Corrected evidence", supersedes: seed.id,
+      expected_updated_at: seed.updated_at ?? seed.timestamp, idempotency_key: KEY };
+    const first = await call(tool, args);
+    expect(first).toMatchObject({ ok: true, status: "superseded" });
+    const audits = db.prepare("SELECT COUNT(*) AS count FROM audit_log").get();
+    expect(await call(tool, args)).toMatchObject({
+      ok: true, status: "superseded", id: first.id, valid_from: first.valid_from,
+      supersedes: seed.id, idempotency_replayed: true,
+    });
+    expect(entryCount(db, namespace)).toBe(2);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM audit_log").get()).toEqual(audits);
+    db.close();
+  });
+
+  it("rechecks raised namespace floors and retains the owner's explicit below-floor override", async () => {
+    const db = initDatabase(":memory:");
+    const call = makeCall(db, familyContext({ principalType: "agent" }));
+    const args = { namespace: "users/alice/floor", key: "note", content: "internal", idempotency_key: KEY };
+    expect((await call("memory_write", args)).ok).toBe(true);
+    db.prepare("INSERT INTO namespace_classification (namespace_pattern, min_classification, created_at, updated_at) VALUES (?, ?, ?, ?)")
+      .run("users/alice/floor", "client-restricted", "2026-01-01", "2026-01-01");
+    expect(await call("memory_write", args)).toMatchObject({ ok: false, error: "access_denied" });
+    const owner = makeCall(db, { ...ownerContext(), maxClassification: "public", transportType: "consumer" });
+    const override = { namespace: "clients/replay-override", key: "note", content: "Public release",
+      classification: "public", classification_override: true, idempotency_key: KEY };
+    expect((await owner("memory_write", override)).ok).toBe(true);
+    expect(await owner("memory_write", override)).toMatchObject({ ok: true, idempotency_replayed: true });
+    db.close();
+  });
+
   it("replays a write by canonical args and UUID case without returning payload", async () => {
     const db = initDatabase(":memory:");
     const call = makeCall(db);
