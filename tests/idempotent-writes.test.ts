@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { initDatabase } from "../src/db.js";
 import { ownerContext, type AccessContext } from "../src/access.js";
@@ -6,6 +6,7 @@ import { registerTools } from "../src/tools.js";
 import { createTestStorage } from "./helpers/test-storage.js";
 
 const KEY = "a1b2c3d4-e5f6-47a8-9b0c-d1e2f3a4b5c6";
+afterEach(() => vi.useRealTimers());
 
 type Call = (name: string, args?: Record<string, unknown>) => Promise<Record<string, unknown>>;
 
@@ -43,6 +44,47 @@ function entryCount(db: ReturnType<typeof initDatabase>, namespace: string, entr
 }
 
 describe("durable idempotency for memory writes, logs, and status updates", () => {
+  it("does not treat an unknown log validate_only argument as a status preview", async () => {
+    const db = initDatabase(":memory:");
+    const call = makeCall(db);
+    const args = { namespace: "testing/replay-log-preview", content: "Recorded once",
+      validate_only: true, idempotency_key: KEY };
+    expect(await call("memory_log", args)).toMatchObject({ ok: true, idempotency_replayed: false });
+    expect(await call("memory_log", args)).toMatchObject({ ok: true, idempotency_replayed: true });
+    expect(entryCount(db, args.namespace)).toBe(1);
+    db.close();
+  });
+
+  it.each(["memory_write", "memory_log"])("reauthorizes the current successor when replaying a superseded %s", async (tool) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-03T12:00:00.000Z"));
+    const db = initDatabase(":memory:");
+    const call = makeCall(db, familyContext({ principalType: "agent" }));
+    const owner = makeCall(db);
+    const args = { namespace: "users/alice/replay-successor", content: "Original internal",
+      ...(tool === "memory_write" ? { key: "note" } : {}), idempotency_key: KEY };
+    const original = await call(tool, args);
+    expect(original.ok).toBe(true);
+    vi.setSystemTime(Date.now() + 100);
+    const corrected = await owner(tool, {
+      ...args, idempotency_key: undefined, content: "Later internal",
+      supersedes: original.id, expected_updated_at: original.updated_at ?? original.timestamp,
+    });
+    expect(corrected).toMatchObject({ ok: true, status: "superseded" });
+    expect(await call(tool, args)).toMatchObject({
+      ok: true, id: original.id, entry_changed: true, idempotency_replayed: true,
+    });
+    vi.setSystemTime(Date.now() + 100);
+    const restricted = await owner(tool, {
+      ...args, idempotency_key: undefined, content: "Restricted successor",
+      classification: "client-restricted", tags: [], supersedes: corrected.id,
+      expected_updated_at: corrected.updated_at ?? corrected.timestamp,
+    });
+    expect(restricted, JSON.stringify(restricted)).toMatchObject({ ok: true, status: "superseded" });
+    expect(await call(tool, args)).toMatchObject({ ok: false, error: "access_denied" });
+    db.close();
+  });
+
   it("rejects malformed UUIDs without reserving or writing anything", async () => {
     const db = initDatabase(":memory:");
     const call = makeCall(db);

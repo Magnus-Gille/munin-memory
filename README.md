@@ -311,8 +311,9 @@ are preserved. A new intentional operation needs a new key. A dry run
 
 The write and its receipt commit in one SQLite transaction. Replay skips stale
 CAS and correction checks because it retrieves an already committed operation.
-It returns original identifiers, status and timestamps, with `entry_available`
-and `entry_changed` describing the current entry. It does not return cached
+It returns original identifiers, status and timestamps. `entry_available` reports
+whether the original entry still exists; `entry_changed` also marks superseded
+revisions. Classification checks include the successor chain. It does not return cached
 content, status sections, intake reports or hints; read current memory separately.
 Namespace write access, classification and the caller's current visibility ceiling
 are checked again. Revoked access does not grant receipt access.
@@ -327,7 +328,9 @@ A compatible bridge learns support from the authenticated HTTP response header
 `X-Munin-Write-Replay: v1`, then adds a UUID to supported writes that lack one.
 It preserves explicit keys and excludes read calls, notifications and dry runs.
 When a keyed write fails, the error includes the key and same-argument recovery
-instructions. It never automatically retries writes after network errors. Old
+instructions. If the response no longer confirms support, the error still retains
+the key and asks the caller to verify server support before repeating the write.
+It never automatically retries writes after network errors. Old
 servers without the capability header receive no automatically injected key.
 `memory_status.features.idempotent_writes` also exposes server support.
 

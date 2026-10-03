@@ -16,6 +16,8 @@ describe("bridge negotiated write recovery", () => {
     expect(keyed).toMatchObject({ params: { arguments: { idempotency_key: key } } });
     expect(message).not.toMatchObject({ params: { arguments: { idempotency_key: key } } });
     expect(prepareBridgeWriteMessage(keyed, true, () => "different")).toBe(keyed);
+    expect(prepareBridgeWriteMessage(write("memory_log", { validate_only: true }), true, () => key))
+      .toMatchObject({ params: { arguments: { idempotency_key: key } } });
     for (const candidate of [
       write("memory_read"), write("unknown_tool"), write("memory_update_status", { validate_only: true }),
       write("memory_log", { idempotency_key: "invalid-explicit-key" }),

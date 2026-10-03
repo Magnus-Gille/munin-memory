@@ -151,7 +151,7 @@ function rpcCall(id: number, tool: WriteTool, args: Record<string, unknown>): JS
   } as JSONRPCMessage;
 }
 
-async function runRecoveryScenario(tool: WriteTool, mode: FailureMode): Promise<void> {
+async function runRecoveryScenario(tool: WriteTool, mode: FailureMode, omitReplayHeader = false): Promise<void> {
   const http = await startHttp();
   const stdio = fakeStdio();
   let supportsReplay = false;
@@ -205,7 +205,7 @@ async function runRecoveryScenario(tool: WriteTool, mode: FailureMode): Promise<
           status: 200,
           headers: {
             "content-type": "application/json",
-            [WRITE_REPLAY_HEADER]: "v1",
+            ...(omitReplayHeader ? {} : { [WRITE_REPLAY_HEADER]: "v1" }),
           },
         },
       );
@@ -258,6 +258,7 @@ async function runRecoveryScenario(tool: WriteTool, mode: FailureMode): Promise<
     expect(firstError.code).toBe(-32000);
     expect(firstWriteUuid).toBe("11111111-1111-4111-8111-111111111111");
     expect(firstError.message).toContain(firstWriteUuid);
+    if (omitReplayHeader) expect(firstError.message).toContain("support was not confirmed");
     expect(writeAttempts).toBe(1);
 
     if (mode === "before-delivery") {
@@ -310,6 +311,10 @@ describe("HTTP write recovery", () => {
 
   it("does not replay memory_write after a before-delivery failure", async () => {
     await runRecoveryScenario("memory_write", "before-delivery");
+  });
+
+  it("retains an injected key when capability disappears on an unreadable response", async () => {
+    await runRecoveryScenario("memory_log", "after-commit", true);
   });
 
   it("does not advertise write recovery to an unauthenticated caller", async () => {

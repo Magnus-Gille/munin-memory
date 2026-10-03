@@ -7765,8 +7765,23 @@ function replayWriteReceipt(
   const entry = getById(db, receipt.entry_id);
   const ceiling = getContextMaxClassification(ctx);
   const floor = resolveNamespaceClassificationFloor(db, receipt.namespace);
+  // A correction leaves the receipt's predecessor in history. Authorize its
+  // complete successor chain as well, rather than treating that retired row
+  // as the live current entry. UNION also terminates corrupt cycles safely.
+  const successorClassifications = entry && entry.is_current !== 1
+    ? db.prepare(`
+        WITH RECURSIVE lineage(id) AS (
+          SELECT ? UNION
+          SELECT s.successor_id FROM entry_supersessions s
+          JOIN lineage ON s.predecessor_id = lineage.id
+        )
+        SELECT e.classification FROM entries e JOIN lineage ON e.id = lineage.id
+      `).all(entry.id) as Array<{ classification: string }>
+    : [];
   if (!isClassificationLevel(receipt.classification) || !classificationAllowed(receipt.classification, ceiling)
     || (entry && !classificationAllowed(entry.classification, ceiling))
+    || successorClassifications.some(({ classification }) =>
+      !isClassificationLevel(classification) || !classificationAllowed(classification, ceiling))
     || (!allowBelowFloor && !classificationAllowed(floor, ceiling))) {
     return accessDeniedResponse(db, ctx, action);
   }
@@ -7784,7 +7799,7 @@ function replayWriteReceipt(
     idempotency_key: key,
     idempotency_replayed: true,
     entry_available: entry !== null,
-    entry_changed: entry !== null && entry.updated_at !== receipt.entry_updated_at,
+    entry_changed: entry !== null && (entry.is_current !== 1 || entry.updated_at !== receipt.entry_updated_at),
     provenance: buildProvenance(ctx.principalId, ctx.principalId),
   });
 }
@@ -7812,7 +7827,7 @@ function withWriteReceipt(
     return accessDeniedErrorResponse(db, ctx, action, "classification_override is only available to the owner principal.");
   }
   // A preview validates normally without consuming or looking up a receipt.
-  if (args.validate_only === true) return handle();
+  if (tool === "memory_update_status" && args.validate_only === true) return handle();
   const key = suppliedKey.toLowerCase();
   const requestArguments = Object.fromEntries(Object.entries(args)
     .filter(([name]) => name !== "idempotency_key"));

@@ -226,9 +226,10 @@ export function prepareBridgeWriteMessage(
   message: JSONRPCMessage, supported: boolean, uuid: () => string = randomUUID,
 ): JSONRPCMessage {
   if (!supported) return message;
-  const args = bridgeWriteArguments(message);
-  if (!args || args.idempotency_key !== undefined || args.validate_only === true) return message;
   if (!("params" in message)) return message;
+  const args = bridgeWriteArguments(message);
+  if (!args || args.idempotency_key !== undefined
+    || (message.params?.name === "memory_update_status" && args.validate_only === true)) return message;
   return {
     ...message,
     params: { ...message.params, arguments: { ...args, idempotency_key: uuid() } },
@@ -974,10 +975,13 @@ export function createBridge(config: BridgeConfig) {
    */
   function describeSendFailure(error: Error, message: JSONRPCMessage): string {
     let text = `Bridge error: ${formatBridgeErrorMessage(error)}`;
-    const recoveryKey = supportsWriteReplay() ? bridgeWriteReplayKey(message) : undefined;
-    const recovery = recoveryKey
-      ? ` [idempotency_key ${recoveryKey}]; recover by calling the same tool with exactly the same arguments and this idempotency_key. The server returns the committed receipt or applies the write once if it was not committed.`
-      : "";
+    const recoveryKey = bridgeWriteReplayKey(message);
+    let recovery = "";
+    if (recoveryKey) {
+      recovery = ` [idempotency_key ${recoveryKey}]; ` + (supportsWriteReplay()
+        ? "recover by calling the same tool with exactly the same arguments and this idempotency_key. The server returns the committed receipt or applies the write once if it was not committed."
+        : "write recovery support was not confirmed by this response; retain this key and verify server support before repeating the write.");
+    }
     if (error instanceof BridgeNetworkError) return text + recovery;
     if (!isReadOnlyJsonRpcMessage(message)) {
       text += `; ${WRITE_OUTCOME_UNKNOWN_GUIDANCE}`;
