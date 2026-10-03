@@ -102,14 +102,14 @@ All 24 names registered in `TOOL_DEFINITIONS` must appear exactly once in this t
 | `memory_commitments` | Surface open, at-risk, overdue, and completed commitments. |
 | `memory_patterns` | Derive reviewable patterns from decisions and outcomes. |
 | `memory_handoff` | Source-backed current state, decisions, open loops, and next actions. |
-| `memory_write` | Upsert state with validation and optional CAS. |
-| `memory_update_status` | Structured tracked-status update with lifecycle normalization, CAS, and optional `valid_until` expiry. |
+| `memory_write` | Upsert state with validation, optional CAS and durable keyed recovery. |
+| `memory_update_status` | Structured tracked-status update with lifecycle normalization, CAS, optional `valid_until` expiry and durable keyed recovery. |
 | `memory_read` | Read one state entry. |
 | `memory_read_batch` | Read several state entries. |
 | `memory_get` | Retrieve an entry by UUID. |
 | `memory_query` | Lexical, semantic, or hybrid search with filters. |
 | `memory_attention` | Triage blocked, stale, expiring, or malformed tracked statuses. |
-| `memory_log` | Append an immutable chronological entry. |
+| `memory_log` | Append an immutable chronological entry with optional durable keyed recovery. |
 | `memory_list` | Browse namespaces and recent log previews. |
 | `memory_history` | Cursorable chronological audit trail. |
 | `memory_delete` | Preview and confirm entry or enabled namespace deletion. |

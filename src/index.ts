@@ -1,3 +1,4 @@
+import { WRITE_REPLAY_HEADER, WRITE_REPLAY_VERSION } from "./internal/write-replay.js";
 import Database from "better-sqlite3";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -997,6 +998,7 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
     // Stateless mode requires a fresh transport per request to avoid message ID collisions.
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
+      enableJsonResponse: true,
     });
     const authInfo = req.auth as ExtendedAuthInfo | undefined;
     const accessContext = resolveAccessContext(
@@ -1036,6 +1038,7 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
     );
 
     try {
+      res.setHeader(WRITE_REPLAY_HEADER, WRITE_REPLAY_VERSION);
       await mcpServer.connect(transport);
       await transport.handleRequest(req, res, body);
     } catch (error) {

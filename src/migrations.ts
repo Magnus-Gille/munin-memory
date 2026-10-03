@@ -1082,6 +1082,31 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 27,
+    description: "Durable principal-scoped write recovery receipts (#321)",
+    up: (db) => {
+      // No FK to entries: deleting an entry must not permit a delayed replay
+      // to recreate it. Receipts retain metadata only, never memory content.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS write_receipts (
+          principal_id TEXT NOT NULL,
+          idempotency_key TEXT NOT NULL,
+          tool_name TEXT NOT NULL,
+          namespace TEXT NOT NULL,
+          request_hash TEXT NOT NULL,
+          entry_id TEXT NOT NULL,
+          entry_key TEXT,
+          entry_updated_at TEXT NOT NULL,
+          classification TEXT NOT NULL,
+          result_status TEXT NOT NULL,
+          valid_from TEXT,
+          supersedes TEXT,
+          PRIMARY KEY (principal_id, idempotency_key)
+        ) WITHOUT ROWID;
+      `);
+    },
+  },
 ];
 
 /**

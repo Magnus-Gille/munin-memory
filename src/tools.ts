@@ -23,6 +23,7 @@ import {
   resolveReadableNamespaceSelectors,
 } from "./access.js";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { WRITE_REPLAY_UUID_PATTERN } from "./internal/write-replay.js";
 import { namespaceFilterScope } from "./internal/namespace-filter.js";
 import { fuseHybridResults } from "./internal/hybrid-fusion.js";
 export { fuseHybridResults } from "./internal/hybrid-fusion.js";
@@ -7096,6 +7097,11 @@ const TOOL_DEFINITIONS = [
     inputSchema: {
       type: "object" as const,
       properties: {
+        idempotency_key: {
+          type: "string",
+          pattern: WRITE_REPLAY_UUID_PATTERN.source,
+          description: "Optional UUID recovery key. Repeat exactly the same arguments and key after an uncertain write outcome to retrieve its original metadata without applying it again. Keys are scoped to the authenticated principal and cannot be reused for another operation.",
+        },
         namespace: writeTargetNamespaceSchema(
           "Write target namespace. Must start with an alphanumeric character, then use only letters, digits, '_', '-', and '/'. Trailing slashes and empty segments are rejected: use `maintenance`, not `maintenance/`.",
           { examples: ["projects/hugin-munin", "people/owner", "decisions/tech-stack"] },
@@ -7178,6 +7184,11 @@ const TOOL_DEFINITIONS = [
     inputSchema: {
       type: "object" as const,
       properties: {
+        idempotency_key: {
+          type: "string",
+          pattern: WRITE_REPLAY_UUID_PATTERN.source,
+          description: "Optional UUID recovery key. Repeat exactly the same arguments and key after an uncertain write outcome to retrieve its original metadata without applying it again. Keys are scoped to the authenticated principal and cannot be reused for another operation.",
+        },
         namespace: writeTargetNamespaceSchema(
           "Namespace to target. Real mutations require a tracked namespace from the caller's configured tracked roots (default `projects/*` or `clients/*`). With `validate_only:true`, the same validation path may preview any writable namespace the caller is authorized to write. Trailing slashes and empty segments are rejected.",
           { examples: ["projects/grimnir", "clients/acme"] },
@@ -7441,6 +7452,11 @@ const TOOL_DEFINITIONS = [
     inputSchema: {
       type: "object" as const,
       properties: {
+        idempotency_key: {
+          type: "string",
+          pattern: WRITE_REPLAY_UUID_PATTERN.source,
+          description: "Optional UUID recovery key. Repeat exactly the same arguments and key after an uncertain write outcome to retrieve its original metadata without applying it again. Keys are scoped to the authenticated principal and cannot be reused for another operation.",
+        },
         namespace: writeTargetNamespaceSchema(
           "Write target namespace to log to. Must start with an alphanumeric character, then use only letters, digits, '_', '-', and '/'. Trailing slashes and empty segments are rejected: use `maintenance`, not `maintenance/`.",
           { examples: ["projects/hugin", "clients/acme", "decisions/tech-stack"] },
@@ -7717,6 +7733,132 @@ function okResult(action: string, data: Record<string, unknown>) {
 
 function errResult(action: string, error: string, message: string, extra?: Record<string, unknown>) {
   return { content: [{ type: "text" as const, text: JSON.stringify({ ok: false, action, error, message, ...extra }) }] };
+}
+
+interface WriteReceipt {
+  tool_name: string;
+  namespace: string;
+  request_hash: string;
+  entry_id: string;
+  entry_key: string | null;
+  entry_updated_at: string;
+  classification: string;
+  result_status: string;
+  valid_from: string | null;
+  supersedes: string | null;
+}
+
+function canonicalWriteArguments(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalWriteArguments);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value)
+      .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+      .map(([key, item]) => [key, canonicalWriteArguments(item)]));
+  }
+  return value;
+}
+
+function replayWriteReceipt(
+  db: Database.Database, ctx: AccessContext, receipt: WriteReceipt,
+  action: string, key: string, allowBelowFloor: boolean,
+) {
+  const entry = getById(db, receipt.entry_id);
+  const ceiling = getContextMaxClassification(ctx);
+  const floor = resolveNamespaceClassificationFloor(db, receipt.namespace);
+  if (!isClassificationLevel(receipt.classification) || !classificationAllowed(receipt.classification, ceiling)
+    || (entry && !classificationAllowed(entry.classification, ceiling))
+    || (!allowBelowFloor && !classificationAllowed(floor, ceiling))) {
+    return accessDeniedResponse(db, ctx, action);
+  }
+  return okResult(action, {
+    status: receipt.result_status,
+    id: receipt.entry_id,
+    namespace: receipt.namespace,
+    classification: receipt.classification,
+    ...(action === "log" ? {
+      timestamp: receipt.entry_updated_at,
+      timestamp_local: toLocalDisplay(receipt.entry_updated_at),
+    } : { key: receipt.entry_key, updated_at: receipt.entry_updated_at }),
+    ...(receipt.valid_from !== null ? { valid_from: receipt.valid_from } : {}),
+    ...(receipt.supersedes !== null ? { supersedes: receipt.supersedes } : {}),
+    idempotency_key: key,
+    idempotency_replayed: true,
+    entry_available: entry !== null,
+    entry_changed: entry !== null && entry.updated_at !== receipt.entry_updated_at,
+    provenance: buildProvenance(ctx.principalId, ctx.principalId),
+  });
+}
+
+/**
+ * The synchronous handler and receipt share an immediate transaction, including
+ * nested DB savepoints, so a successful write cannot commit without its receipt.
+ * Failed results roll back incidental effects and never reserve a key.
+ */
+function withWriteReceipt(
+  db: Database.Database, ctx: AccessContext, tool: string,
+  rawArgs: Record<string, unknown> | undefined, handle: () => ReturnType<typeof okResult>,
+) {
+  const args = rawArgs ?? {};
+  const suppliedKey = args.idempotency_key;
+  if (suppliedKey === undefined) return handle();
+  const action = tool.slice("memory_".length);
+  if (typeof suppliedKey !== "string" || !WRITE_REPLAY_UUID_PATTERN.test(suppliedKey)) {
+    return errResult(action, "validation_error", "idempotency_key must be a UUID.");
+  }
+  const namespace = args.namespace;
+  if (typeof namespace !== "string" || !validateWriteNamespace(namespace).valid) return handle();
+  if (!canWrite(ctx, namespace)) return accessDeniedResponse(db, ctx, action);
+  if (args.classification_override === true && ctx.principalType !== "owner") {
+    return accessDeniedErrorResponse(db, ctx, action, "classification_override is only available to the owner principal.");
+  }
+  // A preview validates normally without consuming or looking up a receipt.
+  if (args.validate_only === true) return handle();
+  const key = suppliedKey.toLowerCase();
+  const requestArguments = Object.fromEntries(Object.entries(args)
+    .filter(([name]) => name !== "idempotency_key"));
+  const requestHash = createHash("sha256")
+    .update(JSON.stringify(canonicalWriteArguments(requestArguments))).digest("hex");
+  let failedResult: ReturnType<typeof okResult> | undefined;
+  const rollback = new Error("Rollback failed keyed write");
+  try {
+    return db.transaction(() => {
+      const receipt = db.prepare(
+        "SELECT * FROM write_receipts WHERE principal_id = ? AND idempotency_key = ?",
+      ).get(ctx.principalId, key) as WriteReceipt | undefined;
+      if (receipt) {
+        if (receipt.tool_name !== tool || receipt.namespace !== namespace || receipt.request_hash !== requestHash) {
+          return errResult(action, "idempotency_conflict", "This idempotency_key was already used with different arguments. Use a new key for a new operation.");
+        }
+        return replayWriteReceipt(db, ctx, receipt, action, key,
+          ctx.principalType === "owner" && args.classification_override === true);
+      }
+      const result = handle();
+      const response = JSON.parse(result.content[0].text) as Record<string, unknown>;
+      if (response.ok !== true) {
+        failedResult = result;
+        throw rollback;
+      }
+      // Human-facing invisible denials return ok/found:false without a write.
+      if (typeof response.id !== "string") return result;
+      const entry = getById(db, response.id);
+      if (!entry) throw new Error("Keyed write completed without a persisted entry");
+      db.prepare(`
+        INSERT INTO write_receipts (
+          principal_id, idempotency_key, tool_name, namespace, request_hash,
+          entry_id, entry_key, entry_updated_at, classification, result_status,
+          valid_from, supersedes
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(ctx.principalId, key, tool, namespace, requestHash,
+        entry.id, entry.key, entry.updated_at, entry.classification, response.status,
+        response.valid_from ?? null, response.supersedes ?? null);
+      return okResult(action, { ...response, idempotency_key: key, idempotency_replayed: false });
+    }).immediate();
+  } catch (error) {
+    if (error !== rollback || !failedResult) throw error;
+    const failure = JSON.parse(failedResult.content[0].text) as Record<string, unknown>;
+    if (failure.error === "access_denied") recordAccessDenied(db, ctx.principalId, tool);
+    return failedResult;
+  }
 }
 
 function buildAccessDeniedResult(ctx: AccessContext, action: string) {
@@ -10203,11 +10345,11 @@ export function registerTools(
 
           case "memory_write": {
             // eslint-disable-next-line complexity -- one handler intentionally validates the mutually-exclusive full-write, patch, correction, and tracked-status paths before mutation.
-            const handleMemoryWrite = async () => {
+            const handleMemoryWrite = () => {
               const unknownArgumentError = rejectUnknownArguments(args, [
                 "namespace", "key", "content", "tags", "valid_until", "expected_updated_at",
                 "create_if_absent", "classification", "classification_override", "supersedes",
-                "valid_from", "patch",
+                "valid_from", "patch", "idempotency_key",
               ]);
               if (unknownArgumentError) {
                 return errResult("write", "validation_error", unknownArgumentError);
@@ -10608,14 +10750,14 @@ export function registerTools(
 
               return okResult("write", response);
             };
-            return handleMemoryWrite();
+            return withWriteReceipt(db, ctx, "memory_write", args, handleMemoryWrite);
           }
 
           case "memory_update_status": {
-            const handleMemoryUpdateStatus = async () => {
+            const handleMemoryUpdateStatus = () => {
               const unknownArgumentError = rejectUnknownArguments(args, [
                 "namespace", "phase", "current_work", "blockers", "next_steps", "notes",
-                "lifecycle", "valid_until", "validate_only", "expected_updated_at", "classification", "classification_override",
+                "lifecycle", "valid_until", "validate_only", "expected_updated_at", "classification", "classification_override", "idempotency_key",
               ]);
               if (unknownArgumentError) {
                 return errResult("update_status", "validation_error", unknownArgumentError);
@@ -10954,7 +11096,7 @@ export function registerTools(
 
               return okResult("update_status", response);
             };
-            return handleMemoryUpdateStatus();
+            return withWriteReceipt(db, ctx, "memory_update_status", args, handleMemoryUpdateStatus);
           }
 
           case "memory_read": {
@@ -12039,7 +12181,7 @@ export function registerTools(
           }
 
           case "memory_log": {
-            const handleMemoryLog = async () => {
+            const handleMemoryLog = () => {
               const {
                 namespace,
                 content,
@@ -12213,7 +12355,7 @@ export function registerTools(
               if (logWarnings.length > 0) logResponse.warnings = logWarnings;
               return okResult("log", logResponse);
             };
-            return handleMemoryLog();
+            return withWriteReceipt(db, ctx, "memory_log", args, handleMemoryLog);
           }
 
           case "memory_list": {
@@ -12768,6 +12910,7 @@ export function registerTools(
                 },
                 schema_version: schemaVersion,
                 features: {
+                  idempotent_writes: true,
                   embeddings: isEmbeddingAvailable(),
                   semantic_search: isSemanticEnabled(),
                   hybrid_search: isHybridEnabled(),

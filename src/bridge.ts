@@ -42,6 +42,7 @@ import {
   StreamableHTTPError,
 } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import { WRITE_REPLAY_TOOLS, WRITE_REPLAY_UUID_PATTERN, WRITE_REPLAY_HEADER, WRITE_REPLAY_VERSION } from "./internal/write-replay.js";
 import { SERVER_VERSION } from "./version.js";
 
 // --- Credential loading ---
@@ -212,6 +213,33 @@ export function isRequest(
   return "id" in msg && "method" in msg && msg.id !== undefined;
 }
 
+function bridgeWriteArguments(message: JSONRPCMessage): Record<string, unknown> | undefined {
+  if (!isRequest(message) || !("method" in message) || message.method !== "tools/call") return;
+  const params = message.params as { name?: unknown; arguments?: unknown } | undefined;
+  if (!params || typeof params.name !== "string" || !WRITE_REPLAY_TOOLS.includes(params.name)) return;
+  const args = params.arguments;
+  if (!args || typeof args !== "object" || Array.isArray(args)) return;
+  return args as Record<string, unknown>;
+}
+
+export function prepareBridgeWriteMessage(
+  message: JSONRPCMessage, supported: boolean, uuid: () => string = randomUUID,
+): JSONRPCMessage {
+  if (!supported) return message;
+  const args = bridgeWriteArguments(message);
+  if (!args || args.idempotency_key !== undefined || args.validate_only === true) return message;
+  if (!("params" in message)) return message;
+  return {
+    ...message,
+    params: { ...message.params, arguments: { ...args, idempotency_key: uuid() } },
+  };
+}
+
+function bridgeWriteReplayKey(message: JSONRPCMessage): string | undefined {
+  const key = bridgeWriteArguments(message)?.idempotency_key;
+  return typeof key === "string" && WRITE_REPLAY_UUID_PATTERN.test(key) ? key.toLowerCase() : undefined;
+}
+
 export const DEFAULT_BRIDGE_RATE_LIMIT_RETRIES = 2;
 export const DEFAULT_BRIDGE_RATE_LIMIT_MAX_WAIT_MS = 10_000;
 export const DEFAULT_BRIDGE_RATE_LIMIT_JITTER_MS = 250;
@@ -234,6 +262,7 @@ export interface FetchWithTimeoutOptions {
   uuid?: () => string;
   /** Called with the id of every forwarded request (the bridge reports the latest one). */
   onRequestId?: (requestId: string) => void;
+  onWriteReplaySupport?: (supported: boolean) => void;
 }
 
 function nonNegativeInteger(
@@ -727,6 +756,9 @@ export function createFetchWithTimeout(
           response.status !== 429 ||
           response.headers.get("X-Munin-Rate-Limit") !== "admission-v1"
         ) {
+          if (response.ok) {
+            options.onWriteReplaySupport?.(response.headers.get(WRITE_REPLAY_HEADER) === WRITE_REPLAY_VERSION);
+          }
           return response;
         }
 
@@ -785,6 +817,8 @@ export interface BridgeConfig {
   onExit?: (code: number) => void;
   /** Id of the most recent forwarded HTTP request (the send queue is sequential). */
   getLastRequestId?: () => string | undefined;
+  supportsWriteReplay?: () => boolean;
+  uuid?: () => string;
 }
 
 export function createBridge(config: BridgeConfig) {
@@ -795,6 +829,8 @@ export function createBridge(config: BridgeConfig) {
       process.stderr.write(`[munin-bridge] ${msg}\n`),
     onExit = (code: number) => process.exit(code),
     getLastRequestId,
+    supportsWriteReplay = () => false,
+    uuid = randomUUID,
   } = config;
 
   let httpClient = createHttpTransport();
@@ -938,13 +974,17 @@ export function createBridge(config: BridgeConfig) {
    */
   function describeSendFailure(error: Error, message: JSONRPCMessage): string {
     let text = `Bridge error: ${formatBridgeErrorMessage(error)}`;
-    if (error instanceof BridgeNetworkError) return text;
+    const recoveryKey = supportsWriteReplay() ? bridgeWriteReplayKey(message) : undefined;
+    const recovery = recoveryKey
+      ? ` [idempotency_key ${recoveryKey}]; recover by calling the same tool with exactly the same arguments and this idempotency_key. The server returns the committed receipt or applies the write once if it was not committed.`
+      : "";
+    if (error instanceof BridgeNetworkError) return text + recovery;
     if (!isReadOnlyJsonRpcMessage(message)) {
       text += `; ${WRITE_OUTCOME_UNKNOWN_GUIDANCE}`;
     }
     const requestId = getLastRequestId?.();
     if (requestId) text += ` [request id ${requestId}]`;
-    return text;
+    return text + recovery;
   }
 
   async function processSendQueue(): Promise<void> {
@@ -952,7 +992,7 @@ export function createBridge(config: BridgeConfig) {
     sending = true;
 
     while (sendQueue.length > 0) {
-      const message = sendQueue.shift()!;
+      const message = prepareBridgeWriteMessage(sendQueue.shift()!, supportsWriteReplay(), uuid);
       try {
         await httpClient.send(message);
       } catch (err) {
@@ -1075,8 +1115,10 @@ async function main(): Promise<void> {
   authHeaders["X-Munin-Client-Id"] = resolveBridgeClientId();
 
   let lastRequestId: string | undefined;
+  let supportsWriteReplay = false;
   const fetchWithTimeout = createFetchWithTimeout(requestTimeoutMs, {
     log,
+    onWriteReplaySupport: (supported) => { supportsWriteReplay = supported; },
     onRequestId: (id) => {
       lastRequestId = id;
     },
@@ -1092,6 +1134,7 @@ async function main(): Promise<void> {
     log,
     onExit: (code) => process.exit(code),
     getLastRequestId: () => lastRequestId,
+    supportsWriteReplay: () => supportsWriteReplay,
   });
 
   process.on("SIGINT", () => {

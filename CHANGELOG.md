@@ -10,6 +10,17 @@ changelog is the canonical record of what moved.
 
 ### Added
 
+- **Replay-safe write recovery (#321).** Optional principal-scoped UUID
+  `idempotency_key` on state writes, logs and status updates. Migration 27 stores
+  metadata-only receipts atomically with write effects. Same-argument recovery
+  returns the committed identifiers/status/timestamps without reapplying a write;
+  changed operations conflict. Replays recheck live authorization/classification,
+  survive deletion and restart, and do not reserve keys during dry runs.
+  The bridge negotiates support, injects keys and reports recovery instructions
+  without automatic network write retries. Stateless HTTP uses JSON responses
+  so lost response bodies reach the bridge's request error path. Receipts persist
+  after content deletion and cannot cover history lost by restoring an older backup.
+
 - **Optional Heimdall status for NAS backups.** When `HEIMDALL_HUB_URL` and
   `HEIMDALL_FLEET_TOKEN` are set in the ops environment, the backup publishes a
   fixed generic pass/fail status to the `nas-backup` panel. Delivery is best
