@@ -973,8 +973,8 @@ export function createBridge(config: BridgeConfig) {
    * example while the response body is read) are not BridgeNetworkErrors, so
    * add the outcome guidance for writes and the request id here.
    */
-  function describeSendFailure(error: Error, message: JSONRPCMessage): string {
-    let text = `Bridge error: ${formatBridgeErrorMessage(error)}`;
+  function describeSendFailure(error: Error, message: JSONRPCMessage, label = "Bridge error"): string {
+    let text = `${label}: ${formatBridgeErrorMessage(error)}`;
     const recoveryKey = bridgeWriteReplayKey(message);
     let recovery = "";
     if (recoveryKey) {
@@ -1021,7 +1021,7 @@ export function createBridge(config: BridgeConfig) {
                   id: message.id,
                   error: {
                     code: -32000,
-                    message: `Bridge reconnect failed: ${error.message}`,
+                    message: describeSendFailure(error, message, "Bridge reconnect failed"),
                   },
                 });
               } catch {
