@@ -1,5 +1,8 @@
 # Dependency advisory triage — 2026-07-22
 
+This is a historical snapshot. For the current dependency floors, exposure
+review, and validation, see [the October triage](dependency-advisory-triage-2026-10.md).
+
 This note records the production-only `npm audit` review performed against
 Munin Memory v0.5.0 after schema v20 shipped. It distinguishes compatible
 remediation from advisories whose published fix is outside the declaring
