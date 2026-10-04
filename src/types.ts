@@ -46,6 +46,7 @@ export interface ParsedEntry extends Omit<Entry, "tags"> {
 // Tool parameter types
 
 export interface WriteParams {
+  idempotency_key?: string;
   namespace: string;
   key: string;
   content?: string;
@@ -60,6 +61,7 @@ export interface WriteParams {
 }
 
 export interface StatusUpdateParams {
+  idempotency_key?: string;
   namespace: string;
   phase?: string;
   current_work?: string;
@@ -177,6 +179,7 @@ export interface HandoffParams {
 }
 
 export interface LogParams {
+  idempotency_key?: string;
   namespace: string;
   content: string;
   tags?: string[];

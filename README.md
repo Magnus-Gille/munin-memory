@@ -286,13 +286,58 @@ request. The server-marked `admission-v1` 429 path above remains retryable becau
 rejects before execution. A write that fails reports what is known: when the chain
 proves the failure happened while connecting, the error says the request was most
 likely not applied; otherwise it says it may or may not have been applied. Either way,
-check with `memory_read` or `memory_history` before repeating it. The same guidance
+use keyed recovery below when supported, or check with `memory_read` or `memory_history` before repeating it. The same guidance
 (and the request id) is added when a write's JSON response body cannot be read or an
-HTTP error occurs. Asynchronous SSE stream failures remain outside this guidance.
+HTTP error occurs. Servers advertising write recovery use JSON responses so the bridge also observes response-body failures. Older SSE servers can still report asynchronous stream errors outside this guidance.
 The bridge's own timeout is never retried. Each request carries an
 `X-Munin-Request-Id` header (reused across retries) that appears in bridge errors
 and network retry and failure stderr logs; the server logs it as `requestId` when
 well-formed and otherwise ignores it.
+
+### Recovering a write after a lost response
+
+`memory_write`, `memory_log`, and `memory_update_status` accept an optional UUID
+`idempotency_key`. Generate it before sending a write and retain the complete
+arguments until its outcome is known. If the response is lost, call the same tool
+with exactly the same arguments and key. The server either applies an uncommitted
+operation once, or returns the original committed outcome metadata with
+`idempotency_replayed:true`. A first success includes `idempotency_replayed:false`.
+
+Keys belong to the authenticated principal. Reusing one with another tool,
+namespace, or arguments returns `idempotency_conflict`. JSON object property order
+and UUID letter case are ignored; array order and omitted versus explicit values
+are preserved. A new intentional operation needs a new key. A dry run
+(`validate_only:true`) validates normally and never reserves a key.
+
+The write and its receipt commit in one SQLite transaction. Replay skips stale
+CAS and correction checks because it retrieves an already committed operation.
+It returns original identifiers, status and timestamps. `entry_available` reports
+whether the original entry still exists; `entry_changed` also marks superseded
+revisions. Classification checks include the successor chain. It does not return cached
+content, status sections, intake reports or hints; read current memory separately.
+Namespace write access, classification and the caller's current visibility ceiling
+are checked again. Revoked access does not grant receipt access.
+
+Receipts retain only principal/key, an argument hash and minimal outcome metadata.
+They have no expiry and survive entry deletion, so replay cannot recreate deleted
+memory. They are included in database backups. Restoring a backup from before an
+operation also loses its receipt; recovery cannot deduplicate operations outside
+the restored database history. Receipt metadata persists after content deletion.
+
+A compatible bridge learns support from the authenticated HTTP response header
+`X-Munin-Write-Replay: v1`, then adds a UUID to supported writes that lack one.
+It preserves explicit keys and excludes read calls, notifications and dry runs.
+When a keyed write fails, the error includes the key and same-argument recovery
+instructions. If the response no longer confirms support, the error still retains
+the key and asks the caller to verify server support before repeating the write.
+It never automatically retries writes after network errors. Old
+servers without the capability header receive no automatically injected key.
+`memory_status.features.idempotent_writes` also exposes server support.
+
+Stateless HTTP requests still use a fresh server and transport per POST. JSON
+responses let the bridge surface a lost or unreadable response body as a failed
+request. This provides safe outcome recovery; the historical production network
+failure's cause has not been established.
 
 ## Grimnir ecosystem
 
