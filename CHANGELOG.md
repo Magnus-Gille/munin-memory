@@ -8,6 +8,14 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Security
+
+- **Production dependency advisory remediation (#356).** Raise the patched
+  floors for adm-zip, fast-uri, Hono, ip-address and Sharp, and pin a patched
+  qs floor for OAuth/form parsing. Keep direct SDK, Transformers and ONNX Runtime
+  versions stable; refresh the dated exposure/compatibility review and guard
+  URI authority validation with a regression test.
+
 ### Added
 
 - **Replay-safe write recovery (#321).** Optional principal-scoped UUID
