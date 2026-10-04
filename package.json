@@ -71,12 +71,12 @@
     "scorecard:publish": "tsx benchmark/scorecard/publish.ts"
   },
   "dependencies": {
-    "@huggingface/transformers": "^4.2.0",
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@huggingface/transformers": "^4.3.0",
+    "@modelcontextprotocol/sdk": "^1.31.0",
     "better-sqlite3": "^12.11.1",
     "express": "^5.2.1",
     "sqlite-vec": "^0.1.9",
-    "uuid": "^14.0.1"
+    "uuid": "^14.0.2"
   },
   "overrides": {
     "adm-zip": "^0.6.1",
