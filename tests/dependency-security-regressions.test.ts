@@ -17,6 +17,13 @@ describe("SDK URI resolver dependency security (#356)", () => {
     },
   );
 
+  it("canonicalizes percent-encoded scheme-relative host names", () => {
+    expect(uri.parse("//%41.com").host).toBe("a.com");
+    expect(uri.parse("//A.com").host).toBe("a.com");
+    expect(uri.parse("//a.com").host).toBe("a.com");
+    expect(uri.equal("//%41.com", "//a.com")).toBe(true);
+  });
+
   it("preserves legitimate URI resolution and normalization", () => {
     expect(uri.serialize({
       scheme: "https",
