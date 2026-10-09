@@ -1545,6 +1545,7 @@ export function listNamespaces(db: Database.Database): NamespaceCount[] {
               MAX(updated_at) as last_activity_at
        FROM entries
        WHERE is_current = 1
+         AND NOT EXISTS (SELECT 1 FROM code_health_records chr WHERE chr.entry_id = entries.id)
        GROUP BY namespace
        ORDER BY namespace`,
     )
@@ -1566,6 +1567,7 @@ export function listNamespacesByClassification(
               MAX(updated_at) as last_activity_at
        FROM entries
        WHERE is_current = 1 AND classification IN (${placeholders})
+         AND NOT EXISTS (SELECT 1 FROM code_health_records chr WHERE chr.entry_id = entries.id)
        GROUP BY namespace
        ORDER BY namespace`,
     )

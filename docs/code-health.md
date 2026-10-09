@@ -17,7 +17,8 @@ ID are principal-scoped. An exact retry returns its prior receipt; a payload
 collision fails. A deleted or expired ID cannot be recreated.
 
 Append accepts a v1 `record`, a namespace, a UUID `idempotency_key`, and optional
-`classification`. A correction also requires `expected_updated_at`; it must
+`classification`. Successful append and replay responses include the persisted
+entry `updated_at` token. A correction also requires `expected_updated_at`; it must
 replace the current record, keep its repo/task/attempt/record-kind lineage, and
 cannot lower classification. The server rejects unknown fields, secret-like
 content, records over 16 KiB, unsupported rubric versions, timestamps with
@@ -33,8 +34,12 @@ does not grant that producer append authority. Export applies namespace and row
 classification gates before materializing authorized count or page positions.
 It returns current records plus authenticated stored context, a deterministic
 snapshot watermark, `total_records`, `complete`, and a `retention` array. Each
-retention item has `record_id`, `collected_at`, and `expires_at`, sourced from
-the same authenticated producer and namespace ledger as the exported record.
+retention item has `record_id`, `collected_at`, `expires_at`, `updated_at`, and
+`classification`, sourced from the exact retained ledger entry and its matching
+`entry_id` in the same authenticated producer and namespace. The `updated_at`
+value is the compare-and-swap token for that record, including historical
+predecessors retained as context; it never falls forward to an unrelated
+successor.
 The array covers exactly the union of the page's `records` and
 `context_records`, with each record ID listed once. A shared context record on
 multiple pages carries the same server timestamps on every page. Cursors are

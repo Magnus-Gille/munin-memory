@@ -343,7 +343,7 @@ export function appendCodeHealthRecord(
       return {
         ok: true, action: "code_health", status: "replayed", id: existing.id,
         record_id: record.record_id, namespace: input.namespace, collected_at: prior.collected_at,
-        expires_at: prior.expires_at, classification: prior.classification,
+        expires_at: prior.expires_at, updated_at: existing.updated_at, classification: prior.classification,
       };
     }
 
@@ -418,7 +418,7 @@ export function appendCodeHealthRecord(
     return {
       ok: true, action: "code_health", status: targetId ? "corrected" : "stored", id: entryId,
       record_id: record.record_id, namespace: input.namespace, collected_at: collectedAt,
-      expires_at: expiresAt, classification: entry.classification,
+      expires_at: expiresAt, updated_at: entry.updated_at, classification: entry.classification,
       ...(targetId ? { supersedes_record_id: targetId, correction_ref: record.correction_ref } : {}),
     };
   } catch (error) {
@@ -461,6 +461,8 @@ interface CodeHealthRetentionMetadata {
   record_id: string;
   collected_at: string;
   expires_at: string;
+  updated_at: string;
+  classification: ClassificationLevel;
 }
 
 function loadRetentionMetadata(
@@ -472,11 +474,12 @@ function loadRetentionMetadata(
   const recordIds = [...new Set(records.map((record) => record.record_id))];
   if (recordIds.length === 0) return [];
   const rows = db.prepare(`
-    SELECT record_id, collected_at, expires_at
-      FROM code_health_records
-     WHERE principal_id = ? AND namespace = ?
-       AND entry_id IS NOT NULL AND expires_at > ?
-       AND record_id IN (${recordIds.map(() => "?").join(", ")})
+    SELECT r.record_id, r.collected_at, r.expires_at, e.updated_at, r.classification
+      FROM code_health_records r
+      JOIN entries e ON e.id = r.entry_id AND e.namespace = r.namespace
+     WHERE r.principal_id = ? AND r.namespace = ?
+       AND r.entry_id IS NOT NULL AND r.expires_at > ?
+       AND r.record_id IN (${recordIds.map(() => "?").join(", ")})
   `).all(principalId, namespace, nowUTC(), ...recordIds) as CodeHealthRetentionMetadata[];
   const byRecordId = new Map(rows.map((row) => [row.record_id, row]));
   if (byRecordId.size !== recordIds.length) {

@@ -7832,6 +7832,7 @@ function replayWriteReceipt(
       classification: record?.classification ?? receipt.classification,
       collected_at: record?.collected_at,
       expires_at: record?.expires_at,
+      updated_at: receipt.entry_updated_at,
       idempotency_key: key,
       idempotency_replayed: true,
       entry_available: true,

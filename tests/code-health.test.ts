@@ -30,12 +30,12 @@ function parse(response: unknown): Record<string, unknown> {
   return JSON.parse(result.content[0].text) as Record<string, unknown>;
 }
 
-function callAs(ctx: AccessContext) {
+function callAs(ctx: AccessContext, toolName = "memory_code_health") {
   const server = new Server({ name: "test-code-health", version: "0.0.1" }, { capabilities: { tools: {} } });
   registerTools(server, db, undefined, ctx);
   const handler = (server as unknown as { _requestHandlers: Map<string, Function> })._requestHandlers.get("tools/call");
   if (!handler) throw new Error("Cannot access MCP tool handler");
-  return (args: Record<string, unknown>) => handler({ method: "tools/call", params: { name: "memory_code_health", arguments: args } });
+  return (args: Record<string, unknown>) => handler({ method: "tools/call", params: { name: toolName, arguments: args } });
 }
 
 function sampleRecord(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -115,9 +115,11 @@ describe("memory_code_health", () => {
   it("replays a record ID exactly, rejects payload collisions, and keeps idempotency principal scoped", () => {
     const record = sampleRecord();
     const first = append(record);
-    expect(first).toMatchObject({ ok: true });
+    expect(first).toMatchObject({ ok: true, updated_at: expect.any(String) });
     const replay = append(record);
-    expect(replay).toMatchObject({ ok: true, status: "replayed", record_id: record.record_id });
+    expect(replay).toMatchObject({
+      ok: true, status: "replayed", record_id: record.record_id, updated_at: first.updated_at,
+    });
     expect(append({ ...record, summary: "different" })).toMatchObject({ ok: false, error: "idempotency_conflict" });
     const other = { ...producer, principalId: "agent:other" };
     const otherReplay = appendCodeHealthRecord(db, other, {
@@ -133,8 +135,11 @@ describe("memory_code_health", () => {
     const key = randomUUID();
     const args = { action: "append", namespace, idempotency_key: key, record };
     const [first, replay] = await Promise.all([call(args), call(args)]);
-    expect(parse(first)).toMatchObject({ ok: true, idempotency_replayed: false });
-    expect(parse(replay)).toMatchObject({ ok: true, idempotency_replayed: true, record_id: record.record_id });
+    expect(parse(first)).toMatchObject({ ok: true, idempotency_replayed: false, updated_at: expect.any(String) });
+    expect(parse(replay)).toMatchObject({
+      ok: true, idempotency_replayed: true, record_id: record.record_id,
+      updated_at: parse(first).updated_at,
+    });
     const collision = await call({ ...args, record: sampleRecord() });
     expect(parse(collision)).toMatchObject({ ok: false, error: "idempotency_conflict" });
     expect((db.prepare("SELECT COUNT(*) AS n FROM code_health_records").get() as { n: number }).n).toBe(1);
@@ -166,6 +171,8 @@ describe("memory_code_health", () => {
       record_id: record.record_id,
       collected_at: stored.collected_at,
       expires_at: stored.expires_at,
+      updated_at: stored.updated_at,
+      classification: stored.classification,
     }]);
 
     const oldCollectedAt = "2026-08-01T00:00:00.000Z";
@@ -235,12 +242,14 @@ describe("memory_code_health", () => {
     if (replay.ok) expect(replay.retention).toEqual(first.retention);
   });
 
-  it("corrects through immutable lineage and exports the current correction once with authenticated context", () => {
+  it("corrects through immutable lineage and exports the current correction once with authenticated context", async () => {
     const original = sampleRecord();
-    append(original);
-    const originalEntry = db.prepare(`SELECT e.id, e.updated_at FROM code_health_records r
-      JOIN entries e ON e.id = r.entry_id WHERE r.principal_id = ? AND r.record_id = ?`)
-      .get(producer.principalId, original.record_id) as { id: string; updated_at: string };
+    const call = callAs(producer);
+    const originalResponse = parse(await call({
+      action: "append", namespace, idempotency_key: randomUUID(), record: original,
+    }));
+    expect(originalResponse).toMatchObject({ ok: true, record_id: original.record_id });
+    const originalUpdatedAt = originalResponse.updated_at as string;
     const correction = sampleRecord({
       task_id: original.task_id,
       attempt_id: original.attempt_id,
@@ -250,17 +259,35 @@ describe("memory_code_health", () => {
       correction_ref: "ref:correction-evidence",
       observed_at: original.observed_at,
     });
-    const correctionResult = append(correction, { expected_updated_at: originalEntry.updated_at });
-    expect(correctionResult).toMatchObject({ ok: true, status: "corrected" });
-    const owner = ownerContext();
-    const exported = exportCodeHealthRecords(db, owner, { namespace, producer_principal_id: producer.principalId, limit: 1 });
+    const correctionResult = parse(await call({
+      action: "append", namespace, idempotency_key: randomUUID(), record: correction,
+      expected_updated_at: originalUpdatedAt,
+    }));
+    expect(correctionResult).toMatchObject({ ok: true, status: "corrected", updated_at: expect.any(String) });
+    expect(correctionResult.updated_at).not.toBe(originalUpdatedAt);
+    const staleCorrection = sampleRecord({
+      task_id: original.task_id,
+      attempt_id: original.attempt_id,
+      occurrence_id: original.occurrence_id,
+      record_id: "ref:stale-correction",
+      supersedes_record_id: original.record_id,
+      correction_ref: "ref:stale-correction-evidence",
+      observed_at: original.observed_at,
+    });
+    expect(parse(await call({
+      action: "append", namespace, idempotency_key: randomUUID(), record: staleCorrection,
+      expected_updated_at: originalUpdatedAt,
+    }))).toMatchObject({ ok: false, error: "conflict" });
+    const exported = parse(await callAs(ownerContext())({
+      action: "export", namespace, producer_principal_id: producer.principalId, limit: 1,
+    }));
     expect(exported).toMatchObject({ ok: true, total_records: 1, complete: true });
     if (exported.ok) {
       expect(exported.records).toMatchObject([{ record_id: "ref:corrected-record" }]);
       expect(exported.context_records).toMatchObject([{ record_id: original.record_id }]);
       expect(exported.retention).toEqual(expect.arrayContaining([
-        expect.objectContaining({ record_id: "ref:corrected-record" }),
-        expect.objectContaining({ record_id: original.record_id }),
+        expect.objectContaining({ record_id: "ref:corrected-record", updated_at: correctionResult.updated_at }),
+        expect.objectContaining({ record_id: original.record_id, updated_at: originalUpdatedAt }),
       ]));
       expect(exported.retention).toHaveLength(2);
     }
@@ -484,6 +511,107 @@ describe("memory_code_health", () => {
     appendLog(db, namespace, "ordinary memory log searchable normally", [], producer.principalId);
     expect(db.prepare("SELECT 1 FROM entries_fts WHERE entries_fts MATCH ?").get('"searchable"')).toBeDefined();
     expect(managed.ok).toBe(true);
+  });
+
+  it("keeps shared managed-only namespaces out of list, orient, attention, and health aggregates", async () => {
+    const sharedNamespace = "projects/code-health-aggregate-shared";
+    const managedOnlyNamespace = "projects/code-health-aggregate-managed-only";
+    const other: AccessContext = {
+      ...producer,
+      principalId: "agent:other",
+      accessibleNamespaces: [
+        { pattern: sharedNamespace, permissions: "rw" },
+        { pattern: managedOnlyNamespace, permissions: "rw" },
+      ],
+    };
+    const producerCall = callAs({
+      ...producer,
+      accessibleNamespaces: [
+        { pattern: sharedNamespace, permissions: "rw" },
+        { pattern: managedOnlyNamespace, permissions: "rw" },
+      ],
+    });
+    const producerLogCall = callAs({
+      ...producer,
+      accessibleNamespaces: [
+        { pattern: sharedNamespace, permissions: "rw" },
+        { pattern: managedOnlyNamespace, permissions: "rw" },
+      ],
+    }, "memory_log");
+    const producerListCall = callAs({
+      ...producer,
+      accessibleNamespaces: [
+        { pattern: sharedNamespace, permissions: "rw" },
+        { pattern: managedOnlyNamespace, permissions: "rw" },
+      ],
+    }, "memory_list");
+    const producerOrientCall = callAs({
+      ...producer,
+      accessibleNamespaces: [
+        { pattern: sharedNamespace, permissions: "rw" },
+        { pattern: managedOnlyNamespace, permissions: "rw" },
+      ],
+    }, "memory_orient");
+    const producerAttentionCall = callAs({
+      ...producer,
+      accessibleNamespaces: [
+        { pattern: sharedNamespace, permissions: "rw" },
+        { pattern: managedOnlyNamespace, permissions: "rw" },
+      ],
+    }, "memory_attention");
+    const otherCall = callAs(other);
+    const appendViaMcp = async (
+      call: (args: Record<string, unknown>) => Promise<unknown>,
+      targetNamespace: string,
+      record: Record<string, unknown>,
+    ) => parse(await call({
+      action: "append",
+      namespace: targetNamespace,
+      idempotency_key: randomUUID(),
+      record,
+    }));
+
+    expect((await appendViaMcp(producerCall, managedOnlyNamespace, sampleRecord({
+      record_id: "ref:aggregate-producer-managed-only",
+      task_id: "task-aggregate-producer-managed-only",
+    }))).ok).toBe(true);
+    expect((await appendViaMcp(otherCall, managedOnlyNamespace, sampleRecord({
+      record_id: "ref:aggregate-other-managed-only",
+      task_id: "task-aggregate-other-managed-only",
+    }))).ok).toBe(true);
+    expect((await appendViaMcp(producerCall, sharedNamespace, sampleRecord({
+      record_id: "ref:aggregate-producer-shared",
+      task_id: "task-aggregate-shared",
+    }))).ok).toBe(true);
+    expect(parse(await producerLogCall({
+      namespace: sharedNamespace,
+      content: "ordinary shared namespace log",
+    })).ok).toBe(true);
+
+    const list = parse(await producerListCall({}));
+    expect(list.namespaces).toEqual(expect.arrayContaining([
+      expect.objectContaining({ namespace: sharedNamespace, log_count: 1 }),
+    ]));
+    expect((list.namespaces as Array<{ namespace: string }>).some((item) => item.namespace === managedOnlyNamespace)).toBe(false);
+
+    const orient = parse(await producerOrientCall({ detail: "standard", include_namespaces: true, include_completed_tasks: true }));
+    expect((orient.namespaces as Array<{ namespace: string }>).some((item) => item.namespace === sharedNamespace)).toBe(true);
+    expect((orient.namespaces as Array<{ namespace: string }>).some((item) => item.namespace === managedOnlyNamespace)).toBe(false);
+
+    const attention = parse(await producerAttentionCall({ namespace_prefix: sharedNamespace }));
+    const attentionItems = attention.items as Array<{ namespace: string; category: string }>;
+    expect(attentionItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({ namespace: sharedNamespace, category: "missing_status" }),
+    ]));
+    expect(attentionItems.some((item) => item.namespace === managedOnlyNamespace)).toBe(false);
+
+    const health = parse(await callAs(ownerContext(), "memory_health")({}));
+    expect(health).toMatchObject({ ok: true });
+    expect(health.sections).toBeDefined();
+    expect((health.sections as Record<string, Record<string, unknown>>).size)
+      .toMatchObject({ entries_log: 1, namespace_count: 1 });
+    expect((health.sections as Record<string, Record<string, unknown>>).maintenance)
+      .toMatchObject({ missing_status: 1 });
   });
 
   it("indexes ordinary tags that only contain the managed marker as a substring", () => {
