@@ -353,7 +353,9 @@ export function _forceCircuitBreakerTrippedForTesting(tripped: boolean): void {
  */
 export function resetOrphanedProcessingRows(db: Database.Database): number {
   const result = db
-    .prepare("UPDATE entries SET embedding_status = 'pending' WHERE embedding_status = 'processing'")
+    .prepare(`UPDATE entries SET embedding_status = 'pending'
+               WHERE embedding_status = 'processing'
+                 AND NOT EXISTS (SELECT 1 FROM code_health_records chr WHERE chr.entry_id = entries.id)`)
     .run();
   return result.changes;
 }
@@ -415,6 +417,7 @@ async function processBatch(): Promise<void> {
          WHERE id IN (
            SELECT id FROM entries
            WHERE is_current = 1
+             AND NOT EXISTS (SELECT 1 FROM code_health_records chr WHERE chr.entry_id = entries.id)
              AND (embedding_status IN ('pending', 'failed')
               OR (embedding_status = 'generated'
                   AND (embedding_model IS NULL OR embedding_model != ?)))

@@ -8,6 +8,8 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import Database from "better-sqlite3";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { initDatabase, writeState, replaceCrossReferences, listCommitments, storeEmbedding, vecLoaded } from "../src/db.js";
@@ -44,6 +46,38 @@ function agentContext(): AccessContext {
     accessibleNamespaces: [
       { pattern: "projects/heimdall/*", permissions: "rw" },
     ],
+  };
+}
+
+function codeHealthAgentContext(maxClassification: AccessContext["maxClassification"]): AccessContext {
+  return {
+    principalId: "agent:heimdall",
+    principalType: "agent",
+    accessibleNamespaces: [
+      { pattern: "projects/heimdall/*", permissions: "rw" },
+    ],
+    maxClassification,
+    transportType: "local",
+  };
+}
+
+const codeHealthRecordTemplate = (() => {
+  const fixture = JSON.parse(readFileSync(new URL("./fixtures/code-health/agent-positive.json", import.meta.url), "utf8")) as {
+    records: Array<Record<string, unknown>>;
+  };
+  return fixture.records.find((record) => record.record_id === "ref:rec-worker")!;
+})();
+
+function codeHealthRecord(recordId: string): Record<string, unknown> {
+  const suffix = recordId.replace(/^ref:/, "");
+  return {
+    ...structuredClone(codeHealthRecordTemplate),
+    task_id: `task-${suffix}`,
+    record_id: recordId,
+    attempt_id: "attempt-access",
+    parent_attempt_id: null,
+    occurrence_id: `ref:occurrence-${suffix}`,
+    observed_at: new Date(Date.now() - 1000).toISOString().replace(/\.\d{3}Z$/, "Z"),
   };
 }
 
@@ -213,6 +247,38 @@ describe("memory_write — access enforcement", () => {
     const result = parse(raw) as { found?: boolean };
     // external type → same as family response (found: false)
     expect(result.found).toBe(false);
+  });
+});
+
+describe("memory_code_health — access enforcement", () => {
+  it("denies export from a namespace outside the principal's access", async () => {
+    const result = parse(await familyCall("memory_code_health", {
+      action: "export",
+      namespace: "projects/foo",
+    })) as { error?: string };
+    expect(result).toMatchObject({ found: false });
+  });
+
+  it("does not export records above the principal's classification ceiling", async () => {
+    const highClassificationCall = makeServer(db, codeHealthAgentContext("client-confidential"));
+    const limitedClassificationCall = makeServer(db, codeHealthAgentContext("internal"));
+    const record = codeHealthRecord("ref:classification-boundary");
+    const append = parse(await highClassificationCall("memory_code_health", {
+      action: "append",
+      namespace: "projects/heimdall/code-health",
+      idempotency_key: randomUUID(),
+      record,
+      classification: "client-confidential",
+    })) as { error?: string; record_id?: string };
+    expect(append.ok, JSON.stringify(append)).toBe(true);
+    expect(append.record_id).toBe("ref:classification-boundary");
+
+    const exported = parse(await limitedClassificationCall("memory_code_health", {
+      action: "export",
+      namespace: "projects/heimdall/code-health",
+    })) as { error?: string; total_records?: number; records?: unknown[] };
+    expect(exported).toMatchObject({ total_records: 0, records: [] });
+    expect(exported.error).toBeUndefined();
   });
 });
 
@@ -1963,6 +2029,7 @@ describe("meta: all registered tools are covered", () => {
       "memory_retrieval_feedback",
       "memory_status",
       "memory_health",
+      "memory_code_health",
     ]);
 
     const untestedTools = registeredTools.filter((name) => !testedTools.has(name));

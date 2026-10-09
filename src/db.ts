@@ -299,6 +299,13 @@ export interface ClassificationWriteOptions {
   classificationOverride?: boolean;
 }
 
+export interface ManagedLogOptions {
+  /** Fixed, content-free audit detail for bounded managed evidence. */
+  auditDetail?: string;
+  /** Keep managed evidence out of the embedding queue. */
+  skipEmbeddings?: boolean;
+}
+
 export interface WriteStateOptions extends ClassificationWriteOptions {
   createIfAbsent?: boolean;
 }
@@ -980,6 +987,7 @@ export function appendLog(
   tags: string[],
   agentId = "default",
   classificationOptions?: ClassificationWriteOptions,
+  managedOptions?: ManagedLogOptions,
 ): {
   id: string;
   timestamp: string;
@@ -998,8 +1006,8 @@ export function appendLog(
 
   const txn = db.transaction(() => {
     db.prepare(
-      `INSERT INTO entries (id, namespace, key, entry_type, content, tags, agent_id, owner_principal_id, created_at, updated_at, valid_from, classification)
-       VALUES (?, ?, NULL, 'log', ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO entries (id, namespace, key, entry_type, content, tags, agent_id, owner_principal_id, created_at, updated_at, valid_from, classification, embedding_status)
+       VALUES (?, ?, NULL, 'log', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       id,
       namespace,
@@ -1011,9 +1019,10 @@ export function appendLog(
       now,
       now,
       resolvedClassification.classification,
+      managedOptions?.skipEmbeddings ? "failed" : "pending",
     );
 
-    const logPreview = content.length > 80 ? content.slice(0, 80) + "..." : content;
+    const logPreview = managedOptions?.auditDetail ?? (content.length > 80 ? content.slice(0, 80) + "..." : content);
     const classificationSuffix = buildClassificationAuditSuffix(resolvedClassification);
     insertAuditRow(db, now, agentId, "log_append", namespace, null, `${logPreview}${classificationSuffix}`, id);
   });
@@ -1037,6 +1046,7 @@ export function supersedeLog(
   expectedUpdatedAt: string,
   validFrom: string,
   classificationOptions?: ClassificationWriteOptions,
+  managedOptions?: ManagedLogOptions,
 ): SupersedeEntryResult {
   const txn = db.transaction((): SupersedeEntryResult => {
     const existing = db.prepare(
@@ -1089,8 +1099,8 @@ export function supersedeLog(
     db.prepare(
       `INSERT INTO entries
          (id, namespace, key, entry_type, content, tags, agent_id, owner_principal_id,
-          created_at, updated_at, valid_from, classification)
-       VALUES (?, ?, NULL, 'log', ?, ?, ?, ?, ?, ?, ?, ?)`,
+          created_at, updated_at, valid_from, classification, embedding_status)
+       VALUES (?, ?, NULL, 'log', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       id,
       namespace,
@@ -1102,6 +1112,7 @@ export function supersedeLog(
       now,
       validFrom,
       resolved.classification,
+      managedOptions?.skipEmbeddings ? "failed" : "pending",
     );
     db.prepare(
       `INSERT INTO entry_supersessions
@@ -1116,7 +1127,7 @@ export function supersedeLog(
       "supersede",
       namespace,
       null,
-      `log correction${buildClassificationAuditSuffix(resolved)}`,
+      `${managedOptions?.auditDetail ?? "log correction"}${buildClassificationAuditSuffix(resolved)}`,
       id,
     );
     return {
@@ -1130,6 +1141,93 @@ export function supersedeLog(
     };
   });
   return txn.immediate();
+}
+
+/**
+ * Expire managed code-health logs without touching unrelated memory rows.
+ * Correction chains are removed together so the foreign-key lineage and
+ * contract references cannot become dangling. A content-free record-id/hash
+ * tombstone remains until that record's own expiry boundary.
+ */
+export function pruneCodeHealthRecords(db: Database.Database, now = nowUTC()): number {
+  return db.transaction(() => {
+    const expired = db.prepare(`
+      WITH RECURSIVE affected(principal_id, record_id) AS (
+        SELECT principal_id, record_id FROM code_health_records WHERE expires_at <= ?
+        UNION
+        SELECT refs.principal_id, refs.record_id
+          FROM code_health_record_refs refs JOIN affected a
+            ON refs.principal_id = a.principal_id AND refs.referenced_record_id = a.record_id
+      )
+      SELECT DISTINCT r.entry_id FROM code_health_records r
+        JOIN affected a ON a.principal_id = r.principal_id AND a.record_id = r.record_id
+       WHERE r.entry_id IS NOT NULL
+       ORDER BY r.entry_id
+    `).all(now) as Array<{ entry_id: string }>;
+    const visited = new Set<string>();
+    let deleted = 0;
+
+    for (const { entry_id } of expired) {
+      if (visited.has(entry_id)) continue;
+      const lineage = db.prepare(`
+        WITH RECURSIVE linked(id) AS (
+          SELECT ?
+          UNION
+          SELECT CASE WHEN s.predecessor_id = linked.id THEN s.successor_id ELSE s.predecessor_id END
+            FROM entry_supersessions s JOIN linked
+              ON s.predecessor_id = linked.id OR s.successor_id = linked.id
+        )
+        SELECT id FROM linked
+      `).all(entry_id) as Array<{ id: string }>;
+      const ids = lineage.map(({ id }) => id);
+      if (ids.length === 0) continue;
+      for (const id of ids) visited.add(id);
+      const placeholders = ids.map(() => "?").join(", ");
+      const managedCount = (db.prepare(`
+        SELECT COUNT(*) AS count FROM code_health_records
+         WHERE entry_id IN (${placeholders})
+      `).get(...ids) as { count: number }).count;
+      // Fail closed if an unexpected mixed lineage could make this scoped
+      // retention delete touch ordinary memory.
+      if (managedCount !== ids.length) continue;
+
+      if (_vecLoaded) {
+        const removeVector = db.prepare("DELETE FROM entries_vec WHERE entry_id = ?");
+        for (const id of ids) removeVector.run(id);
+      }
+      db.prepare(`DELETE FROM commitments WHERE source_entry_id IN (${placeholders})`).run(...ids);
+      db.prepare(`DELETE FROM entry_supersessions
+                   WHERE predecessor_id IN (${placeholders}) OR successor_id IN (${placeholders})`)
+        .run(...ids, ...ids);
+      const rows = db.prepare(`SELECT id, namespace FROM entries WHERE id IN (${placeholders})`).all(...ids) as Array<{
+        id: string; namespace: string;
+      }>;
+      const removeEntry = db.prepare("DELETE FROM entries WHERE id = ? AND entry_type = 'log'");
+      for (const row of rows) {
+        const result = removeEntry.run(row.id);
+        deleted += result.changes;
+        if (result.changes) {
+          insertAuditRow(db, now, "munin:retention", "delete", row.namespace, null,
+            "code-health evidence expired", row.id);
+        }
+      }
+    }
+
+    db.prepare(`DELETE FROM code_health_record_refs
+                 WHERE EXISTS (SELECT 1 FROM code_health_records r
+                                WHERE r.principal_id = code_health_record_refs.principal_id
+                                  AND r.record_id = code_health_record_refs.record_id AND r.expires_at <= ?)`)
+      .run(now);
+    db.prepare(`DELETE FROM write_receipts
+                 WHERE tool_name = 'memory_code_health'
+                   AND EXISTS (SELECT 1 FROM code_health_records r
+                                WHERE r.principal_id = write_receipts.principal_id
+                                  AND r.idempotency_key = write_receipts.idempotency_key
+                                  AND r.expires_at <= ?)`).run(now);
+    db.prepare("DELETE FROM code_health_records WHERE entry_id IS NULL AND expires_at <= ?").run(now);
+    db.prepare("DELETE FROM code_health_export_snapshots WHERE expires_at <= ?").run(now);
+    return deleted;
+  }).immediate();
 }
 
 // --- Query / search operations ---
@@ -1246,6 +1344,7 @@ export function filterIdsMatchingFts(
     SELECT e.id FROM entries e
     JOIN entries_fts fts ON e.rowid = fts.rowid
     WHERE entries_fts MATCH ? AND e.is_current = 1 AND e.id IN (${placeholders})
+      AND NOT EXISTS (SELECT 1 FROM code_health_records chr WHERE chr.entry_id = e.id)
   `;
   let rows: Array<{ id: string }>;
   try {
@@ -1312,7 +1411,7 @@ export function buildQueryEntriesByFilterStatement(
   } = options;
   const clampedLimit = clampQueryLimit(limit, options);
 
-  let sql = "SELECT * FROM entries WHERE is_current = 1";
+  let sql = "SELECT * FROM entries WHERE is_current = 1 AND NOT EXISTS (SELECT 1 FROM code_health_records chr WHERE chr.entry_id = entries.id)";
   const params: unknown[] = [];
 
   sql = appendNamespaceSqlFilter(sql, params, "namespace", namespace, namespaceMode, namespaceSelectors);
@@ -1372,6 +1471,7 @@ export function buildQueryEntriesLexicalStatement(
     SELECT e.*, bm25(entries_fts) as lexical_score FROM entries e
     JOIN entries_fts fts ON e.rowid = fts.rowid
     WHERE entries_fts MATCH ? AND e.is_current = 1
+      AND NOT EXISTS (SELECT 1 FROM code_health_records chr WHERE chr.entry_id = e.id)
   `;
   const params: unknown[] = [rawFts5 ? query : escapeFtsQuery(query)];
 
@@ -1532,6 +1632,7 @@ export function summarizeNamespaceLogsByClassification(
          WHERE namespace = ?
            AND entry_type = 'log'
            AND is_current = 1
+           AND NOT EXISTS (SELECT 1 FROM code_health_records chr WHERE chr.entry_id = entries.id)
            AND classification IN (${placeholders})`,
       )
       .get(namespace, ...visibleLevels) as Omit<LogSummary, "recent">
@@ -1552,7 +1653,8 @@ export function listNamespaceContents(
   const logStats = (db
     .prepare(
       `SELECT COUNT(*) as log_count, MIN(created_at) as earliest, MAX(created_at) as latest
-       FROM entries WHERE namespace = ? AND entry_type = 'log' AND is_current = 1`,
+       FROM entries WHERE namespace = ? AND entry_type = 'log' AND is_current = 1
+         AND NOT EXISTS (SELECT 1 FROM code_health_records chr WHERE chr.entry_id = entries.id)`,
     )
     .get(namespace) as { log_count: number; earliest: string | null; latest: string | null }) ?? { log_count: 0, earliest: null, latest: null };
 
@@ -1560,6 +1662,7 @@ export function listNamespaceContents(
     .prepare(
       `SELECT id, substr(content, 1, 200) as content_preview, tags, agent_id, owner_principal_id, created_at, classification
        FROM entries WHERE namespace = ? AND entry_type = 'log' AND is_current = 1
+         AND NOT EXISTS (SELECT 1 FROM code_health_records chr WHERE chr.entry_id = entries.id)
        ORDER BY rowid DESC LIMIT 5`,
     )
     .all(namespace) as LogPreview[];
@@ -1583,7 +1686,7 @@ export function listEntriesForDerivation(
   options: DerivationEntryOptions = {},
 ): Entry[] {
   const { namespace, namespaceMode = "exact", since } = options;
-  let sql = "SELECT * FROM entries WHERE is_current = 1";
+  let sql = "SELECT * FROM entries WHERE is_current = 1 AND NOT EXISTS (SELECT 1 FROM code_health_records chr WHERE chr.entry_id = entries.id)";
   const params: unknown[] = [];
 
   sql = appendNamespaceSqlFilter(sql, params, "namespace", namespace, namespaceMode);
@@ -2420,7 +2523,7 @@ export class DeletePreviewStaleError extends Error {
  */
 export class DeletePreviewPartialLineageError extends Error {
   constructor() {
-    super("Deletion would remove only part of a correction chain; no preview token was generated.");
+    super("Deletion would remove only part of a correction chain or required code-health context; no preview token was generated.");
     this.name = "DeletePreviewPartialLineageError";
   }
 }
@@ -2494,12 +2597,32 @@ function assertCompleteLineageSelection(
   }
 }
 
+function assertCompleteCodeHealthReferenceSelection(
+  db: Database.Database,
+  selectionSql: string,
+  params: unknown[],
+): void {
+  const partial = db.prepare(`
+    WITH selected(id) AS (${selectionSql})
+    SELECT 1 FROM code_health_record_refs refs
+      JOIN code_health_records source
+        ON source.principal_id = refs.principal_id AND source.record_id = refs.record_id
+      JOIN code_health_records target
+        ON target.principal_id = refs.principal_id AND target.record_id = refs.referenced_record_id
+     WHERE source.entry_id IS NOT NULL AND target.entry_id IS NOT NULL
+       AND ((source.entry_id IN (SELECT id FROM selected)) != (target.entry_id IN (SELECT id FROM selected)))
+     LIMIT 1
+  `).get(...params);
+  if (partial) throw new DeletePreviewPartialLineageError();
+}
+
 function deleteLineageForSelection(
   db: Database.Database,
   selectionSql: string,
   params: unknown[],
 ): void {
   assertCompleteLineageSelection(db, selectionSql, params);
+  assertCompleteCodeHealthReferenceSelection(db, selectionSql, params);
   db.prepare(
     `DELETE FROM entry_supersessions
      WHERE predecessor_id IN (${selectionSql}) OR successor_id IN (${selectionSql})`,
@@ -2645,6 +2768,7 @@ export function previewDelete(
     ? "SELECT id FROM entries WHERE namespace = ?"
     : "SELECT id FROM entries WHERE namespace = ? AND COALESCE(owner_principal_id, agent_id) = ?";
   assertCompleteLineageSelection(db, selectionSql, stateParams);
+  assertCompleteCodeHealthReferenceSelection(db, selectionSql, stateParams);
   const keys: string[] = [];
   let stateCount = 0;
   let currentStateCount = 0;
@@ -2747,6 +2871,7 @@ export function previewDeleteByClassification(
     ? `SELECT id FROM entries WHERE namespace = ? AND classification IN (${placeholders})`
     : `SELECT id FROM entries WHERE namespace = ? AND COALESCE(owner_principal_id, agent_id) = ? AND classification IN (${placeholders})`;
   assertCompleteLineageSelection(db, selectionSql, stateParams);
+  assertCompleteCodeHealthReferenceSelection(db, selectionSql, stateParams);
   const keys: string[] = [];
   let stateCount = 0;
   let currentStateCount = 0;
@@ -2920,6 +3045,7 @@ interface SemanticFilterOptions {
 
 function passesSemanticFilters(entry: Entry, opts: SemanticFilterOptions): boolean {
   if (entry.is_current !== 1) return false;
+  if ((JSON.parse(entry.tags) as string[]).includes("code-health:evidence-v1")) return false;
   if (opts.namespaceSelectors !== undefined && opts.namespaceSelectors !== null) {
     if (!matchesNamespaceSelectors(entry.namespace, opts.namespaceSelectors)) return false;
   }
@@ -4687,6 +4813,7 @@ export function getNamespaceEntriesForIntake(
        FROM entries
        WHERE namespace = ?
          AND is_current = 1
+         AND NOT EXISTS (SELECT 1 FROM code_health_records chr WHERE chr.entry_id = entries.id)
          AND (entry_type != 'state' OR valid_until IS NULL OR valid_until > ?)
          AND classification IN (${classificationInClause(visibleLevels)})
        ORDER BY updated_at DESC, rowid DESC
@@ -4749,6 +4876,7 @@ export function getNamespacesNeedingConsolidation(
     LEFT JOIN consolidation_metadata cm ON cm.namespace = e.namespace
     WHERE e.entry_type = 'log'
       AND e.is_current = 1
+      AND NOT EXISTS (SELECT 1 FROM code_health_records chr WHERE chr.entry_id = e.id)
       AND ${trackedClause}
       AND (
         cm.last_log_created_at IS NULL
@@ -4799,6 +4927,7 @@ export function hasMoreLogsAfter(
       `SELECT 1 FROM entries
          WHERE namespace = ? AND entry_type = 'log'
            AND is_current = 1
+           AND NOT EXISTS (SELECT 1 FROM code_health_records chr WHERE chr.entry_id = entries.id)
            AND (created_at > ? OR (created_at = ? AND id > ?))
          LIMIT 1`,
     )
@@ -4838,6 +4967,7 @@ export function getLogsForConsolidation(
       `SELECT * FROM entries
          WHERE namespace = ? AND entry_type = 'log'
            AND is_current = 1
+           AND NOT EXISTS (SELECT 1 FROM code_health_records chr WHERE chr.entry_id = entries.id)
            ${where}
          ${order}${limitClause}`,
     );
@@ -4851,6 +4981,7 @@ export function getLogsForConsolidation(
     `SELECT * FROM entries
        WHERE namespace = ? AND entry_type = 'log'
          AND is_current = 1
+         AND NOT EXISTS (SELECT 1 FROM code_health_records chr WHERE chr.entry_id = entries.id)
        ${order}${limitClause}`,
   );
   return (hasLimit ? stmt.all(namespace, maxLogs) : stmt.all(namespace)) as Entry[];
@@ -5122,7 +5253,8 @@ export function getEmbeddingQueueCounts(
        SUM(CASE WHEN embedding_status = 'generated' AND embedding_model IS NULL THEN 1 ELSE 0 END) AS generated_null,
        COUNT(*) AS total
      FROM entries
-     WHERE is_current = 1`,
+     WHERE is_current = 1
+       AND NOT EXISTS (SELECT 1 FROM code_health_records chr WHERE chr.entry_id = entries.id)`,
   ).get(activeModel, activeModel) as {
     pending: number | null;
     processing: number | null;
@@ -5175,7 +5307,8 @@ export function getMemorySizeCounts(db: Database.Database, isOwner: boolean): Me
        SUM(CASE WHEN entry_type = 'log'   THEN 1 ELSE 0 END) AS log_count,
        COUNT(*) AS total,
        COUNT(DISTINCT namespace) AS ns_count
-     FROM entries`,
+     FROM entries
+     WHERE NOT EXISTS (SELECT 1 FROM code_health_records chr WHERE chr.entry_id = entries.id)`,
   ).get() as {
     state_count: number | null;
     log_count: number | null;
@@ -5411,7 +5544,9 @@ export interface ClassificationDistribution {
 export function getClassificationDistribution(db: Database.Database, isOwner: boolean): ClassificationDistribution {
   if (!isOwner) throw new Error("memory_health helpers are owner-only");
   const rows = db.prepare(
-    `SELECT classification, COUNT(*) AS cnt FROM entries GROUP BY classification`,
+    `SELECT classification, COUNT(*) AS cnt FROM entries
+      WHERE NOT EXISTS (SELECT 1 FROM code_health_records chr WHERE chr.entry_id = entries.id)
+      GROUP BY classification`,
   ).all() as Array<{ classification: string; cnt: number }>;
 
   const dist: ClassificationDistribution = {

@@ -2366,6 +2366,7 @@ describe("isReadOnlyBridgeRequest", () => {
     const stale = [...decided].filter((n) => !REGISTERED_TOOL_NAMES.includes(n));
     expect(stale).toEqual([]);
   });
+
 });
 
 describe("createFetchWithTimeout network retry", () => {
@@ -2388,6 +2389,26 @@ describe("createFetchWithTimeout network retry", () => {
       ...extra,
     });
   }
+
+  it("never retries the mixed append/export code-health tool automatically", async () => {
+    for (const action of ["append", "export"]) {
+      const fetchFn = vi.fn().mockRejectedValue(
+        fetchError("ECONNREFUSED", "connect ECONNREFUSED 127.0.0.1:3030", "connect"),
+      );
+      const body = rpcBody("tools/call", {
+        name: "memory_code_health",
+        arguments: { action },
+      });
+
+      await expect(make(fetchFn)("https://example.com/mcp", {
+        method: "POST",
+        body,
+        headers: { "content-type": "application/json" },
+      })).rejects.toMatchObject({ readOnly: false, attempts: 1 });
+      expect(fetchFn).toHaveBeenCalledTimes(1);
+    }
+    expect(sleep).not.toHaveBeenCalled();
+  });
 
   it("retries a connect failure for a read-only request with the same body and request id", async () => {
     const fetchFn = vi

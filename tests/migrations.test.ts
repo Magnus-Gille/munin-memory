@@ -1233,14 +1233,14 @@ describe("migration v19 — retrieval_events.duration_ms", () => {
         applied_at TEXT NOT NULL
       );
     `);
-    // Mark all versions up to v18 as applied WITHOUT creating any tables.
-    for (let v = 1; v <= 18; v++) {
-      db.prepare("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)").run(
-        v, new Date().toISOString(),
-      );
-    }
-    // runMigrations should run v19; the table-absent guard must prevent a throw.
-    expect(() => runMigrations(db)).not.toThrow();
+    // Exercise v19 itself. Continuing through later migrations would create an
+    // invalid synthetic baseline for migrations that require the real entries
+    // schema (including the code-health deletion trigger).
+    const migration19 = migrations.find(({ version }) => version === 19);
+    expect(migration19).toBeDefined();
+    expect(() => migration19!.up(db)).not.toThrow();
+    expect(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'retrieval_events'").get())
+      .toBeUndefined();
     db.close();
   });
 });

@@ -470,7 +470,7 @@ export function canonicalizeTags(tags: string[]): { canonical: string[]; normali
  * provenance signal unspoofable. Applied unconditionally on every write/log/patch
  * path (separate from alias canonicalization, which only runs for status writes).
  */
-export const RESERVED_SERVER_TAGS = new Set<string>(["source:synthesis"]);
+export const RESERVED_SERVER_TAGS = new Set<string>(["source:synthesis", "code-health:evidence-v1"]);
 
 export function stripReservedTags(tags: string[]): { kept: string[]; removed: string[] } {
   const kept: string[] = [];

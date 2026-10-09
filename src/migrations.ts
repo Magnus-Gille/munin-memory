@@ -1107,6 +1107,190 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 28,
+    description: "Add bounded code-health evidence ledger and export snapshots (#358)",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS code_health_records (
+          principal_id TEXT NOT NULL,
+          record_id TEXT NOT NULL,
+          namespace TEXT,
+          entry_id TEXT UNIQUE,
+          payload_hash TEXT NOT NULL,
+          record_kind TEXT CHECK(record_kind IS NULL OR record_kind IN ('observation', 'assessment')),
+          repo_owner TEXT,
+          repo_name TEXT,
+          task_id TEXT,
+          attempt_id TEXT,
+          observed_at TEXT,
+          collected_at TEXT,
+          expires_at TEXT NOT NULL,
+          model TEXT,
+          rubric_version TEXT,
+          classification TEXT,
+          supersedes_record_id TEXT,
+          correction_ref TEXT,
+          idempotency_key TEXT,
+          PRIMARY KEY (principal_id, record_id)
+        ) WITHOUT ROWID;
+
+        CREATE INDEX IF NOT EXISTS idx_code_health_scope
+          ON code_health_records(principal_id, namespace, repo_owner, repo_name, task_id, observed_at, record_id);
+        CREATE INDEX IF NOT EXISTS idx_code_health_retention
+          ON code_health_records(expires_at, entry_id);
+        CREATE INDEX IF NOT EXISTS idx_code_health_entry
+          ON code_health_records(entry_id);
+        CREATE INDEX IF NOT EXISTS idx_code_health_idempotency
+          ON code_health_records(principal_id, idempotency_key);
+
+        CREATE TABLE IF NOT EXISTS code_health_record_refs (
+          principal_id TEXT NOT NULL,
+          namespace TEXT NOT NULL,
+          record_id TEXT NOT NULL,
+          referenced_record_id TEXT NOT NULL,
+          PRIMARY KEY (principal_id, record_id, referenced_record_id)
+        ) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS idx_code_health_refs_target
+          ON code_health_record_refs(principal_id, referenced_record_id);
+
+        CREATE TABLE IF NOT EXISTS code_health_export_snapshots (
+          id TEXT PRIMARY KEY,
+          caller_principal_id TEXT NOT NULL,
+          producer_principal_id TEXT NOT NULL,
+          namespace TEXT NOT NULL,
+          filter_hash TEXT NOT NULL,
+          auth_hash TEXT NOT NULL,
+          generated_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          total_records INTEGER NOT NULL CHECK(total_records >= 0),
+          invalidated INTEGER NOT NULL DEFAULT 0 CHECK(invalidated IN (0, 1))
+        );
+        CREATE INDEX IF NOT EXISTS idx_code_health_export_expiry
+          ON code_health_export_snapshots(expires_at);
+
+        CREATE TABLE IF NOT EXISTS code_health_export_items (
+          snapshot_id TEXT NOT NULL REFERENCES code_health_export_snapshots(id) ON DELETE CASCADE,
+          position INTEGER NOT NULL CHECK(position >= 0),
+          principal_id TEXT NOT NULL,
+          record_id TEXT NOT NULL,
+          entry_id TEXT NOT NULL,
+          PRIMARY KEY (snapshot_id, position),
+          UNIQUE (snapshot_id, principal_id, record_id)
+        ) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS idx_code_health_export_entry
+          ON code_health_export_items(entry_id, snapshot_id);
+
+        CREATE TRIGGER IF NOT EXISTS code_health_entry_deleted
+        AFTER DELETE ON entries
+        BEGIN
+          UPDATE code_health_export_snapshots
+             SET invalidated = 1
+           WHERE EXISTS (
+             SELECT 1 FROM code_health_records r
+              WHERE r.entry_id = old.id
+                AND r.namespace = code_health_export_snapshots.namespace
+                AND r.principal_id = code_health_export_snapshots.producer_principal_id
+           );
+          DELETE FROM code_health_export_items
+           WHERE snapshot_id IN (SELECT id FROM code_health_export_snapshots WHERE invalidated = 1);
+          UPDATE code_health_records
+             SET entry_id = NULL, namespace = NULL, record_kind = NULL,
+                 repo_owner = NULL, repo_name = NULL, task_id = NULL, attempt_id = NULL,
+                 observed_at = NULL, collected_at = NULL, model = NULL, rubric_version = NULL,
+                 classification = NULL, supersedes_record_id = NULL, correction_ref = NULL
+           WHERE entry_id = old.id;
+          DELETE FROM code_health_record_refs
+           WHERE EXISTS (
+             SELECT 1 FROM code_health_records r
+              WHERE r.entry_id IS NULL
+                AND r.principal_id = code_health_record_refs.principal_id
+                AND r.record_id = code_health_record_refs.record_id
+           ) OR EXISTS (
+             SELECT 1 FROM code_health_records r
+              WHERE r.entry_id IS NULL
+                AND r.principal_id = code_health_record_refs.principal_id
+                AND r.record_id = code_health_record_refs.referenced_record_id
+           );
+          UPDATE write_receipts
+             SET namespace = '', entry_id = '', entry_updated_at = '', classification = 'public',
+                 entry_key = NULL, valid_from = NULL, supersedes = NULL
+           WHERE tool_name = 'memory_code_health'
+             AND EXISTS (
+               SELECT 1 FROM code_health_records r
+                WHERE r.entry_id IS NULL
+                  AND r.principal_id = write_receipts.principal_id
+                  AND r.idempotency_key = write_receipts.idempotency_key
+             );
+        END;
+      `);
+
+      // Managed code-health payloads remain in immutable-log storage, but their
+      // text must never enter the generic full-text cache. Keep ordinary rows
+      // on the existing FTS path and rebuild once to establish that boundary.
+      db.exec(`
+        DROP TRIGGER IF EXISTS entries_ai;
+        DROP TRIGGER IF EXISTS entries_ad;
+        DROP TRIGGER IF EXISTS entries_au;
+
+        CREATE TRIGGER entries_ai AFTER INSERT ON entries
+        WHEN json_valid(new.tags)
+          AND NOT EXISTS (
+            SELECT 1 FROM json_each(new.tags)
+             WHERE type = 'text' AND value = 'code-health:evidence-v1'
+          )
+        BEGIN
+          INSERT INTO entries_fts(rowid, content, namespace, key, tags)
+          VALUES (new.rowid, new.content || ' ' || munin_split_tokens(new.content), new.namespace, new.key, new.tags);
+        END;
+
+        CREATE TRIGGER entries_ad AFTER DELETE ON entries
+        WHEN json_valid(old.tags)
+          AND NOT EXISTS (
+            SELECT 1 FROM json_each(old.tags)
+             WHERE type = 'text' AND value = 'code-health:evidence-v1'
+          )
+        BEGIN
+          INSERT INTO entries_fts(entries_fts, rowid, content, namespace, key, tags)
+          VALUES ('delete', old.rowid, old.content || ' ' || munin_split_tokens(old.content), old.namespace, old.key, old.tags);
+        END;
+
+        CREATE TRIGGER entries_au AFTER UPDATE ON entries
+        BEGIN
+          INSERT INTO entries_fts(entries_fts, rowid, content, namespace, key, tags)
+          SELECT 'delete', old.rowid, old.content || ' ' || munin_split_tokens(old.content), old.namespace, old.key, old.tags
+          WHERE json_valid(old.tags)
+            AND NOT EXISTS (
+              SELECT 1 FROM json_each(old.tags)
+               WHERE type = 'text' AND value = 'code-health:evidence-v1'
+            );
+          INSERT INTO entries_fts(rowid, content, namespace, key, tags)
+          SELECT new.rowid, new.content || ' ' || munin_split_tokens(new.content), new.namespace, new.key, new.tags
+          WHERE json_valid(new.tags)
+            AND NOT EXISTS (
+              SELECT 1 FROM json_each(new.tags)
+               WHERE type = 'text' AND value = 'code-health:evidence-v1'
+            );
+        END;
+
+        INSERT INTO entries_fts(entries_fts) VALUES('delete-all');
+      `);
+      const ordinaryRows = db.prepare(`SELECT rowid, content, namespace, key, tags FROM entries
+        WHERE json_valid(entries.tags)
+          AND NOT EXISTS (
+            SELECT 1 FROM json_each(entries.tags)
+             WHERE type = 'text' AND value = 'code-health:evidence-v1'
+          )
+          AND NOT EXISTS (SELECT 1 FROM code_health_records chr WHERE chr.entry_id = entries.id)`).all() as Array<{
+        rowid: number; content: string; namespace: string; key: string | null; tags: string;
+      }>;
+      const indexOrdinary = db.prepare(`INSERT INTO entries_fts(rowid, content, namespace, key, tags)
+        VALUES (?, ? || ' ' || munin_split_tokens(?), ?, ?, ?)`);
+      for (const row of ordinaryRows) {
+        indexOrdinary.run(row.rowid, row.content, row.content, row.namespace, row.key, row.tags);
+      }
+    },
+  },
 ];
 
 /**
