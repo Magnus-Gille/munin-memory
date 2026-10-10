@@ -80,3 +80,12 @@ if a deleted alias has no recoverable record lineage. This small deduplication
 tombstone is the deliberate metadata-erasure exception. SQLite backups may
 retain deleted rows until their configured backup expiry; see
 `docs/offsite-backup.md` for the backup lifecycle.
+
+Migration 30 repairs the derived FTS cache after older `rebuildFTS()` versions
+could index managed payloads. It clears the index (including terms whose source
+rows were already deleted) and repopulates it only from ordinary rows using the
+same exact reserved-tag and ledger exclusions as migration 28, preserving
+split-token augmentation. It does not rewrite memory rows or ledger data. If
+the migration fails, its transaction leaves the prior database state in place;
+resolve the failure and retry the forward migration rather than editing the
+FTS cache manually. No database rollback is needed for this derived-index repair.

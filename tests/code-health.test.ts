@@ -8,7 +8,7 @@ import {
   appendCodeHealthRecord,
   exportCodeHealthRecords,
 } from "../src/code-health.js";
-import { appendLog, executeDelete, getById, initDatabase, pruneCodeHealthRecords } from "../src/db.js";
+import { appendLog, executeDelete, getById, initDatabase, pruneCodeHealthRecords, rebuildFTS } from "../src/db.js";
 import { registerTools } from "../src/tools.js";
 import { createTestStorage } from "./helpers/test-storage.js";
 
@@ -706,5 +706,40 @@ describe("memory_code_health", () => {
 
     db.prepare("DELETE FROM entries WHERE id = ?").run(ordinary.id);
     expect(find("adjacenttagupdatedneedle")).toBeUndefined();
+  });
+
+  it("keeps appended managed payloads out of rebuilt FTS through deletion and expiry", () => {
+    const find = (term: string) => db.prepare(
+      "SELECT rowid FROM entries_fts WHERE entries_fts MATCH ?",
+    ).all(`"${term}"`);
+    appendLog(db, namespace, "OrdinaryWebFetch remains searchable", [], producer.principalId);
+
+    const deletedRecord = sampleRecord({ summary: "manageddeletionftssentinel" });
+    expect(append(deletedRecord).ok).toBe(true);
+    rebuildFTS(db);
+    expect(find("manageddeletionftssentinel")).toHaveLength(0);
+    expect(find("web fetch")).toHaveLength(1);
+    executeDelete(db, namespace, undefined, producer.principalId, false);
+    expect(find("manageddeletionftssentinel")).toHaveLength(0);
+
+    const expiryNamespace = "projects/code-health-expiry";
+    const expiryCtx: AccessContext = {
+      ...producer,
+      accessibleNamespaces: [{ pattern: expiryNamespace, permissions: "rw" }],
+    };
+    const expiringRecord = sampleRecord({ summary: "managedexpiryftssentinel" });
+    const appendResult = appendCodeHealthRecord(db, expiryCtx, {
+      namespace: expiryNamespace,
+      idempotency_key: randomUUID(),
+      record: expiringRecord,
+    });
+    expect(appendResult.ok).toBe(true);
+    const expiry = "2000-01-01T00:00:00.000Z";
+    db.prepare("UPDATE code_health_records SET expires_at = ? WHERE principal_id = ? AND record_id = ?")
+      .run(expiry, producer.principalId, expiringRecord.record_id);
+    rebuildFTS(db);
+    expect(find("managedexpiryftssentinel")).toHaveLength(0);
+    expect(pruneCodeHealthRecords(db, new Date(Date.parse(expiry) + 1000).toISOString())).toBe(1);
+    expect(find("managedexpiryftssentinel")).toHaveLength(0);
   });
 });

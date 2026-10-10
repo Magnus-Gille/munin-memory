@@ -1361,6 +1361,34 @@ describe("loadTargetVocabulary", () => {
     const targets = loadTargetVocabulary(db, "projects/alpha");
     expect(targets[0]).toEqual({ namespace: "projects/hugin", bareName: "hugin" });
   });
+
+  it("does not derive targets from managed-only namespaces but allows ordinary rows beside them", () => {
+    const managedNamespace = "projects/managedtarget";
+    const managedEntryId = "managed-target-entry";
+    const now = new Date().toISOString();
+    db.prepare(`INSERT INTO entries
+      (id, namespace, key, entry_type, content, tags, agent_id, created_at, updated_at)
+      VALUES (?, ?, NULL, 'log', ?, ?, 'agent:producer', ?, ?)`)
+      .run(managedEntryId, managedNamespace, "managed target payload", '["code-health:evidence-v1"]', now, now);
+    db.prepare(`INSERT INTO code_health_records
+      (principal_id, record_id, namespace, entry_id, payload_hash, expires_at)
+      VALUES ('agent:producer', 'ref:managed-target', ?, ?, 'payload-hash', '2099-01-01T00:00:00.000Z')`)
+      .run(managedNamespace, managedEntryId);
+
+    const logs: Entry[] = [
+      makeEntry({ content: "Managedtarget needs a check." }),
+      makeEntry({ content: "Another reference to projects/managedtarget." }),
+    ];
+    expect(loadTargetVocabulary(db, "projects/alpha").map(({ namespace }) => namespace))
+      .not.toContain(managedNamespace);
+    expect(discoverOrphanedReferences(db, "projects/alpha", logs).orphans).toEqual([]);
+
+    appendLog(db, managedNamespace, "ordinary row keeps this target eligible", []);
+    expect(loadTargetVocabulary(db, "projects/alpha").map(({ namespace }) => namespace))
+      .toContain(managedNamespace);
+    expect(discoverOrphanedReferences(db, "projects/alpha", logs).orphans)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ target_namespace: managedNamespace })]));
+  });
 });
 
 describe("scanMentions", () => {

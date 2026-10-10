@@ -1385,6 +1385,34 @@ export const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 30,
+    description: "Repair managed-row FTS exclusion and remove stale indexed payloads (#358)",
+    up: (db) => {
+      // A prior rebuildFTS implementation could repopulate managed evidence,
+      // including rows since deleted whose terms survive in the external FTS
+      // index. Clear the derived index first, then restore only ordinary rows
+      // with the same exact-tag + ledger exclusion and split-token expansion
+      // established by migration 28.
+      db.exec("INSERT INTO entries_fts(entries_fts) VALUES('delete-all')");
+      const ordinaryRows = db.prepare(`SELECT rowid, content, namespace, key, tags FROM entries
+        WHERE json_valid(entries.tags)
+          AND NOT EXISTS (
+            SELECT 1 FROM json_each(entries.tags)
+             WHERE type = 'text' AND value = 'code-health:evidence-v1'
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM code_health_records chr WHERE chr.entry_id = entries.id
+          )`).all() as Array<{
+        rowid: number; content: string; namespace: string; key: string | null; tags: string;
+      }>;
+      const indexOrdinary = db.prepare(`INSERT INTO entries_fts(rowid, content, namespace, key, tags)
+        VALUES (?, ? || ' ' || munin_split_tokens(?), ?, ?, ?)`);
+      for (const row of ordinaryRows) {
+        indexOrdinary.run(row.rowid, row.content, row.content, row.namespace, row.key, row.tags);
+      }
+    },
+  },
 ];
 
 /**

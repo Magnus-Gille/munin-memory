@@ -42,6 +42,7 @@ import {
   getAuditHistoryPage,
   createQuerySnapshot,
   rebuildFTS,
+  pruneCodeHealthRecords,
   logToolCall,
   getToolCallAggregates,
   getToolCallTelemetrySnapshot,
@@ -2073,6 +2074,45 @@ describe("rebuildFTS", () => {
         r.content.includes("WebFetch"),
       ),
     ).toBe(true);
+  });
+
+  it("excludes ledger-backed managed payloads while preserving ordinary split-token rows", () => {
+    const now = new Date().toISOString();
+    writeState(db, "projects/fts-rebuild", "ordinary", "OrdinaryWebFetch target remains searchable", []);
+    const managed = appendLog(db, "projects/fts-rebuild", "managedrebuildsentinel", [], "agent:producer");
+    db.prepare("UPDATE entries SET tags = ? WHERE id = ?")
+      .run(JSON.stringify(["code-health:evidence-v1"]), managed.id);
+    db.prepare(`INSERT INTO code_health_records
+      (principal_id, record_id, namespace, entry_id, payload_hash, expires_at)
+      VALUES ('agent:producer', ?, 'projects/fts-rebuild', ?, 'payload-hash', '2099-01-01T00:00:00.000Z')`)
+      .run("ref:managed-ft-rebuild", managed.id);
+
+    rebuildFTS(db);
+    const find = (term: string) => db.prepare(
+      "SELECT rowid FROM entries_fts WHERE entries_fts MATCH ?",
+    ).all(`"${term}"`);
+    expect(find("managedrebuildsentinel")).toHaveLength(0);
+    expect(find("web fetch")).toHaveLength(1);
+
+    db.prepare("DELETE FROM entries WHERE id = ?").run(managed.id);
+    expect(find("managedrebuildsentinel")).toHaveLength(0);
+    // The index repair is content-only; it does not rewrite ordinary rows.
+    expect(find("web fetch")).toHaveLength(1);
+
+    // Simulate an older index containing a managed term, then verify expiry
+    // cleanup remains safe after a rebuild has established the new boundary.
+    const expiring = appendLog(db, "projects/fts-rebuild", "managedexpiry sentinel", [], "agent:producer");
+    db.prepare("UPDATE entries SET tags = ? WHERE id = ?")
+      .run(JSON.stringify(["code-health:evidence-v1"]), expiring.id);
+    db.prepare(`INSERT INTO code_health_records
+      (principal_id, record_id, namespace, entry_id, payload_hash, expires_at)
+      VALUES ('agent:producer', ?, 'projects/fts-rebuild', ?, 'payload-hash-2', ?)`)
+      .run("ref:managed-ft-expiry", expiring.id, now);
+    rebuildFTS(db);
+    expect(find("managedexpiry")).toHaveLength(0);
+    expect(pruneCodeHealthRecords(db, new Date(Date.now() + 1000).toISOString())).toBe(1);
+    expect(find("managedexpiry")).toHaveLength(0);
+    expect(find("web fetch")).toHaveLength(1);
   });
 });
 

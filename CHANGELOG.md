@@ -28,7 +28,9 @@ changelog is the canonical record of what moved.
   and descriptive ledger metadata while a minimal ID/hash tombstone and every
   key-bound receipt remain until their original expiry. Migration 29 binds each
   receipt alias to the principal-scoped record and fails closed when deleted
-  alias lineage cannot be recovered. See `docs/code-health.md`.
+  alias lineage cannot be recovered. Migration 30 repairs the derived FTS cache,
+  purging managed terms (including orphan terms from already-deleted rows) while
+  preserving split-token search for ordinary entries. See `docs/code-health.md`.
 
 - **Replay-safe write recovery (#321).** Optional principal-scoped UUID
   `idempotency_key` on state writes, logs and status updates. Migration 27 stores

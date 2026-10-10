@@ -233,7 +233,15 @@ export function rebuildFTS(db: Database.Database): void {
            namespace,
            key,
            tags
-         FROM entries`,
+         FROM entries
+        WHERE json_valid(entries.tags)
+          AND NOT EXISTS (
+            SELECT 1 FROM json_each(entries.tags)
+             WHERE type = 'text' AND value = 'code-health:evidence-v1'
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM code_health_records chr WHERE chr.entry_id = entries.id
+          )`,
     ).run();
   })();
 }

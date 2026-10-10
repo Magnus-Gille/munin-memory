@@ -911,7 +911,15 @@ export function loadTargetVocabulary(
           OR namespace GLOB 'people/*'
           OR namespace GLOB 'decisions/*')
          AND namespace != ?
-         AND is_current = 1`,
+         AND is_current = 1
+         AND json_valid(entries.tags)
+         AND NOT EXISTS (
+           SELECT 1 FROM json_each(entries.tags)
+            WHERE type = 'text' AND value = 'code-health:evidence-v1'
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM code_health_records chr WHERE chr.entry_id = entries.id
+         )`,
     )
     .all(sourceNamespace) as Array<{ namespace: string }>;
 

@@ -484,7 +484,7 @@ describe("migration v29 — bind code-health receipts to retained records", () =
     runMigrations(db);
     const columns = db.prepare("PRAGMA table_info(write_receipts)").all() as Array<{ name: string; notnull: number }>;
     expect(columns.find(({ name }) => name === "code_health_record_id")).toMatchObject({ notnull: 0 });
-    expect(getSchemaVersion(db)).toBe(29);
+    expect(getSchemaVersion(db)).toBe(30);
     db.close();
   });
 
@@ -533,6 +533,53 @@ describe("migration v29 — bind code-health receipts to retained records", () =
     expect(() => runMigrations(db)).toThrow(/unbound memory_code_health write receipts/);
     expect(getSchemaVersion(db)).toBe(28);
     expect((db.prepare("PRAGMA table_info(write_receipts)").all() as Array<{ name: string }>).some(({ name }) => name === "code_health_record_id")).toBe(false);
+    db.close();
+  });
+});
+
+describe("migration v30 — repair managed-row FTS exclusion", () => {
+  it("purges live and orphaned managed terms while preserving ordinary augmented search", () => {
+    const db = openRawDb();
+    applyMigrationsThrough(db, 29);
+    const now = "2026-10-10T00:00:00.000Z";
+    db.prepare(`INSERT INTO entries
+      (id, namespace, key, entry_type, content, tags, agent_id, created_at, updated_at)
+      VALUES ('ordinary-row', 'projects/ordinarytarget', 'note', 'state', 'OrdinaryWebFetch migrordinarytoken', '[]', 'agent:a', ?, ?)`)
+      .run(now, now);
+    const insertManaged = db.prepare(`INSERT INTO entries
+      (id, namespace, key, entry_type, content, tags, agent_id, created_at, updated_at)
+      VALUES (?, 'projects/managedtarget', NULL, 'log', ?, '["code-health:evidence-v1"]', 'agent:a', ?, ?)`);
+    const liveId = "live-managed-row";
+    const deletedId = "deleted-managed-row";
+    insertManaged.run(liveId, "livecodehealthmigrationtoken", now, now);
+    insertManaged.run(deletedId, "orphanedcodehealthmigrationtoken", now, now);
+    db.prepare(`INSERT INTO code_health_records
+      (principal_id, record_id, namespace, entry_id, payload_hash, expires_at)
+      VALUES ('agent:a', 'ref:live-managed', 'projects/managedtarget', ?, 'live-hash', '2099-01-01T00:00:00.000Z'),
+             ('agent:a', 'ref:deleted-managed', 'projects/managedtarget', ?, 'deleted-hash', '2099-01-01T00:00:00.000Z')`)
+      .run(liveId, deletedId);
+
+    // Reproduce contamination from a prior faulty rebuild; the deleted row's
+    // FTS terms become orphaned because migration 28 intentionally skips its
+    // managed-row delete trigger.
+    const injectStale = db.prepare(`INSERT INTO entries_fts(rowid, content, namespace, key, tags)
+      SELECT rowid, content, namespace, key, tags FROM entries WHERE id = ?`);
+    injectStale.run(liveId);
+    injectStale.run(deletedId);
+    db.prepare("DELETE FROM entries WHERE id = ?").run(deletedId);
+    const find = (term: string) => db.prepare(
+      "SELECT rowid FROM entries_fts WHERE entries_fts MATCH ?",
+    ).all(`\"${term}\"`);
+    expect(find("livecodehealthmigrationtoken")).toHaveLength(1);
+    expect(find("orphanedcodehealthmigrationtoken")).toHaveLength(1);
+
+    runMigrations(db);
+
+    expect(getSchemaVersion(db)).toBe(30);
+    expect(find("livecodehealthmigrationtoken")).toHaveLength(0);
+    expect(find("orphanedcodehealthmigrationtoken")).toHaveLength(0);
+    expect(find("ordinarywebfetch")).toHaveLength(1);
+    expect(find("web fetch")).toHaveLength(1);
     db.close();
   });
 });
