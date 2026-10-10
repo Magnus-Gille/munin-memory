@@ -410,6 +410,8 @@ export const BRIDGE_RETRY_SAFE_TOOL_NAMES: readonly string[] = [
  * - memory_review: approve/decline/undo mutate memory truth or proposal state.
  * - memory_retrieval_feedback: records feedback rows on every call.
  * - memory_consolidate: runs LLM synthesis and writes entries; costly and mutating.
+ * - memory_code_health: append writes evidence while export creates a snapshot,
+ *   so the tool cannot be safely classified by its mixed action payload here.
  */
 export const BRIDGE_NEVER_RETRY_TOOL_NAMES: readonly string[] = [
   "memory_write",
@@ -420,6 +422,7 @@ export const BRIDGE_NEVER_RETRY_TOOL_NAMES: readonly string[] = [
   "memory_review",
   "memory_retrieval_feedback",
   "memory_consolidate",
+  "memory_code_health",
 ];
 
 /**

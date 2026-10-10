@@ -39,7 +39,7 @@ Munin is more than a key-value store for AI. The features are designed around ho
 - **Dual auth** — Bearer token (simple) + OAuth 2.1 with dynamic client registration and PKCE (for web and mobile clients).
 - **Two transports** — stdio (local) and Streamable HTTP (network).
 
-Twenty-four MCP tools in total. The compact checked inventory is in [AGENTS.md](AGENTS.md#mcp-tools-exposed).
+Twenty-five MCP tools in total. The compact checked inventory is in [AGENTS.md](AGENTS.md#mcp-tools-exposed).
 
 ## What it looks like in practice
 
@@ -435,7 +435,7 @@ npm run test:watch    # Watch mode
 
 Early-stage open source and intended for technically comfortable self-hosters.
 
-Available today: 24 MCP tools, background consolidation through OpenRouter or a
+Available today: 25 MCP tools, background consolidation through OpenRouter or a
 compatible local endpoint, lifecycle and retrospective views, multi-principal
 authorization, OAuth and service tokens, retrieval signals, and encrypted backup
 helpers. The constrained profile has been validated under cgroup memory limits on

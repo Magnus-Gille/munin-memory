@@ -18,6 +18,20 @@ changelog is the canonical record of what moved.
 
 ### Added
 
+- **Bounded code-health evidence ingestion and reconciliation export (#358).**
+  `memory_code_health` accepts frozen v1 records with principal-scoped UUID
+  receipts, same-principal correction lineage, classification checks, and a
+  six-calendar-month maximum retention period. Deterministic snapshots page the
+  complete authorized retained set; consumers may remove absent rows only
+  after a complete export. Managed evidence is excluded from generic search,
+  embeddings, consolidation, and automatic derivation. Deletion clears content
+  and descriptive ledger metadata while a minimal ID/hash tombstone and every
+  key-bound receipt remain until their original expiry. Migration 29 binds each
+  receipt alias to the principal-scoped record and fails closed when deleted
+  alias lineage cannot be recovered. Migration 30 repairs the derived FTS cache,
+  purging managed terms (including orphan terms from already-deleted rows) while
+  preserving split-token search for ordinary entries. See `docs/code-health.md`.
+
 - **Replay-safe write recovery (#321).** Optional principal-scoped UUID
   `idempotency_key` on state writes, logs and status updates. Migration 27 stores
   metadata-only receipts atomically with write effects. Same-argument recovery

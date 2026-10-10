@@ -33,6 +33,8 @@ docs/*
 !docs/state-of-memory-systems-2026.md
 !docs/memory-health-spec.md
 !docs/memory-health.schema.json
+!docs/code-health.md
+!docs/code-health-agent-v1.schema.json
 !docs/untrusted-content-boundary.md
 !docs/adr/
 !docs/examples/

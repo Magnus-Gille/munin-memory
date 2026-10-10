@@ -21,6 +21,7 @@ import {
   initDatabase,
   nowUTC,
   pruneExpiredQuerySnapshots,
+  pruneCodeHealthRecords,
   pruneRedactionLog,
   pruneRetrievalAnalytics,
 } from "./db.js";
@@ -76,6 +77,7 @@ function getRedactionLogRetentionDays(): number {
 export function runMaintenancePrune(database: Database.Database): void {
   const maintenanceNow = nowUTC();
   pruneExpiredQuerySnapshots(database, maintenanceNow);
+  pruneCodeHealthRecords(database, maintenanceNow);
   pruneRetrievalAnalytics(database, getAnalyticsRetentionDays());
   pruneRedactionLog(database, getRedactionLogRetentionDays());
   pruneReviewProposals(database, maintenanceNow);

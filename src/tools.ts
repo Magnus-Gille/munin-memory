@@ -24,6 +24,7 @@ import {
 } from "./access.js";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { WRITE_REPLAY_UUID_PATTERN } from "./internal/write-replay.js";
+import { appendCodeHealthRecord, exportCodeHealthRecords } from "./code-health.js";
 import { namespaceFilterScope } from "./internal/namespace-filter.js";
 import { fuseHybridResults } from "./internal/hybrid-fusion.js";
 export { fuseHybridResults } from "./internal/hybrid-fusion.js";
@@ -7499,6 +7500,33 @@ const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: "memory_code_health",
+    description: "Store and export bounded code-health agent evidence under the frozen Grimnir v1 contract. Append one validated observation or terminal assessment with a principal-scoped idempotency key; export uses an exact filter and deterministic complete pagination. Producer records and referenced context remain scoped to one authenticated principal and namespace. This tool stores evidence only and does not score code quality or authorize cleanup.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["append", "export"], description: "append validates and stores one record; export starts or resumes a frozen authorized snapshot." },
+        namespace: { type: "string", description: "Exact authorized namespace that owns the evidence." },
+        idempotency_key: { type: "string", description: "Required UUID for append; stable across transport retries." },
+        record: { type: "object", description: "One closed v1 observation or assessment object from the frozen code-health agent schema." },
+        expected_updated_at: { type: "string", description: "Required with a correction; exact current target timestamp." },
+        classification: { type: "string", enum: ["public", "internal", "client-confidential", "client-restricted"] },
+        producer_principal_id: { type: "string", description: "Owner-only exact source principal filter; otherwise the authenticated caller." },
+        repo_owner: { type: "string" },
+        repo_name: { type: "string" },
+        task_id: { type: "string" },
+        since: { type: "string", description: "Inclusive whole-second UTC observed_at lower bound." },
+        until: { type: "string", description: "Inclusive whole-second UTC observed_at upper bound." },
+        model: { type: "string", description: "Exact match against actual_worker.observed_model." },
+        rubric_version: { type: "string", enum: ["changeability-1.0"] },
+        limit: { type: "integer", minimum: 1, maximum: 100 },
+        cursor: { type: "string", description: "Opaque continuation cursor from an unexpired export snapshot." },
+      },
+      required: ["action", "namespace"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "memory_list",
     description:
       "Browse memory contents. Without a namespace, shows visible namespaces with counts and last activity; with a namespace, shows state keys, log count, and recent log previews. Demo and completed task-run namespaces are hidden by default. `limit` and `offset` page only the top-level namespace listing; non-default paging with `namespace` is rejected rather than ignored.",
@@ -7740,6 +7768,7 @@ interface WriteReceipt {
   namespace: string;
   request_hash: string;
   entry_id: string;
+  code_health_record_id: string | null;
   entry_key: string | null;
   entry_updated_at: string;
   classification: string;
@@ -7764,7 +7793,22 @@ function replayWriteReceipt(
 ) {
   const entry = getById(db, receipt.entry_id);
   const ceiling = getContextMaxClassification(ctx);
-  const floor = resolveNamespaceClassificationFloor(db, receipt.namespace);
+  const codeHealthRecord = action === "code_health" && receipt.code_health_record_id !== null
+    ? db.prepare(`SELECT record_id, namespace, collected_at, expires_at, classification, entry_id
+        FROM code_health_records WHERE principal_id = ? AND record_id = ?`)
+      .get(ctx.principalId, receipt.code_health_record_id) as {
+        record_id: string; namespace: string | null; collected_at: string; expires_at: string;
+        classification: string | null; entry_id: string | null;
+      } | undefined
+    : undefined;
+  if (action === "code_health" && (!codeHealthRecord || !codeHealthRecord.namespace
+    || !codeHealthRecord.entry_id || codeHealthRecord.entry_id !== receipt.entry_id
+    || codeHealthRecord.namespace !== receipt.namespace || codeHealthRecord.expires_at <= nowUTC())) {
+    return errResult(action, "record_deleted", "This code-health record was deleted or expired and cannot be recreated.");
+  }
+  const floor = resolveNamespaceClassificationFloor(db, action === "code_health"
+    ? codeHealthRecord!.namespace!
+    : receipt.namespace);
   // A correction leaves the receipt's predecessor in history. Authorize its
   // complete successor chain as well, rather than treating that retired row
   // as the live current entry. UNION also terminates corrupt cycles safely.
@@ -7780,10 +7824,27 @@ function replayWriteReceipt(
     : [];
   if (!isClassificationLevel(receipt.classification) || !classificationAllowed(receipt.classification, ceiling)
     || (entry && !classificationAllowed(entry.classification, ceiling))
+    || (codeHealthRecord !== undefined && (!isClassificationLevel(codeHealthRecord.classification)
+      || !classificationAllowed(codeHealthRecord.classification, ceiling)))
     || successorClassifications.some(({ classification }) =>
       !isClassificationLevel(classification) || !classificationAllowed(classification, ceiling))
     || (!allowBelowFloor && !classificationAllowed(floor, ceiling))) {
     return accessDeniedResponse(db, ctx, action);
+  }
+  if (action === "code_health") {
+    return okResult(action, {
+      status: receipt.result_status,
+      id: receipt.entry_id,
+      record_id: codeHealthRecord!.record_id,
+      namespace: receipt.namespace,
+      classification: codeHealthRecord!.classification,
+      collected_at: codeHealthRecord!.collected_at,
+      expires_at: codeHealthRecord!.expires_at,
+      updated_at: receipt.entry_updated_at,
+      idempotency_key: key,
+      idempotency_replayed: true,
+      entry_available: true,
+    });
   }
   return okResult(action, {
     status: receipt.result_status,
@@ -7841,7 +7902,9 @@ function withWriteReceipt(
         "SELECT * FROM write_receipts WHERE principal_id = ? AND idempotency_key = ?",
       ).get(ctx.principalId, key) as WriteReceipt | undefined;
       if (receipt) {
-        if (receipt.tool_name !== tool || receipt.namespace !== namespace || receipt.request_hash !== requestHash) {
+        const scrubbedCodeHealthReceipt = tool === "memory_code_health" && receipt.namespace === "";
+        if (receipt.tool_name !== tool || (!scrubbedCodeHealthReceipt && receipt.namespace !== namespace)
+          || receipt.request_hash !== requestHash) {
           return errResult(action, "idempotency_conflict", "This idempotency_key was already used with different arguments. Use a new key for a new operation.");
         }
         return replayWriteReceipt(db, ctx, receipt, action, key,
@@ -7857,15 +7920,26 @@ function withWriteReceipt(
       if (typeof response.id !== "string") return result;
       const entry = getById(db, response.id);
       if (!entry) throw new Error("Keyed write completed without a persisted entry");
+      let codeHealthRecordId: string | null = null;
+      if (tool === "memory_code_health") {
+        if (typeof response.record_id !== "string") {
+          throw new Error("Keyed code-health append completed without a record identifier");
+        }
+        const record = db.prepare(`SELECT 1 FROM code_health_records
+          WHERE principal_id = ? AND record_id = ? AND namespace = ? AND entry_id = ?`)
+          .get(ctx.principalId, response.record_id, namespace, entry.id);
+        if (!record) throw new Error("Keyed code-health append completed without its principal-scoped record");
+        codeHealthRecordId = response.record_id;
+      }
       db.prepare(`
         INSERT INTO write_receipts (
           principal_id, idempotency_key, tool_name, namespace, request_hash,
           entry_id, entry_key, entry_updated_at, classification, result_status,
-          valid_from, supersedes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          valid_from, supersedes, code_health_record_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(ctx.principalId, key, tool, namespace, requestHash,
         entry.id, entry.key, entry.updated_at, entry.classification, response.status,
-        response.valid_from ?? null, response.supersedes ?? null);
+        response.valid_from ?? null, response.supersedes ?? null, codeHealthRecordId);
       return okResult(action, { ...response, idempotency_key: key, idempotency_replayed: false });
     }).immediate();
   } catch (error) {
@@ -11287,6 +11361,9 @@ export function registerTools(
                 if (gate.redacted) {
                   return okResult("get", { found: true, ...gate.response });
                 }
+                if (db.prepare("SELECT 1 FROM code_health_records WHERE entry_id = ?").get(entry.id)) {
+                  return errResult("get", "managed_record", "Code-health evidence is available through memory_code_health export.");
+                }
                 const response: Record<string, unknown> = { found: true, ...gate.response };
                 if (isEntryExpired(parsed)) {
                   response.expired = true;
@@ -12245,6 +12322,9 @@ export function registerTools(
                 ) {
                   return errResult("log", "not_found", "No readable log entry matched the correction target.", { namespace });
                 }
+                if (db.prepare("SELECT 1 FROM code_health_records WHERE entry_id = ?").get(supersedes)) {
+                  return errResult("log", "validation_error", "Managed code-health records can only be corrected through memory_code_health.", { namespace });
+                }
                 if (
                   (ctx.principalType !== "owner" &&
                     (correctionTarget.owner_principal_id ?? correctionTarget.agent_id) !== ctx.principalId) ||
@@ -12371,6 +12451,59 @@ export function registerTools(
               return okResult("log", logResponse);
             };
             return withWriteReceipt(db, ctx, "memory_log", args, handleMemoryLog);
+          }
+
+          case "memory_code_health": {
+            const healthArgs = (args ?? {}) as Record<string, unknown>;
+            const action = healthArgs.action;
+            const allowed = action === "append"
+              ? ["action", "namespace", "idempotency_key", "record", "expected_updated_at", "classification"]
+              : ["action", "namespace", "producer_principal_id", "repo_owner", "repo_name", "task_id", "since", "until", "model", "rubric_version", "limit", "cursor"];
+            const unknownArgumentError = rejectUnknownArguments(healthArgs, allowed);
+            if (unknownArgumentError) return errResult("code_health", "validation_error", unknownArgumentError);
+            if (action !== "append" && action !== "export") {
+              return errResult("code_health", "validation_error", "action must be append or export.");
+            }
+            if (typeof healthArgs.namespace !== "string") {
+              return errResult("code_health", "validation_error", "namespace is required.");
+            }
+            if (action === "append") {
+              const handleAppend = () => {
+                const result = appendCodeHealthRecord(db, ctx, {
+                  namespace: healthArgs.namespace as string,
+                  idempotency_key: healthArgs.idempotency_key as string,
+                  record: healthArgs.record,
+                  expected_updated_at: healthArgs.expected_updated_at as string | undefined,
+                  classification: healthArgs.classification as "public" | "internal" | "client-confidential" | "client-restricted" | undefined,
+                });
+                if (!result.ok && result.error === "access_denied") {
+                  return accessDeniedResponse(db, ctx, "code_health");
+                }
+                return result.ok
+                  ? okResult("code_health", Object.fromEntries(Object.entries(result).filter(([key]) => key !== "ok" && key !== "action")))
+                  : errResult("code_health", result.error, result.message);
+              };
+              return withWriteReceipt(db, ctx, "memory_code_health", healthArgs, handleAppend);
+            }
+            const result = exportCodeHealthRecords(db, ctx, {
+              namespace: healthArgs.namespace as string,
+              producer_principal_id: healthArgs.producer_principal_id as string | undefined,
+              repo_owner: healthArgs.repo_owner as string | undefined,
+              repo_name: healthArgs.repo_name as string | undefined,
+              task_id: healthArgs.task_id as string | undefined,
+              since: healthArgs.since as string | undefined,
+              until: healthArgs.until as string | undefined,
+              model: healthArgs.model as string | undefined,
+              rubric_version: healthArgs.rubric_version as string | undefined,
+              limit: healthArgs.limit as number | undefined,
+              cursor: healthArgs.cursor as string | undefined,
+            });
+            if (!result.ok && result.error === "access_denied") {
+              return accessDeniedResponse(db, ctx, "code_health");
+            }
+            return result.ok
+              ? okResult("code_health", Object.fromEntries(Object.entries(result).filter(([key]) => key !== "ok" && key !== "action")))
+              : errResult("code_health", result.error, result.message);
           }
 
           case "memory_list": {
