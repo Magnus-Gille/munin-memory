@@ -1222,7 +1222,7 @@ export function pruneCodeHealthRecords(db: Database.Database, now = nowUTC()): n
                  WHERE tool_name = 'memory_code_health'
                    AND EXISTS (SELECT 1 FROM code_health_records r
                                 WHERE r.principal_id = write_receipts.principal_id
-                                  AND r.idempotency_key = write_receipts.idempotency_key
+                                  AND r.record_id = write_receipts.code_health_record_id
                                   AND r.expires_at <= ?)`).run(now);
     db.prepare("DELETE FROM code_health_records WHERE entry_id IS NULL AND expires_at <= ?").run(now);
     db.prepare("DELETE FROM code_health_export_snapshots WHERE expires_at <= ?").run(now);

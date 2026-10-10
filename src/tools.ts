@@ -7768,6 +7768,7 @@ interface WriteReceipt {
   namespace: string;
   request_hash: string;
   entry_id: string;
+  code_health_record_id: string | null;
   entry_key: string | null;
   entry_updated_at: string;
   classification: string;
@@ -7792,7 +7793,22 @@ function replayWriteReceipt(
 ) {
   const entry = getById(db, receipt.entry_id);
   const ceiling = getContextMaxClassification(ctx);
-  const floor = resolveNamespaceClassificationFloor(db, receipt.namespace);
+  const codeHealthRecord = action === "code_health" && receipt.code_health_record_id !== null
+    ? db.prepare(`SELECT record_id, namespace, collected_at, expires_at, classification, entry_id
+        FROM code_health_records WHERE principal_id = ? AND record_id = ?`)
+      .get(ctx.principalId, receipt.code_health_record_id) as {
+        record_id: string; namespace: string | null; collected_at: string; expires_at: string;
+        classification: string | null; entry_id: string | null;
+      } | undefined
+    : undefined;
+  if (action === "code_health" && (!codeHealthRecord || !codeHealthRecord.namespace
+    || !codeHealthRecord.entry_id || codeHealthRecord.entry_id !== receipt.entry_id
+    || codeHealthRecord.namespace !== receipt.namespace || codeHealthRecord.expires_at <= nowUTC())) {
+    return errResult(action, "record_deleted", "This code-health record was deleted or expired and cannot be recreated.");
+  }
+  const floor = resolveNamespaceClassificationFloor(db, action === "code_health"
+    ? codeHealthRecord!.namespace!
+    : receipt.namespace);
   // A correction leaves the receipt's predecessor in history. Authorize its
   // complete successor chain as well, rather than treating that retired row
   // as the live current entry. UNION also terminates corrupt cycles safely.
@@ -7808,30 +7824,22 @@ function replayWriteReceipt(
     : [];
   if (!isClassificationLevel(receipt.classification) || !classificationAllowed(receipt.classification, ceiling)
     || (entry && !classificationAllowed(entry.classification, ceiling))
+    || (codeHealthRecord !== undefined && (!isClassificationLevel(codeHealthRecord.classification)
+      || !classificationAllowed(codeHealthRecord.classification, ceiling)))
     || successorClassifications.some(({ classification }) =>
       !isClassificationLevel(classification) || !classificationAllowed(classification, ceiling))
     || (!allowBelowFloor && !classificationAllowed(floor, ceiling))) {
     return accessDeniedResponse(db, ctx, action);
   }
   if (action === "code_health") {
-    const record = db.prepare(`
-      SELECT record_id, collected_at, expires_at, classification, entry_id
-        FROM code_health_records
-       WHERE principal_id = ? AND idempotency_key = ?
-    `).get(ctx.principalId, key) as {
-      record_id: string; collected_at: string; expires_at: string; classification: string; entry_id: string | null;
-    } | undefined;
-    if (!record || !record.entry_id || record.expires_at <= nowUTC()) {
-      return errResult(action, "record_deleted", "This code-health record was deleted or expired and cannot be recreated.");
-    }
     return okResult(action, {
       status: receipt.result_status,
       id: receipt.entry_id,
-      record_id: record?.record_id,
+      record_id: codeHealthRecord!.record_id,
       namespace: receipt.namespace,
-      classification: record?.classification ?? receipt.classification,
-      collected_at: record?.collected_at,
-      expires_at: record?.expires_at,
+      classification: codeHealthRecord!.classification,
+      collected_at: codeHealthRecord!.collected_at,
+      expires_at: codeHealthRecord!.expires_at,
       updated_at: receipt.entry_updated_at,
       idempotency_key: key,
       idempotency_replayed: true,
@@ -7894,7 +7902,9 @@ function withWriteReceipt(
         "SELECT * FROM write_receipts WHERE principal_id = ? AND idempotency_key = ?",
       ).get(ctx.principalId, key) as WriteReceipt | undefined;
       if (receipt) {
-        if (receipt.tool_name !== tool || receipt.namespace !== namespace || receipt.request_hash !== requestHash) {
+        const scrubbedCodeHealthReceipt = tool === "memory_code_health" && receipt.namespace === "";
+        if (receipt.tool_name !== tool || (!scrubbedCodeHealthReceipt && receipt.namespace !== namespace)
+          || receipt.request_hash !== requestHash) {
           return errResult(action, "idempotency_conflict", "This idempotency_key was already used with different arguments. Use a new key for a new operation.");
         }
         return replayWriteReceipt(db, ctx, receipt, action, key,
@@ -7910,15 +7920,26 @@ function withWriteReceipt(
       if (typeof response.id !== "string") return result;
       const entry = getById(db, response.id);
       if (!entry) throw new Error("Keyed write completed without a persisted entry");
+      let codeHealthRecordId: string | null = null;
+      if (tool === "memory_code_health") {
+        if (typeof response.record_id !== "string") {
+          throw new Error("Keyed code-health append completed without a record identifier");
+        }
+        const record = db.prepare(`SELECT 1 FROM code_health_records
+          WHERE principal_id = ? AND record_id = ? AND namespace = ? AND entry_id = ?`)
+          .get(ctx.principalId, response.record_id, namespace, entry.id);
+        if (!record) throw new Error("Keyed code-health append completed without its principal-scoped record");
+        codeHealthRecordId = response.record_id;
+      }
       db.prepare(`
         INSERT INTO write_receipts (
           principal_id, idempotency_key, tool_name, namespace, request_hash,
           entry_id, entry_key, entry_updated_at, classification, result_status,
-          valid_from, supersedes
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          valid_from, supersedes, code_health_record_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(ctx.principalId, key, tool, namespace, requestHash,
         entry.id, entry.key, entry.updated_at, entry.classification, response.status,
-        response.valid_from ?? null, response.supersedes ?? null);
+        response.valid_from ?? null, response.supersedes ?? null, codeHealthRecordId);
       return okResult(action, { ...response, idempotency_key: key, idempotency_replayed: false });
     }).immediate();
   } catch (error) {

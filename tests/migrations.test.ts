@@ -36,6 +36,41 @@ function openRawDb(): Database.Database {
   return db;
 }
 
+function applyMigrationsThrough(db: Database.Database, maximumVersion: number): void {
+  registerMuninUDFs(db);
+  db.exec(`CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER PRIMARY KEY,
+    applied_at TEXT NOT NULL
+  )`);
+  for (const migration of migrations.filter(({ version }) => version <= maximumVersion)) {
+    db.transaction(() => {
+      migration.up(db);
+      db.prepare("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)")
+        .run(migration.version, "2026-10-10T00:00:00.000Z");
+    })();
+  }
+}
+
+function insertLegacyReceipt(
+  db: Database.Database,
+  values: {
+    principal: string;
+    key: string;
+    tool: string;
+    namespace: string;
+    entryId: string;
+    classification?: string;
+  },
+): void {
+  db.prepare(`INSERT INTO write_receipts (
+    principal_id, idempotency_key, tool_name, namespace, request_hash, entry_id,
+    entry_key, entry_updated_at, classification, result_status, valid_from, supersedes
+  ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, 'stored', NULL, NULL)`).run(
+    values.principal, values.key, values.tool, values.namespace, "hash",
+    values.entryId, "2026-10-10T00:00:00.000Z", values.classification ?? "internal",
+  );
+}
+
 function makeReviewCall(db: Database.Database) {
   const server = new Server(
     { name: "migration-review-test", version: "0.0.1" },
@@ -439,6 +474,65 @@ describe("runMigrations", () => {
       .prepare("SELECT content FROM entries WHERE id = 'test-id'")
       .get() as { content: string } | undefined;
     expect(entry?.content).toBe("survives re-migration");
+    db.close();
+  });
+});
+
+describe("migration v29 — bind code-health receipts to retained records", () => {
+  it("adds the nullable binding on fresh databases", () => {
+    const db = openRawDb();
+    runMigrations(db);
+    const columns = db.prepare("PRAGMA table_info(write_receipts)").all() as Array<{ name: string; notnull: number }>;
+    expect(columns.find(({ name }) => name === "code_health_record_id")).toMatchObject({ notnull: 0 });
+    expect(getSchemaVersion(db)).toBe(29);
+    db.close();
+  });
+
+  it("backfills live aliases by same-principal entry and deleted originals by idempotency key", () => {
+    const db = openRawDb();
+    applyMigrationsThrough(db, 28);
+    const liveEntryId = "code-health-live-entry";
+    const now = "2026-10-10T00:00:00.000Z";
+    db.prepare(`INSERT INTO entries
+      (id, namespace, key, entry_type, content, tags, agent_id, created_at, updated_at)
+      VALUES (?, 'projects/code-health', NULL, 'log', '{}', '["code-health:evidence-v1"]', 'agent:a', ?, ?)`)
+      .run(liveEntryId, now, now);
+    db.prepare(`INSERT INTO code_health_records
+      (principal_id, record_id, namespace, entry_id, payload_hash, expires_at, idempotency_key)
+      VALUES ('agent:a', 'ref:live', 'projects/code-health', ?, 'hash-live', '2027-04-10T00:00:00.000Z', 'key-original')`)
+      .run(liveEntryId);
+    db.prepare(`INSERT INTO code_health_records
+      (principal_id, record_id, namespace, entry_id, payload_hash, expires_at, idempotency_key)
+      VALUES ('agent:a', 'ref:deleted', NULL, NULL, 'hash-deleted', '2027-04-10T00:00:00.000Z', 'key-deleted')`).run();
+    insertLegacyReceipt(db, { principal: "agent:a", key: "key-original", tool: "memory_code_health", namespace: "projects/code-health", entryId: liveEntryId });
+    insertLegacyReceipt(db, { principal: "agent:a", key: "key-alias", tool: "memory_code_health", namespace: "projects/code-health", entryId: liveEntryId });
+    insertLegacyReceipt(db, { principal: "agent:a", key: "key-deleted", tool: "memory_code_health", namespace: "", entryId: "", classification: "public" });
+    insertLegacyReceipt(db, { principal: "agent:a", key: "key-unrelated", tool: "memory_write", namespace: "projects/code-health", entryId: liveEntryId });
+
+    runMigrations(db);
+    const bindings = db.prepare(`SELECT idempotency_key, code_health_record_id FROM write_receipts
+      WHERE principal_id = 'agent:a' ORDER BY idempotency_key`).all();
+    expect(bindings).toEqual([
+      { idempotency_key: "key-alias", code_health_record_id: "ref:live" },
+      { idempotency_key: "key-deleted", code_health_record_id: "ref:deleted" },
+      { idempotency_key: "key-original", code_health_record_id: "ref:live" },
+      { idempotency_key: "key-unrelated", code_health_record_id: null },
+    ]);
+    db.close();
+  });
+
+  it("fails closed when a deleted alias cannot be mapped without guessing", () => {
+    const db = openRawDb();
+    applyMigrationsThrough(db, 28);
+    db.prepare(`INSERT INTO code_health_records
+      (principal_id, record_id, namespace, entry_id, payload_hash, expires_at, idempotency_key)
+      VALUES ('agent:a', 'ref:deleted', NULL, NULL, 'hash-deleted', '2027-04-10T00:00:00.000Z', 'key-original')`).run();
+    insertLegacyReceipt(db, { principal: "agent:a", key: "key-original", tool: "memory_code_health", namespace: "", entryId: "", classification: "public" });
+    insertLegacyReceipt(db, { principal: "agent:a", key: "key-alias", tool: "memory_code_health", namespace: "projects/code-health", entryId: "deleted-entry" });
+
+    expect(() => runMigrations(db)).toThrow(/unbound memory_code_health write receipts/);
+    expect(getSchemaVersion(db)).toBe(28);
+    expect((db.prepare("PRAGMA table_info(write_receipts)").all() as Array<{ name: string }>).some(({ name }) => name === "code_health_record_id")).toBe(false);
     db.close();
   });
 });

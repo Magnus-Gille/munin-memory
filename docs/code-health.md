@@ -14,7 +14,9 @@ the caller's classification ceiling, and the namespace classification floor.
 The record ID and correction references resolve only to records stored by the
 same principal in the same namespace. The exact UUID idempotency key and record
 ID are principal-scoped. An exact retry returns its prior receipt; a payload
-collision fails. A deleted or expired ID cannot be recreated.
+collision fails. Each key that acknowledges an existing record is independently
+bound to that principal-scoped record, so aliases replay the same record without
+extending its expiry. A deleted or expired ID cannot be recreated.
 
 Append accepts a v1 `record`, a namespace, a UUID `idempotency_key`, and optional
 `classification`. Successful append and replay responses include the persisted
@@ -69,8 +71,12 @@ evidence tag prevents managed rows from entering the FTS index. Audit events
 contain only a static operation label, never evidence excerpts. Normal `memory_delete` applies
 to the evidence namespace and uses the normal row deletion path. Deletion clears
 the payload and descriptive ledger fields, invalidates export snapshots, and
-leaves only a principal-scoped record ID, payload hash, UUID idempotency key,
-and original expiry until that expiry, preventing replay from resurrecting the
-record. This small deduplication tombstone is the deliberate metadata-erasure
-exception. SQLite backups may retain deleted rows until their configured backup
-expiry; see `docs/offsite-backup.md` for the backup lifecycle.
+leaves only a principal-scoped record ID, payload hash, UUID idempotency keys,
+and original expiry until that expiry, preventing any acknowledged alias from
+resurrecting the record. At expiry, maintenance removes every bound receipt and
+the tombstone together; it does not renew the original retention boundary.
+Migration 29 binds existing receipts to their retained record. It fails closed
+if a deleted alias has no recoverable record lineage. This small deduplication
+tombstone is the deliberate metadata-erasure exception. SQLite backups may
+retain deleted rows until their configured backup expiry; see
+`docs/offsite-backup.md` for the backup lifecycle.

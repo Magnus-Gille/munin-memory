@@ -145,6 +145,70 @@ describe("memory_code_health", () => {
     expect((db.prepare("SELECT COUNT(*) AS n FROM code_health_records").get() as { n: number }).n).toBe(1);
   });
 
+  it("binds every keyed replay alias to one retained record and scrubs all aliases on deletion", async () => {
+    const call = callAs(producer);
+    const record = sampleRecord();
+    const keyA = randomUUID();
+    const keyB = randomUUID();
+    const base = { action: "append", namespace, record };
+    const first = parse(await call({ ...base, idempotency_key: keyA }));
+    const alias = parse(await call({ ...base, idempotency_key: keyB }));
+    expect(first).toMatchObject({ ok: true, idempotency_replayed: false, record_id: record.record_id });
+    expect(alias).toMatchObject({ ok: true, status: "replayed", record_id: record.record_id, idempotency_replayed: false });
+    expect(alias.id).toBe(first.id);
+
+    const originalExpiry = db.prepare(`SELECT expires_at FROM code_health_records
+      WHERE principal_id = ? AND record_id = ?`).get(producer.principalId, record.record_id) as { expires_at: string };
+    const aliasRetry = parse(await call({ ...base, idempotency_key: keyB }));
+    expect(aliasRetry).toMatchObject({ ok: true, idempotency_replayed: true, record_id: record.record_id, id: first.id });
+    expect(db.prepare(`SELECT expires_at FROM code_health_records
+      WHERE principal_id = ? AND record_id = ?`).get(producer.principalId, record.record_id)).toEqual(originalExpiry);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM code_health_records WHERE principal_id = ? AND record_id = ?")
+      .get(producer.principalId, record.record_id)).toMatchObject({ n: 1 });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM entries WHERE id = ?").get(first.id)).toMatchObject({ n: 1 });
+    expect(db.prepare(`SELECT COUNT(*) AS n FROM write_receipts
+      WHERE principal_id = ? AND tool_name = 'memory_code_health' AND code_health_record_id = ?`)
+      .get(producer.principalId, record.record_id)).toMatchObject({ n: 2 });
+
+    const lowClassification = { ...producer, maxClassification: "public" as const };
+    expect(parse(await callAs(lowClassification)({ ...base, idempotency_key: keyB })))
+      .toMatchObject({ ok: false, error: "access_denied" });
+
+    executeDelete(db, namespace, undefined, producer.principalId, false);
+    const receipts = db.prepare(`SELECT namespace, entry_id, entry_updated_at, classification, code_health_record_id
+      FROM write_receipts WHERE principal_id = ? AND tool_name = 'memory_code_health'
+      ORDER BY idempotency_key`).all(producer.principalId) as Array<Record<string, unknown>>;
+    expect(receipts).toHaveLength(2);
+    expect(receipts).toEqual(receipts.map((receipt) => expect.objectContaining({
+      namespace: "", entry_id: "", entry_updated_at: "", classification: "public",
+      code_health_record_id: record.record_id,
+    })));
+    expect(parse(await call({ ...base, idempotency_key: keyB })))
+      .toMatchObject({ ok: false, error: "record_deleted" });
+  });
+
+  it("removes every receipt alias when a managed record expires", async () => {
+    const call = callAs(producer);
+    const record = sampleRecord();
+    const keyA = randomUUID();
+    const keyB = randomUUID();
+    const base = { action: "append", namespace, record };
+    const first = parse(await call({ ...base, idempotency_key: keyA }));
+    expect(parse(await call({ ...base, idempotency_key: keyB }))).toMatchObject({ ok: true, status: "replayed" });
+    const expiry = "2000-01-01T00:00:00.000Z";
+    db.prepare("UPDATE code_health_records SET expires_at = ? WHERE principal_id = ? AND record_id = ?")
+      .run(expiry, producer.principalId, record.record_id);
+    expect(parse(await call({ ...base, idempotency_key: keyA }))).toMatchObject({ ok: false, error: "record_deleted" });
+    expect(parse(await call({ ...base, idempotency_key: keyB }))).toMatchObject({ ok: false, error: "record_deleted" });
+    expect(pruneCodeHealthRecords(db, new Date(Date.parse(expiry) + 1000).toISOString())).toBe(1);
+    expect(db.prepare(`SELECT COUNT(*) AS n FROM write_receipts
+      WHERE principal_id = ? AND tool_name = 'memory_code_health' AND code_health_record_id = ?`)
+      .get(producer.principalId, record.record_id)).toMatchObject({ n: 0 });
+    expect(db.prepare("SELECT 1 FROM code_health_records WHERE principal_id = ? AND record_id = ?")
+      .get(producer.principalId, record.record_id)).toBeUndefined();
+    expect(first.record_id).toBe(record.record_id);
+  });
+
   it("does not return expired records when maintenance has not yet run", async () => {
     const record = sampleRecord();
     const key = randomUUID();
@@ -457,7 +521,7 @@ describe("memory_code_health", () => {
       action: "append", namespace, idempotency_key: priorOtherKey, record: priorOtherRecord,
     }));
     expect(priorOther).toMatchObject({ ok: true });
-    executeDelete(db, namespace, priorOther.id as string, otherProducer.principalId, false);
+    executeDelete(db, namespace, undefined, otherProducer.principalId, false);
 
     const sharedRecordId = "ref:shared-across-principals";
     const sharedKey = "00000000-0000-4000-8000-000000000102";
@@ -471,6 +535,12 @@ describe("memory_code_health", () => {
     }));
     expect(producerResponse).toMatchObject({ ok: true, record_id: sharedRecordId });
     expect(otherResponse).toMatchObject({ ok: true, record_id: sharedRecordId });
+    expect(db.prepare(`SELECT code_health_record_id FROM write_receipts
+      WHERE principal_id = ? AND idempotency_key = ?`).get(producer.principalId, sharedKey))
+      .toEqual({ code_health_record_id: sharedRecordId });
+    expect(db.prepare(`SELECT code_health_record_id FROM write_receipts
+      WHERE principal_id = ? AND idempotency_key = ?`).get(otherProducer.principalId, sharedKey))
+      .toEqual({ code_health_record_id: sharedRecordId });
 
     const dependent = {
       ...structuredClone(sourceCloseTemplate),
@@ -484,15 +554,16 @@ describe("memory_code_health", () => {
       action: "append", namespace, idempotency_key: "00000000-0000-4000-8000-000000000103", record: dependent,
     }))).toMatchObject({ ok: true, record_id: dependent.record_id });
 
-    executeDelete(db, namespace, producerResponse.id as string, producer.principalId, false);
+    executeDelete(db, namespace, undefined, producer.principalId, false);
 
     expect(db.prepare(`SELECT 1 FROM code_health_record_refs
       WHERE principal_id = ? AND record_id = ? AND referenced_record_id = ?`)
       .get(otherProducer.principalId, dependent.record_id, sharedRecordId)).toBeDefined();
-    const otherReceipt = db.prepare(`SELECT namespace, entry_id, entry_updated_at, classification
+    const otherReceipt = db.prepare(`SELECT namespace, entry_id, entry_updated_at, classification, code_health_record_id
       FROM write_receipts WHERE principal_id = ? AND idempotency_key = ?`)
       .get(otherProducer.principalId, sharedKey);
     expect(otherReceipt).toMatchObject({ namespace, entry_id: otherResponse.id, classification: "internal" });
+    expect(otherReceipt).toMatchObject({ code_health_record_id: sharedRecordId });
 
     db.prepare("UPDATE code_health_records SET expires_at = ? WHERE principal_id = ? AND record_id = ?")
       .run("2000-01-01T00:00:00.000Z", otherProducer.principalId, sharedRecordId);

@@ -25,8 +25,10 @@ changelog is the canonical record of what moved.
   complete authorized retained set; consumers may remove absent rows only
   after a complete export. Managed evidence is excluded from generic search,
   embeddings, consolidation, and automatic derivation. Deletion clears content
-  and descriptive ledger metadata while a minimal ID/hash/idempotency tombstone
-  remains until its original expiry. See `docs/code-health.md`.
+  and descriptive ledger metadata while a minimal ID/hash tombstone and every
+  key-bound receipt remain until their original expiry. Migration 29 binds each
+  receipt alias to the principal-scoped record and fails closed when deleted
+  alias lineage cannot be recovered. See `docs/code-health.md`.
 
 - **Replay-safe write recovery (#321).** Optional principal-scoped UUID
   `idempotency_key` on state writes, logs and status updates. Migration 27 stores

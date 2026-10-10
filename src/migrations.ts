@@ -1291,6 +1291,100 @@ export const migrations: Migration[] = [
       }
     },
   },
+  {
+    version: 29,
+    description: "Bind code-health write receipts to principal-scoped retained records (#358)",
+    up: (db) => {
+      const receiptColumns = db.prepare("PRAGMA table_info(write_receipts)").all() as Array<{ name: string }>;
+      if (!receiptColumns.some(({ name }) => name === "code_health_record_id")) {
+        db.exec("ALTER TABLE write_receipts ADD COLUMN code_health_record_id TEXT");
+      }
+
+      const ambiguous = db.prepare(`
+        SELECT COUNT(*) AS count FROM write_receipts wr
+         WHERE wr.tool_name = 'memory_code_health'
+           AND wr.code_health_record_id IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM code_health_records r
+              WHERE r.principal_id = wr.principal_id
+                AND r.namespace = wr.namespace
+                AND r.entry_id = wr.entry_id
+                AND r.entry_id IS NOT NULL
+           )
+           AND (SELECT COUNT(*) FROM code_health_records r
+                 WHERE r.principal_id = wr.principal_id
+                   AND r.idempotency_key = wr.idempotency_key
+                   AND r.entry_id IS NULL) > 1
+      `).get() as { count: number };
+      if (ambiguous.count > 0) {
+        throw new Error("Migration 29 cannot safely bind ambiguous deleted memory_code_health receipts; restore the pre-migration database and resolve receipt lineage before retrying.");
+      }
+
+      db.exec(`
+        UPDATE write_receipts AS wr
+           SET code_health_record_id = (
+             SELECT r.record_id FROM code_health_records r
+              WHERE r.principal_id = wr.principal_id
+                AND r.namespace = wr.namespace
+                AND r.entry_id = wr.entry_id
+                AND r.entry_id IS NOT NULL
+           )
+         WHERE wr.tool_name = 'memory_code_health'
+           AND wr.code_health_record_id IS NULL
+           AND EXISTS (
+             SELECT 1 FROM code_health_records r
+              WHERE r.principal_id = wr.principal_id
+                AND r.namespace = wr.namespace
+                AND r.entry_id = wr.entry_id
+                AND r.entry_id IS NOT NULL
+           );
+
+        UPDATE write_receipts AS wr
+           SET code_health_record_id = (
+             SELECT r.record_id FROM code_health_records r
+              WHERE r.principal_id = wr.principal_id
+                AND r.idempotency_key = wr.idempotency_key
+                AND r.entry_id IS NULL
+           )
+         WHERE wr.tool_name = 'memory_code_health'
+           AND wr.code_health_record_id IS NULL
+           AND EXISTS (
+             SELECT 1 FROM code_health_records r
+              WHERE r.principal_id = wr.principal_id
+                AND r.idempotency_key = wr.idempotency_key
+                AND r.entry_id IS NULL
+           );
+      `);
+
+      const unbound = db.prepare(`SELECT COUNT(*) AS count FROM write_receipts
+        WHERE tool_name = 'memory_code_health' AND code_health_record_id IS NULL`).get() as { count: number };
+      if (unbound.count > 0) {
+        throw new Error("Migration 29 cannot safely bind unbound memory_code_health write receipts; a deleted alias has no recoverable record lineage, so restore the pre-migration database and resolve it before retrying.");
+      }
+
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_write_receipts_code_health_record
+          ON write_receipts(principal_id, code_health_record_id)
+          WHERE tool_name = 'memory_code_health';
+
+        CREATE TRIGGER IF NOT EXISTS code_health_receipts_before_entry_deleted
+        BEFORE DELETE ON entries
+        BEGIN
+          UPDATE write_receipts
+             SET namespace = '', entry_id = '', entry_updated_at = '', classification = 'public',
+                 entry_key = NULL, valid_from = NULL, supersedes = NULL
+           WHERE tool_name = 'memory_code_health'
+             AND EXISTS (
+               SELECT 1 FROM code_health_records r
+                WHERE r.principal_id = write_receipts.principal_id
+                  AND r.record_id = write_receipts.code_health_record_id
+                  AND r.namespace = write_receipts.namespace
+                  AND r.entry_id = old.id
+             );
+        END;
+      `);
+    },
+  },
 ];
 
 /**
