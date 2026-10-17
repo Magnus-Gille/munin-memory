@@ -32,6 +32,13 @@ changelog is the canonical record of what moved.
 
 ### Added
 
+- **Proposal extraction evaluation foundation (#370).** Add frozen synthetic
+  English/Swedish cases, candidate-only labels, a deterministic in-memory
+  `memory_extract` baseline, and common recorded-result envelopes for general
+  model and HyMemory comparisons. No model or hardware run is performed;
+  thresholds and labels remain pending review, and smoke output is never
+  publication-eligible.
+
 - **Bounded code-health evidence ingestion and reconciliation export (#358).**
   `memory_code_health` accepts frozen v1 records with principal-scoped UUID
   receipts, same-principal correction lineage, classification checks, and a
