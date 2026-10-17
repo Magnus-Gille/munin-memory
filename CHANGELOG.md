@@ -10,6 +10,13 @@ changelog is the canonical record of what moved.
 
 ### Security
 
+- **Legacy bridge redirect containment (#373).** Prevent the standalone
+  `scripts/stdio-bridge.mjs` from forwarding Cloudflare credentials or MCP session
+  IDs across origins on message POSTs or cleanup DELETEs. Follow at most five
+  same-origin 307/308 redirects; reject method-changing redirects, URL userinfo
+  and invalid targets with fixed diagnostics. Legacy configurations using
+  301/302/303 redirects must point `MUNIN_REMOTE_URL` at the final MCP endpoint.
+
 - **Dependency advisory remediation (#359).** Upgrade the MCP SDK to the
   patched 1.32.x family, Transformers to 4.3.x with ONNX Runtime 1.30, and the
   Vitest toolchain within 4.1.x. Refresh affected transitive packages and remove

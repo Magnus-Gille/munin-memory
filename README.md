@@ -230,6 +230,16 @@ See `.env.example` for the full list.
 
 The stdio-to-HTTP bridge (`dist/bridge.js`) needs a Bearer token and optionally Cloudflare Access client credentials to talk to a remote Munin server. MCP clients typically pass these via env vars in their config file, which means the secrets end up in plaintext on disk (often `0644`, syncable to dotfile repos, easy to screenshot).
 
+Legacy clients still invoking `scripts/stdio-bridge.mjs` should set
+`MUNIN_REMOTE_URL` to the final HTTP(S) MCP endpoint, without URL userinfo. That
+standalone script follows at most five 307/308 redirects within the exact same
+origin (scheme, hostname and port), preserving the POST or DELETE method and
+body. It rejects 301/302/303 redirects, origin changes, URL userinfo and invalid
+redirect targets; use the final endpoint instead of a login or redirect URL.
+This policy applies to session cleanup as well as message forwarding. To migrate,
+run `npm run build` and point the client's command at `dist/bridge.js`; the same
+endpoint and credential environment variables are supported.
+
 **Recommended: store secrets in a `chmod 600` JSON file, not in your MCP client config.**
 
 ```bash

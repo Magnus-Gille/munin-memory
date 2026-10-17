@@ -10,7 +10,7 @@
  * every Claude Code / Desktop session spawns its own bridge process.
  *
  * Environment variables:
- *   MUNIN_REMOTE_URL        — Required. Remote MCP endpoint URL.
+ *   MUNIN_REMOTE_URL        — Required. Final HTTP(S) MCP endpoint, no userinfo.
  *   MUNIN_AUTH_TOKEN         — Bearer token for Authorization header.
  *   MUNIN_CF_CLIENT_ID       — Cloudflare Access client ID.
  *   MUNIN_CF_CLIENT_SECRET   — Cloudflare Access client secret.
@@ -23,6 +23,23 @@ import { createInterface } from "node:readline";
 const REMOTE_URL = process.env.MUNIN_REMOTE_URL;
 if (!REMOTE_URL) {
   process.stderr.write("Fatal: MUNIN_REMOTE_URL is required\n");
+  process.exit(1);
+}
+
+let remoteUrl;
+try {
+  remoteUrl = new URL(REMOTE_URL);
+  if (
+    !["http:", "https:"].includes(remoteUrl.protocol) ||
+    remoteUrl.username || remoteUrl.password
+  ) {
+    throw new Error("Invalid endpoint");
+  }
+} catch {
+  // Never echo an invalid URL: it may contain credentials.
+  process.stderr.write(
+    "Fatal: MUNIN_REMOTE_URL must be an HTTP(S) URL without username or password\n",
+  );
   process.exit(1);
 }
 
@@ -64,6 +81,47 @@ function jsonRpcError(id, code, message) {
   return { jsonrpc: "2.0", id, error: { code, message } };
 }
 
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+const MAX_REDIRECTS = 5;
+
+// Shared by message POSTs and session DELETEs. Automatic fetch redirects can
+// forward custom CF/session headers across origins even when Authorization is
+// stripped. Validate every target before sending any headers or body to it.
+async function fetchRemote(init) {
+  let currentUrl = remoteUrl;
+  for (let followed = 0; ; followed++) {
+    const response = await fetch(currentUrl, { ...init, redirect: "manual" });
+    if (!REDIRECT_STATUSES.has(response.status)) return response;
+
+    const location = response.headers.get("location");
+    await response.body?.cancel();
+    // MCP POST/DELETE must not silently become GET. Keep redirect diagnostics
+    // fixed: neither Location nor the response body is safe to reflect.
+    if (response.status !== 307 && response.status !== 308) {
+      throw new Error(
+        "Redirect rejected: only same-origin 307/308 redirects are supported; set MUNIN_REMOTE_URL to the final MCP endpoint",
+      );
+    }
+    if (followed >= MAX_REDIRECTS) {
+      throw new Error("Redirect limit exceeded; set MUNIN_REMOTE_URL to the final MCP endpoint");
+    }
+
+    let target;
+    try {
+      if (!location) throw new Error("Missing Location");
+      target = new URL(location, currentUrl);
+    } catch {
+      throw new Error("Invalid redirect target; set MUNIN_REMOTE_URL to the final MCP endpoint");
+    }
+    if (target.origin !== remoteUrl.origin || target.username || target.password) {
+      throw new Error(
+        "Unsafe redirect rejected: the target must have the same scheme, hostname and port without URL userinfo; set MUNIN_REMOTE_URL to the final MCP endpoint",
+      );
+    }
+    currentUrl = target;
+  }
+}
+
 // --- SSE parser ---
 
 function parseSseEvents(text) {
@@ -99,7 +157,7 @@ async function forwardToRemote(message) {
   const notification = isNotification(message);
 
   try {
-    const response = await fetch(REMOTE_URL, {
+    const response = await fetchRemote({
       method: "POST",
       headers,
       body: JSON.stringify(message),
@@ -293,11 +351,11 @@ rl.on("close", () => {
 function cleanup() {
   // Best-effort session cleanup with the remote server
   if (sessionId) {
-    fetch(REMOTE_URL, {
+    fetchRemote({
       method: "DELETE",
       headers: { ...authHeaders, "mcp-session-id": sessionId },
     })
-      .catch(() => {})
+      .catch(() => log("Session cleanup failed; check MUNIN_REMOTE_URL and the server's redirect policy"))
       .finally(() => process.exit(0));
     // Fallback if DELETE hangs
     setTimeout(() => process.exit(0), 1000);
