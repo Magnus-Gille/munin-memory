@@ -162,10 +162,6 @@ export interface RequestLogEntry {
     throttleCount: number;
     totalThrottleCount: number;
   };
-  diagnostics?: {
-    headers: Record<string, string | string[]>;
-    bodySnippet?: string;
-  };
 }
 
 export interface HttpAppOptions {
@@ -656,44 +652,12 @@ function resolveReviewRun(
   };
 }
 
-const REDACTED_HEADER_KEYS = new Set([
-  "authorization",
-  "cookie",
-  "proxy-authorization",
-  "cf-access-client-secret",
-  "x-api-key",
-]);
-
-const DIAGNOSTIC_BODY_SNIPPET_LIMIT = 500;
-
-function redactHeaders(headers: Request["headers"]): Record<string, string | string[]> {
-  const out: Record<string, string | string[]> = {};
-  for (const [key, value] of Object.entries(headers)) {
-    if (value === undefined) continue;
-    out[key] = REDACTED_HEADER_KEYS.has(key.toLowerCase()) ? "[REDACTED]" : value;
-  }
-  return out;
-}
-
-function buildBodySnippet(body: unknown): string | undefined {
-  if (body === undefined) return undefined;
-  try {
-    const serialized = typeof body === "string" ? body : JSON.stringify(body);
-    if (!serialized) return undefined;
-    return serialized.length > DIAGNOSTIC_BODY_SNIPPET_LIMIT
-      ? serialized.slice(0, DIAGNOSTIC_BODY_SNIPPET_LIMIT) + "...[truncated]"
-      : serialized;
-  } catch {
-    return undefined;
-  }
-}
-
 function attachRequestLogger(
   req: Request,
   res: Response,
   requestLogger: (entry: RequestLogEntry) => void,
 ): {
-  setBody: (body: unknown) => void;
+  setRequestMetadata: (body: unknown) => void;
   setRateLimit: (rateLimit: NonNullable<RequestLogEntry["rateLimit"]>) => void;
 } {
   const startTime = Date.now();
@@ -702,7 +666,6 @@ function attachRequestLogger(
   const authContext = getRequestAuthLogContext(req.auth);
   let rpcMethod: string | undefined;
   let toolName: string | undefined;
-  let body: unknown;
   let rateLimit: RequestLogEntry["rateLimit"];
 
   res.on("finish", () => {
@@ -719,18 +682,11 @@ function attachRequestLogger(
       durationMs: Date.now() - startTime,
       rateLimit,
     };
-    if (res.statusCode >= 400 && req.path === "/mcp") {
-      entry.diagnostics = {
-        headers: redactHeaders(req.headers),
-        bodySnippet: buildBodySnippet(body),
-      };
-    }
     requestLogger(entry);
   });
 
   return {
-    setBody(nextBody: unknown) {
-      body = nextBody;
+    setRequestMetadata(nextBody: unknown) {
       rpcMethod = extractMethod(nextBody);
       toolName = extractToolName(nextBody);
     },
@@ -1003,7 +959,7 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
     }
     const body = result.body;
 
-    requestLog.setBody(body);
+    requestLog.setRequestMetadata(body);
 
     // Stateless mode requires a fresh transport per request to avoid message ID collisions.
     const transport = new StreamableHTTPServerTransport({

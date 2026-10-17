@@ -1430,11 +1430,10 @@ describe("createHttpApp — GET /authorize identity null fallback", () => {
 });
 
 // ---------------------------------------------------------------------------
-// createHttpApp — diagnostics body snippet behaviors
-// (hit via 4xx /mcp responses with a body that triggers truncation)
+// createHttpApp — failed request logs retain attribution without raw inputs
 // ---------------------------------------------------------------------------
 
-describe("createHttpApp — diagnostics body snippet truncation", () => {
+describe("createHttpApp — failed request log redaction", () => {
   let db: Database.Database;
   let logs: RequestLogEntry[];
 
@@ -1451,7 +1450,7 @@ describe("createHttpApp — diagnostics body snippet truncation", () => {
     delete process.env.MUNIN_OAUTH_TRUSTED_USER_VALUE;
   });
 
-  it("truncates long body snippet in 4xx diagnostics", async () => {
+  it("does not capture oversized nested request data or arbitrary headers in error logs", async () => {
     const { app } = createHttpApp({
       database: db,
       apiKey: LEGACY_API_KEY,
@@ -1461,31 +1460,44 @@ describe("createHttpApp — diagnostics body snippet truncation", () => {
       requestLogger: (e) => logs.push(e),
     });
 
-    // Send a body with a method field > 500 chars so it triggers truncation.
-    // Use "mcp-protocol-version: 2099-01-01" to get a 400 from the SDK.
-    const longString = "a".repeat(600);
+    // Use an invalid protocol version to get a 400 from the SDK.
+    const bodyCanary = "coverage-nested-body-canary";
+    const bodyPayload = `${bodyCanary}-${"a".repeat(600)}`;
+    const headerCanary = "coverage-unknown-header-canary";
     const payload = {
       jsonrpc: "2.0",
       id: 1,
       method: "tools/call",
-      params: { name: "memory_list", longField: longString },
+      params: { name: "memory_list", arguments: { nested: { value: bodyPayload } } },
     };
 
-    await supertest(app)
+    const response = await supertest(app)
       .post("/mcp")
       .set({
         Authorization: `Bearer ${LEGACY_API_KEY}`,
         Host: "127.0.0.1:3030",
+        Accept: "application/json, text/event-stream",
         "Content-Type": "application/json",
         "mcp-protocol-version": "2099-01-01",
+        "X-Debug-Canary": headerCanary,
       })
-      .send(payload);
+      .send(payload)
+      .expect(400);
 
     const entry = logs.find((e) => e.status >= 400 && e.path === "/mcp");
-    if (entry?.diagnostics?.bodySnippet) {
-      // If body was large enough to trigger truncation
-      expect(entry.diagnostics.bodySnippet).toContain("...[truncated]");
-    }
-    // Either truncated or short enough to fit — both are valid
+    expect(entry).toMatchObject({
+      method: "POST",
+      path: "/mcp",
+      rpcMethod: "tools/call",
+      toolName: "memory_list",
+      authType: "bearer",
+      clientId: "legacy",
+      status: 400,
+    });
+    expect(entry).not.toHaveProperty("diagnostics");
+    const capturedLog = JSON.stringify(entry);
+    expect(capturedLog).not.toContain(bodyCanary);
+    expect(capturedLog).not.toContain(headerCanary);
+    expect(capturedLog).not.toContain("mcp-protocol-version");
   });
 });
