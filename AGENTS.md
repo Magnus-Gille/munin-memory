@@ -12,7 +12,7 @@
 
 Munin Memory is a self-hosted MCP server for persistent memory across AI clients. It is part of the Hugin & Munin system and is designed to remain provider-portable.
 
-- Node.js 20+, strict TypeScript, ESM.
+- Node.js 22+, with Node 24 LTS preferred, strict TypeScript, ESM.
 - SQLite through `better-sqlite3`; FTS5 for lexical search and optional sqlite-vec embeddings for semantic/hybrid search.
 - MCP over stdio for local use or stateless Streamable HTTP through Express for network use.
 - Bearer-token and OAuth 2.1 authentication, with server-enforced multi-principal namespace access.

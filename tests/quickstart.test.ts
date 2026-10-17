@@ -116,15 +116,51 @@ describe("quickstart preflight", () => {
       configDir,
       transport: "stdio",
       embeddings: false,
-      nodeVersion: "v20.19.0",
+      nodeVersion: "v22.19.0",
       platform: "linux",
     });
 
     expect(result.ok).toBe(true);
+    expect(result.checks.find((check) => check.id === "node")?.message).toContain("Node 22+");
     expect(result.checks.find((check) => check.id === "sqlite-fts5")?.status).toBe("pass");
     expect(result.checks.find((check) => check.id === "embedding-mode")?.message).toContain("lexical");
     expect(existsSync(dataDir)).toBe(false);
     expect(existsSync(configDir)).toBe(false);
+  });
+
+  it("accepts Node 24 and identifies it as the preferred LTS", async () => {
+    const root = makeTempRoot();
+    const result = await runPreflight({
+      projectRoot: repoRoot,
+      dataDir: join(root, "data"),
+      configDir: join(root, "config"),
+      transport: "stdio",
+      embeddings: false,
+      nodeVersion: "v24.6.0",
+      platform: "linux",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.checks.find((check) => check.id === "node")?.message).toContain("preferred");
+  });
+
+  it.each(["v20.19.0", "v21.7.0"])("rejects unsupported Node %s with an actionable upgrade message", async (nodeVersion) => {
+    const root = makeTempRoot();
+    const result = await runPreflight({
+      projectRoot: repoRoot,
+      dataDir: join(root, "data"),
+      configDir: join(root, "config"),
+      transport: "stdio",
+      embeddings: false,
+      nodeVersion,
+      platform: "linux",
+    });
+
+    const nodeCheck = result.checks.find((check) => check.id === "node");
+    expect(result.ok).toBe(false);
+    expect(nodeCheck?.status).toBe("fail");
+    expect(nodeCheck?.message).toContain("Node.js 22 or newer is required");
+    expect(nodeCheck?.message).toContain("Node 24 LTS is preferred");
   });
 
   it("fails before startup for unsupported runtime, profile, insecure paths, and missing HTTP auth", async () => {
