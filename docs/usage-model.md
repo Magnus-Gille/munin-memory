@@ -275,6 +275,21 @@ guard for an entry you have read, not an assertion that a key exists or is absen
 Soft expiry also does not make a key absent: a state row past `valid_until` remains directly
 addressable, so `create_if_absent: true` returns `already_exists` until that row is deleted.
 
+### Unexpected tool failures
+
+Unexpected backend failures return `ok:false`, `error:"internal_error"`, and
+fixed guidance instead of exception text. An optional opaque `error_reference`
+links the response to a content-free operator diagnostic. These diagnostics
+include a server-owned stage label, never request content or raw exception details.
+Deliberate validation, access, version-conflict, and delete-preview errors retain
+their existing contracts. Legacy history timestamp/cursor validation retains its
+existing `internal_error` shape and actionable validation message.
+
+A failure can occur after a write commits. Check current state or recover the
+existing replay receipt before retrying; an `internal_error` is not proof that
+nothing was written. Optional diagnostic or telemetry failures do not change the
+underlying tool result.
+
 ### Advisory intake quality
 
 Successful full `memory_write` and `memory_log` calls include an `intake` object and

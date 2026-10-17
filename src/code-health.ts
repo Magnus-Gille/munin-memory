@@ -1,3 +1,4 @@
+import { PublicValidationError, getPublicValidationMessage } from "./internal/public-errors.js";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { AccessContext } from "./access.js";
@@ -7,7 +8,7 @@ import type { Entry, ClassificationLevel } from "./types.js";
 import { CLASSIFICATION_LEVELS, classificationAllowed, resolveNamespaceClassificationFloor } from "./librarian.js";
 import { scanForSecrets, validateWriteNamespace } from "./security.js";
 import { nowUTC } from "./db.js";
-import { validateRecord, validateRecords } from "../scripts/lib/code-health-agent.mjs";
+import { validateRecord, validateRecords, getCodeHealthValidationMessage } from "../scripts/lib/code-health-agent.mjs";
 
 const MAX_RECORD_BYTES = 16 * 1024;
 const MAX_CONTEXT_RECORDS = 500;
@@ -85,11 +86,11 @@ function addCalendarMonths(instant: string, count: number): string {
 
 function validationTime(value: unknown, field: string): string {
   if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:[0-5]\dZ$/.test(value)) {
-    throw new Error(`${field} must be a whole-second UTC timestamp.`);
+    throw new PublicValidationError(`${field} must be a whole-second UTC timestamp.`);
   }
   const date = new Date(value);
   if (!Number.isFinite(date.getTime()) || date.toISOString().replace(/\.000Z$/, "Z") !== value) {
-    throw new Error(`${field} must be a real UTC timestamp.`);
+    throw new PublicValidationError(`${field} must be a real UTC timestamp.`);
   }
   return value;
 }
@@ -122,7 +123,7 @@ function assertPrincipalCanReadEntry(
     WHERE principal_id = ? AND entry_id = ?`).get(principalId, entry.id) as
     { namespace: string; expires_at: string } | undefined;
   if (!ledger || ledger.namespace !== entry.namespace || ledger.expires_at <= nowUTC()) {
-    throw new Error("Code-health record is no longer in the retained set.");
+    throw new PublicValidationError("Code-health record is no longer in the retained set.");
   }
   if (!classificationAllowed(entry.classification, getContextMaxClassification(ctx))) {
     throw new CodeHealthAccessDenied();
@@ -166,12 +167,12 @@ function loadContextRecords(
         && !classificationAllowed(hidden.classification as ClassificationLevel, getContextMaxClassification(ctx))) {
         throw new CodeHealthAccessDenied();
       }
-      throw new Error(`Code-health reference ${recordId} is not available in this principal and namespace.`);
+      throw new PublicValidationError(`Code-health reference ${recordId} is not available in this principal and namespace.`);
     }
     seen.add(recordId);
-    if (seen.size > MAX_CONTEXT_RECORDS) throw new Error("Code-health reference context exceeds the bounded 500-record limit.");
+    if (seen.size > MAX_CONTEXT_RECORDS) throw new PublicValidationError("Code-health reference context exceeds the bounded 500-record limit.");
     const entry = getById(db, ledger.entry_id!);
-    if (!entry || entry.entry_type !== "log") throw new Error(`Code-health reference ${recordId} is unavailable.`);
+    if (!entry || entry.entry_type !== "log") throw new PublicValidationError(`Code-health reference ${recordId} is unavailable.`);
     assertPrincipalCanReadEntry(db, ctx, entry, principalId);
     const payload = payloadOf(entry);
     result.push(payload);
@@ -199,7 +200,7 @@ function loadStoredTaskContext(
   `).all(principalId, namespace, record.repo_owner, record.repo_name, record.task_id,
     ...CLASSIFICATION_LEVELS.slice(0, CLASSIFICATION_LEVELS.indexOf(getContextMaxClassification(ctx)) + 1),
     nowUTC(), MAX_CONTEXT_RECORDS + 1) as Array<LedgerRow & Entry>;
-  if (rows.length > MAX_CONTEXT_RECORDS) throw new Error("Task validation context exceeds the bounded 500-record limit.");
+  if (rows.length > MAX_CONTEXT_RECORDS) throw new PublicValidationError("Task validation context exceeds the bounded 500-record limit.");
   return rows.map((row) => {
     assertPrincipalCanReadEntry(db, ctx, row, principalId);
     return payloadOf(row);
@@ -279,18 +280,18 @@ function signCursor(snapshotId: string, position: number): string {
 
 function readCursor(value: string): { snapshotId: string; position: number } {
   const parts = value.split(".");
-  if (parts.length !== 2) throw new Error("cursor is invalid or expired; start a new export.");
+  if (parts.length !== 2) throw new PublicValidationError("cursor is invalid or expired; start a new export.");
   const expected = createHmac("sha256", CURSOR_KEY).update(parts[0]).digest();
   let supplied: Buffer;
-  try { supplied = Buffer.from(parts[1], "base64url"); } catch { throw new Error("cursor is invalid or expired; start a new export."); }
+  try { supplied = Buffer.from(parts[1], "base64url"); } catch { throw new PublicValidationError("cursor is invalid or expired; start a new export."); }
   if (expected.length !== supplied.length || !timingSafeEqual(expected, supplied)) {
-    throw new Error("cursor is invalid or expired; start a new export.");
+    throw new PublicValidationError("cursor is invalid or expired; start a new export.");
   }
   let parsed: { s?: unknown; p?: unknown };
   try { parsed = JSON.parse(Buffer.from(parts[0], "base64url").toString("utf8")) as { s?: unknown; p?: unknown }; }
-  catch { throw new Error("cursor is invalid or expired; start a new export."); }
+  catch { throw new PublicValidationError("cursor is invalid or expired; start a new export."); }
   if (typeof parsed.s !== "string" || !Number.isSafeInteger(parsed.p) || (parsed.p as number) < 0) {
-    throw new Error("cursor is invalid or expired; start a new export.");
+    throw new PublicValidationError("cursor is invalid or expired; start a new export.");
   }
   return { snapshotId: parsed.s, position: parsed.p as number };
 }
@@ -422,15 +423,17 @@ export function appendCodeHealthRecord(
       ...(targetId ? { supersedes_record_id: targetId, correction_ref: record.correction_ref } : {}),
     };
   } catch (error) {
-    if (error instanceof CodeHealthAccessDenied) return fail("access_denied", error.message);
-    return fail("validation_error", error instanceof Error ? error.message : "Code-health record failed validation.");
+    if (error instanceof CodeHealthAccessDenied) return fail("access_denied", "Access denied.");
+    const message = getPublicValidationMessage(error) ?? getCodeHealthValidationMessage(error);
+    if (message === undefined) throw error;
+    return fail("validation_error", message);
   }
 }
 
 function validateExportInput(input: CodeHealthExportInput): { filters: Record<string, unknown>; limit: number } {
-  if (!validateWriteNamespace(input.namespace).valid) throw new Error("namespace is invalid.");
+  if (!validateWriteNamespace(input.namespace).valid) throw new PublicValidationError("namespace is invalid.");
   const limit = input.limit ?? 50;
-  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("limit must be an integer from 1 through 100.");
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new PublicValidationError("limit must be an integer from 1 through 100.");
   for (const [name, value, pattern, max] of [
     ["repo_owner", input.repo_owner, /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/, 39],
     ["repo_name", input.repo_name, /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,97}[A-Za-z0-9])?$/, 99],
@@ -438,12 +441,12 @@ function validateExportInput(input: CodeHealthExportInput): { filters: Record<st
     ["model", input.model, /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/, 64],
     ["rubric_version", input.rubric_version, /^changeability-1\.0$/, 32],
   ] as const) {
-    if (value !== undefined && (value.length > max || !pattern.test(value))) throw new Error(`${name} is invalid or exceeds its bounded exact-match format.`);
+    if (value !== undefined && (value.length > max || !pattern.test(value))) throw new PublicValidationError(`${name} is invalid or exceeds its bounded exact-match format.`);
   }
   const filters = filterShape(input);
   if (input.since !== undefined) validationTime(input.since, "since");
   if (input.until !== undefined) validationTime(input.until, "until");
-  if (input.since && input.until && input.since > input.until) throw new Error("since must not be later than until.");
+  if (input.since && input.until && input.since > input.until) throw new PublicValidationError("since must not be later than until.");
   return { filters, limit };
 }
 
@@ -483,7 +486,7 @@ function loadRetentionMetadata(
   `).all(principalId, namespace, nowUTC(), ...recordIds) as CodeHealthRetentionMetadata[];
   const byRecordId = new Map(rows.map((row) => [row.record_id, row]));
   if (byRecordId.size !== recordIds.length) {
-    throw new Error("Code-health retention metadata is no longer available in this principal and namespace.");
+    throw new PublicValidationError("Code-health retention metadata is no longer available in this principal and namespace.");
   }
   return recordIds.map((recordId) => byRecordId.get(recordId)!);
 }
@@ -612,7 +615,9 @@ export function exportCodeHealthRecords(
       reconciliation: complete ? "complete-authorized-retained-set" : "incomplete-do-not-remove-consumer-records",
     };
   } catch (error) {
-    if (error instanceof CodeHealthAccessDenied) return fail("access_denied", error.message);
-    return fail("validation_error", error instanceof Error ? error.message : "Code-health export failed.");
+    if (error instanceof CodeHealthAccessDenied) return fail("access_denied", "Access denied.");
+    const message = getPublicValidationMessage(error) ?? getCodeHealthValidationMessage(error);
+    if (message === undefined) throw error;
+    return fail("validation_error", message);
   }
 }

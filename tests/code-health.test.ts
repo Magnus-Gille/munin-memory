@@ -88,9 +88,9 @@ afterAll(() => {
 });
 
 describe("memory_code_health", () => {
-  it("pins the vendored frozen validator, schema, and fixtures by SHA-256", () => {
+  it("pins the validator with its error-branding adapter, frozen schema, and fixtures by SHA-256", () => {
     const expected: Record<string, string> = {
-      "scripts/lib/code-health-agent.mjs": "9d887baea538e9801785122448b098e37a803ead244fea3f167a338d79ccb258",
+      "scripts/lib/code-health-agent.mjs": "21aff53982b1dafcc215bbb076a2aab071f2b08501079d1177493a12a9385b79",
       "scripts/lib/code-health-schema.mjs": "0bf6801120221ea0a21b64b8a0d15efe96e6f51a8858f4be042878f36885eb59",
       "docs/code-health-agent-v1.schema.json": "c329c167c9537382613dbc93950ecb7c82e8b4e42b66562a5821abc9d76e3bea",
       "tests/fixtures/code-health/agent-positive.json": "67864271b8a18bdc5f6249e4017075c2d0a0152857e9c858eaf17e9463b68ffd",
