@@ -175,6 +175,8 @@ import {
   getSearchModeUnavailableReason,
   getSemanticMaxDistance,
   getActiveEmbeddingModel,
+  getActiveEmbeddingIdentity,
+  getConfiguredEmbeddingIdentity,
   getEmbeddingStatusReason,
   isEmbeddingCircuitBreakerTripped,
   getActiveEmbeddingDtype,
@@ -11775,12 +11777,13 @@ export function registerTools(
                     rawFts5,
                   })))
               );
-              const collectSemanticExpiredIds = (queryEmbedding: Buffer, queryEmbeddingModel: string) => (
+              const collectSemanticExpiredIds = (queryEmbedding: Buffer, queryEmbeddingModel: string, queryEmbeddingIdentity: string) => (
                 includeExpired
                   ? new Set<string>()
                   : collectExpiredEntryIds(queryEntriesSemanticScored(db, withQueryProbeLimit({
                     queryEmbedding,
                     queryEmbeddingModel,
+                    queryEmbeddingIdentity,
                     namespaceSelectors: readableNamespaceSelectors,
                     entryType: entry_type,
                     tags,
@@ -11807,8 +11810,9 @@ export function registerTools(
               }
 
               if (actualMode === "semantic") {
+                const activeEmbeddingIdentity = getActiveEmbeddingIdentity();
                 const queryEmb = await generateEmbedding(queryText);
-                if (!queryEmb) {
+                if (!queryEmb || activeEmbeddingIdentity === null || getActiveEmbeddingIdentity() !== activeEmbeddingIdentity) {
                   actualMode = "lexical";
                   warning = "Failed to generate query embedding. Falling back to lexical search.";
                   fallbackReason = "embedding_generation_failed";
@@ -11818,6 +11822,7 @@ export function registerTools(
                   semanticResults = queryEntriesSemanticScored(db, withQueryProbeLimit({
                     queryEmbedding: buf,
                     queryEmbeddingModel: activeEmbeddingModel,
+                    queryEmbeddingIdentity: activeEmbeddingIdentity,
                     namespaceSelectors: readableNamespaceSelectors,
                     entryType: entry_type,
                     tags,
@@ -11830,14 +11835,15 @@ export function registerTools(
                   const cappedSemantic = capQueryCandidates(semanticResults);
                   semanticResults = cappedSemantic.rows;
                   if (cappedSemantic.truncated) candidatesTruncated = true;
-                  expiredFilteredCount = collectSemanticExpiredIds(buf, activeEmbeddingModel).size;
+                  expiredFilteredCount = collectSemanticExpiredIds(buf, activeEmbeddingModel, activeEmbeddingIdentity).size;
                   results = semanticResults.map((result) => result.entry);
                 }
               }
 
               if (actualMode === "hybrid") {
+                const activeEmbeddingIdentity = getActiveEmbeddingIdentity();
                 const queryEmb = await generateEmbedding(queryText);
-                if (!queryEmb) {
+                if (!queryEmb || activeEmbeddingIdentity === null || getActiveEmbeddingIdentity() !== activeEmbeddingIdentity) {
                   actualMode = "lexical";
                   warning = "Failed to generate query embedding. Falling back to lexical search.";
                   fallbackReason = "embedding_generation_failed";
@@ -11875,6 +11881,7 @@ export function registerTools(
                   semanticResults = queryEntriesSemanticScored(db, withQueryProbeLimit({
                     queryEmbedding: buf,
                     queryEmbeddingModel: activeEmbeddingModel,
+                    queryEmbeddingIdentity: activeEmbeddingIdentity,
                     namespaceSelectors: readableNamespaceSelectors,
                     entryType: entry_type,
                     tags,
@@ -11895,7 +11902,7 @@ export function registerTools(
                       warning = "No exact lexical matches found. Used relaxed token matching for natural-language query.";
                     }
                   }
-                  const expiredCandidateIds = collectSemanticExpiredIds(buf, activeEmbeddingModel);
+                  const expiredCandidateIds = collectSemanticExpiredIds(buf, activeEmbeddingModel, activeEmbeddingIdentity);
                   for (const id of collectLexicalExpiredIds(
                     relaxedLexical && relaxedQuery ? relaxedQuery : queryText,
                     relaxedLexical,
@@ -13131,9 +13138,13 @@ export function registerTools(
               // --- Section 1: embedding (canonical contract name) ---
               buildSection("embedding", () => {
                 const activeModel = getActiveEmbeddingModel();
-                const c = getEmbeddingQueueCounts(db, activeModel, isOwner);
+                const configuredIdentity = getConfiguredEmbeddingIdentity();
+                const c = getEmbeddingQueueCounts(db, activeModel, isOwner, configuredIdentity ?? "unavailable");
                 return {
                   model: activeModel,
+                  identity: configuredIdentity,
+                  compatible_generated: c.generated_current,
+                  reembedding_backlog: c.reembedding_backlog,
                   // Use getActiveEmbeddingDtype() so profile-resolved defaults (e.g.
                   // zero-appliance → "q8") are reflected even when the env var is unset.
                   dtype: getActiveEmbeddingDtype(),
@@ -13146,12 +13157,12 @@ export function registerTools(
                   },
                   // null when there are no entries (total == 0) — see getEmbeddingQueueCounts.
                   coverage_pct: c.coverage_pct,
-                  // A re-embedding pass has outstanding work (stale-model + null-model + pending).
+                  // A re-embedding pass has outstanding work (incompatible + unknown + pending/processing/failed).
                   reembed_in_progress: c.reembedding_backlog > 0,
                   // Stuck = entries marked generated but not against the active model
                   // (model-identity-based; no embedding_claimed_at column for time-based detection).
                   stuck: c.generated_stale + c.generated_null,
-                  stuck_note: "Stuck entries are defined as model-identity-based (generated_stale + generated_null); no embedding_claimed_at column exists for time-based detection.",
+                  stuck_note: "Stuck entries are generated vectors with a different or unknown embedding identity; no embedding_claimed_at column exists for time-based detection.",
                   // Real circuit-breaker accessor → enum. Distinct from config-disabled or
                   // model-not-loaded (embedding_available covers all three; breaker only covers trips).
                   circuit_breaker: isEmbeddingCircuitBreakerTripped() ? "tripped" : "healthy",

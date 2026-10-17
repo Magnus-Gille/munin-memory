@@ -1,7 +1,8 @@
-import { mkdirSync, existsSync } from "node:fs";
 import type Database from "better-sqlite3";
 import { getDataDir, vecLoaded, storeEmbedding } from "./db.js";
 import { resolveKnob } from "./profiles.js";
+import { resolveEmbeddingIdentity } from "./internal/embedding-identity.js";
+import { withPinnedEmbeddingSource } from "./internal/embedding-source.js";
 
 // --- Configuration from env vars ---
 //
@@ -17,8 +18,8 @@ export type ValidDtype = (typeof VALID_DTYPES)[number];
 /**
  * Validate the resolved dtype against the known-good Transformers.js v3 set.
  * Returns the dtype if valid, or `undefined` if:
- *  - the value is undefined or empty string (unset — fall through to library default)
- *  - the value is set but not in the allowed list (warn + fall through to library default)
+ *  - the value is undefined or empty string (unset — use explicit CPU fp32)
+ *  - the value is set but not in the allowed list (warn + use explicit CPU fp32)
  *
  * Exported for unit testing.
  */
@@ -26,7 +27,7 @@ export function resolveEmbeddingsDtype(raw: string | undefined): string | undefi
   if (raw === undefined || raw === "") return undefined;
   if ((VALID_DTYPES as readonly string[]).includes(raw)) return raw;
   console.warn(
-    `[munin] MUNIN_EMBEDDINGS_DTYPE="${raw}" is not a recognised dtype — ignored, using library default. Allowed: ${VALID_DTYPES.join(", ")}`,
+    `[munin] MUNIN_EMBEDDINGS_DTYPE="${raw}" is not a recognised dtype — ignored, using CPU fp32. Allowed: ${VALID_DTYPES.join(", ")}`,
   );
   return undefined;
 }
@@ -39,7 +40,8 @@ const config = {
   model:
     resolveKnob("MUNIN_EMBEDDINGS_MODEL", "Xenova/bge-small-en-v1.5") ??
     "Xenova/bge-small-en-v1.5",
-  // ONNX weight precision for the embedding model. Unset = library default
+  revision: process.env.MUNIN_EMBEDDINGS_REVISION,
+  // ONNX weight precision for the embedding model. Unset = explicit CPU fp32
   // (fp32 for all-MiniLM). Lower precision (e.g. "q8"/"int8") cuts resident
   // model memory ~3-4x, the primary lever for fitting embeddings on
   // zero/zero-plus appliance RAM. Valid values follow Transformers.js v3:
@@ -69,6 +71,7 @@ let extractor: ((text: string, options: { pooling: PoolingType; normalize: boole
 let circuitBreakerFailures = 0;
 let circuitBreakerDisabled = false;
 let extractorCacheDir: string | null = null;
+let extractorIdentity: string | null = null;
 let workerTimer: ReturnType<typeof setTimeout> | null = null;
 let workerProcessing = false;
 let workerInflightPromise: Promise<void> | null = null;
@@ -83,11 +86,15 @@ export function _setExtractorForTesting(fn: ExtractorFn | null): void {
   if (process.env.VITEST) {
     _testExtractor = fn;
     if (fn) {
-      extractor = fn;
+      extractorIdentity = getConfiguredEmbeddingIdentity();
+      extractorCacheDir = getEmbeddingCacheDir();
+      extractor = extractorIdentity === null ? null : fn;
       circuitBreakerFailures = 0;
       circuitBreakerDisabled = false;
     } else {
       extractor = null;
+      extractorIdentity = null;
+      extractorCacheDir = null;
     }
   }
 }
@@ -140,42 +147,42 @@ export function getEmbeddingCacheDir(configuredDbPath = process.env.MUNIN_MEMORY
 }
 
 export async function initEmbeddings(): Promise<boolean> {
-  if (!config.embeddingsEnabled) {
+  const resolved = resolveEmbeddingIdentity(config);
+  if (!config.embeddingsEnabled || !vecLoaded() || resolved.identity === null) {
+    extractor = null;
+    extractorIdentity = null;
+    extractorCacheDir = null;
     return false;
   }
 
-  if (!vecLoaded()) {
-    return false;
+  const cacheDir = getEmbeddingCacheDir();
+  const identity = resolved.identity;
+  if (extractor && !circuitBreakerDisabled && extractorCacheDir === cacheDir && extractorIdentity === identity) {
+    return true;
   }
-
+  // Invalidate an old binding before any asynchronous initialization can fail.
+  extractor = null;
+  extractorIdentity = null;
+  extractorCacheDir = null;
   try {
-    if (_testExtractor) {
-      extractor = _testExtractor;
-      return true;
+    const model = config.model;
+    const pipelineOptions: Record<string, unknown> = {
+      cache_dir: cacheDir,
+      device: "cpu",
+      dtype: resolved.dtype,
+      revision: resolved.revision,
+    };
+    if (config.localOnly) pipelineOptions.local_files_only = true;
+    const pipe = _testExtractor ?? await loadFeatureExtractionPipeline(model, pipelineOptions, cacheDir);
+    if (!config.embeddingsEnabled || getConfiguredEmbeddingIdentity() !== identity || getEmbeddingCacheDir() !== cacheDir) {
+      return false;
     }
-
-    const cacheDir = getEmbeddingCacheDir();
-
-    // Short-circuit only when the extractor is already loaded AND bound to the
-    // same cache_dir. If the DB path (and therefore cache_dir) changed, rebuild.
-    if (extractor && !circuitBreakerDisabled && extractorCacheDir === cacheDir) {
-      return true;
-    }
-
-    const pipelineOptions: Record<string, unknown> = { cache_dir: cacheDir };
-    if (config.localOnly) {
-      pipelineOptions.local_files_only = true;
-    }
-    if (config.dtype !== undefined && config.dtype !== "") {
-      pipelineOptions.dtype = config.dtype;
-    }
-
-    const pipe = await loadFeatureExtractionPipeline(config.model, pipelineOptions, cacheDir);
     extractor = async (text: string, options: { pooling: PoolingType; normalize: boolean }) => {
       const result = await pipe(text, { pooling: options.pooling, normalize: options.normalize });
       return { data: result.data };
     };
     extractorCacheDir = cacheDir;
+    extractorIdentity = identity;
     return true;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -202,31 +209,29 @@ async function loadFeatureExtractionPipeline(
 
   const transformers = await import("@huggingface/transformers");
 
-  // Point model cache to the data directory (writable under systemd sandboxing)
-  if (!existsSync(cacheDir)) {
-    mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
-  }
-  transformers.env.cacheDir = cacheDir;
-
-  return transformers.pipeline(
+  return withPinnedEmbeddingSource(transformers.env, cacheDir, () => transformers.pipeline(
     "feature-extraction",
     model,
     options,
-  ) as unknown as Promise<LoadedPipeline>;
+  ) as unknown as Promise<LoadedPipeline>);
 }
 
 // --- Embedding generation ---
 
 export async function generateEmbedding(text: string): Promise<Float32Array | null> {
-  if (!extractor || circuitBreakerDisabled) {
-    return null;
-  }
+  const identity = getActiveEmbeddingIdentity();
+  const loadedExtractor = extractor;
+  if (identity === null || loadedExtractor === null) return null;
 
   try {
-    const result = await extractor(text, { pooling: "mean", normalize: true });
+    const result = await loadedExtractor(text, { pooling: "mean", normalize: true });
+    // A result belongs to the extractor captured before awaiting. Never relabel
+    // it with a configuration or runtime binding that changed in the meantime.
+    if (!isExtractorBindingCurrent(identity) || extractor !== loadedExtractor) return null;
     circuitBreakerFailures = 0;
     return result.data;
   } catch (err) {
+    if (!isExtractorBindingCurrent(identity) || extractor !== loadedExtractor) return null;
     circuitBreakerFailures++;
     const message = err instanceof Error ? err.message : String(err);
     console.error(`Embedding generation failed (${circuitBreakerFailures}/${config.maxFailures}): ${message}`);
@@ -242,8 +247,22 @@ export async function generateEmbedding(text: string): Promise<Float32Array | nu
 
 // --- Status checks ---
 
+function isExtractorBindingCurrent(identity: string): boolean {
+  return config.embeddingsEnabled && extractor !== null && extractorIdentity === identity
+    && getConfiguredEmbeddingIdentity() === identity && extractorCacheDir === getEmbeddingCacheDir();
+}
+
+export function getConfiguredEmbeddingIdentity(): string | null {
+  return resolveEmbeddingIdentity(config).identity;
+}
+
+export function getActiveEmbeddingIdentity(): string | null {
+  return extractorIdentity !== null && !circuitBreakerDisabled && vecLoaded()
+    && isExtractorBindingCurrent(extractorIdentity) ? extractorIdentity : null;
+}
+
 export function isEmbeddingAvailable(): boolean {
-  return extractor !== null && !circuitBreakerDisabled && vecLoaded();
+  return getActiveEmbeddingIdentity() !== null;
 }
 
 /**
@@ -276,8 +295,11 @@ export function isHybridEnabled(): boolean {
 export function getEmbeddingStatusReason(): string {
   if (!config.embeddingsEnabled) return "Embeddings disabled via MUNIN_EMBEDDINGS_ENABLED=false";
   if (!vecLoaded()) return "sqlite-vec extension not available";
+  const resolved = resolveEmbeddingIdentity(config);
+  if (resolved.reason !== null) return resolved.reason;
   if (!extractor) return "Embedding model failed to load";
   if (circuitBreakerDisabled) return `Circuit breaker tripped after ${config.maxFailures} consecutive failures`;
+  if (getActiveEmbeddingIdentity() === null) return "Embedding configuration changed; reinitialize the embedding model";
   return "Embedding system operational";
 }
 
@@ -306,7 +328,7 @@ export function isEmbeddingCircuitBreakerTripped(): boolean {
 /**
  * Returns the ONNX dtype resolved for the embedding model (explicit env var
  * > MUNIN_PROFILE default > hard default). Returns null when no dtype was
- * configured (library default, typically fp32). Use this instead of reading
+ * configured (the effective CPU dtype is still explicit fp32). Use this instead of reading
  * process.env.MUNIN_EMBEDDINGS_DTYPE directly so that profile-resolved
  * defaults (e.g. zero-appliance → "q8") are reflected.
  */
@@ -402,15 +424,15 @@ async function processBatch(): Promise<void> {
 
   try {
     const db = workerDb;
+    const identity = getActiveEmbeddingIdentity();
+    if (identity === null) return;
+    const model = config.model;
 
     // Atomically claim rows: UPDATE with subquery for LIMIT.
     // In addition to 'pending'/'failed' entries, also claim entries that were
-    // previously embedded with a DIFFERENT model (embedding_model != current) or
-    // have NULL embedding_model (SQL `!= ?` evaluates to UNKNOWN for NULL, so the
-    // IS NULL guard is required to reclaim legacy/partially-written rows).
-    // This ensures that a MUNIN_EMBEDDINGS_MODEL change triggers a full
-    // re-embedding of the corpus on the next worker pass, so stale vectors
-    // from the old model are replaced and no longer served via the model filter.
+    // previously embedded with a different model or identity, or missing either
+    // provenance field. SQL != does not match NULL, so legacy/unknown vectors
+    // need explicit IS NULL guards. Only the captured batch identity may be stored.
     const claimed = db
       .prepare(
         `UPDATE entries SET embedding_status = 'processing'
@@ -420,20 +442,36 @@ async function processBatch(): Promise<void> {
              AND NOT EXISTS (SELECT 1 FROM code_health_records chr WHERE chr.entry_id = entries.id)
              AND (embedding_status IN ('pending', 'failed')
               OR (embedding_status = 'generated'
-                  AND (embedding_model IS NULL OR embedding_model != ?)))
+                  AND (embedding_model IS NULL OR embedding_model != ?
+                    OR embedding_identity IS NULL OR embedding_identity != ?)))
            ORDER BY created_at ASC
            LIMIT ?
          )
          RETURNING id, content, updated_at`,
       )
-      .all(config.model, config.batchSize) as Array<{ id: string; content: string; updated_at: string }>;
+      .all(model, identity, config.batchSize) as Array<{ id: string; content: string; updated_at: string }>;
 
     if (claimed.length === 0) return;
 
+    const requeueClaimed = () => {
+      const requeue = db.prepare(
+        "UPDATE entries SET embedding_status = 'pending' WHERE id = ? AND updated_at = ? AND embedding_status = 'processing'",
+      );
+      db.transaction(() => {
+        for (const row of claimed) requeue.run(row.id, row.updated_at);
+      })();
+    };
     for (const row of claimed) {
-      if (circuitBreakerDisabled) break;
+      if (circuitBreakerDisabled || !isExtractorBindingCurrent(identity)) {
+        requeueClaimed();
+        break;
+      }
 
       const embedding = await generateEmbedding(row.content);
+      if (!isExtractorBindingCurrent(identity)) {
+        requeueClaimed();
+        break;
+      }
       if (!embedding) {
         // Mark as failed if embedding generation failed
         db.prepare(
@@ -455,7 +493,7 @@ async function processBatch(): Promise<void> {
           return;
         }
 
-        storeEmbedding(db, row.id, buf, config.model);
+        storeEmbedding(db, row.id, buf, model, identity);
       });
 
       txn();

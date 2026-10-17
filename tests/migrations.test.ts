@@ -484,7 +484,7 @@ describe("migration v29 — bind code-health receipts to retained records", () =
     runMigrations(db);
     const columns = db.prepare("PRAGMA table_info(write_receipts)").all() as Array<{ name: string; notnull: number }>;
     expect(columns.find(({ name }) => name === "code_health_record_id")).toMatchObject({ notnull: 0 });
-    expect(getSchemaVersion(db)).toBe(30);
+    expect(getSchemaVersion(db)).toBe(31);
     db.close();
   });
 
@@ -575,7 +575,7 @@ describe("migration v30 — repair managed-row FTS exclusion", () => {
 
     runMigrations(db);
 
-    expect(getSchemaVersion(db)).toBe(30);
+    expect(getSchemaVersion(db)).toBe(31);
     expect(find("livecodehealthmigrationtoken")).toHaveLength(0);
     expect(find("orphanedcodehealthmigrationtoken")).toHaveLength(0);
     expect(find("ordinarywebfetch")).toHaveLength(1);

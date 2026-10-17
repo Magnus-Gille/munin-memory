@@ -22,6 +22,7 @@ import {
   resetCircuitBreaker,
   embeddingToBuffer,
   getActiveEmbeddingModel,
+  getActiveEmbeddingIdentity,
 } from "../src/embeddings.js";
 
 // ---------------------------------------------------------------------------
@@ -908,6 +909,8 @@ describe.skipIf(!vecAvailable)("memory_query — access enforcement semantic/hyb
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     _setExtractorForTesting(mockExtractor as any);
     resetCircuitBreaker();
+    const activeIdentity = getActiveEmbeddingIdentity();
+    if (activeIdentity === null) throw new Error("Test extractor must have an active embedding identity");
 
     for (let index = 0; index < 6; index += 1) {
       await ownerCall("memory_write", {
@@ -919,7 +922,7 @@ describe.skipIf(!vecAvailable)("memory_query — access enforcement semantic/hyb
         db.prepare("SELECT id FROM entries WHERE namespace = ? AND key = 'status' AND is_current = 1")
           .get(`projects/reports/private-${index}`) as { id: string }
       ).id;
-      storeEmbedding(db, childId, embeddingToBuffer(makeEmbedding(1)), getActiveEmbeddingModel());
+      storeEmbedding(db, childId, embeddingToBuffer(makeEmbedding(1)), getActiveEmbeddingModel(), activeIdentity);
     }
 
     await ownerCall("memory_write", {
@@ -931,7 +934,7 @@ describe.skipIf(!vecAvailable)("memory_query — access enforcement semantic/hyb
       db.prepare("SELECT id FROM entries WHERE namespace = 'projects/reports' AND key = 'status' AND is_current = 1")
         .get() as { id: string }
     ).id;
-    storeEmbedding(db, parentId, embeddingToBuffer(makeEmbedding(1)), getActiveEmbeddingModel());
+    storeEmbedding(db, parentId, embeddingToBuffer(makeEmbedding(1)), getActiveEmbeddingModel(), activeIdentity);
 
     const semanticRaw = await exactParentConsumerCall("memory_query", {
       query: "moonbeam",

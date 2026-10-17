@@ -39,11 +39,14 @@ everywhere, so additive fields are non-breaking.
 |---|---|:--:|---|
 | `ok` | boolean | yes | |
 | `model` | string \| null | yes | Active embedding model id. |
+| `identity` | string \| null | yes | Canonical JSON embedding manifest; null when identity cannot be established. |
+| `compatible_generated` | integer | yes | Generated entries matching the exact configured identity and model. |
+| `reembedding_backlog` | integer | yes | Pending, processing, failed, incompatible and unknown generated entries. |
 | `dtype` | string \| null | yes | Resolved ONNX weight precision (profile defaults applied); `null` when unset. |
 | `counts` | object | yes | `{ pending, processing, generated, failed, total }` — all integers. |
-| `coverage_pct` | number \| null | yes | Percent of entries with a generated embedding (0–100). **`null` when `counts.total == 0`** — distinguishes "nothing to cover" from "0% covered". |
-| `reembed_in_progress` | boolean | yes | `true` when there is a re-embedding backlog (`generated_stale + generated_null + pending > 0`). |
-| `stuck` | integer | yes | `generated_stale + generated_null`: entries marked `generated` but **not** against the active model identity (stale-model or null-model). Model-identity-based only — there is no `embedding_claimed_at` column for time-based stuck detection. |
+| `coverage_pct` | number \| null | yes | Percent of entries with a compatible generated embedding (0–100). **`null` when `counts.total == 0`** — distinguishes "nothing to cover" from "0% covered". |
+| `reembed_in_progress` | boolean | yes | `true` when there is a re-embedding backlog (`generated_stale + generated_null + pending + processing + failed > 0`). |
+| `stuck` | integer | yes | `generated_stale + generated_null`: entries marked `generated` but **not** against the exact active identity (stale or unknown provenance). Model-identity-based only — there is no `embedding_claimed_at` column for time-based stuck detection. |
 | `stuck_note` | string | no | Documents the `stuck` definition (additive). |
 | `circuit_breaker` | `"healthy"` \| `"tripped"` | yes | Embedding circuit-breaker state (distinct from model-not-loaded, which shows in `embedding_available`). |
 | `embedding_available` | boolean | yes | Additive. Whether the model is loaded and usable. |

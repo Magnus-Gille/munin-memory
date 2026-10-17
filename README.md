@@ -31,7 +31,7 @@ Munin is more than a key-value store for AI. The features are designed around ho
 - **Settled write classifications** — write-like responses return the effective stored `classification` that was resolved and persisted before the response and audit row were emitted. Optional background work still remains non-blocking, but there is no synthetic provisional classification state.
 - **Hierarchical namespaces** — `projects/website`, `people/alice`, `decisions/tech-stack`, `clients/acme`, and so on. Prefixed tags (`client:acme`, `person:alice`, `topic:ai-education`) cross-reference entries without rigid schemas.
 - **Three search modes** — keyword (FTS5), semantic (vector embeddings), and hybrid (fused via Reciprocal Rank Fusion). Semantic modes are optional and profile-dependent.
-- **Exact, bounded query pagination** — multi-page `memory_query` results use short-lived opaque cursors backed by server-side snapshots only when more than one page is needed. Cursor validity ends exactly 5 minutes after creation; physical rows are pruned at startup and periodic HTTP/stdio maintenance, at most one maintenance interval after expiry during normal runtime. Snapshots are capped per principal and globally, a caller may evict only its own oldest active snapshots, and resumed pages keep the frozen membership/order and explanation inputs while re-checking current visibility, expiry, and redaction on every page. Cursor integrity uses a per-snapshot HMAC secret, while the legacy `access_fingerprint` column stores an exact versioned canonical access-shape binding rather than a digest. Semantic `total_matched` is exact (unless `retrieval.candidates_truncated`) over currently retrievable candidates indexed with the active embedding model; entries without a compatible embedding are outside that candidate set. Hybrid totals are exact (unless `retrieval.candidates_truncated`) over the union of lexical matches and those currently retrievable semantic candidates, so an entry without an embedding can still match lexically. These are retrieval-candidate rules: server-policy canonical orientation and blocked/needs-attention entries may then be injected before final reranking, become members of the frozen result set, and count in final `total_matched`. A query never fails for matching too many candidates: at most the best 500 are kept and pageable, `retrieval.candidates_truncated: true` with `retrieval.candidate_cap: 500` marks truncation on every page (`total_matched` is then a lower bound), and structural reranking only reorders the 50 best-relevance candidates.
+- **Exact, bounded query pagination** — multi-page `memory_query` results use short-lived opaque cursors backed by server-side snapshots only when more than one page is needed. Cursor validity ends exactly 5 minutes after creation; physical rows are pruned at startup and periodic HTTP/stdio maintenance, at most one maintenance interval after expiry during normal runtime. Snapshots are capped per principal and globally, a caller may evict only its own oldest active snapshots, and resumed pages keep the frozen membership/order and explanation inputs while re-checking current visibility, expiry, and redaction on every page. Cursor integrity uses a per-snapshot HMAC secret, while the legacy `access_fingerprint` column stores an exact versioned canonical access-shape binding rather than a digest. Semantic `total_matched` is exact (unless `retrieval.candidates_truncated`) over currently retrievable candidates indexed with the exact active embedding identity; entries without a compatible embedding are outside that candidate set. Hybrid totals are exact (unless `retrieval.candidates_truncated`) over the union of lexical matches and those currently retrievable semantic candidates, so an entry without an embedding can still match lexically. These are retrieval-candidate rules: server-policy canonical orientation and blocked/needs-attention entries may then be injected before final reranking, become members of the frozen result set, and count in final `total_matched`. A query never fails for matching too many candidates: at most the best 500 are kept and pageable, `retrieval.candidates_truncated: true` with `retrieval.candidate_cap: 500` marks truncation on every page (`total_matched` is then a lower bound), and structural reranking only reorders the 50 best-relevance candidates.
 - **Multi-principal access control** — server-enforced namespace isolation. The owner gets full access; family members, agents, and external principals get scoped permissions. OAuth clients auto-map to principals via a trusted proxy email header. A `munin-admin` CLI manages principals, devices, and service tokens.
 - **Outcome-aware retrieval** — Munin observes what the assistant does after each retrieval (opened a result? wrote in the namespace? reformulated the query?) and accumulates per-entry signals over time. Inspectable via `memory_insights`; explicit feedback via `memory_retrieval_feedback`.
 - **Cursorable change feed + provenance** — `memory_history` distinguishes newest-first browsing (`older_cursor`, `has_older`) from ascending sync (`cursor`, `next_cursor`, `has_newer`). The initial newest-first page emits the forward watermark (`sync_cursor`, or `0` for an empty feed); older pages return `sync_cursor: null`, and sync pages preserve or advance the numeric watermark. Entries and audits carry actor provenance.
@@ -214,6 +214,7 @@ All configuration is via environment variables. Copy `.env.example` for a starti
 | `MUNIN_PROFILE` | — | Optional hardware preset: `zero-appliance`, `zero-plus`, or `full-node` |
 | `MUNIN_EMBEDDINGS_ENABLED` | `true` | Enable semantic search |
 | `MUNIN_EMBEDDINGS_MODEL` | profile-dependent; otherwise `Xenova/bge-small-en-v1.5` | Local embedding model |
+| `MUNIN_EMBEDDINGS_REVISION` | built-in BGE/MiniLM commit pins | Immutable 40-character Hugging Face commit SHA; required for custom models |
 | `MUNIN_SEMANTIC_ENABLED` | `true` | Allow semantic search requests |
 | `MUNIN_HYBRID_ENABLED` | `true` | Enable hybrid search (FTS5 + vector) |
 | `MUNIN_OAUTH_ISSUER_URL` | `http://localhost:3030` | OAuth issuer (set to your public URL) |
@@ -225,6 +226,33 @@ All configuration is via environment variables. Copy `.env.example` for a starti
 | `MUNIN_OWNER_PROFILE_NAMESPACE` | `people/owner` | Canonical owner-profile namespace; lookup falls back to existing `people/magnus` data |
 
 See `.env.example` for the full list.
+
+Embedding compatibility uses a versioned identity containing the model revision,
+effective dtype, dimensions, pooling, normalization, preprocessing, installed
+Transformers/ONNX versions, CPU provider, platform and architecture. Changing any
+identity field causes the background worker to re-embed entries. Legacy vectors
+without an identity are also re-embedded; they are never treated as compatible.
+Writes remain independent of this work. Until compatible vectors exist, semantic
+search can have no candidates; hybrid search still includes lexical matches.
+Invalid custom-model revisions or unavailable runtime metadata disable embeddings
+and requests explicitly fall back to lexical search.
+Model IDs must be Hugging Face `owner/repository` IDs. Unversioned local model
+directories and URLs are unsupported; `MUNIN_EMBEDDINGS_LOCAL_ONLY=true` reloads
+only the pinned revision from the filesystem cache.
+
+Before rollout, audit an existing database or snapshot without migrations, model
+loads or writes:
+
+```bash
+node --import tsx scripts/embedding-compatibility.ts --db /absolute/path/to/snapshot.db
+```
+
+Run the preview with the intended model/revision/dtype and runtime installed. Its
+counts include compatible vectors, incompatible/unknown vectors and the total
+re-embedding backlog. `memory_health` exposes the same identity and compatible
+coverage. The preview does not start the worker. See
+[embedding compatibility](docs/embedding-compatibility.md) for migration and
+recovery details.
 
 ## Credential storage (MCP bridge)
 

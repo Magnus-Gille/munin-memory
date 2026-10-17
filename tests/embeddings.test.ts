@@ -39,6 +39,7 @@ import {
   resolveEmbeddingsDtype,
   _setPipelineFactoryForTesting,
   getActiveEmbeddingModel,
+  getActiveEmbeddingIdentity,
   isEmbeddingCircuitBreakerTripped,
   getActiveEmbeddingDtype,
   _forceCircuitBreakerTrippedForTesting,
@@ -1181,7 +1182,7 @@ describe("initEmbeddings pipeline options wiring", () => {
     expect(sink.options?.cache_dir).toBe(getEmbeddingCacheDir());
   });
 
-  it.skipIf(!vecAvailable)("omits dtype from pipeline options when unset", async () => {
+  it.skipIf(!vecAvailable)("pins fp32 in pipeline options when dtype is unset", async () => {
     const sink: { options?: Record<string, unknown> } = {};
     captureFactory(sink);
 
@@ -1192,7 +1193,7 @@ describe("initEmbeddings pipeline options wiring", () => {
     const ok = await initEmbeddings();
     expect(ok).toBe(true);
     expect(sink.options).toBeDefined();
-    expect("dtype" in sink.options!).toBe(false);
+    expect(sink.options?.dtype).toBe("fp32");
   });
 
   it.skipIf(!vecAvailable)("sets local_files_only only when localOnly is enabled", async () => {
@@ -1258,16 +1259,21 @@ describe("worker stale-model convergence", () => {
   // but passed queryEmbeddingModel=undefined → guard disabled → mixed-space possible.
   // Fix: auto-derive getActiveEmbeddingModel() when no frozen provider is supplied.
   it.skipIf(!vecAvailable)(
-    "executeQuery auto-applies active model guard when no frozen provider is given",
+    "executeQuery auto-applies model and identity guards when no frozen provider is given",
     async () => {
       // Two entries: one with activeModel vectors, one with staleModel vectors.
       const activeModel = getActiveEmbeddingModel();
       const { id: activeId } = writeState(db, "test/runner-guard", "active", "content about cats", []);
       const { id: staleId } = writeState(db, "test/runner-guard", "stale", "content about dogs", []);
 
-      // Store embeddings with different models
-      storeEmbedding(db, activeId, embeddingToBuffer(makeEmbedding(1)), activeModel);
-      storeEmbedding(db, staleId, embeddingToBuffer(makeEmbedding(2)), "stale-model");
+      const identity = getActiveEmbeddingIdentity();
+      expect(identity).not.toBeNull();
+      const { id: legacyId } = writeState(db, "test/runner-guard", "legacy", "legacy cats", []);
+      const { id: wrongIdentityId } = writeState(db, "test/runner-guard", "wrong-identity", "stale identity cats", []);
+      storeEmbedding(db, activeId, embeddingToBuffer(makeEmbedding(1)), activeModel, identity!);
+      storeEmbedding(db, staleId, embeddingToBuffer(makeEmbedding(2)), "stale-model", identity!);
+      storeEmbedding(db, legacyId, embeddingToBuffer(makeEmbedding(1)), activeModel);
+      storeEmbedding(db, wrongIdentityId, embeddingToBuffer(makeEmbedding(1)), activeModel, "wrong-identity");
 
       // executeQuery with mode="semantic", no queryEmbeddingProvider, no queryEmbeddingModel.
       // The mock extractor returns a deterministic embedding for "cats" (seed 1).
@@ -1287,6 +1293,8 @@ describe("worker stale-model convergence", () => {
       // activeId (activeModel) must appear; staleId must NOT appear
       expect(ids).toContain(activeId);
       expect(ids).not.toContain(staleId);
+      expect(ids).not.toContain(legacyId);
+      expect(ids).not.toContain(wrongIdentityId);
     },
   );
 

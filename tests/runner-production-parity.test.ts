@@ -15,6 +15,8 @@ import {
   _embeddingConfig,
   embeddingToBuffer,
   getActiveEmbeddingModel,
+  getActiveEmbeddingIdentity,
+  _setExtractorForTesting,
 } from "../src/embeddings.js";
 import * as embeddings from "../src/embeddings.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -60,7 +62,9 @@ function seedEmbedded(
   validUntil?: string | null,
 ): string {
   const id = writeState(db, namespace, key, content, [], "test", undefined, validUntil).id;
-  storeEmbedding(db, id, embeddingToBuffer(makeEmbedding(seed)), getActiveEmbeddingModel());
+  const identity = getActiveEmbeddingIdentity();
+  if (identity === null) throw new Error("Test extractor must have an active embedding identity");
+  storeEmbedding(db, id, embeddingToBuffer(makeEmbedding(seed)), getActiveEmbeddingModel(), identity);
   return id;
 }
 
@@ -71,10 +75,12 @@ describe("benchmark runner production retrieval parity", () => {
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), "runner-production-parity-"));
     db = initDatabase(join(tempDir, "snapshot.db"));
+    _setExtractorForTesting(async () => ({ data: makeEmbedding(1) }));
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
+    _setExtractorForTesting(null);
     db.close();
     if (existsSync(tempDir)) rmSync(tempDir, { recursive: true, force: true });
   });
@@ -141,7 +147,9 @@ describe("benchmark runner production retrieval parity", () => {
     const hybridIds: string[] = [];
     for (let index = 0; index < 60; index += 1) {
       const id = writeState(db, `hybrid/${index}`, "status", "hybrid overfetch parity token", []).id;
-      storeEmbedding(db, id, embeddingToBuffer(makeEmbedding(1)), getActiveEmbeddingModel());
+      const identity = getActiveEmbeddingIdentity();
+      if (identity === null) throw new Error("Test extractor must have an active embedding identity");
+      storeEmbedding(db, id, embeddingToBuffer(makeEmbedding(1)), getActiveEmbeddingModel(), identity);
       hybridIds.push(id);
     }
     const provider = () => makeEmbedding(1);

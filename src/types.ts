@@ -36,6 +36,7 @@ export interface Entry {
   classification: ClassificationLevel;
   embedding_status: EmbeddingStatus;
   embedding_model: string | null;
+  embedding_identity?: string | null;
 }
 
 // Parsed entry with tags as array
