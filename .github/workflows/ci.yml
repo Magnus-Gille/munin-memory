@@ -15,6 +15,22 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  native-runtime-smoke-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      # Downloads the current default BGE and profile MiniLM weights once per
+      # dtype, then starts fresh processes with local_files_only=true to prove
+      # cache-only reloads.
+      - run: node scripts/native-runtime-smoke.mjs
+
   quickstart-arm64:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 6
