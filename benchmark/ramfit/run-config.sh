@@ -13,7 +13,7 @@
 # Requirements:
 #   - systemd user slice with memory controller delegated
 #   - XDG_RUNTIME_DIR set (handled below)
-#   - nvm + node 20 on PATH
+#   - Node.js 22+ on PATH (Node 24 preferred; nvm is used when available)
 
 set -euo pipefail
 
@@ -31,15 +31,25 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-mkdir -p "${RESULTS_DIR}" "${HF_CACHE}"
-
 # ── Node path via nvm ────────────────────────────────────────────────────────
 export NVM_DIR="${HOME}/.nvm"
 # shellcheck disable=SC1091
 [ -s "${NVM_DIR}/nvm.sh" ] && . "${NVM_DIR}/nvm.sh"
-nvm use 20 --silent 2>/dev/null || true
-NODE_BIN=$(command -v node)
-echo "[run-config] node: $(${NODE_BIN} --version) at ${NODE_BIN}"
+if command -v nvm >/dev/null 2>&1; then
+  nvm use 24 --silent >/dev/null 2>&1 || true
+fi
+NODE_BIN=$(command -v node || true)
+if [[ -z "${NODE_BIN}" ]]; then
+  echo "[run-config] Node.js 22 or newer is required (Node 24 preferred); no node executable was found." >&2
+  exit 1
+fi
+NODE_MAJOR=$("${NODE_BIN}" -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || true)
+if [[ ! "${NODE_MAJOR}" =~ ^[0-9]+$ || "${NODE_MAJOR}" -lt 22 ]]; then
+  echo "[run-config] Node.js 22 or newer is required (Node 24 preferred); found $("${NODE_BIN}" --version 2>/dev/null || echo unknown)." >&2
+  exit 1
+fi
+mkdir -p "${RESULTS_DIR}" "${HF_CACHE}"
+echo "[run-config] node: $("${NODE_BIN}" --version) at ${NODE_BIN}"
 
 # ── systemd-run setup ────────────────────────────────────────────────────────
 export XDG_RUNTIME_DIR="/run/user/$(id -u)"

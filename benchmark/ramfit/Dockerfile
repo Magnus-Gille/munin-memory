@@ -2,7 +2,7 @@
 # Targets linux/arm64 (owner-desktop host).
 # Build context: repo root (so COPY works from .)
 
-FROM node:20-bookworm
+FROM node:24-bookworm
 
 # Build deps needed for native addons: better-sqlite3, sqlite-vec, onnxruntime-node
 RUN apt-get update && apt-get install -y --no-install-recommends \

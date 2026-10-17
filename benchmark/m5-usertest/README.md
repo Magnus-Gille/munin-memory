@@ -28,7 +28,7 @@ contain verbatim fixture content and must be treated as sensitive until reviewed
 
 ## Requirements
 
-- Node.js 20+
+- Node.js 22+ (Node 24 preferred)
 - a built checkout (`npm run build`; the harness builds if needed)
 - an OpenAI-compatible `/chat/completions` endpoint
 - a synthetic or sanitized Munin SQLite fixture
