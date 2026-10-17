@@ -53,6 +53,13 @@ changelog is the canonical record of what moved.
 
 ### Changed
 
+- **Node.js runtime support now starts at 22, with Node 24 LTS preferred (#365).**
+  The package engine, quick-start preflight, documentation, and CI now reject
+  Node 20/21 with an actionable upgrade message while continuing to accept
+  newer Node releases. CI covers Node 22 and 24 plus the native ARM64 Node 24
+  quick-start path and real SQLite/vector/embedding inference with cache-only
+  reloads; dependency versions are unchanged.
+
 - **Successful `memory_write` patches return their new `updated_at` (#278, item 2).**
   Callers can immediately use the patch response timestamp as the expected version
   for their next CAS write. Conflict and not-found responses keep their existing shape.

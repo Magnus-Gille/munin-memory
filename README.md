@@ -122,7 +122,7 @@ No full rewrite is recommended as the first move: keep the MCP and SQLite contra
 
 ### Prerequisites
 
-- Node.js 20+
+- Node.js 22+ (Node 24 LTS preferred)
 - npm
 
 ### Canonical five-minute path

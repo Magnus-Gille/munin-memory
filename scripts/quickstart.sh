@@ -15,12 +15,12 @@ case "$(uname -s)" in
   *) fail "supported platforms are macOS and Linux" ;;
 esac
 
-command -v node >/dev/null 2>&1 || fail "Node.js 20+ is required"
+command -v node >/dev/null 2>&1 || fail "Node.js 22 or newer is required (Node 24 LTS is preferred)"
 command -v npm >/dev/null 2>&1 || fail "npm is required"
 
 NODE_MAJOR="$(node -p 'Number(process.versions.node.split(".")[0])')"
-if [[ "$NODE_MAJOR" -lt 20 ]]; then
-  fail "Node.js 20+ is required (found $(node --version))"
+if [[ "$NODE_MAJOR" -lt 22 ]]; then
+  fail "Node.js 22 or newer is required (Node 24 LTS is preferred; found $(node --version))"
 fi
 
 cd "$PROJECT_ROOT"

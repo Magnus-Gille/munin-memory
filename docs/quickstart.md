@@ -2,6 +2,9 @@
 
 Status: canonical local installation and first-success path for macOS and Linux.
 
+The supported runtime is Node.js 22 or newer; Node 24 LTS is preferred. Node
+20 and 21 fail preflight with an upgrade instruction.
+
 ## Outcome
 
 From a fresh checkout, one command installs locked dependencies, builds Munin,
@@ -136,21 +139,42 @@ cannot prevent first success.
 The database and generated client examples live outside the source checkout, so
 normal code upgrades do not replace them:
 
+For new local work and release validation, select Node 24 LTS. Select Node 22
+when reproducing a release that was validated on that LTS line; both are
+supported. Confirm the selected runtime with `node --version` before installing
+dependencies. Switching Node major versions requires a fresh locked install so
+native modules are rebuilt for the selected ABI. For a local checkout, first
+select the intended tag or commit; release validation uses the exact application
+artifact and matching lockfile:
+
 ```bash
-cp ~/.munin-memory/memory.db ~/.munin-memory/memory.db.pre-upgrade
-git pull --ff-only
 npm ci
 npm run build
 ./scripts/quickstart.sh --preflight-only
+npm run quickstart:smoke
 ```
 
-Stop any running Munin process before copying the live database directly; the
-documented SQLite-safe backup path remains authoritative for services. Keep the
-production `.env` and database outside release directories. For rollback,
-restore the previous code/tag, run its locked `npm ci && npm run build`, and
-point it at the unchanged database only when that release supports the active
-schema. Forward-only migrations mean a database backup—not a code checkout—is
-the rollback boundary for schema changes.
+Run the repository's required checks before treating the local checkout as a
+release candidate: `npm run lint`, both typechecks, `npm test`,
+`npm run test:coverage`, both lexical/hybrid benchmark gates, and
+`node scripts/native-runtime-smoke.mjs` (downloads public model weights).
+For a service deployment,
+prepare the exact application artifact, runtime, lockfile, and verification
+commands for the owner-approved deployment procedure; this local upgrade guide
+does not authorize changing a production service.
+
+Keep the production `.env` and database outside release directories. For
+services, the documented SQLite-safe backup path remains authoritative and any
+runtime switch requires the owner-approved deployment procedure. For rollback,
+restore the previous supported Node 22 or Node 24 runtime together with the
+matching application artifact and `package-lock.json`, then run a fresh
+`npm ci` and `npm run build` to rebuild native dependencies for that runtime.
+Rerun preflight, quickstart smoke, and the relevant checks before handing the
+artifact to the owner for any approved service action. Point it at the
+unchanged database only when that release supports the active schema.
+Forward-only migrations mean a database backup—not a code checkout—is the
+rollback boundary for schema changes; do not roll back by editing or replacing
+the database or `.env`.
 
 To uninstall the local code, remove the checkout and the Munin entry from each
 client. Retain `~/.munin-memory` and `~/.config/munin-memory` unless data erasure

@@ -366,11 +366,25 @@ export async function runPreflight(options: PreflightOptions): Promise<Preflight
 
   const nodeVersion = options.nodeVersion ?? process.version;
   const nodeMajor = Number(nodeVersion.match(/^v?(\d+)/)?.[1]);
-  checks.push(
-    Number.isInteger(nodeMajor) && nodeMajor >= 20
-      ? { id: "node", status: "pass", message: `Node ${nodeVersion} satisfies Node 20+.` }
-      : { id: "node", status: "fail", message: `Node ${nodeVersion} is unsupported; install Node 20 or newer.` },
-  );
+  if (!Number.isInteger(nodeMajor) || nodeMajor < 22) {
+    checks.push({
+      id: "node",
+      status: "fail",
+      message: `Node ${nodeVersion} is unsupported; Node.js 22 or newer is required (Node 24 LTS is preferred).`,
+    });
+  } else if (nodeMajor === 24) {
+    checks.push({
+      id: "node",
+      status: "pass",
+      message: `Node ${nodeVersion} is the preferred Node 24 LTS runtime.`,
+    });
+  } else {
+    checks.push({
+      id: "node",
+      status: "pass",
+      message: `Node ${nodeVersion} satisfies Node 22+; Node 24 LTS is preferred.`,
+    });
+  }
 
   const packagePath = join(options.projectRoot, "package.json");
   const serverPath = join(options.projectRoot, "dist/index.js");

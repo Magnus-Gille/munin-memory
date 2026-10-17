@@ -19,7 +19,7 @@ npm test
 
 Runtime requirements:
 
-- Node.js 20+
+- Node.js 22+ (Node 24 LTS preferred)
 - npm
 
 ## Project expectations
