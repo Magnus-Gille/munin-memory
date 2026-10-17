@@ -43,6 +43,12 @@ changelog is the canonical record of what moved.
 
 ### Added
 
+- **Bilingual retrieval evaluation foundation (refs #369).** Add strict,
+  hash-bound candidate/result contracts, deterministic paired scoring and
+  synthetic offline smoke fixtures for all four SV/EN directions. Smoke reports
+  remain incomplete and publication-ineligible; human labels, live model runs
+  and target-hardware measurements remain pending.
+
 - **Bounded code-health evidence ingestion and reconciliation export (#358).**
   `memory_code_health` accepts frozen v1 records with principal-scoped UUID
   receipts, same-principal correction lineage, classification checks, and a
