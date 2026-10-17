@@ -363,7 +363,7 @@ export function validateConsentAuthConfig(config: ConsentAuthConfig, issuer: URL
   return null;
 }
 
-export function isTrustedConsentRequest(req: Request, config: ConsentAuthConfig): boolean {
+export function isTrustedConsentRequest(req: Request, config: ConsentAuthConfig, issuer: URL): boolean {
   if (
     config.trustedHeaderName &&
     config.trustedHeaderValue &&
@@ -372,45 +372,33 @@ export function isTrustedConsentRequest(req: Request, config: ConsentAuthConfig)
     return true;
   }
 
-  // If identity header is configured, check if the email matches any active principal
-  if (config.identityHeaderName) {
-    const email = req.get(config.identityHeaderName);
-    if (email) return true; // Gate passes — identity will be resolved in the handler
-  }
-
-  if (!config.allowLocalhost) {
-    return false;
-  }
-
-  return isLoopbackAddress(req.socket.remoteAddress);
+  // A user identity claim never proves that the request passed through the trusted proxy.
+  // Loopback is a development exception only for local issuers; a local reverse proxy
+  // can make public requests appear loopback at the socket boundary.
+  return isLocalHostname(issuer.hostname) &&
+    config.allowLocalhost &&
+    isLoopbackAddress(req.socket.remoteAddress);
 }
 
 /**
  * Resolve the identity of the user making a consent request.
  * Returns null if identity cannot be determined (fail-closed).
  *
- * Resolution order:
- * 1. Owner env var fallback (MUNIN_OAUTH_TRUSTED_USER_VALUE match)
- * 2. Identity header → DB lookup by email
- * 3. Localhost → owner
+ * A valid proxy gate is required first. With an identity header configured,
+ * resolve exactly one active principal from its email; otherwise a matching
+ * trusted-user value or explicit local-development request resolves to owner.
  */
 export function resolveConsentIdentity(
   req: Request,
   config: ConsentAuthConfig,
   db: Database.Database,
+  issuer: URL,
 ): ConsentIdentity | null {
-  // 1. Check owner env var (gate header match = owner)
-  if (
-    config.trustedHeaderName &&
-    config.trustedHeaderValue
-  ) {
-    const headerValue = req.get(config.trustedHeaderName) ?? "";
-    if (safeStringEqual(headerValue, config.trustedHeaderValue)) {
-      return { email: config.trustedHeaderValue, principalId: "owner", isOwner: true };
-    }
-  }
+  if (!isTrustedConsentRequest(req, config, issuer)) return null;
 
-  // 2. Identity header → DB lookup
+  // When an identity header is configured, it must resolve to exactly one active
+  // principal. The trusted header is only a proxy gate and must not become an
+  // owner fallback when the identity claim is absent or invalid.
   if (config.identityHeaderName) {
     const email = req.get(config.identityHeaderName)?.trim();
     if (email) {
@@ -435,12 +423,29 @@ export function resolveConsentIdentity(
         console.error(`resolveConsentIdentity: multiple principals match email "${emailLower}" — failing closed`);
         return null;
       }
-      // No match — fall through (may still match localhost)
+      // No match — fail closed; do not fall through to owner/localhost.
+      return null;
+    }
+    return null;
+  }
+
+  // Without a separate identity header, the matching trusted-user value is the
+  // configured owner identity. This preserves owner-only consent deployments.
+  if (config.trustedHeaderName && config.trustedHeaderValue) {
+    const headerValue = req.get(config.trustedHeaderName) ?? "";
+    if (safeStringEqual(headerValue, config.trustedHeaderValue)) {
+      return { email: config.trustedHeaderValue, principalId: "owner", isOwner: true };
     }
   }
 
-  // 3. Localhost fallback → owner
-  if (config.allowLocalhost && isLoopbackAddress(req.socket.remoteAddress)) {
+  // Local development owner fallback is available only without identity mapping,
+  // and only when the issuer itself is local and the direct peer is loopback.
+  if (
+    !config.identityHeaderName &&
+    isLocalHostname(issuer.hostname) &&
+    config.allowLocalhost &&
+    isLoopbackAddress(req.socket.remoteAddress)
+  ) {
     return { email: "localhost", principalId: "owner", isOwner: true };
   }
 
@@ -834,34 +839,41 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
     res.json(HEIMDALL_DESCRIPTOR);
   });
 
-  // OAuth consent must be protected by a trusted user signal.
-  // For GET /authorize, also resolve identity and pass to OAuth provider.
+  // OAuth consent must pass the proxy gate and resolve one authorized identity.
+  // For GET and POST /authorize, bind that identity to the pending authorization.
   app.use((req: Request, res: Response, next: NextFunction) => {
-    if (req.path !== "/authorize" && req.path !== "/authorize/approve") {
+    // Express route matching is case-insensitive and permits a trailing slash by
+    // default, so normalize those forms before deciding whether consent auth applies.
+    const consentPath = req.path.toLowerCase().replace(/\/+$/, "");
+    if (consentPath !== "/authorize" && consentPath !== "/authorize/approve") {
       next();
       return;
     }
 
-    if (!isTrustedConsentRequest(req, consentAuth)) {
+    if (!isTrustedConsentRequest(req, consentAuth, issuer)) {
       res.status(403).json({
         error: "Forbidden: OAuth consent requires trusted user authentication",
       });
       return;
     }
 
+    const identity = resolveConsentIdentity(req, consentAuth, database, issuer);
+    if (!identity) {
+      res.status(403).json({
+        error: "Forbidden: OAuth consent requires a valid user identity",
+      });
+      return;
+    }
+
+    res.locals.consentIdentity = identity;
+
     // Resolve identity for GET /authorize — pass to OAuth provider so
     // authorize() can bind it to the pending auth
-    if (req.method === "GET" && req.path === "/authorize") {
-      const identity = resolveConsentIdentity(req, consentAuth, database);
-      if (identity) {
-        oauthProvider.setLastResolvedIdentity({
-          email: identity.email,
-          principalId: identity.principalId,
-        });
-      } else {
-        // Identity resolution failed but gate passed — proceed as owner fallback
-        oauthProvider.setLastResolvedIdentity(undefined);
-      }
+    if ((req.method === "GET" || req.method === "POST") && consentPath === "/authorize") {
+      oauthProvider.setLastResolvedIdentity({
+        email: identity.email,
+        principalId: identity.principalId,
+      });
     }
 
     next();
@@ -908,11 +920,7 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
       }
 
       // TOCTOU protection: re-resolve identity on POST and verify it matches GET
-      const identity = resolveConsentIdentity(req, consentAuth, database);
-      if (!identity) {
-        oauthProvider.denyAuthorization(pending, res);
-        return;
-      }
+      const identity = res.locals.consentIdentity as ConsentIdentity;
 
       // If the pending auth was bound to a specific principal at GET time,
       // verify the identity hasn't changed

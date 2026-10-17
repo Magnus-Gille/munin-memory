@@ -10,7 +10,7 @@
  * Focus areas:
  *   1. getConsentAuthConfig — identityHeaderName branch
  *   2. validateConsentAuthConfig — all branch paths
- *   3. isTrustedConsentRequest — identityHeaderName gate, allowLocalhost false, ::1
+ *   3. isTrustedConsentRequest — proxy gate, issuer-scoped localhost mode, ::1
  *   4. resolveConsentIdentity — ambiguous email, no identity header, ::1 loopback
  *   5. getRequestAuthLogContext — authMethod !== "oauth" and non-legacy clientId
  *   6. createHttpApp — consent config error throw, rate-limit path, body parse errors,
@@ -21,6 +21,8 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Database from "better-sqlite3";
+import { IncomingMessage, ServerResponse } from "node:http";
+import { Duplex } from "node:stream";
 import supertest from "supertest";
 import { runMigrations } from "../src/migrations.js";
 import { addPrincipal } from "../src/admin-cli.js";
@@ -74,6 +76,67 @@ function mockRequest(
 
 const LEGACY_API_KEY = "index-coverage-test-api-key";
 const ISSUER_URL = "https://test.example.com";
+
+interface AppResponseSnapshot {
+  statusCode: number;
+  headers: Record<string, number | string | string[] | undefined>;
+  body: string;
+}
+
+function invokeAppWithoutListener(
+  app: ReturnType<typeof createHttpApp>["app"],
+  options: { method: string; url: string; headers: Record<string, string>; body?: string },
+): Promise<AppResponseSnapshot> {
+  return new Promise((resolve, reject) => {
+    const socket = new Duplex({ read() {}, write(_chunk, _encoding, callback) { callback(); } });
+    Object.assign(socket, { remoteAddress: "203.0.113.10", encrypted: false });
+    const req = new IncomingMessage(socket as never);
+    Object.assign(req, {
+      method: options.method,
+      url: options.url,
+      headers: {
+        host: "127.0.0.1:3030",
+        ...Object.fromEntries(Object.entries(options.headers).map(([key, value]) => [key.toLowerCase(), value])),
+        ...(options.body ? {
+          "content-type": "application/x-www-form-urlencoded",
+          "content-length": String(Buffer.byteLength(options.body)),
+        } : {}),
+      },
+      httpVersion: "1.1",
+      httpVersionMajor: 1,
+      httpVersionMinor: 1,
+    });
+
+    const res = new ServerResponse(req);
+    const chunks: Buffer[] = [];
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve({
+        statusCode: res.statusCode,
+        headers: res.getHeaders(),
+        body: Buffer.concat(chunks).toString("utf8"),
+      });
+    };
+    res.write = ((chunk: string | Uint8Array) => {
+      chunks.push(Buffer.from(chunk));
+      return true;
+    }) as typeof res.write;
+    res.end = ((chunk?: string | Uint8Array) => {
+      if (chunk !== undefined) chunks.push(Buffer.from(chunk));
+      finish();
+      return res;
+    }) as typeof res.end;
+
+    req.push(options.body ?? "");
+    req.push(null);
+    app.handle(req, res, (error?: unknown) => {
+      if (error) reject(error);
+      else finish();
+    });
+  });
+}
 
 function makeApp(
   db: Database.Database,
@@ -217,13 +280,13 @@ describe("validateConsentAuthConfig — additional branches", () => {
 // ---------------------------------------------------------------------------
 
 describe("isTrustedConsentRequest — additional branches", () => {
-  it("accepts request with identityHeaderName present (gate passes for DB lookup later)", () => {
+  it("does not accept an identity claim without the trusted proxy gate", () => {
     const req = mockRequest({ "x-user-email": "someone@example.com" });
     const config: ConsentAuthConfig = {
       identityHeaderName: "x-user-email",
       allowLocalhost: false,
     };
-    expect(isTrustedConsentRequest(req, config)).toBe(true);
+    expect(isTrustedConsentRequest(req, config, new URL("https://munin.example.com"))).toBe(false);
   });
 
   it("rejects when identityHeaderName configured but no email header present", () => {
@@ -233,7 +296,7 @@ describe("isTrustedConsentRequest — additional branches", () => {
       allowLocalhost: false,
     };
     // No email header => doesn't pass the identity gate; no localhost => false
-    expect(isTrustedConsentRequest(req, config)).toBe(false);
+    expect(isTrustedConsentRequest(req, config, new URL("https://munin.example.com"))).toBe(false);
   });
 
   it("rejects when allowLocalhost=false and remote is loopback", () => {
@@ -241,19 +304,19 @@ describe("isTrustedConsentRequest — additional branches", () => {
     const config: ConsentAuthConfig = {
       allowLocalhost: false,
     };
-    expect(isTrustedConsentRequest(req, config)).toBe(false);
+    expect(isTrustedConsentRequest(req, config, new URL("https://munin.example.com"))).toBe(false);
   });
 
-  it("accepts ::1 as loopback when allowLocalhost=true", () => {
+  it("accepts ::1 for a local issuer when allowLocalhost=true", () => {
     const req = mockRequest({}, "::1");
     const config: ConsentAuthConfig = { allowLocalhost: true };
-    expect(isTrustedConsentRequest(req, config)).toBe(true);
+    expect(isTrustedConsentRequest(req, config, new URL("http://localhost:3030"))).toBe(true);
   });
 
-  it("accepts ::ffff:127.0.0.1 mapped IPv4 loopback", () => {
+  it("rejects loopback proxy peers for a public issuer even when localhost is enabled", () => {
     const req = mockRequest({}, "::ffff:127.0.0.1");
     const config: ConsentAuthConfig = { allowLocalhost: true };
-    expect(isTrustedConsentRequest(req, config)).toBe(true);
+    expect(isTrustedConsentRequest(req, config, new URL("https://munin.example.com"))).toBe(false);
   });
 
   it("rejects wrong trusted header value", () => {
@@ -263,7 +326,7 @@ describe("isTrustedConsentRequest — additional branches", () => {
       trustedHeaderValue: "correct@example.com",
       allowLocalhost: false,
     };
-    expect(isTrustedConsentRequest(req, config)).toBe(false);
+    expect(isTrustedConsentRequest(req, config, new URL("https://munin.example.com"))).toBe(false);
   });
 
   it("ignores identityHeaderName when trustedHeaderName matches first", () => {
@@ -275,7 +338,7 @@ describe("isTrustedConsentRequest — additional branches", () => {
       identityHeaderName: "x-user-email",
       allowLocalhost: false,
     };
-    expect(isTrustedConsentRequest(req, config)).toBe(true);
+    expect(isTrustedConsentRequest(req, config, new URL("https://munin.example.com"))).toBe(true);
   });
 });
 
@@ -303,7 +366,7 @@ describe("resolveConsentIdentity — uncovered branches", () => {
       get: (name: string) => (name === "x-user-email" ? "   " : undefined),
       socket: { remoteAddress: "203.0.113.1" },
     } as unknown as Request;
-    const result = resolveConsentIdentity(req, config, db);
+    const result = resolveConsentIdentity(req, config, db, new URL("https://munin.example.com"));
     expect(result).toBeNull();
   });
 
@@ -312,7 +375,7 @@ describe("resolveConsentIdentity — uncovered branches", () => {
       allowLocalhost: false,
     };
     const req = mockRequest({}, "203.0.113.5");
-    const result = resolveConsentIdentity(req, config, db);
+    const result = resolveConsentIdentity(req, config, db, new URL("https://munin.example.com"));
     expect(result).toBeNull();
   });
 
@@ -323,27 +386,25 @@ describe("resolveConsentIdentity — uncovered branches", () => {
     };
     // get() returns undefined for missing header
     const req = mockRequest({});
-    const result = resolveConsentIdentity(req, config, db);
+    const result = resolveConsentIdentity(req, config, db, new URL("https://munin.example.com"));
     expect(result).toBeNull();
   });
 
-  it("falls through to localhost when identity header yields no match and localhost is allowed", () => {
+  it("does not fall back to owner when configured identity is unknown, even on localhost", () => {
     const config: ConsentAuthConfig = {
       identityHeaderName: "x-user-email",
       allowLocalhost: true,
     };
     // unknown email + loopback address => falls through to localhost owner
     const req = mockRequest({ "x-user-email": "unknown@example.com" }, "127.0.0.1");
-    const result = resolveConsentIdentity(req, config, db);
-    expect(result).not.toBeNull();
-    expect(result!.isOwner).toBe(true);
-    expect(result!.principalId).toBe("owner");
+    const result = resolveConsentIdentity(req, config, db, new URL("http://localhost:3030"));
+    expect(result).toBeNull();
   });
 
   it("resolves ::1 loopback as owner", () => {
     const config: ConsentAuthConfig = { allowLocalhost: true };
     const req = mockRequest({}, "::1");
-    const result = resolveConsentIdentity(req, config, db);
+    const result = resolveConsentIdentity(req, config, db, new URL("http://localhost:3030"));
     expect(result).not.toBeNull();
     expect(result!.isOwner).toBe(true);
   });
@@ -418,6 +479,7 @@ describe("createHttpApp — consent config validation", () => {
     db.close();
     delete process.env.MUNIN_OAUTH_TRUSTED_USER_HEADER;
     delete process.env.MUNIN_OAUTH_TRUSTED_USER_VALUE;
+    delete process.env.MUNIN_OAUTH_IDENTITY_HEADER;
   });
 
   it("throws when public issuer has no trusted header config", () => {
@@ -482,6 +544,7 @@ describe("createHttpApp — HTTP app endpoints", () => {
     db.close();
     delete process.env.MUNIN_OAUTH_TRUSTED_USER_HEADER;
     delete process.env.MUNIN_OAUTH_TRUSTED_USER_VALUE;
+    delete process.env.MUNIN_OAUTH_IDENTITY_HEADER;
   });
 
   it("/health returns 200 with no auth", async () => {
@@ -972,6 +1035,7 @@ describe("createHttpApp — /authorize GET identity resolution", () => {
     db.close();
     delete process.env.MUNIN_OAUTH_TRUSTED_USER_HEADER;
     delete process.env.MUNIN_OAUTH_TRUSTED_USER_VALUE;
+    delete process.env.MUNIN_OAUTH_IDENTITY_HEADER;
   });
 
   it("GET /authorize with trusted header passes through to OAuth SDK", async () => {
@@ -1005,6 +1069,105 @@ describe("createHttpApp — /authorize GET identity resolution", () => {
       .expect(400);
     // 400 = nonce invalid, which means our middleware DID allow it through
     expect(res.body).toMatchObject({ error: "Invalid or expired authorization request" });
+  });
+
+  it("allows a mapped delegate through only when both proxy gate and identity resolve", async () => {
+    addPrincipal(db, {
+      principalId: "alice",
+      principalType: "family",
+      rules: [{ pattern: "users/alice/*", permissions: "rw" }],
+      email: "alice@example.com",
+    });
+    process.env.MUNIN_OAUTH_IDENTITY_HEADER = "x-user-email";
+
+    const { app } = makeApp(db);
+    const res = await supertest(app)
+      .get("/Authorize/?client_id=unknown&response_type=code")
+      .set({
+        Host: "127.0.0.1:3030",
+        "x-auth-user": "owner@example.com",
+        "x-user-email": "alice@example.com",
+      });
+
+    expect(res.status).not.toBe(403);
+  });
+
+  it("rejects a missing identity even when the proxy gate passes", async () => {
+    process.env.MUNIN_OAUTH_IDENTITY_HEADER = "x-user-email";
+
+    const { app } = makeApp(db);
+    await supertest(app)
+      .get("/authorize?client_id=unknown&response_type=code")
+      .set({
+        Host: "127.0.0.1:3030",
+        "x-auth-user": "owner@example.com",
+      })
+      .expect(403);
+  });
+
+  it("binds POST /authorize identity through approval and rejects a cross-principal approver", async () => {
+    addPrincipal(db, {
+      principalId: "alice",
+      principalType: "family",
+      rules: [{ pattern: "users/alice/*", permissions: "rw" }],
+      email: "alice@example.com",
+    });
+    db.prepare("UPDATE principals SET email = ?, email_lower = ? WHERE principal_id = 'owner'")
+      .run("owner@example.com", "owner@example.com");
+    process.env.MUNIN_OAUTH_IDENTITY_HEADER = "x-user-email";
+
+    const { app, oauthProvider } = makeApp(db);
+    const clientInfo = (clientId: string) => ({
+      client_id: clientId,
+      redirect_uris: [new URL("http://localhost/callback")],
+      client_name: "Consent binding test",
+      token_endpoint_auth_method: "none" as const,
+      grant_types: ["authorization_code"],
+      response_types: ["code"],
+    });
+    await oauthProvider.clientsStore.registerClient(clientInfo("review-client"));
+    await oauthProvider.clientsStore.registerClient(clientInfo("review-client-cross-principal"));
+
+    const headersFor = (email: string) => ({
+      "x-auth-user": "owner@example.com",
+      "x-user-email": email,
+    });
+    const authorizationBody = (clientId: string) => new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: "http://localhost/callback",
+      response_type: "code",
+      code_challenge: "test-challenge",
+      code_challenge_method: "S256",
+    }).toString();
+    const startPostAuthorization = async (clientId: string) => {
+      const result = await invokeAppWithoutListener(app, {
+        method: "POST",
+        url: clientId === "review-client" ? "/Authorize/" : "/authorize",
+        headers: headersFor("alice@example.com"),
+        body: authorizationBody(clientId),
+      });
+      expect(result.statusCode).toBe(200);
+      const nonce = result.body.match(/name="nonce" value="([^"]+)"/)?.[1];
+      expect(nonce).toBeDefined();
+      return nonce!;
+    };
+    const approve = (nonce: string, email: string) => invokeAppWithoutListener(app, {
+      method: "POST",
+      url: "/authorize/approve",
+      headers: headersFor(email),
+      body: new URLSearchParams({ action: "approve", nonce }).toString(),
+    });
+
+    const samePrincipalNonce = await startPostAuthorization("review-client");
+    const samePrincipalResult = await approve(samePrincipalNonce, "alice@example.com");
+    expect(samePrincipalResult.statusCode).toBe(302);
+    expect(String(samePrincipalResult.headers.location)).toContain("code=");
+
+    const crossPrincipalNonce = await startPostAuthorization("review-client-cross-principal");
+    const crossPrincipalResult = await approve(crossPrincipalNonce, "owner@example.com");
+    expect(crossPrincipalResult.statusCode).toBe(302);
+    expect(String(crossPrincipalResult.headers.location)).toContain("error=access_denied");
+    expect(String(crossPrincipalResult.headers.location)).not.toContain("code=");
   });
 });
 
@@ -1116,7 +1279,7 @@ describe("isTrustedConsentRequest — undefined remoteAddress", () => {
       socket: { remoteAddress: undefined },
     } as unknown as Request;
     const config: ConsentAuthConfig = { allowLocalhost: true };
-    expect(isTrustedConsentRequest(req, config)).toBe(false);
+    expect(isTrustedConsentRequest(req, config, new URL("https://munin.example.com"))).toBe(false);
   });
 });
 
@@ -1189,14 +1352,15 @@ describe("createHttpApp — GET /authorize identity null fallback", () => {
     db.close();
     delete process.env.MUNIN_OAUTH_TRUSTED_USER_HEADER;
     delete process.env.MUNIN_OAUTH_TRUSTED_USER_VALUE;
+    delete process.env.MUNIN_OAUTH_IDENTITY_HEADER;
     delete process.env.MUNIN_OAUTH_ALLOW_LOCALHOST_CONSENT;
   });
 
-  it("proceeds (no identity bound) when gate passes but identity resolution returns null", async () => {
+  it("rejects GET /authorize when trusted gate passes but configured identity is unknown", async () => {
     // Configure identity header that won't match any principal.
     // allowLocalhost=true (default) means the loopback gate passes.
     // identityHeaderName is configured but email is not in DB → identity = null.
-    // The code should call setLastResolvedIdentity(undefined) and proceed.
+    // Identity resolution must fail closed before the OAuth handler is reached.
     process.env.MUNIN_OAUTH_TRUSTED_USER_HEADER = "x-auth-user";
     process.env.MUNIN_OAUTH_TRUSTED_USER_VALUE = "owner@example.com";
     process.env.MUNIN_OAUTH_IDENTITY_HEADER = "x-user-email";
@@ -1210,17 +1374,58 @@ describe("createHttpApp — GET /authorize identity null fallback", () => {
     });
 
     // Send GET /authorize with identity header for an unknown email.
-    // Loopback address => gate passes; identity resolution => no match => null.
-    // The SDK's authorize handler will return a 4xx for missing client_id,
-    // but the key is it's NOT a 403 from our middleware.
+    // Matching trust header passes the gate; unknown email must still be rejected.
     const res = await supertest(app)
       .get("/authorize?client_id=unknown&response_type=code")
       .set({
         Host: "127.0.0.1:3030",
+        "x-auth-user": "owner@example.com",
         "x-user-email": "nobody@example.com",
       });
-    // NOT 403 (our middleware passed it through)
-    expect(res.status).not.toBe(403);
+    expect(res.status).toBe(403);
+  });
+
+  it("rejects public requests that reach the app through a loopback proxy without the trusted gate", async () => {
+    process.env.MUNIN_OAUTH_TRUSTED_USER_HEADER = "x-auth-user";
+    process.env.MUNIN_OAUTH_TRUSTED_USER_VALUE = "owner@example.com";
+
+    const { app } = createHttpApp({
+      database: db,
+      apiKey: LEGACY_API_KEY,
+      issuerUrl: ISSUER_URL,
+      httpHost: "127.0.0.1",
+      httpPort: 3030,
+    });
+
+    await supertest(app)
+      .get("/Authorize/?client_id=unknown&response_type=code")
+      .set({ Host: "127.0.0.1:3030" })
+      .expect(403);
+  });
+
+  it("rejects POST consent with an unknown configured identity before consuming the nonce", async () => {
+    process.env.MUNIN_OAUTH_TRUSTED_USER_HEADER = "x-auth-user";
+    process.env.MUNIN_OAUTH_TRUSTED_USER_VALUE = "owner@example.com";
+    process.env.MUNIN_OAUTH_IDENTITY_HEADER = "x-user-email";
+
+    const { app } = createHttpApp({
+      database: db,
+      apiKey: LEGACY_API_KEY,
+      issuerUrl: ISSUER_URL,
+      httpHost: "127.0.0.1",
+      httpPort: 3030,
+    });
+
+    await supertest(app)
+      .post("/authorize/approve")
+      .set({
+        Host: "127.0.0.1:3030",
+        "x-auth-user": "owner@example.com",
+        "x-user-email": "unknown@example.com",
+      })
+      .type("form")
+      .send({ action: "deny", nonce: "not-a-real-nonce" })
+      .expect(403);
   });
 });
 

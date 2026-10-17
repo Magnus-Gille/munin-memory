@@ -8,6 +8,14 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Security
+
+- **OAuth consent proxy and identity gates.** Public issuers now require an exact
+  trusted proxy header/value match on both consent endpoints; an identity email
+  cannot satisfy that gate. When identity mapping is configured, missing or
+  unresolved identities fail closed, and loopback owner fallback is limited to
+  direct loopback requests for local issuers.
+
 ### Fixed
 
 - Bind stored and query embeddings to an immutable model/runtime identity, including
