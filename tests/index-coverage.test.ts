@@ -85,7 +85,7 @@ interface AppResponseSnapshot {
 
 function invokeAppWithoutListener(
   app: ReturnType<typeof createHttpApp>["app"],
-  options: { method: string; url: string; headers: Record<string, string>; body?: string },
+  options: { method: string; url: string; headers: Record<string, string>; body?: string; beforeBody?: () => void },
 ): Promise<AppResponseSnapshot> {
   return new Promise((resolve, reject) => {
     const socket = new Duplex({ read() {}, write(_chunk, _encoding, callback) { callback(); } });
@@ -129,12 +129,15 @@ function invokeAppWithoutListener(
       return res;
     }) as typeof res.end;
 
-    req.push(options.body ?? "");
-    req.push(null);
     app.handle(req, res, (error?: unknown) => {
       if (error) reject(error);
       else finish();
     });
+    // Allow tests to change identity state after early middleware has run but
+    // before the urlencoded parser receives the approval body.
+    options.beforeBody?.();
+    req.push(options.body ?? "");
+    req.push(null);
   });
 }
 
@@ -1168,6 +1171,113 @@ describe("createHttpApp — /authorize GET identity resolution", () => {
     expect(crossPrincipalResult.statusCode).toBe(302);
     expect(String(crossPrincipalResult.headers.location)).toContain("error=access_denied");
     expect(String(crossPrincipalResult.headers.location)).not.toContain("code=");
+  });
+
+  it("re-resolves consent identity after a delayed body and denies a remapped principal", async () => {
+    addPrincipal(db, {
+      principalId: "alice",
+      principalType: "family",
+      rules: [{ pattern: "users/alice/*", permissions: "rw" }],
+      email: "alice@example.com",
+    });
+    addPrincipal(db, {
+      principalId: "bob",
+      principalType: "family",
+      rules: [{ pattern: "users/bob/*", permissions: "rw" }],
+      email: "bob@example.com",
+    });
+    process.env.MUNIN_OAUTH_IDENTITY_HEADER = "x-user-email";
+
+    const { app, oauthProvider } = makeApp(db);
+    await oauthProvider.clientsStore.registerClient({
+      client_id: "delayed-remap-client",
+      redirect_uris: [new URL("http://localhost/callback")],
+      client_name: "Delayed remap test",
+      token_endpoint_auth_method: "none",
+      grant_types: ["authorization_code"],
+      response_types: ["code"],
+    });
+    const authorization = await invokeAppWithoutListener(app, {
+      method: "POST",
+      url: "/authorize",
+      headers: { "x-auth-user": "owner@example.com", "x-user-email": "alice@example.com" },
+      body: new URLSearchParams({
+        client_id: "delayed-remap-client",
+        redirect_uri: "http://localhost/callback",
+        response_type: "code",
+        code_challenge: "test-challenge",
+        code_challenge_method: "S256",
+      }).toString(),
+    });
+    const nonce = authorization.body.match(/name="nonce" value="([^"]+)"/)?.[1];
+    expect(nonce).toBeDefined();
+
+    const approval = await invokeAppWithoutListener(app, {
+      method: "POST",
+      url: "/authorize/approve",
+      headers: { "x-auth-user": "owner@example.com", "x-user-email": "alice@example.com" },
+      body: new URLSearchParams({ action: "approve", nonce: nonce! }).toString(),
+      beforeBody: () => {
+        db.prepare("UPDATE principals SET email = ?, email_lower = ? WHERE principal_id = 'alice'")
+          .run("alice-new@example.com", "alice-new@example.com");
+        db.prepare("UPDATE principals SET email = ?, email_lower = ? WHERE principal_id = 'bob'")
+          .run("alice@example.com", "alice@example.com");
+      },
+    });
+
+    expect(approval.statusCode).toBe(302);
+    expect(String(approval.headers.location)).toContain("error=access_denied");
+    expect(String(approval.headers.location)).not.toContain("code=");
+  });
+
+  it("denies delayed consent approval when the mapped principal is revoked", async () => {
+    addPrincipal(db, {
+      principalId: "alice",
+      principalType: "family",
+      rules: [{ pattern: "users/alice/*", permissions: "rw" }],
+      email: "alice@example.com",
+    });
+    process.env.MUNIN_OAUTH_IDENTITY_HEADER = "x-user-email";
+
+    const { app, oauthProvider } = makeApp(db);
+    await oauthProvider.clientsStore.registerClient({
+      client_id: "delayed-revoke-client",
+      redirect_uris: [new URL("http://localhost/callback")],
+      client_name: "Delayed revocation test",
+      token_endpoint_auth_method: "none",
+      grant_types: ["authorization_code"],
+      response_types: ["code"],
+    });
+    const headers = { "x-auth-user": "owner@example.com", "x-user-email": "alice@example.com" };
+    const authorization = await invokeAppWithoutListener(app, {
+      method: "POST",
+      url: "/authorize",
+      headers,
+      body: new URLSearchParams({
+        client_id: "delayed-revoke-client",
+        redirect_uri: "http://localhost/callback",
+        response_type: "code",
+        code_challenge: "test-challenge",
+        code_challenge_method: "S256",
+      }).toString(),
+    });
+    const nonce = authorization.body.match(/name="nonce" value="([^"]+)"/)?.[1];
+    expect(nonce).toBeDefined();
+
+    const approval = await invokeAppWithoutListener(app, {
+      method: "POST",
+      url: "/authorize/approve",
+      headers,
+      body: new URLSearchParams({ action: "approve", nonce: nonce! }).toString(),
+      beforeBody: () => {
+        db.prepare("UPDATE principals SET revoked_at = ? WHERE principal_id = 'alice'")
+          .run(new Date().toISOString());
+      },
+    });
+
+    expect(approval.statusCode).toBe(302);
+    expect(String(approval.headers.location)).toContain("error=access_denied");
+    expect(String(approval.headers.location)).not.toContain("code=");
   });
 });
 

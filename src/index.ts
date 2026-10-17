@@ -875,8 +875,13 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
         return;
       }
 
-      // TOCTOU protection: re-resolve identity on POST and verify it matches GET
-      const identity = res.locals.consentIdentity as ConsentIdentity;
+      // TOCTOU protection: re-resolve after the approval body has been parsed,
+      // so principal changes during body receipt cannot reuse middleware's snapshot.
+      const identity = resolveConsentIdentity(req, consentAuth, database, issuer);
+      if (!identity) {
+        oauthProvider.denyAuthorization(pending, res);
+        return;
+      }
 
       // If the pending auth was bound to a specific principal at GET time,
       // verify the identity hasn't changed
