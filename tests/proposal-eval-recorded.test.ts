@@ -7,6 +7,9 @@ import { loadProposalEvalDataset } from "../benchmark/proposal-eval/evaluate.js"
 import { buildPromptManifest, scoreRecordedRun } from "../benchmark/proposal-eval/recorded.js";
 
 const dataset = loadProposalEvalDataset();
+const cli = "benchmark/proposal-eval/recorded.ts";
+const invoke = (args: string[]) => execFileSync(process.execPath, ["--import", "tsx", cli, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+
 function recorded() {
   return {
     schema_version: 1,
@@ -131,23 +134,51 @@ describe("offline recorded proposal adapter", () => {
     expect(result.failures.map((entry) => entry.code)).toEqual(expect.arrayContaining(["MISSING_CASE_RESULT", "DUPLICATE_CASE_RESULT", "UNKNOWN_CASE_RESULT"]));
   });
 
-  it("prints prompts and reads only an explicitly selected bounded JSON file", () => {
-    const cli = "benchmark/proposal-eval/recorded.ts";
-    const invoke = (args: string[]) => execFileSync(process.execPath, ["--import", "tsx", cli, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  it("prints the frozen prompt manifest", () => {
     expect(JSON.parse(invoke(["--prompts"]))).toEqual(buildPromptManifest(dataset));
-    for (const args of [[], ["--input"], ["--prompts", "extra"], ["--input", "x", "--prompts"]]) expect(() => invoke(args)).toThrow();
+  });
+
+  it.each([
+    { name: "no arguments", args: [] },
+    { name: "missing input path", args: ["--input"] },
+    { name: "extra prompt argument", args: ["--prompts", "extra"] },
+    { name: "conflicting modes", args: ["--input", "x", "--prompts"] },
+  ])("rejects invalid CLI usage: $name", ({ args }) => {
+    expect(() => invoke(args)).toThrow();
+  });
+
+  it("reads only an explicitly selected literal path without shell interpretation", () => {
     const directory = mkdtempSync(join(tmpdir(), "munin-recorded-test-"));
     try {
       const file = join(directory, "literal $(never-executed) `path`.json");
       writeFileSync(file, JSON.stringify(recorded()));
       expect(JSON.parse(invoke(["--input", file])).case_coverage.metric_case_count).toBe(0);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects input files larger than 8 MiB", () => {
+    const directory = mkdtempSync(join(tmpdir(), "munin-recorded-test-"));
+    try {
+      const file = join(directory, "oversized.json");
       writeFileSync(file, " ".repeat(8 * 1024 * 1024 + 1));
       expect(() => invoke(["--input", file])).toThrow(/8 MiB/);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("reports malformed JSON without echoing its contents", () => {
+    const directory = mkdtempSync(join(tmpdir(), "munin-recorded-test-"));
+    try {
+      const file = join(directory, "malformed.json");
       writeFileSync(file, "{invalid-secret-text");
-      try { invoke(["--input", file]); } catch (error) {
-        expect(String(error)).not.toContain("invalid-secret-text");
-        expect(String(error)).toContain("valid JSON");
-      }
+      let error: unknown;
+      try { invoke(["--input", file]); } catch (caught) { error = caught; }
+      expect(error).toBeDefined();
+      expect(String(error)).not.toContain("invalid-secret-text");
+      expect(String(error)).toContain("valid JSON");
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
