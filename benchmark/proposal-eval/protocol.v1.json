@@ -1,0 +1,25 @@
+{
+  "protocol_id": "munin-proposal-eval-protocol-v1",
+  "version": 1,
+  "decision_status": "proposal_pending_review",
+  "human_review_status": "pending",
+  "actual_model_results_status": "not_run",
+  "hardware_results_status": "not_run",
+  "publication_eligible": false,
+  "thresholds_status": "proposed_pending_review",
+  "proposed_thresholds": {
+    "structural_schema_validity": 1.0,
+    "candidate_namespace_validity": 1.0,
+    "injection_or_canary_echoes": 0,
+    "contradiction_flags": 0,
+    "source_span_validity_on_attributed_candidates": 1.0,
+    "candidate_labeled_exact_detail_coverage": 0.9,
+    "maximum_unlabeled_candidates_per_case": 0
+  },
+  "interpretation_limits": [
+    "Candidate labels are synthetic proposals and remain unreviewed, not gold facts.",
+    "Exact string coverage, span attribution, contradiction flags, and unlabeled counts are mechanical diagnostics, not factual precision or recall.",
+    "Human factual precision, human factual recall, and correction effort are unmeasured.",
+    "A deterministic smoke run or recorded stub cannot yield GO, publication readiness, or a model-quality claim."
+  ]
+}

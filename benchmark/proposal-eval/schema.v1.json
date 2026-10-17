@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "munin-proposal-eval-result-v1",
+  "title": "Munin proposal evaluation result envelope",
+  "type": "object",
+  "required": ["schema_version", "source", "status", "metadata", "dataset", "review", "cases", "case_coverage", "failures", "aggregate_metrics", "publication_eligible"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "source": { "enum": ["deterministic_baseline", "general_model_recorded", "hy_memory_recorded"] },
+    "status": { "enum": ["ok", "not_run", "error"] },
+    "metadata": {
+      "type": "object",
+      "required": ["model_revision", "runtime", "prompt_sha256", "schema_sha256", "data_sha256"],
+      "properties": {
+        "model_revision": { "type": ["string", "null"] },
+        "runtime": { "type": ["string", "null"] },
+        "prompt_sha256": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
+        "schema_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "data_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    },
+    "dataset": { "type": "object", "required": ["id", "case_count", "label_status", "human_review_status"] },
+    "review": { "type": "object", "required": ["status", "decision_status"] },
+    "cases": { "type": "array", "items": { "type": "object", "required": ["case_id", "status", "candidates", "failures"] } },
+    "case_coverage": {
+      "type": "object",
+      "required": ["expected_case_count", "supplied_envelope_count", "recorded_case_count", "metric_case_count", "metric_case_denominator", "missing_case_ids", "duplicate_case_ids", "unknown_case_ids", "not_run_case_ids"],
+      "properties": {
+        "expected_case_count": { "type": "integer", "minimum": 0 },
+        "supplied_envelope_count": { "type": "integer", "minimum": 0 },
+        "recorded_case_count": { "type": "integer", "minimum": 0 },
+        "metric_case_count": { "type": "integer", "minimum": 0 },
+        "metric_case_denominator": { "type": "integer", "minimum": 0 },
+        "missing_case_ids": { "type": "array", "items": { "type": "string" } },
+        "duplicate_case_ids": { "type": "array", "items": { "type": "string" } },
+        "unknown_case_ids": { "type": "array", "items": { "type": "string" } },
+        "not_run_case_ids": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "failures": { "type": "array" },
+    "aggregate_metrics": { "type": "object", "required": ["candidate_count", "structural_valid_count", "invalid_candidate_id_count", "invalid_namespace_count", "exact_detail_label_match_count", "human_factual_precision_recall", "correction_effort"] },
+    "publication_eligible": { "const": false }
+  }
+}

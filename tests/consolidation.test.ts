@@ -613,7 +613,7 @@ describe("consolidateNamespace", () => {
     const result = await consolidateNamespace(db, "projects/gamma", failingCallApi);
 
     expect(result.error).toBeDefined();
-    expect(result.error).toContain("API connection failed");
+    expect(result.error).toContain("Consolidation failed unexpectedly. Contact the server operator with error reference");
     expect(result.logs_processed).toBe(0);
 
     // No synthesis written
@@ -713,7 +713,7 @@ describe("consolidateNamespace", () => {
 
     const result = await consolidateNamespace(db, "projects/api-err", apiError);
 
-    expect(result.error).toContain("401");
+    expect(result.error).toContain("Consolidation failed unexpectedly. Contact the server operator with error reference");
     // Auth/quota/4xx errors are deterministic — retrying cannot fix them, so the
     // call must not be repeated (#131).
     expect(apiError).toHaveBeenCalledTimes(1);
@@ -1208,7 +1208,7 @@ describe("circuit breaker", () => {
     // The rejection is an API-call error (not a parse failure), so it is NOT
     // retried (#131) — it surfaces on the first attempt, consuming one call.
     const r1 = await consolidateNamespace(db, "projects/fail1", mixedCallApi);
-    expect(r1.error).toContain("Fail 1");
+    expect(r1.error).toContain("Consolidation failed unexpectedly. Contact the server operator with error reference");
 
     const r2 = await consolidateNamespace(db, "projects/ok1", mixedCallApi);
     expect(r2.error).toBeUndefined();
@@ -1895,7 +1895,7 @@ describe("getConsolidationHealth — reflects circuit breaker state", () => {
     // One failure: failures === 1, breaker NOT tripped (maxFailures is 3)
     expect(health.failures).toBe(1);
     expect(health.last_error).not.toBeNull();
-    expect(health.last_error).toContain("401");
+    expect(health.last_error).toContain("Consolidation failed unexpectedly. Contact the server operator with error reference");
     expect(health.circuit_breaker_tripped).toBe(false);
 
     // Pre-trip failures remain visible in memory_status/memory_health, but do
@@ -1931,7 +1931,7 @@ describe("getConsolidationHealth — reflects circuit breaker state", () => {
     const health = getConsolidationHealth();
     expect(health.circuit_breaker_tripped).toBe(true);
     expect(health.last_error).not.toBeNull();
-    expect(health.last_error).toContain("401");
+    expect(health.last_error).toContain("Consolidation failed unexpectedly. Contact the server operator with error reference");
     expect(health.last_error_at).not.toBeNull();
     expect(health.failures).toBeGreaterThanOrEqual(failCount);
   });
@@ -1993,7 +1993,7 @@ describe("meta/system-health alert entry — transition-only writes", () => {
     };
     expect(parsed.status).toBe("tripped");
     expect(parsed.failures).toBeGreaterThanOrEqual(failCount);
-    expect(parsed.last_error).toContain("401");
+    expect(parsed.last_error).toContain("Consolidation failed unexpectedly. Contact the server operator with error reference");
     expect(parsed.last_error_at).toBeTruthy();
     expect(parsed.updated_at).toBeTruthy();
 
@@ -2138,14 +2138,14 @@ describe("meta/system-health alert entry — transition-only writes", () => {
     // In-memory health must not contain the raw key
     const health = getConsolidationHealth();
     expect(health.last_error).not.toBeNull();
-    expect(health.last_error).toContain("[REDACTED]");
+    expect(health.last_error).toContain("Consolidation failed unexpectedly. Contact the server operator with error reference");
     expect(health.last_error).not.toContain(fakeKey);
 
     // Persisted entry must also be sanitized
     const alertEntry = readState(db, "meta/system-health", "consolidation");
     expect(alertEntry).not.toBeNull();
     const parsed = JSON.parse(alertEntry!.content) as { last_error: string };
-    expect(parsed.last_error).toContain("[REDACTED]");
+    expect(parsed.last_error).toContain("Consolidation failed unexpectedly. Contact the server operator with error reference");
     expect(parsed.last_error).not.toContain(fakeKey);
   });
 
@@ -2175,7 +2175,7 @@ describe("meta/system-health alert entry — transition-only writes", () => {
     const health = getConsolidationHealth();
     expect(health.last_error).not.toBeNull();
     expect(health.last_error).not.toContain(fakeKey);
-    expect(health.last_error).toContain("[REDACTED]");
+    expect(health.last_error).toContain("Consolidation failed unexpectedly. Contact the server operator with error reference");
 
     // Persisted entry must also have ZERO occurrences
     const alertEntry = readState(db, "meta/system-health", "consolidation");
@@ -2209,7 +2209,7 @@ describe("meta/system-health alert entry — transition-only writes", () => {
     const health = getConsolidationHealth();
     expect(health.last_error).not.toBeNull();
     expect(health.last_error).not.toContain(fakeKey);
-    expect(health.last_error).toContain("[REDACTED]");
+    expect(health.last_error).toContain("Consolidation failed unexpectedly. Contact the server operator with error reference");
 
     const alertEntry = readState(db, "meta/system-health", "consolidation");
     expect(alertEntry).not.toBeNull();

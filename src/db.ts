@@ -1,3 +1,4 @@
+import { PublicValidationError } from "./internal/public-errors.js";
 import Database from "better-sqlite3";
 import * as sqliteVec from "sqlite-vec";
 import { randomUUID, createHash, type Hash } from "node:crypto";
@@ -450,11 +451,11 @@ export function writeState(
 ): WriteStateResult {
   const namespaceCheck = validateWriteNamespace(namespace);
   if (!namespaceCheck.valid) {
-    throw new Error(namespaceCheck.error);
+    throw new PublicValidationError(namespaceCheck.error ?? "Invalid namespace.");
   }
 
   if (writeOptions?.createIfAbsent === true && expectedUpdatedAt !== undefined) {
-    throw new Error("createIfAbsent and expectedUpdatedAt are mutually exclusive write preconditions");
+    throw new PublicValidationError("createIfAbsent and expectedUpdatedAt are mutually exclusive write preconditions");
   }
 
   const txn = db.transaction(() => {
@@ -602,7 +603,7 @@ export function patchState(
 ): PatchStateResult {
   const namespaceCheck = validateWriteNamespace(namespace);
   if (!namespaceCheck.valid) {
-    throw new Error(namespaceCheck.error);
+    throw new PublicValidationError(namespaceCheck.error ?? "Invalid namespace.");
   }
 
   const txn = db.transaction((): PatchStateResult => {
@@ -914,10 +915,10 @@ export function supersedeState(
       };
     }
     if (validFrom < existing.valid_from) {
-      throw new Error("valid_from cannot precede the correction target's valid_from timestamp.");
+      throw new PublicValidationError("valid_from cannot precede the correction target's valid_from timestamp.");
     }
     if (validFrom > nowUTC() && !(allowExistingFutureBoundary && validFrom === existing.valid_from)) {
-      throw new Error("valid_from cannot be in the future.");
+      throw new PublicValidationError("valid_from cannot be in the future.");
     }
 
     const resolved = resolveWriteClassification(
@@ -928,7 +929,7 @@ export function supersedeState(
       existing.classification,
     );
     if (compareClassificationLevels(resolved.classification, existing.classification) < 0) {
-      throw new Error("A correction cannot lower the classification of the entry it supersedes.");
+      throw new PublicValidationError("A correction cannot lower the classification of the entry it supersedes.");
     }
 
     const now = nowUTC();
@@ -1082,10 +1083,10 @@ export function supersedeLog(
       };
     }
     if (validFrom < existing.valid_from) {
-      throw new Error("valid_from cannot precede the correction target's valid_from timestamp.");
+      throw new PublicValidationError("valid_from cannot precede the correction target's valid_from timestamp.");
     }
     if (validFrom > nowUTC()) {
-      throw new Error("valid_from cannot be in the future.");
+      throw new PublicValidationError("valid_from cannot be in the future.");
     }
     const resolved = resolveWriteClassification(
       db,
@@ -1095,7 +1096,7 @@ export function supersedeLog(
       existing.classification,
     );
     if (compareClassificationLevels(resolved.classification, existing.classification) < 0) {
-      throw new Error("A correction cannot lower the classification of the entry it supersedes.");
+      throw new PublicValidationError("A correction cannot lower the classification of the entry it supersedes.");
     }
 
     const now = nowUTC();
@@ -4381,7 +4382,7 @@ export function getAuditHistory(
   if (since !== undefined) {
     const d = new Date(since);
     if (isNaN(d.getTime())) {
-      throw new Error(`Invalid "since" value: "${since}". Must be a valid ISO 8601 timestamp.`);
+      throw new PublicValidationError(`Invalid "since" value: "${since}". Must be a valid ISO 8601 timestamp.`);
     }
   }
 
@@ -4430,18 +4431,18 @@ export function getAuditHistoryPage(
   if (since !== undefined) {
     const d = new Date(since);
     if (isNaN(d.getTime())) {
-      throw new Error(`Invalid "since" value: "${since}". Must be a valid ISO 8601 timestamp.`);
+      throw new PublicValidationError(`Invalid "since" value: "${since}". Must be a valid ISO 8601 timestamp.`);
     }
   }
 
   if (cursor !== undefined && (!Number.isInteger(cursor) || cursor < 0)) {
-    throw new Error(`Invalid "cursor" value: "${cursor}". Must be a non-negative integer.`);
+    throw new PublicValidationError(`Invalid "cursor" value: "${cursor}". Must be a non-negative integer.`);
   }
   if (olderCursor !== undefined && (!Number.isInteger(olderCursor) || olderCursor < 0)) {
-    throw new Error(`Invalid "older_cursor" value: "${olderCursor}". Must be a non-negative integer.`);
+    throw new PublicValidationError(`Invalid "older_cursor" value: "${olderCursor}". Must be a non-negative integer.`);
   }
   if (cursor !== undefined && olderCursor !== undefined) {
-    throw new Error(`"cursor" and "older_cursor" are mutually exclusive.`);
+    throw new PublicValidationError(`"cursor" and "older_cursor" are mutually exclusive.`);
   }
 
   let sql = "SELECT id, timestamp, agent_id, action, namespace, key, detail, entry_id FROM audit_log WHERE 1=1";
@@ -4820,29 +4821,46 @@ export function getNamespaceStateEntries(
  * supplied classification ceiling. Intake and other derived analysis must use
  * this instead of computing over hidden rows and filtering afterward.
  */
+export interface IntakeEntrySample {
+  entries: Entry[];
+  truncated: boolean;
+}
+
+export interface IntakeEntrySampleOptions {
+  exactKey?: string | null;
+  excludeEntryIds?: string[];
+  limit?: number;
+}
+
 export function getNamespaceEntriesForIntake(
   db: Database.Database,
   namespace: string,
   maxClassification: ClassificationLevel,
-  limit = 100,
-): Entry[] {
+  options: IntakeEntrySampleOptions = {},
+): IntakeEntrySample {
   const visibleLevels = getVisibleClassificationLevels(maxClassification);
-  const boundedLimit = Math.min(Math.max(Math.trunc(limit), 1), 200);
+  const boundedLimit = Math.min(Math.max(Math.trunc(options.limit ?? 100), 1), 200);
   const maxContentChars = 8_000;
   const now = nowUTC();
-  return db
-    .prepare(
-      `SELECT id, namespace, key, entry_type,
+  const excludedIds = [...new Set(options.excludeEntryIds ?? [])];
+  const excludeSql = excludedIds.length > 0
+    ? ` AND entries.id NOT IN (${excludedIds.map(() => "?").join(", ")})`
+    : "";
+  const baseWhere = `namespace = ?
+         AND is_current = 1
+         AND NOT EXISTS (SELECT 1 FROM code_health_records chr WHERE chr.entry_id = entries.id)
+         AND (entry_type != 'state' OR valid_until IS NULL OR valid_until > ?)
+         AND classification IN (${classificationInClause(visibleLevels)})${excludeSql}`;
+  const selectColumns = `SELECT id, namespace, key, entry_type,
               substr(content, 1, ?) AS content,
               tags, agent_id, owner_principal_id, created_at, updated_at,
               valid_from, valid_until, is_current, classification,
               embedding_status, embedding_model
-       FROM entries
-       WHERE namespace = ?
-         AND is_current = 1
-         AND NOT EXISTS (SELECT 1 FROM code_health_records chr WHERE chr.entry_id = entries.id)
-         AND (entry_type != 'state' OR valid_until IS NULL OR valid_until > ?)
-         AND classification IN (${classificationInClause(visibleLevels)})
+       FROM entries`;
+  const rows = db
+    .prepare(
+      `${selectColumns}
+       WHERE ${baseWhere}
        ORDER BY updated_at DESC, rowid DESC
        LIMIT ?`,
     )
@@ -4851,8 +4869,38 @@ export function getNamespaceEntriesForIntake(
       namespace,
       now,
       ...visibleLevels,
-      boundedLimit,
+      ...excludedIds,
+      boundedLimit + 1,
     ) as Entry[];
+  const entries = rows.slice(0, boundedLimit);
+  const truncated = rows.length > boundedLimit;
+
+  if (options.exactKey != null && !entries.some((entry) => entry.key === options.exactKey)) {
+    const sentinel = rows[boundedLimit];
+    let exact = sentinel?.key === options.exactKey ? sentinel : undefined;
+    if (!exact) {
+      exact = db
+        .prepare(
+          `${selectColumns}
+           WHERE ${baseWhere} AND entry_type = 'state' AND key = ?
+           LIMIT 1`,
+        )
+        .get(
+          maxContentChars,
+          namespace,
+          now,
+          ...visibleLevels,
+          ...excludedIds,
+          options.exactKey,
+        ) as Entry | undefined;
+    }
+    if (exact) {
+      entries.unshift(exact);
+      entries.length = Math.min(entries.length, boundedLimit);
+    }
+  }
+
+  return { entries, truncated };
 }
 
 /**

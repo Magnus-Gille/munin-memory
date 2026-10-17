@@ -6,6 +6,18 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { canonical, validateSchema } from './code-health-schema.mjs';
 
+// Deliberate validator failures are distinct from backend/program exceptions.
+const validationMessages = new WeakMap();
+class CodeHealthValidationError extends TypeError {
+  constructor(message) {
+    super(message);
+    validationMessages.set(this, message);
+  }
+}
+export function getCodeHealthValidationMessage(error) {
+  return typeof error === 'object' && error !== null ? validationMessages.get(error) : undefined;
+}
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const schema = JSON.parse(fs.readFileSync(path.join(here, '../../docs/code-health-agent-v1.schema.json'), 'utf8'));
 
@@ -255,16 +267,16 @@ function batchSemanticErrors(unique, byId) {
 
 export function validateRecord(record) {
   const errors = assertBatchShape([record]);
-  if (errors.length) throw new TypeError(`invalid code-health agent record:\n${errors.join('\n')}`);
+  if (errors.length) throw new CodeHealthValidationError(`invalid code-health agent record:\n${errors.join('\n')}`);
   return record;
 }
 
 export function validateRecords(records, { contextRecords = [] } = {}) {
-  if (!Array.isArray(contextRecords)) throw new TypeError('contextRecords must be an array');
+  if (!Array.isArray(contextRecords)) throw new CodeHealthValidationError('contextRecords must be an array');
   const errors = assertBatchShape(records);
-  if (errors.length) throw new TypeError(`invalid code-health agent records:\n${errors.join('\n')}`);
+  if (errors.length) throw new CodeHealthValidationError(`invalid code-health agent records:\n${errors.join('\n')}`);
   errors.push(...assertBatchShape(contextRecords).map((error) => `validation context: ${error}`));
-  if (errors.length) throw new TypeError(`invalid code-health agent records:\n${errors.join('\n')}`);
+  if (errors.length) throw new CodeHealthValidationError(`invalid code-health agent records:\n${errors.join('\n')}`);
   const { unique, byId } = uniquePayloads(records, errors);
   const { unique: uniqueContext } = uniquePayloads(contextRecords, errors);
   const allUnique = [...unique];
@@ -281,7 +293,7 @@ export function validateRecords(records, { contextRecords = [] } = {}) {
     allUnique.push(contextRecord);
   }
   errors.push(...batchSemanticErrors(allUnique, allById));
-  if (errors.length) throw new TypeError(`invalid code-health agent records:\n${errors.join('\n')}`);
+  if (errors.length) throw new CodeHealthValidationError(`invalid code-health agent records:\n${errors.join('\n')}`);
   return records;
 }
 

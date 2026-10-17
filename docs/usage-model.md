@@ -275,6 +275,21 @@ guard for an entry you have read, not an assertion that a key exists or is absen
 Soft expiry also does not make a key absent: a state row past `valid_until` remains directly
 addressable, so `create_if_absent: true` returns `already_exists` until that row is deleted.
 
+### Unexpected tool failures
+
+Unexpected backend failures return `ok:false`, `error:"internal_error"`, and
+fixed guidance instead of exception text. An optional opaque `error_reference`
+links the response to a content-free operator diagnostic. These diagnostics
+include a server-owned stage label, never request content or raw exception details.
+Deliberate validation, access, version-conflict, and delete-preview errors retain
+their existing contracts. Legacy history timestamp/cursor validation retains its
+existing `internal_error` shape and actionable validation message.
+
+A failure can occur after a write commits. Check current state or recover the
+existing replay receipt before retrying; an `internal_error` is not proof that
+nothing was written. Optional diagnostic or telemetry failures do not change the
+underlying tool result.
+
 ### Advisory intake quality
 
 Successful full `memory_write` and `memory_log` calls include an `intake` object and
@@ -287,7 +302,13 @@ memory operation still succeeds.
 Related-entry analysis is bounded to 100 current entries that the caller was already
 authorized to read at the connection's classification ceiling. Write-only callers still
 receive intrinsic checks such as sparse-content and namespace-depth warnings, but no
-related-entry identifiers, keys, counts, or scores. One versioned `entry_intake` row is
+related-entry identifiers, keys, counts, or scores. Read-authorized reports expose
+`metadata.candidate_count`, `metadata.candidate_cap` (100), and
+`metadata.candidates_truncated`; the count is the number of visible entries actually
+analyzed, and truncation means additional eligible visible entries were omitted. These
+fields never include hidden, expired, superseded, excluded, or internal code-health rows.
+Tag-vocabulary findings describe tags absent from the evaluated sample, and explicitly
+mark an incomplete sample when candidates were truncated. One versioned `entry_intake` row is
 stored per entry for later measurement; mutable state updates replace that entry's prior
 advisory row, and deletion cascades to it.
 

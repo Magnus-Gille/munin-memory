@@ -67,7 +67,7 @@ Invisible denial is critical: non-owner principals must not be able to distingui
 | **compare-and-swap** | `expected_updated_at` works normally within accessible namespaces |
 | **create-if-absent** | `create_if_absent: true` atomically creates only while the accessible namespace+key is absent; an existing entry returns a typed conflict with `current_updated_at` |
 | **correction** | `supersedes` requires read + write access, exact CAS, and source ownership for non-owner principals. Classification cannot be lowered. Explicit `valid_from` backdating is owner-only. |
-| **intake advisory** | Related-entry checks are computed only from current entries the caller can read at its classification ceiling. A write-only caller receives intrinsic checks only; hidden entries cannot affect returned identifiers, keys, counts, or scores. Intake failure never blocks the write. |
+| **intake advisory** | Related-entry checks are computed only from current entries the caller can read at its classification ceiling. Read-authorized reports expose the count/cap/truncation of that visible sample; a write-only caller receives intrinsic checks only and omits those fields. Hidden entries cannot affect returned identifiers, keys, counts, or scores. Intake failure never blocks the write. |
 
 ### memory_update_status
 

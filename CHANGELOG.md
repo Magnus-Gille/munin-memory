@@ -21,180 +21,6 @@ changelog is the canonical record of what moved.
   directories and URLs are no longer accepted; offline reloads require the pinned
   revision in the filesystem cache.
 
-### Security
-
-- **Legacy bridge redirect containment (#373).** Prevent the standalone
-  `scripts/stdio-bridge.mjs` from forwarding Cloudflare credentials or MCP session
-  IDs across origins on message POSTs or cleanup DELETEs. Follow at most five
-  same-origin 307/308 redirects; reject method-changing redirects, URL userinfo
-  and invalid targets with fixed diagnostics. Legacy configurations using
-  301/302/303 redirects must point `MUNIN_REMOTE_URL` at the final MCP endpoint.
-
-- **Dependency advisory remediation (#359).** Upgrade the MCP SDK to the
-  patched 1.32.x family, Transformers to 4.3.x with ONNX Runtime 1.30, and the
-  Vitest toolchain within 4.1.x. Refresh affected transitive packages and remove
-  the vulnerable sprintf-js dependency chain. Add proxy trust-range regressions
-  and Linux ARM64 native SQLite/vector/embedding smoke coverage for both models,
-  fp32/q8 inference, and cache-only reloads. Embedding defaults are unchanged.
-
-- **Production dependency advisory remediation (#356).** Raise the patched
-  floors for adm-zip, fast-uri, Hono, ip-address and Sharp, and pin a patched
-  qs floor for OAuth/form parsing. Keep direct SDK, Transformers and ONNX Runtime
-  versions stable; refresh the dated exposure/compatibility review and guard
-  URI authority validation with a regression test.
-
-### Added
-
-- **Bounded code-health evidence ingestion and reconciliation export (#358).**
-  `memory_code_health` accepts frozen v1 records with principal-scoped UUID
-  receipts, same-principal correction lineage, classification checks, and a
-  six-calendar-month maximum retention period. Deterministic snapshots page the
-  complete authorized retained set; consumers may remove absent rows only
-  after a complete export. Managed evidence is excluded from generic search,
-  embeddings, consolidation, and automatic derivation. Deletion clears content
-  and descriptive ledger metadata while a minimal ID/hash tombstone and every
-  key-bound receipt remain until their original expiry. Migration 29 binds each
-  receipt alias to the principal-scoped record and fails closed when deleted
-  alias lineage cannot be recovered. Migration 30 repairs the derived FTS cache,
-  purging managed terms (including orphan terms from already-deleted rows) while
-  preserving split-token search for ordinary entries. See `docs/code-health.md`.
-
-- **Replay-safe write recovery (#321).** Optional principal-scoped UUID
-  `idempotency_key` on state writes, logs and status updates. Migration 27 stores
-  metadata-only receipts atomically with write effects. Same-argument recovery
-  returns the committed identifiers/status/timestamps without reapplying a write;
-  changed operations conflict. Replays recheck live authorization/classification,
-  survive deletion and restart, and do not reserve keys during dry runs.
-  The bridge negotiates support, injects keys and reports recovery instructions
-  without automatic network write retries. Stateless HTTP uses JSON responses
-  so lost response bodies reach the bridge's request error path. Receipts persist
-  after content deletion and cannot cover history lost by restoring an older backup.
-
-- **Optional Heimdall status for NAS backups.** When `HEIMDALL_HUB_URL` and
-  `HEIMDALL_FLEET_TOKEN` are set in the ops environment, the backup publishes a
-  fixed generic pass/fail status to the `nas-backup` panel. Delivery is best
-  effort and cannot change the backup result. A systemd `OnFailure` alert covers
-  timeouts and unexpected process kills; intentional `systemctl stop` does not
-  trigger it. `scripts/install-ops.sh` installs the status helper and alert unit.
-  Early validation failures leave caller-owned temporary files untouched.
-
-### Changed
-
-- **Node.js runtime support now starts at 22, with Node 24 LTS preferred (#365).**
-  The package engine, quick-start preflight, documentation, and CI now reject
-  Node 20/21 with an actionable upgrade message while continuing to accept
-  newer Node releases. CI covers Node 22 and 24 plus the native ARM64 Node 24
-  quick-start path and real SQLite/vector/embedding inference with cache-only
-  reloads; dependency versions are unchanged.
-
-- **Successful `memory_write` patches return their new `updated_at` (#278, item 2).**
-  Callers can immediately use the patch response timestamp as the expected version
-  for their next CAS write. Conflict and not-found responses keep their existing shape.
-
-- **Benchmark production-query parity (#343).** `production_ranker` now uses
-  the same 500-candidate cap per retrieval leg, semantic-distance cutoff and
-  default expiry filtering as `memory_query`. It also mirrors the 50-candidate
-  rerank window, suppression and exact-anchor uniqueness checks across the
-  remaining candidates. Raw benchmark retrieval retains its existing behavior.
-
-- **`memory_query` ordering stays anchored to relevance (#335, #248).** Inside the
-  50-candidate rerank window, each entry's ranking position is now adjusted by a bounded
-  amount (structural class: up to five positions' worth of lift or one of demotion;
-  recency: in proportion to `search_recency_weight`, about two positions' worth at the
-  default) and entries are then ordered by the adjusted position, so an entry's final
-  place also depends on how its neighbours were adjusted. This replaces structural class
-  and newest-first overriding relevance. Entries whose structural score is at or below the
-  demotion threshold (a plain tombstone, for example) sort after all others; a tombstone
-  that also carries a strong structural boost can stay above it. Recency is computed from
-  `updated_at` values only, never the clock; `explain` `freshness_score` remains
-  informational (age relative to now). Broad orientation and attention-triage queries keep
-  the structural-first ordering, with newest-first among equal structural scores when
-  `search_recency_weight` is above 0. The reranker also normalises the weight itself
-  (non-finite falls back to the default, finite values clamp to 0..1) for callers that
-  bypass handler validation.
-- **`memory_review` proposals are isolated by creator session/run (#271).** Durable
-  proposals now retain a server-derived creator session, and list/get/preview/edit/
-  approve/decline/undo actions default to the current session plus principal. A
-  known foreign-session ID returns the same non-leaking `not_found` response as an
-  unknown ID. `scope:"principal"` is an explicit same-principal cross-session
-  opt-in; it never expands across principals. Lists support exact `namespace` and
-  `operation_type` filters. Legacy rows with no session remain principal-scope-only
-  until their normal retention lifecycle removes them. Authenticated OAuth and
-  agent-token HTTP requests that omit `Mcp-Session-Id` receive a fresh random,
-  signed server-issued run handle and must echo it for subsequent review actions.
-  Handles are bound to the authenticated principal and credential; static bearer
-  callers and requests with invalid presented handles fail closed, so neither can
-  capture durable review proposals.
-- **`memory_query` pagination snapshots are now bounded operational writes with authenticated opaque cursors (#268).**
-  Multi-page query results now persist a server-side snapshot only when more than one page is actually needed, with a documented 5-minute TTL instead of a long-lived cache entry. Active snapshots are capped per principal and globally, expired rows are cleaned via the indexed `expires_at` range during startup and periodic maintenance for both transports, and a caller may evict only its own oldest active snapshots before the server throws `capacity_exceeded` rather than deleting another principal's cursor. Expiry pruning, caller-owned capacity eviction, and snapshot creation are atomic, so a failed creation cannot discard existing cursors. Query cursors bind snapshot identity and frozen position with an HMAC under a per-row random secret; the current access shape is bound separately through exact versioned canonical JSON (stored in the legacy `access_fingerprint` column), with fixed field order and sorted namespace rules rather than password-style hashing. Resumes reject tampered, access-mismatched, expired, or out-of-range cursors safely while still allowing `limit` changes and exact partial override replays that normalize back to the stored request shape. Resumed pages keep the frozen membership/order and explanation scores/reasons against newer writes or later status changes but re-check current deletion, expiry, authorization, and redaction before returning each page, so `total_matched`, `returned`, and `has_more` stay truthful even when snapshot members disappear after page 1. Semantic `total_matched` is exact over currently retrievable active-model indexed candidates, while hybrid totals are exact over the lexical plus currently retrievable semantic union; entries without compatible embeddings remain eligible for hybrid lexical matches. Those mode contracts define retrieval candidates; server-policy canonical orientation and blocked/needs-attention injections become members of the final frozen result set and count in `total_matched`. Hybrid `expired_filtered_count` counts unique expired candidate IDs across both retrieval legs.
-- **`memory_history` now exposes explicit sync bootstrap state alongside older-page navigation (#268).**
-  Cursorless newest-first pages now return `sync_cursor`, the newest visible audit id in that initial feed (or `0` when the feed is empty), so clients can bootstrap forward polling without guessing from `older_cursor`. `older_cursor` pages keep newest-first history browsing but now return `sync_cursor: null`, which makes the initial watermark contract explicit. Their `has_newer` flag is derived from a separate SQL-visible segment using the same namespace, time, action, and access filters, so arbitrary or changed-filter cursors and hidden rows cannot manufacture newer history. Ascending sync pages keep numeric `cursor` compatibility and continue to advance `next_cursor`, while also exposing the same value as `sync_cursor`; empty sync pages preserve the input cursor in both fields. `next_cursor` remains `null` on cursorless/older pages to avoid inviting the wrong direction, and the tool metadata now documents `has_more` as a direction alias for `has_older` or `has_newer`.
-- **MCP tool metadata now provides server-level instructions and expressive input schemas (#257).** The server publishes fallback-safe first-operation guidance, while tool schemas expose relevant grammar, examples, limits, and lifecycle vocabulary.
-- **`memory_query` serialization metadata now describes reranked linear order (#252).** `linear` preserves the result order after structural reranking; visible lexical, semantic, and hybrid retrieval signals may differ from a result's final position. `boundary` remains a display-only transform applied afterward, and retrieval analytics continue to record the linear order.
-- **`memory_update_status` now supports non-mutating sandbox validation via `validate_only: true` (#275).**
-  The normal mutation path is unchanged: real `memory_update_status` writes still require one
-  of the caller's tracked namespaces and still create the usual state/audit/commitment effects.
-  The new dry-run mode executes the same namespace authorization, lifecycle normalization,
-  classification floor/visibility checks, secret and parameter-markup scans, `valid_until`
-  normalization, legacy-status guards, and CAS/create-vs-update preconditions, but it never
-  writes an entry, audit row, commitment, retrieval outcome, intake row, redaction row,
-  or access-denied telemetry. Ordinary content-blind tool-call telemetry remains enabled so
-  dry-run use and failures stay observable. Successful dry runs return
-  `status: "validated"`, `wrote: false`,
-  `would_write: "create" | "update"`, and the normalized prospective metadata. Read-visible
-  callers also receive the previewed `content` / `structured_status`; write-only callers get
-  the same generic withholding notice used by the real mutation response.
-- **`memory_orient` now has a total response budget, a beginner mode, and an
-  explicit response marker (#277).** The per-group dashboard caps from #254
-  still left `standard` responses large enough to blow past host output limits
-  on mature estates. `memory_orient` now applies a deterministic
-  `response_character_budget` on the final JSON payload in every detail mode,
-  preserving the core handshake and reporting every budget-driven omission or
-  truncation in `response_budget_meta.adjustments` instead of failing
-  silently. Every orient response also includes `generated_at` so callers can
-  identify the specific handshake they are looking at without pretending it is
-  a transactional snapshot across later `memory_list` calls. A new
-  `detail:"beginner"` mode returns the mental model, starter tool index,
-  three common workflows, and safe write examples with no live dashboard or
-  namespace-estate data, while `compact` remains the default first call.
-- **Manual `memory_consolidate` is now a reviewed, source-grounded flow (#270).**
-  The first targeted call returns a non-persisting preview and a short-lived,
-  one-use confirmation token; only confirmation writes that exact reviewed
-  payload. The token fingerprints the whole unincorporated log window, so a
-  newer log makes confirmation stale rather than being silently consumed.
-  Preview claims must carry source-log UUIDs and be verbatim excerpts
-  of every cited log, so unsupported teams, deadlines, risks, plans, or named
-  entities are rejected instead of becoming durable synthesis. The server
-  renders source links itself and strips model-supplied lifecycle tags, so a
-  consolidation cannot assert or overwrite human-maintained status truth.
-  Manual invocations now require an eligible `projects/*` or `clients/*`
-  namespace; `testing/*` and other ephemeral/untracked roots fail closed.
-  The preview discloses model, actual duration, completion-token count, the
-  historical duration average when available, and explicitly reports when no
-  provider-pricing estimate is configured. The prior unscoped, immediate-write
-  manual invocation is intentionally retired; the background worker remains
-  separately configured and retains its existing operational behavior.
-
-- **External backup requirements now have a public-safe, versioned v1 consumer
-  contract (#235).** The contract binds a stable logical near-site target,
-  owner-overlay authentication boundary, capacity/write guarantees, SQLite
-  snapshot cadence/timeout, and a measured transfer-window preflight. It fails
-  closed for offline, stale, interrupted, timed-out, or relocated targets.
-  Verified copy/integrity evidence is distinct from periodic representative
-  restore evidence, and encrypted offsite backup remains independent. The
-  published schema and fixtures contain no deployment endpoint, private path,
-  or credential.
-
-- **`memory_review` preview response shape changed (#272).** The legacy
-  `writes_memory` field is removed. Preview now reports its own side effects
-  with `preview_wrote_memory:false` and the current approval consequence with
-  `approval_would_write_memory:true|false`. When retention has already purged a
-  terminal proposal payload, preview still returns the truthful non-writing
-  terminal outcome but omits `exact_operation` because no retained payload
-  remains to display.
-
-### Fixed
-
 - **Relaxed lexical fallback keeps non-ASCII words whole (#334).** When a strict
   query matches nothing, the OR fallback now splits on anything that is not a
   Unicode letter, number, `_` or `-`, so words such as `återställning` or
@@ -381,6 +207,212 @@ changelog is the canonical record of what moved.
   in the request log line only when it matches `[A-Za-z0-9_-]{8,64}`, and does not
   use it for anything else. `scripts/stdio-bridge.mjs` gains the cause reporting
   only (identical table, tested).
+
+### Changed
+
+- **Report bounded intake sample completeness (#367).** Read-authorized `memory_write` and
+  `memory_log` reports now expose the number of visible entries analyzed, the 100-entry cap,
+  and whether eligible visible entries were omitted. Tag-vocabulary findings describe the
+  evaluated sample and identify incomplete samples; write-only calls omit these fields.
+
+- **Node.js runtime support now starts at 22, with Node 24 LTS preferred (#365).**
+  The package engine, quick-start preflight, documentation, and CI now reject
+  Node 20/21 with an actionable upgrade message while continuing to accept
+  newer Node releases. CI covers Node 22 and 24 plus the native ARM64 Node 24
+  quick-start path and real SQLite/vector/embedding inference with cache-only
+  reloads; dependency versions are unchanged.
+
+- **Successful `memory_write` patches return their new `updated_at` (#278, item 2).**
+  Callers can immediately use the patch response timestamp as the expected version
+  for their next CAS write. Conflict and not-found responses keep their existing shape.
+
+- **Benchmark production-query parity (#343).** `production_ranker` now uses
+  the same 500-candidate cap per retrieval leg, semantic-distance cutoff and
+  default expiry filtering as `memory_query`. It also mirrors the 50-candidate
+  rerank window, suppression and exact-anchor uniqueness checks across the
+  remaining candidates. Raw benchmark retrieval retains its existing behavior.
+
+- **`memory_query` ordering stays anchored to relevance (#335, #248).** Inside the
+  50-candidate rerank window, each entry's ranking position is now adjusted by a bounded
+  amount (structural class: up to five positions' worth of lift or one of demotion;
+  recency: in proportion to `search_recency_weight`, about two positions' worth at the
+  default) and entries are then ordered by the adjusted position, so an entry's final
+  place also depends on how its neighbours were adjusted. This replaces structural class
+  and newest-first overriding relevance. Entries whose structural score is at or below the
+  demotion threshold (a plain tombstone, for example) sort after all others; a tombstone
+  that also carries a strong structural boost can stay above it. Recency is computed from
+  `updated_at` values only, never the clock; `explain` `freshness_score` remains
+  informational (age relative to now). Broad orientation and attention-triage queries keep
+  the structural-first ordering, with newest-first among equal structural scores when
+  `search_recency_weight` is above 0. The reranker also normalises the weight itself
+  (non-finite falls back to the default, finite values clamp to 0..1) for callers that
+  bypass handler validation.
+- **`memory_review` proposals are isolated by creator session/run (#271).** Durable
+  proposals now retain a server-derived creator session, and list/get/preview/edit/
+  approve/decline/undo actions default to the current session plus principal. A
+  known foreign-session ID returns the same non-leaking `not_found` response as an
+  unknown ID. `scope:"principal"` is an explicit same-principal cross-session
+  opt-in; it never expands across principals. Lists support exact `namespace` and
+  `operation_type` filters. Legacy rows with no session remain principal-scope-only
+  until their normal retention lifecycle removes them. Authenticated OAuth and
+  agent-token HTTP requests that omit `Mcp-Session-Id` receive a fresh random,
+  signed server-issued run handle and must echo it for subsequent review actions.
+  Handles are bound to the authenticated principal and credential; static bearer
+  callers and requests with invalid presented handles fail closed, so neither can
+  capture durable review proposals.
+- **`memory_query` pagination snapshots are now bounded operational writes with authenticated opaque cursors (#268).**
+  Multi-page query results now persist a server-side snapshot only when more than one page is actually needed, with a documented 5-minute TTL instead of a long-lived cache entry. Active snapshots are capped per principal and globally, expired rows are cleaned via the indexed `expires_at` range during startup and periodic maintenance for both transports, and a caller may evict only its own oldest active snapshots before the server throws `capacity_exceeded` rather than deleting another principal's cursor. Expiry pruning, caller-owned capacity eviction, and snapshot creation are atomic, so a failed creation cannot discard existing cursors. Query cursors bind snapshot identity and frozen position with an HMAC under a per-row random secret; the current access shape is bound separately through exact versioned canonical JSON (stored in the legacy `access_fingerprint` column), with fixed field order and sorted namespace rules rather than password-style hashing. Resumes reject tampered, access-mismatched, expired, or out-of-range cursors safely while still allowing `limit` changes and exact partial override replays that normalize back to the stored request shape. Resumed pages keep the frozen membership/order and explanation scores/reasons against newer writes or later status changes but re-check current deletion, expiry, authorization, and redaction before returning each page, so `total_matched`, `returned`, and `has_more` stay truthful even when snapshot members disappear after page 1. Semantic `total_matched` is exact over currently retrievable active-model indexed candidates, while hybrid totals are exact over the lexical plus currently retrievable semantic union; entries without compatible embeddings remain eligible for hybrid lexical matches. Those mode contracts define retrieval candidates; server-policy canonical orientation and blocked/needs-attention injections become members of the final frozen result set and count in `total_matched`. Hybrid `expired_filtered_count` counts unique expired candidate IDs across both retrieval legs.
+- **`memory_history` now exposes explicit sync bootstrap state alongside older-page navigation (#268).**
+  Cursorless newest-first pages now return `sync_cursor`, the newest visible audit id in that initial feed (or `0` when the feed is empty), so clients can bootstrap forward polling without guessing from `older_cursor`. `older_cursor` pages keep newest-first history browsing but now return `sync_cursor: null`, which makes the initial watermark contract explicit. Their `has_newer` flag is derived from a separate SQL-visible segment using the same namespace, time, action, and access filters, so arbitrary or changed-filter cursors and hidden rows cannot manufacture newer history. Ascending sync pages keep numeric `cursor` compatibility and continue to advance `next_cursor`, while also exposing the same value as `sync_cursor`; empty sync pages preserve the input cursor in both fields. `next_cursor` remains `null` on cursorless/older pages to avoid inviting the wrong direction, and the tool metadata now documents `has_more` as a direction alias for `has_older` or `has_newer`.
+- **MCP tool metadata now provides server-level instructions and expressive input schemas (#257).** The server publishes fallback-safe first-operation guidance, while tool schemas expose relevant grammar, examples, limits, and lifecycle vocabulary.
+- **`memory_query` serialization metadata now describes reranked linear order (#252).** `linear` preserves the result order after structural reranking; visible lexical, semantic, and hybrid retrieval signals may differ from a result's final position. `boundary` remains a display-only transform applied afterward, and retrieval analytics continue to record the linear order.
+- **`memory_update_status` now supports non-mutating sandbox validation via `validate_only: true` (#275).**
+  The normal mutation path is unchanged: real `memory_update_status` writes still require one
+  of the caller's tracked namespaces and still create the usual state/audit/commitment effects.
+  The new dry-run mode executes the same namespace authorization, lifecycle normalization,
+  classification floor/visibility checks, secret and parameter-markup scans, `valid_until`
+  normalization, legacy-status guards, and CAS/create-vs-update preconditions, but it never
+  writes an entry, audit row, commitment, retrieval outcome, intake row, redaction row,
+  or access-denied telemetry. Ordinary content-blind tool-call telemetry remains enabled so
+  dry-run use and failures stay observable. Successful dry runs return
+  `status: "validated"`, `wrote: false`,
+  `would_write: "create" | "update"`, and the normalized prospective metadata. Read-visible
+  callers also receive the previewed `content` / `structured_status`; write-only callers get
+  the same generic withholding notice used by the real mutation response.
+- **`memory_orient` now has a total response budget, a beginner mode, and an
+  explicit response marker (#277).** The per-group dashboard caps from #254
+  still left `standard` responses large enough to blow past host output limits
+  on mature estates. `memory_orient` now applies a deterministic
+  `response_character_budget` on the final JSON payload in every detail mode,
+  preserving the core handshake and reporting every budget-driven omission or
+  truncation in `response_budget_meta.adjustments` instead of failing
+  silently. Every orient response also includes `generated_at` so callers can
+  identify the specific handshake they are looking at without pretending it is
+  a transactional snapshot across later `memory_list` calls. A new
+  `detail:"beginner"` mode returns the mental model, starter tool index,
+  three common workflows, and safe write examples with no live dashboard or
+  namespace-estate data, while `compact` remains the default first call.
+- **Manual `memory_consolidate` is now a reviewed, source-grounded flow (#270).**
+  The first targeted call returns a non-persisting preview and a short-lived,
+  one-use confirmation token; only confirmation writes that exact reviewed
+  payload. The token fingerprints the whole unincorporated log window, so a
+  newer log makes confirmation stale rather than being silently consumed.
+  Preview claims must carry source-log UUIDs and be verbatim excerpts
+  of every cited log, so unsupported teams, deadlines, risks, plans, or named
+  entities are rejected instead of becoming durable synthesis. The server
+  renders source links itself and strips model-supplied lifecycle tags, so a
+  consolidation cannot assert or overwrite human-maintained status truth.
+  Manual invocations now require an eligible `projects/*` or `clients/*`
+  namespace; `testing/*` and other ephemeral/untracked roots fail closed.
+  The preview discloses model, actual duration, completion-token count, the
+  historical duration average when available, and explicitly reports when no
+  provider-pricing estimate is configured. The prior unscoped, immediate-write
+  manual invocation is intentionally retired; the background worker remains
+  separately configured and retains its existing operational behavior.
+
+- **External backup requirements now have a public-safe, versioned v1 consumer
+  contract (#235).** The contract binds a stable logical near-site target,
+  owner-overlay authentication boundary, capacity/write guarantees, SQLite
+  snapshot cadence/timeout, and a measured transfer-window preflight. It fails
+  closed for offline, stale, interrupted, timed-out, or relocated targets.
+  Verified copy/integrity evidence is distinct from periodic representative
+  restore evidence, and encrypted offsite backup remains independent. The
+  published schema and fixtures contain no deployment endpoint, private path,
+  or credential.
+
+- **`memory_review` preview response shape changed (#272).** The legacy
+  `writes_memory` field is removed. Preview now reports its own side effects
+  with `preview_wrote_memory:false` and the current approval consequence with
+  `approval_would_write_memory:true|false`. When retention has already purged a
+  terminal proposal payload, preview still returns the truthful non-writing
+  terminal outcome but omits `exact_operation` because no retained payload
+  remains to display.
+
+### Security
+
+- **Safe MCP exception boundary (#368).** Unexpected backend failures return a
+  fixed `internal_error` message and an opaque error reference. Deliberate
+  validation, access, CAS, capacity, and delete-preview errors keep their public
+  contracts. Diagnostic output contains only server-owned stage labels and
+  references; diagnostic and telemetry failures cannot mask tool results or
+  break optional intake/health degradation. Code-health returned errors use the
+  same typed boundary; consolidation preview/background failures and health
+  alerts retain fixed guidance with an error reference instead of provider text.
+  A failed write response can follow
+  a committed write, so inspect state or use an existing replay receipt before
+  retrying.
+
+- **CodeQL action pinning (#366).** Update both CodeQL workflow steps to the
+  reviewed v4.38.3 commit and group CodeQL action updates in Dependabot. A
+  workflow contract check rejects mutable or mismatched init/analyze pins.
+
+- **Legacy bridge redirect containment (#373).** Prevent the standalone
+  `scripts/stdio-bridge.mjs` from forwarding Cloudflare credentials or MCP session
+  IDs across origins on message POSTs or cleanup DELETEs. Follow at most five
+  same-origin 307/308 redirects; reject method-changing redirects, URL userinfo
+  and invalid targets with fixed diagnostics. Legacy configurations using
+  301/302/303 redirects must point `MUNIN_REMOTE_URL` at the final MCP endpoint.
+
+- **Dependency advisory remediation (#359).** Upgrade the MCP SDK to the
+  patched 1.32.x family, Transformers to 4.3.x with ONNX Runtime 1.30, and the
+  Vitest toolchain within 4.1.x. Refresh affected transitive packages and remove
+  the vulnerable sprintf-js dependency chain. Add proxy trust-range regressions
+  and Linux ARM64 native SQLite/vector/embedding smoke coverage for both models,
+  fp32/q8 inference, and cache-only reloads. Embedding defaults are unchanged.
+
+- **Production dependency advisory remediation (#356).** Raise the patched
+  floors for adm-zip, fast-uri, Hono, ip-address and Sharp, and pin a patched
+  qs floor for OAuth/form parsing. Keep direct SDK, Transformers and ONNX Runtime
+  versions stable; refresh the dated exposure/compatibility review and guard
+  URI authority validation with a regression test.
+
+### Added
+
+- **Proposal extraction evaluation foundation (#370).** Add frozen synthetic
+  English/Swedish cases, candidate-only labels, a deterministic in-memory
+  `memory_extract` baseline, and common recorded-result envelopes for general
+  model and HyMemory comparisons. No model or hardware run is performed;
+  thresholds and labels remain pending review, and smoke output is never
+  publication-eligible.
+
+- **Bilingual retrieval evaluation foundation (refs #369).** Add strict,
+  hash-bound candidate/result contracts, deterministic paired scoring and
+  synthetic offline smoke fixtures for all four SV/EN directions. Smoke reports
+  remain incomplete and publication-ineligible; human labels, live model runs
+  and target-hardware measurements remain pending.
+
+- **Bounded code-health evidence ingestion and reconciliation export (#358).**
+  `memory_code_health` accepts frozen v1 records with principal-scoped UUID
+  receipts, same-principal correction lineage, classification checks, and a
+  six-calendar-month maximum retention period. Deterministic snapshots page the
+  complete authorized retained set; consumers may remove absent rows only
+  after a complete export. Managed evidence is excluded from generic search,
+  embeddings, consolidation, and automatic derivation. Deletion clears content
+  and descriptive ledger metadata while a minimal ID/hash tombstone and every
+  key-bound receipt remain until their original expiry. Migration 29 binds each
+  receipt alias to the principal-scoped record and fails closed when deleted
+  alias lineage cannot be recovered. Migration 30 repairs the derived FTS cache,
+  purging managed terms (including orphan terms from already-deleted rows) while
+  preserving split-token search for ordinary entries. See `docs/code-health.md`.
+
+- **Replay-safe write recovery (#321).** Optional principal-scoped UUID
+  `idempotency_key` on state writes, logs and status updates. Migration 27 stores
+  metadata-only receipts atomically with write effects. Same-argument recovery
+  returns the committed identifiers/status/timestamps without reapplying a write;
+  changed operations conflict. Replays recheck live authorization/classification,
+  survive deletion and restart, and do not reserve keys during dry runs.
+  The bridge negotiates support, injects keys and reports recovery instructions
+  without automatic network write retries. Stateless HTTP uses JSON responses
+  so lost response bodies reach the bridge's request error path. Receipts persist
+  after content deletion and cannot cover history lost by restoring an older backup.
+
+- **Optional Heimdall status for NAS backups.** When `HEIMDALL_HUB_URL` and
+  `HEIMDALL_FLEET_TOKEN` are set in the ops environment, the backup publishes a
+  fixed generic pass/fail status to the `nas-backup` panel. Delivery is best
+  effort and cannot change the backup result. A systemd `OnFailure` alert covers
+  timeouts and unexpected process kills; intentional `systemctl stop` does not
+  trigger it. `scripts/install-ops.sh` installs the status helper and alert unit.
+  Early validation failures leave caller-owned temporary files untouched.
 
 ## [0.6.1] — 2026-07-25
 
