@@ -8,6 +8,13 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Changed
+
+- **Report bounded intake sample completeness (#367).** Read-authorized `memory_write` and
+  `memory_log` reports now expose the number of visible entries analyzed, the 100-entry cap,
+  and whether eligible visible entries were omitted. Tag-vocabulary findings describe the
+  evaluated sample and identify incomplete samples; write-only calls omit these fields.
+
 ### Security
 
 - **CodeQL action pinning (#366).** Update both CodeQL workflow steps to the
