@@ -76,6 +76,8 @@ export interface EvaluateIntakeInput {
    * disclose their existence.
    */
   candidates: Entry[];
+  /** Supplied only when the caller was authorized to read related entries. */
+  candidateSample?: { truncated: boolean };
   now?: string;
 }
 
@@ -235,7 +237,7 @@ export function evaluateIntake(input: EvaluateIntakeInput): IntakeResult {
         flags.push({
           check: "tag_inconsistency",
           severity: "info",
-          message: `Tags [${novelTags.join(", ")}] are new to namespace "${input.namespace}".`,
+          message: `Tags [${novelTags.join(", ")}] were not observed in the evaluated sample for namespace "${input.namespace}"${input.candidateSample?.truncated ? " (the sample is incomplete)" : ""}.`,
         });
       }
     }
@@ -277,6 +279,14 @@ export function evaluateIntake(input: EvaluateIntakeInput): IntakeResult {
   const metadata: IntakeMetadata = {
     intake_score: relevanceScore,
     intake_mode: "advisory",
+    ...(input.candidateSample
+      ? {
+          candidate_count: candidates.length,
+          candidate_cap: MAX_CANDIDATES,
+          candidates_truncated: input.candidateSample.truncated
+            || input.candidates.length > MAX_CANDIDATES,
+        }
+      : {}),
     related_keys: relatedKeys,
     redundancy_flag: redundancy,
     intake_timestamp: input.now ?? nowUTC(),

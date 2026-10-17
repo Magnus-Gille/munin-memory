@@ -1316,26 +1316,15 @@ function getVisibleIntakeCandidates(
   ctx: AccessContext,
   namespace: string,
   key: string | null,
-): Entry[] {
-  if (!canRead(ctx, namespace)) return [];
-  const candidates = getNamespaceEntriesForIntake(
+  excludeEntryIds: string[] = [],
+): ReturnType<typeof getNamespaceEntriesForIntake> | undefined {
+  if (!canRead(ctx, namespace)) return undefined;
+  return getNamespaceEntriesForIntake(
     db,
     namespace,
     getContextMaxClassification(ctx),
-    100,
+    { exactKey: key, excludeEntryIds, limit: 100 },
   );
-  if (key === null || candidates.some((entry) => entry.key === key)) {
-    return candidates;
-  }
-  const exact = readState(db, namespace, key);
-  if (
-    exact
-    && !isEntryExpired(exact)
-    && classificationAllowed(exact.classification, getContextMaxClassification(ctx))
-  ) {
-    return [exact, ...candidates].slice(0, 100);
-  }
-  return candidates;
 }
 
 function evaluateIntakeAdvisory(
@@ -1351,18 +1340,20 @@ function evaluateIntakeAdvisory(
   warnings: string[],
 ): IntakeResult | undefined {
   try {
-    const excluded = new Set(input.excludeEntryIds ?? []);
+    const sample = getVisibleIntakeCandidates(
+      db,
+      ctx,
+      input.namespace,
+      input.key,
+      input.excludeEntryIds,
+    );
     const result = evaluateIntake({
       namespace: input.namespace,
       key: input.key,
       content: input.content,
       tags: input.tags,
-      candidates: getVisibleIntakeCandidates(
-        db,
-        ctx,
-        input.namespace,
-        input.key,
-      ).filter((candidate) => !excluded.has(candidate.id)),
+      candidates: sample?.entries ?? [],
+      candidateSample: sample ? { truncated: sample.truncated } : undefined,
     });
     for (const flag of result.flags) {
       warnings.push(`[intake:${flag.check}] ${flag.message}`);
@@ -7093,7 +7084,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_write",
     description:
-      "Successful full writes return a bounded, authorization-filtered advisory `intake` report and the effective stored `classification`; intake never blocks the write.\n\n" +
+      "Successful full writes return a bounded, authorization-filtered advisory `intake` report and the effective stored `classification`; read-authorized intake metadata includes `candidate_count`, `candidate_cap` and `candidates_truncated`, while write-only calls omit these fields. Intake never blocks the write.\n\n" +
       "Store or replace a state entry. For tracked `projects/*` or `clients/*` status entries, prefer `memory_update_status`; omitting a lifecycle tag preserves the existing lifecycle, while `tags: []` cannot remove one. Optional `valid_until` adds soft expiry. To preserve outdated content as history, use `supersedes` with the target UUID and exact `expected_updated_at`.\n\nClassification, namespace floors, secret rejection, and write visibility are enforced on every write. `expected_updated_at` is an optional compare-and-swap guard; `create_if_absent:true` provides an atomic first write and cannot be combined with CAS or patch. Use the namespace, key, and tag schemas for conventions and valid shapes.",
     inputSchema: {
       type: "object" as const,
@@ -7449,7 +7440,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_log",
     description:
-      "Successful log writes return the same bounded, authorization-filtered advisory `intake` report as full state writes plus the effective stored `classification`. Append immutable chronological decisions, events, and milestones. Corrections use `supersedes` with exact `expected_updated_at`; status changes do not auto-log. Use canonical tags such as `decision`, `milestone`, `blocker`, `discovery`, and `correction` plus useful prefixed tags.",
+      "Successful log writes return the same bounded, authorization-filtered advisory `intake` report as full state writes plus the effective stored `classification`. Read-authorized intake metadata includes `candidate_count`, `candidate_cap` and `candidates_truncated`; write-only calls omit these fields. Append immutable chronological decisions, events, and milestones. Corrections use `supersedes` with exact `expected_updated_at`; status changes do not auto-log. Use canonical tags such as `decision`, `milestone`, `blocker`, `discovery`, and `correction` plus useful prefixed tags.",
     inputSchema: {
       type: "object" as const,
       properties: {

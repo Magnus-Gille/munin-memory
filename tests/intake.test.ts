@@ -226,13 +226,130 @@ describe("advisory intake evaluator", () => {
       "owner",
     );
 
-    const [candidate] = getNamespaceEntriesForIntake(
+    const { entries } = getNamespaceEntriesForIntake(
       db,
       "projects/example",
       "client-restricted",
     );
 
-    expect(candidate.content).toHaveLength(8_000);
+    expect(entries[0].content).toHaveLength(8_000);
+  });
+
+  it("reports a capped sample and describes tag novelty relative to that sample", () => {
+    const namespace = "projects/intake-capped";
+    writeState(db, namespace, "old-tag", "Older content with a unique vocabulary.", ["zebra"], "owner");
+    for (let index = 0; index < 101; index += 1) {
+      writeState(db, namespace, `recent-${index}`, `Recent candidate ${index} has ordinary content.`, ["architecture"], "owner");
+    }
+
+    const sample = getNamespaceEntriesForIntake(db, namespace, "client-restricted");
+    const result = evaluateIntake({
+      namespace,
+      key: null,
+      content: "A useful durable description with adequate detail for future retrieval.",
+      tags: ["zebra"],
+      candidates: sample.entries,
+      candidateSample: { truncated: sample.truncated },
+    });
+
+    expect(sample.entries).toHaveLength(100);
+    expect(sample.truncated).toBe(true);
+    expect(result.metadata).toMatchObject({
+      candidate_count: 100,
+      candidate_cap: 100,
+      candidates_truncated: true,
+    });
+    const tagFlag = result.flags.find((flag) => flag.check === "tag_inconsistency");
+    expect(tagFlag?.message).toContain("evaluated sample");
+    expect(tagFlag?.message).toContain("sample is incomplete");
+    expect(tagFlag?.message).not.toContain("new to namespace");
+  });
+
+  it("applies internal exclusions before the sample sentinel", () => {
+    const namespace = "projects/intake-sentinel";
+    const ids: string[] = [];
+    for (let index = 0; index < 102; index += 1) {
+      ids.push(writeState(db, namespace, `candidate-${index}`, `Candidate ${index} has durable useful content.`, [], "owner").id);
+    }
+
+    const sample = getNamespaceEntriesForIntake(
+      db,
+      namespace,
+      "client-restricted",
+      { excludeEntryIds: [ids[0]] },
+    );
+    expect(sample.entries).toHaveLength(100);
+    expect(sample.truncated).toBe(true);
+
+    const exact100 = getNamespaceEntriesForIntake(
+      db,
+      namespace,
+      "client-restricted",
+      { excludeEntryIds: ids.slice(0, 2) },
+    );
+    expect(exact100.entries).toHaveLength(100);
+    expect(exact100.truncated).toBe(false);
+  });
+
+  it("counts only visible, current, non-expired entries when deciding truncation", () => {
+    const namespace = "projects/intake-visible-count";
+    writeState(db, namespace, "visible", "One visible current entry with useful content.", [], "owner");
+    for (let index = 0; index < 101; index += 1) {
+      writeState(
+        db,
+        namespace,
+        `hidden-${index}`,
+        "Hidden classification entry with useful content.",
+        [],
+        "owner",
+        undefined,
+        undefined,
+        { classification: "client-restricted" },
+      );
+    }
+    for (let index = 0; index < 101; index += 1) {
+      writeState(
+        db,
+        namespace,
+        `expired-${index}`,
+        "Expired entry with useful content.",
+        [],
+        "owner",
+        undefined,
+        "2025-01-01T00:00:00.000Z",
+      );
+    }
+
+    const sample = getNamespaceEntriesForIntake(db, namespace, "internal");
+    expect(sample.entries.map((entry) => entry.key)).toEqual(["visible"]);
+    expect(sample.truncated).toBe(false);
+  });
+
+  it("promotes an older eligible exact key while keeping its content bounded", async () => {
+    const namespace = "projects/intake-exact-key";
+    writeState(db, namespace, "old-key", "Older exact-key content with enough useful detail. " + "x".repeat(20_000), [], "owner");
+    for (let index = 0; index < 101; index += 1) {
+      writeState(db, namespace, `recent-${index}`, `Recent candidate ${index} has unrelated content.`, [], "owner");
+    }
+
+    const sample = getNamespaceEntriesForIntake(
+      db,
+      namespace,
+      "client-restricted",
+      { exactKey: "old-key" },
+    );
+    expect(sample.entries[0].key).toBe("old-key");
+    expect(sample.entries[0].content).toHaveLength(8_000);
+    expect(sample.entries).toHaveLength(100);
+    expect(sample.truncated).toBe(true);
+
+    const insideWindow = getNamespaceEntriesForIntake(
+      db,
+      namespace,
+      "client-restricted",
+      { exactKey: "recent-100" },
+    );
+    expect(insideWindow.entries[0].key).toBe("recent-100");
   });
 });
 
@@ -281,6 +398,79 @@ describe("write-path intake integration", () => {
     expect(persisted?.status).toBe("flagged");
     expect(persisted?.flags.map((flag) => flag.check)).toContain("content_overlap");
     expect(persisted?.evaluator_version).toBe(1);
+  });
+
+  it("keeps an older exact key in the capped, bounded intake sample", async () => {
+    const namespace = "projects/intake-exact-write";
+    writeState(
+      db,
+      namespace,
+      "old-key",
+      "Older exact-key content with enough useful detail. " + "x".repeat(20_000),
+      [],
+      "owner",
+    );
+    for (let index = 0; index < 101; index += 1) {
+      writeState(db, namespace, `recent-${index}`, `Recent candidate ${index} has unrelated content.`, [], "owner");
+    }
+
+    const result = await ownerCall("memory_write", {
+      namespace,
+      key: "old-key",
+      content: "Updated exact-key content with enough detail for durable memory.",
+    });
+    const intake = result.intake as {
+      flags: Array<{ check: string }>;
+      metadata: Record<string, unknown>;
+    };
+
+    expect(intake.flags.map((flag) => flag.check)).toContain("duplicate_key");
+    expect(intake.metadata).toMatchObject({
+      candidate_count: 100,
+      candidate_cap: 100,
+      candidates_truncated: true,
+    });
+  });
+
+  it("reports a different-key content duplicate only while it is inside the recent sample", async () => {
+    const namespace = "projects/intake-content-boundary";
+    const duplicateContent =
+      "SQLite FTS5 stores local full text search content with durable memory persistence and reliable retrieval.";
+    writeState(db, namespace, "old-duplicate", duplicateContent, ["architecture"], "owner");
+    for (let index = 0; index < 101; index += 1) {
+      writeState(db, namespace, `recent-${index}`, `Unrelated recent candidate number ${index} about another topic.`, [], "owner");
+    }
+
+    const outsideWindow = await ownerCall("memory_write", {
+      namespace,
+      key: "outside-window-write",
+      content: duplicateContent,
+      tags: ["architecture"],
+    });
+    const outsideIntake = outsideWindow.intake as {
+      flags: Array<{ check: string }>;
+      metadata: Record<string, unknown>;
+    };
+    expect(outsideIntake.flags.map((flag) => flag.check)).not.toContain("content_overlap");
+    expect(outsideIntake.metadata).toMatchObject({
+      candidate_count: 100,
+      candidate_cap: 100,
+      candidates_truncated: true,
+    });
+
+    writeState(db, namespace, "recent-duplicate", duplicateContent, ["architecture"], "owner");
+    const insideWindow = await ownerCall("memory_write", {
+      namespace,
+      key: "inside-window-write",
+      content: duplicateContent,
+      tags: ["architecture"],
+    });
+    const insideIntake = insideWindow.intake as {
+      flags: Array<{ check: string }>;
+      metadata: Record<string, unknown>;
+    };
+    expect(insideIntake.flags.map((flag) => flag.check)).toContain("content_overlap");
+    expect(insideIntake.metadata.candidates_truncated).toBe(true);
   });
 
   it("upserts one intake record for mutable state and cascades on deletion", async () => {
@@ -391,6 +581,8 @@ describe("write-path intake integration", () => {
       ((result.intake as { flags: Array<{ related_entry_id?: string }> }).flags)
         .some((flag) => flag.related_entry_id === restricted.id),
     ).toBe(false);
+    expect((result.intake as { metadata: Record<string, unknown> }).metadata)
+      .toMatchObject({ candidate_count: 0, candidate_cap: 100, candidates_truncated: false });
   });
 
   it("does not derive related-entry findings for a write-only principal", async () => {
@@ -423,6 +615,12 @@ describe("write-path intake integration", () => {
     expect(result.status).toBe("created");
     expect(serializedIntake).not.toContain(hidden.id as string);
     expect(serializedIntake).not.toContain("\"hidden\"");
+    expect((result.intake as { metadata: Record<string, unknown> }).metadata)
+      .not.toHaveProperty("candidate_count");
+    expect((result.intake as { metadata: Record<string, unknown> }).metadata)
+      .not.toHaveProperty("candidate_cap");
+    expect((result.intake as { metadata: Record<string, unknown> }).metadata)
+      .not.toHaveProperty("candidates_truncated");
   });
 
   it("does not let expired state influence related-entry analysis", async () => {
@@ -448,6 +646,11 @@ describe("write-path intake integration", () => {
 
     expect(intake.flags.some((flag) => flag.related_entry_id === expired.id)).toBe(false);
     expect(intake.metadata.related_keys).toEqual([]);
+    expect(intake.metadata).toMatchObject({
+      candidate_count: 0,
+      candidate_cap: 100,
+      candidates_truncated: false,
+    });
   });
 
   it("does not treat reviving an expired state key as a duplicate overwrite", async () => {
