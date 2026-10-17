@@ -1,0 +1,532 @@
+{
+  "schema_version": 1,
+  "kind": "bilingual_retrieval_fixture",
+  "id": "synthetic-candidates-v1",
+  "source": "synthetic",
+  "review": {
+    "status": "candidate",
+    "reviewer": null
+  },
+  "held_out": false,
+  "fixed_clock": "2026-10-17T00:00:00.000Z",
+  "token_budget": 512,
+  "top_k": 5,
+  "thresholds": {
+    "status": "preregistered_for_review",
+    "recall_delta_min": -0.02,
+    "mrr_delta_min": -0.02,
+    "complete_evidence_delta_min": 0,
+    "hard_negative_rate_max": 0.05,
+    "bootstrap": {
+      "seed": 369,
+      "resamples": 1000
+    }
+  },
+  "corpus": [
+    {
+      "id": "sv-sv-route-positive",
+      "text": "Vi valde den norra vägen eftersom bron är öppen.",
+      "language": "sv"
+    },
+    {
+      "id": "sv-sv-route-negative",
+      "text": "Vi avvisade den norra vägen eftersom bron är stängd.",
+      "language": "sv"
+    },
+    {
+      "id": "sv-sv-migration-positive",
+      "text": "Migreringen är blockerad tills testrapporten kommer den 2026-11-03.",
+      "language": "sv"
+    },
+    {
+      "id": "sv-sv-migration-negative",
+      "text": "Migreringen slutfördes den 2026-10-03 utan testrapport.",
+      "language": "sv"
+    },
+    {
+      "id": "sv-sv-format-positive",
+      "text": "Jag föredrar korta rapporter med datum och vill inte ha veckobilder.",
+      "language": "sv"
+    },
+    {
+      "id": "sv-sv-format-negative",
+      "text": "Jag föredrar veckobilder utan datum och vill inte ha korta rapporter.",
+      "language": "sv"
+    },
+    {
+      "id": "sv-sv-path-positive",
+      "text": "Vi bestämde att det godkända utkastet ska sparas i /synthetic/notes/final-v2.txt.",
+      "language": "sv"
+    },
+    {
+      "id": "sv-sv-path-negative",
+      "text": "Det avvisade utkastet finns i /synthetic/notes/final-v1.txt och är inte godkänt.",
+      "language": "sv"
+    },
+    {
+      "id": "en-en-route-positive",
+      "text": "We chose the north route because the bridge is open.",
+      "language": "en"
+    },
+    {
+      "id": "en-en-route-negative",
+      "text": "We rejected the north route because the bridge is closed.",
+      "language": "en"
+    },
+    {
+      "id": "en-en-migration-positive",
+      "text": "The migration is blocked until the test report arrives on 2026-11-03.",
+      "language": "en"
+    },
+    {
+      "id": "en-en-migration-negative",
+      "text": "The migration finished on 2026-10-03 without a test report.",
+      "language": "en"
+    },
+    {
+      "id": "en-en-format-positive",
+      "text": "I prefer brief reports with dates, and I do not want weekly slides.",
+      "language": "en"
+    },
+    {
+      "id": "en-en-format-negative",
+      "text": "I prefer weekly slides without dates and do not want brief reports.",
+      "language": "en"
+    },
+    {
+      "id": "en-en-path-positive",
+      "text": "We decided to save the approved draft at /synthetic/notes/final-v2.txt.",
+      "language": "en"
+    },
+    {
+      "id": "en-en-path-negative",
+      "text": "The rejected draft is at /synthetic/notes/final-v1.txt; it is not approved.",
+      "language": "en"
+    },
+    {
+      "id": "sv-en-route-positive",
+      "text": "We chose the north route because the bridge is open.",
+      "language": "en"
+    },
+    {
+      "id": "sv-en-route-negative",
+      "text": "We rejected the north route because the bridge is closed.",
+      "language": "en"
+    },
+    {
+      "id": "sv-en-migration-positive",
+      "text": "The migration is blocked until the test report arrives on 2026-11-03.",
+      "language": "en"
+    },
+    {
+      "id": "sv-en-migration-negative",
+      "text": "The migration finished on 2026-10-03 without a test report.",
+      "language": "en"
+    },
+    {
+      "id": "sv-en-format-positive",
+      "text": "I prefer brief reports with dates, and I do not want weekly slides.",
+      "language": "en"
+    },
+    {
+      "id": "sv-en-format-negative",
+      "text": "I prefer weekly slides without dates and do not want brief reports.",
+      "language": "en"
+    },
+    {
+      "id": "sv-en-path-positive",
+      "text": "We decided to save the approved draft at /synthetic/notes/final-v2.txt.",
+      "language": "en"
+    },
+    {
+      "id": "sv-en-path-negative",
+      "text": "The rejected draft is at /synthetic/notes/final-v1.txt; it is not approved.",
+      "language": "en"
+    },
+    {
+      "id": "en-sv-route-positive",
+      "text": "Vi valde den norra vägen eftersom bron är öppen.",
+      "language": "sv"
+    },
+    {
+      "id": "en-sv-route-negative",
+      "text": "Vi avvisade den norra vägen eftersom bron är stängd.",
+      "language": "sv"
+    },
+    {
+      "id": "en-sv-migration-positive",
+      "text": "Migreringen är blockerad tills testrapporten kommer den 2026-11-03.",
+      "language": "sv"
+    },
+    {
+      "id": "en-sv-migration-negative",
+      "text": "Migreringen slutfördes den 2026-10-03 utan testrapport.",
+      "language": "sv"
+    },
+    {
+      "id": "en-sv-format-positive",
+      "text": "Jag föredrar korta rapporter med datum och vill inte ha veckobilder.",
+      "language": "sv"
+    },
+    {
+      "id": "en-sv-format-negative",
+      "text": "Jag föredrar veckobilder utan datum och vill inte ha korta rapporter.",
+      "language": "sv"
+    },
+    {
+      "id": "en-sv-path-positive",
+      "text": "Vi bestämde att det godkända utkastet ska sparas i /synthetic/notes/final-v2.txt.",
+      "language": "sv"
+    },
+    {
+      "id": "en-sv-path-negative",
+      "text": "Det avvisade utkastet finns i /synthetic/notes/final-v1.txt och är inte godkänt.",
+      "language": "sv"
+    }
+  ],
+  "cases": [
+    {
+      "id": "sv-sv-route",
+      "direction": "sv-sv",
+      "category": "decision",
+      "query": "Varför valde vi den norra vägen?",
+      "labels": {
+        "relevant_ids": [
+          "sv-sv-route-positive"
+        ],
+        "hard_negative_ids": [
+          "sv-sv-route-negative"
+        ],
+        "evidence": [
+          {
+            "entry_id": "sv-sv-route-positive",
+            "start": 0,
+            "end": 48
+          }
+        ]
+      }
+    },
+    {
+      "id": "sv-sv-migration",
+      "direction": "sv-sv",
+      "category": "status",
+      "query": "Vad blockerar migreringen?",
+      "labels": {
+        "relevant_ids": [
+          "sv-sv-migration-positive"
+        ],
+        "hard_negative_ids": [
+          "sv-sv-migration-negative"
+        ],
+        "evidence": [
+          {
+            "entry_id": "sv-sv-migration-positive",
+            "start": 0,
+            "end": 67
+          }
+        ]
+      }
+    },
+    {
+      "id": "sv-sv-format",
+      "direction": "sv-sv",
+      "category": "preference",
+      "query": "Vilket rapportformat föredrar jag?",
+      "labels": {
+        "relevant_ids": [
+          "sv-sv-format-positive"
+        ],
+        "hard_negative_ids": [
+          "sv-sv-format-negative"
+        ],
+        "evidence": [
+          {
+            "entry_id": "sv-sv-format-positive",
+            "start": 0,
+            "end": 68
+          }
+        ]
+      }
+    },
+    {
+      "id": "sv-sv-path",
+      "direction": "sv-sv",
+      "category": "decision",
+      "query": "Var bestämde vi att det godkända utkastet ska sparas?",
+      "labels": {
+        "relevant_ids": [
+          "sv-sv-path-positive"
+        ],
+        "hard_negative_ids": [
+          "sv-sv-path-negative"
+        ],
+        "evidence": [
+          {
+            "entry_id": "sv-sv-path-positive",
+            "start": 0,
+            "end": 81
+          }
+        ]
+      }
+    },
+    {
+      "id": "en-en-route",
+      "direction": "en-en",
+      "category": "decision",
+      "query": "Why did we choose the north route?",
+      "labels": {
+        "relevant_ids": [
+          "en-en-route-positive"
+        ],
+        "hard_negative_ids": [
+          "en-en-route-negative"
+        ],
+        "evidence": [
+          {
+            "entry_id": "en-en-route-positive",
+            "start": 0,
+            "end": 52
+          }
+        ]
+      }
+    },
+    {
+      "id": "en-en-migration",
+      "direction": "en-en",
+      "category": "status",
+      "query": "What is blocking the migration?",
+      "labels": {
+        "relevant_ids": [
+          "en-en-migration-positive"
+        ],
+        "hard_negative_ids": [
+          "en-en-migration-negative"
+        ],
+        "evidence": [
+          {
+            "entry_id": "en-en-migration-positive",
+            "start": 0,
+            "end": 69
+          }
+        ]
+      }
+    },
+    {
+      "id": "en-en-format",
+      "direction": "en-en",
+      "category": "preference",
+      "query": "Which report format do I prefer?",
+      "labels": {
+        "relevant_ids": [
+          "en-en-format-positive"
+        ],
+        "hard_negative_ids": [
+          "en-en-format-negative"
+        ],
+        "evidence": [
+          {
+            "entry_id": "en-en-format-positive",
+            "start": 0,
+            "end": 67
+          }
+        ]
+      }
+    },
+    {
+      "id": "en-en-path",
+      "direction": "en-en",
+      "category": "decision",
+      "query": "Where did we decide to save the approved draft?",
+      "labels": {
+        "relevant_ids": [
+          "en-en-path-positive"
+        ],
+        "hard_negative_ids": [
+          "en-en-path-negative"
+        ],
+        "evidence": [
+          {
+            "entry_id": "en-en-path-positive",
+            "start": 0,
+            "end": 71
+          }
+        ]
+      }
+    },
+    {
+      "id": "sv-en-route",
+      "direction": "sv-en",
+      "category": "decision",
+      "query": "Varför valde vi den norra vägen?",
+      "labels": {
+        "relevant_ids": [
+          "sv-en-route-positive"
+        ],
+        "hard_negative_ids": [
+          "sv-en-route-negative"
+        ],
+        "evidence": [
+          {
+            "entry_id": "sv-en-route-positive",
+            "start": 0,
+            "end": 52
+          }
+        ]
+      }
+    },
+    {
+      "id": "sv-en-migration",
+      "direction": "sv-en",
+      "category": "status",
+      "query": "Vad blockerar migreringen?",
+      "labels": {
+        "relevant_ids": [
+          "sv-en-migration-positive"
+        ],
+        "hard_negative_ids": [
+          "sv-en-migration-negative"
+        ],
+        "evidence": [
+          {
+            "entry_id": "sv-en-migration-positive",
+            "start": 0,
+            "end": 69
+          }
+        ]
+      }
+    },
+    {
+      "id": "sv-en-format",
+      "direction": "sv-en",
+      "category": "preference",
+      "query": "Vilket rapportformat föredrar jag?",
+      "labels": {
+        "relevant_ids": [
+          "sv-en-format-positive"
+        ],
+        "hard_negative_ids": [
+          "sv-en-format-negative"
+        ],
+        "evidence": [
+          {
+            "entry_id": "sv-en-format-positive",
+            "start": 0,
+            "end": 67
+          }
+        ]
+      }
+    },
+    {
+      "id": "sv-en-path",
+      "direction": "sv-en",
+      "category": "decision",
+      "query": "Var bestämde vi att det godkända utkastet ska sparas?",
+      "labels": {
+        "relevant_ids": [
+          "sv-en-path-positive"
+        ],
+        "hard_negative_ids": [
+          "sv-en-path-negative"
+        ],
+        "evidence": [
+          {
+            "entry_id": "sv-en-path-positive",
+            "start": 0,
+            "end": 71
+          }
+        ]
+      }
+    },
+    {
+      "id": "en-sv-route",
+      "direction": "en-sv",
+      "category": "decision",
+      "query": "Why did we choose the north route?",
+      "labels": {
+        "relevant_ids": [
+          "en-sv-route-positive"
+        ],
+        "hard_negative_ids": [
+          "en-sv-route-negative"
+        ],
+        "evidence": [
+          {
+            "entry_id": "en-sv-route-positive",
+            "start": 0,
+            "end": 48
+          }
+        ]
+      }
+    },
+    {
+      "id": "en-sv-migration",
+      "direction": "en-sv",
+      "category": "status",
+      "query": "What is blocking the migration?",
+      "labels": {
+        "relevant_ids": [
+          "en-sv-migration-positive"
+        ],
+        "hard_negative_ids": [
+          "en-sv-migration-negative"
+        ],
+        "evidence": [
+          {
+            "entry_id": "en-sv-migration-positive",
+            "start": 0,
+            "end": 67
+          }
+        ]
+      }
+    },
+    {
+      "id": "en-sv-format",
+      "direction": "en-sv",
+      "category": "preference",
+      "query": "Which report format do I prefer?",
+      "labels": {
+        "relevant_ids": [
+          "en-sv-format-positive"
+        ],
+        "hard_negative_ids": [
+          "en-sv-format-negative"
+        ],
+        "evidence": [
+          {
+            "entry_id": "en-sv-format-positive",
+            "start": 0,
+            "end": 68
+          }
+        ]
+      }
+    },
+    {
+      "id": "en-sv-path",
+      "direction": "en-sv",
+      "category": "decision",
+      "query": "Where did we decide to save the approved draft?",
+      "labels": {
+        "relevant_ids": [
+          "en-sv-path-positive"
+        ],
+        "hard_negative_ids": [
+          "en-sv-path-negative"
+        ],
+        "evidence": [
+          {
+            "entry_id": "en-sv-path-positive",
+            "start": 0,
+            "end": 81
+          }
+        ]
+      }
+    }
+  ],
+  "hashes": {
+    "corpus": "4aa6717a7d1ef4b9173be1ac4bcbacc6a8164d50a7a80ea465e41bf34d79442b",
+    "queries": "af569d90f00b412211e9cc5ec705c00ad2bf7d33d21850c79bf36dcdb88820f8",
+    "labels": "446e4adfbe5bebc99d1362915343ef91d3157d2300d1b67563cc754e5433f79e",
+    "evidence": "6e779da177b139383078768988dcfa887bae430f3f077a98ae86695ed3af1341",
+    "dataset": "dfb5d39a9ff30f042196c8d99125466315b6f3027bdf205fcad9a3e50560e4ea"
+  }
+}

@@ -8,6 +8,14 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Added
+
+- **Bilingual retrieval evaluation foundation (refs #369).** Add strict,
+  hash-bound candidate/result contracts, deterministic paired scoring and
+  synthetic offline smoke fixtures for all four SV/EN directions. Smoke reports
+  remain incomplete and publication-ineligible; human labels, live model runs
+  and target-hardware measurements remain pending.
+
 ### Security
 
 - **Legacy bridge redirect containment (#373).** Prevent the standalone
