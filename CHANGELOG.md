@@ -8,15 +8,18 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
-### Added
+### Changed
 
-- **Bilingual retrieval evaluation foundation (refs #369).** Add strict,
-  hash-bound candidate/result contracts, deterministic paired scoring and
-  synthetic offline smoke fixtures for all four SV/EN directions. Smoke reports
-  remain incomplete and publication-ineligible; human labels, live model runs
-  and target-hardware measurements remain pending.
+- **Report bounded intake sample completeness (#367).** Read-authorized `memory_write` and
+  `memory_log` reports now expose the number of visible entries analyzed, the 100-entry cap,
+  and whether eligible visible entries were omitted. Tag-vocabulary findings describe the
+  evaluated sample and identify incomplete samples; write-only calls omit these fields.
 
 ### Security
+
+- **CodeQL action pinning (#366).** Update both CodeQL workflow steps to the
+  reviewed v4.38.3 commit and group CodeQL action updates in Dependabot. A
+  workflow contract check rejects mutable or mismatched init/analyze pins.
 
 - **Legacy bridge redirect containment (#373).** Prevent the standalone
   `scripts/stdio-bridge.mjs` from forwarding Cloudflare credentials or MCP session
@@ -39,6 +42,12 @@ changelog is the canonical record of what moved.
   URI authority validation with a regression test.
 
 ### Added
+
+- **Bilingual retrieval evaluation foundation (refs #369).** Add strict,
+  hash-bound candidate/result contracts, deterministic paired scoring and
+  synthetic offline smoke fixtures for all four SV/EN directions. Smoke reports
+  remain incomplete and publication-ineligible; human labels, live model runs
+  and target-hardware measurements remain pending.
 
 - **Bounded code-health evidence ingestion and reconciliation export (#358).**
   `memory_code_health` accepts frozen v1 records with principal-scoped UUID

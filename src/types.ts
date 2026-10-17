@@ -903,6 +903,12 @@ export interface RedundancyInfo {
 export interface IntakeMetadata {
   intake_score: number;
   intake_mode: IntakeMode;
+  /** Number of authorized visible entries actually analyzed, when readable. */
+  candidate_count?: number;
+  /** Maximum number of entries analyzed for related-entry checks. */
+  candidate_cap?: number;
+  /** True when more eligible visible entries existed than the analyzed sample. */
+  candidates_truncated?: boolean;
   related_keys: RelatedKeyRef[];
   redundancy_flag: RedundancyInfo | null;
   intake_timestamp: string;
