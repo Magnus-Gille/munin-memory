@@ -17,6 +17,10 @@ changelog is the canonical record of what moved.
 
 ### Security
 
+- **CodeQL action pinning (#366).** Update both CodeQL workflow steps to the
+  reviewed v4.38.3 commit and group CodeQL action updates in Dependabot. A
+  workflow contract check rejects mutable or mismatched init/analyze pins.
+
 - **Legacy bridge redirect containment (#373).** Prevent the standalone
   `scripts/stdio-bridge.mjs` from forwarding Cloudflare credentials or MCP session
   IDs across origins on message POSTs or cleanup DELETEs. Follow at most five
