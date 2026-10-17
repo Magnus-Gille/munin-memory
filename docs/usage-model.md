@@ -302,7 +302,13 @@ memory operation still succeeds.
 Related-entry analysis is bounded to 100 current entries that the caller was already
 authorized to read at the connection's classification ceiling. Write-only callers still
 receive intrinsic checks such as sparse-content and namespace-depth warnings, but no
-related-entry identifiers, keys, counts, or scores. One versioned `entry_intake` row is
+related-entry identifiers, keys, counts, or scores. Read-authorized reports expose
+`metadata.candidate_count`, `metadata.candidate_cap` (100), and
+`metadata.candidates_truncated`; the count is the number of visible entries actually
+analyzed, and truncation means additional eligible visible entries were omitted. These
+fields never include hidden, expired, superseded, excluded, or internal code-health rows.
+Tag-vocabulary findings describe tags absent from the evaluated sample, and explicitly
+mark an incomplete sample when candidates were truncated. One versioned `entry_intake` row is
 stored per entry for later measurement; mutable state updates replace that entry's prior
 advisory row, and deletion cascades to it.
 
