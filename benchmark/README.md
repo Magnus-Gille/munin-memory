@@ -291,3 +291,15 @@ still consumes the native JSONLs directly. Start with the markdown
 companion (`retrieval-v1.manifest.md`) for orientation; the JSON file
 holds the machine-checkable schema. See `tests/retrieval-manifest.test.ts`
 for the invariants the manifest is expected to hold.
+
+## Offline packed-gold entry-ID evaluation
+
+`npm run benchmark:evidence -- --snapshot PATH --queries PATH --vectors PATH --as-of ISO_TIMESTAMP --output PATH [--baseline PATH]`
+uses frozen vectors and read-only production hybrid retrieval to measure whether
+all explicit gold entry IDs survive linear packing into the 8192-token estimated
+context budget. Truncation is reported; this proxy does not measure complete
+content/span coverage or answer accuracy. See [the lane contract](evidence-metric/README.md)
+for input provenance, paired comparison and exits 0/1/2. A run without a reviewed
+baseline exits 2 (`not_measured`). Existing local LongMemEval artifacts lack the
+immutable identity/frozen query vectors this lane requires; the real 500-question
+rerun, snapshot storage and published baseline acceptance remain open in #341.

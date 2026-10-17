@@ -8,6 +8,15 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Added
+
+- An offline packed-gold entry-ID benchmark lane (#341) uses explicitly supplied
+  detached snapshots and frozen query vectors with immutable embedding provenance.
+  It records context truncation, input/source hashes and paired all-gold question
+  changes, requiring a reproduced regression before exit 1. Initial candidates
+  remain `not_measured` (exit 2) until compared with a reviewed baseline. This adds
+  infrastructure only; the real 500-question baseline and acceptance remain open.
+
 ### Fixed
 
 - Bind stored and query embeddings to an immutable model/runtime identity, including
