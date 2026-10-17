@@ -55,6 +55,13 @@ changelog is the canonical record of what moved.
 
 ### Added
 
+- **Proposal extraction evaluation foundation (#370).** Add frozen synthetic
+  English/Swedish cases, candidate-only labels, a deterministic in-memory
+  `memory_extract` baseline, and common recorded-result envelopes for general
+  model and HyMemory comparisons. No model or hardware run is performed;
+  thresholds and labels remain pending review, and smoke output is never
+  publication-eligible.
+
 - **Bilingual retrieval evaluation foundation (refs #369).** Add strict,
   hash-bound candidate/result contracts, deterministic paired scoring and
   synthetic offline smoke fixtures for all four SV/EN directions. Smoke reports
