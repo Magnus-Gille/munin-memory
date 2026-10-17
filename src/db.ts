@@ -4836,7 +4836,7 @@ export function getNamespaceEntriesForIntake(
               substr(content, 1, ?) AS content,
               tags, agent_id, owner_principal_id, created_at, updated_at,
               valid_from, valid_until, is_current, classification,
-              embedding_status, embedding_model, embedding_identity
+              embedding_status, embedding_model
        FROM entries
        WHERE namespace = ?
          AND is_current = 1
