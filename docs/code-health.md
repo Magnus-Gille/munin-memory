@@ -2,7 +2,7 @@
 
 `memory_code_health` is the bounded ingestion and export surface for the frozen
 Grimnir Code-Health Agent v1 contract. Its validator, schema, and positive and
-adversarial fixtures are vendored unchanged from Grimnir revision
+adversarial fixtures originate from Grimnir revision
 `7df005ce952a52816597d9888da977d689a631fd`. Their SHA-256 values are pinned in
 `tests/code-health.test.ts`; update them only with an explicitly reviewed
 contract revision.
@@ -89,3 +89,10 @@ split-token augmentation. It does not rewrite memory rows or ledger data. If
 the migration fails, its transaction leaves the prior database state in place;
 resolve the failure and retry the forward migration rather than editing the
 FTS cache manually. No database rollback is needed for this derived-index repair.
+
+The vendored validator has one local adapter for #368: deliberate validation
+failures use a private TypeError subclass with a separately retained public
+message. Schema rules and frozen fixtures are unchanged. This lets ingestion and
+export preserve validation guidance while unexpected backend failures reach the
+common safe MCP error boundary. The regression suite pins the adapted validator
+and unchanged schema/fixtures by SHA-256.

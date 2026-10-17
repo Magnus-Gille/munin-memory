@@ -12376,7 +12376,7 @@ describe("memory_status", () => {
     };
 
     expect(result.consolidation_health.last_error).not.toBeNull();
-    expect(result.consolidation_health.last_error).toContain("[REDACTED]");
+    expect(result.consolidation_health.last_error).toMatch(/^Consolidation failed unexpectedly\. Contact the server operator with error reference [0-9a-f-]{36}\.$/);
     expect(result.consolidation_health.last_error).not.toContain(fakeKey);
 
     // Clean up
