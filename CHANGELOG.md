@@ -10,6 +10,13 @@ changelog is the canonical record of what moved.
 
 ### Security
 
+- **Dependency advisory remediation (#359).** Upgrade the MCP SDK to the
+  patched 1.32.x family, Transformers to 4.3.x with ONNX Runtime 1.30, and the
+  Vitest toolchain within 4.1.x. Refresh affected transitive packages and remove
+  the vulnerable sprintf-js dependency chain. Add proxy trust-range regressions
+  and Linux ARM64 native SQLite/vector/embedding smoke coverage for both models,
+  fp32/q8 inference, and cache-only reloads. Embedding defaults are unchanged.
+
 - **Production dependency advisory remediation (#356).** Raise the patched
   floors for adm-zip, fast-uri, Hono, ip-address and Sharp, and pin a patched
   qs floor for OAuth/form parsing. Keep direct SDK, Transformers and ONNX Runtime

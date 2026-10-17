@@ -1,5 +1,31 @@
 import { describe, expect, it } from "vitest";
 import uri from "fast-uri";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const proxyaddr = require("proxy-addr") as {
+  compile: (ranges: string[]) => (address: string, index: number) => boolean;
+};
+
+describe("proxy trust range dependency security (#359)", () => {
+  it.each(["::ffff:10.0.0.0/8", "::/1"])(
+    "does not widen a malformed mapped range to unrelated IPv4: %s",
+    (range) => {
+      const trust = proxyaddr.compile([range]);
+      expect(trust("203.0.113.9", 0)).toBe(false);
+      expect(trust("::ffff:203.0.113.9", 0)).toBe(false);
+    },
+  );
+
+  it.each(["10.0.0.0/8", "::ffff:10.0.0.0/104"])(
+    "preserves the intended IPv4 subnet for %s",
+    (range) => {
+      const trust = proxyaddr.compile([range]);
+      expect(trust("10.20.30.40", 0)).toBe(true);
+      expect(trust("203.0.113.9", 0)).toBe(false);
+    },
+  );
+});
 
 describe("SDK URI resolver dependency security (#356)", () => {
   it.each(["@127.0.0.1:8124", "443@evil.example", "443/ignored"])(
