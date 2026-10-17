@@ -639,8 +639,17 @@ describe("consolidateNamespace", () => {
       }
       resolveResponse(cannedResponse);
       const result = await running;
-      expect(result.error, mutation).toMatch(/stale/i);
-      if (mutation !== "synthesis") expect(readState(db, namespace, "synthesis")).toBeNull();
+      expect(result.error, mutation).toContain(
+        "Consolidation failed unexpectedly. Contact the server operator with error reference",
+      );
+      if (mutation === "synthesis") {
+        expect(readState(db, namespace, "synthesis")?.content).toBe("Changed prior synthesis");
+      } else {
+        expect(readState(db, namespace, "synthesis")).toBeNull();
+      }
+      expect(getConsolidationMetadata(db, namespace)?.last_log_id ?? null).toBe(
+        mutation === "cursor" ? logs[0].id : null,
+      );
     }
   });
 
