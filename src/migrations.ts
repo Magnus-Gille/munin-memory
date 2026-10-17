@@ -1413,6 +1413,13 @@ export const migrations: Migration[] = [
       }
     },
   },
+  {
+    version: 31,
+    description: "Record embedding-space identity without trusting legacy vectors",
+    up: (db) => {
+      db.exec("ALTER TABLE entries ADD COLUMN embedding_identity TEXT");
+    },
+  },
 ];
 
 /**

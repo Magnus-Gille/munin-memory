@@ -54,6 +54,9 @@
       "properties": {
         "ok": { "type": "boolean" },
         "model": { "type": ["string", "null"] },
+        "identity": { "type": ["string", "null"] },
+        "compatible_generated": { "type": "integer", "minimum": 0 },
+        "reembedding_backlog": { "type": "integer", "minimum": 0 },
         "dtype": { "type": ["string", "null"] },
         "counts": {
           "type": "object",
@@ -69,7 +72,7 @@
         },
         "coverage_pct": {
           "type": ["number", "null"],
-          "description": "Percent of entries with a generated embedding (0-100); null when total == 0."
+          "description": "Percent of entries with a compatible generated embedding (0-100); null when total == 0."
         },
         "reembed_in_progress": { "type": "boolean" },
         "stuck": {
@@ -85,6 +88,9 @@
       "then": {
         "required": [
           "model",
+          "identity",
+          "compatible_generated",
+          "reembedding_backlog",
           "dtype",
           "counts",
           "coverage_pct",

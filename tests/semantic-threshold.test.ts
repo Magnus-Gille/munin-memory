@@ -15,6 +15,7 @@ import {
   _setExtractorForTesting,
   resetCircuitBreaker,
   getActiveEmbeddingModel,
+  getActiveEmbeddingIdentity,
 } from "../src/embeddings.js";
 import { registerTools } from "../src/tools.js";
 import { createTestStorage } from "./helpers/test-storage.js";
@@ -94,7 +95,9 @@ afterAll(() => {
 
 function seedEntry(namespace: string, key: string, content: string, seed: number, tags: string[] = []) {
   const { id } = writeState(db, namespace, key, content, tags);
-  storeEmbedding(db, id, embeddingToBuffer(makeEmbedding(seed)), getActiveEmbeddingModel());
+  const identity = getActiveEmbeddingIdentity();
+  if (identity === null) throw new Error("Test extractor must have an active embedding identity");
+  storeEmbedding(db, id, embeddingToBuffer(makeEmbedding(seed)), getActiveEmbeddingModel(), identity);
   db.prepare("UPDATE entries SET embedding_status = 'generated' WHERE id = ?").run(id);
   return id;
 }

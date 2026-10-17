@@ -8,6 +8,19 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Fixed
+
+- Bind stored and query embeddings to an immutable model/runtime identity, including
+  revision and effective dtype, rather than the model name alone. Migration 31
+  leaves legacy identities unknown; the worker gradually rebuilds incompatible
+  vectors without changing human memory or its timestamps. Health reports compatible
+  coverage and backlog; a read-only database preview supports rollout planning.
+  Custom embedding models now require `MUNIN_EMBEDDINGS_REVISION`; missing or invalid
+  revisions disable optional embeddings and preserve explicit lexical fallback.
+  Model IDs must use Hugging Face `owner/repository` syntax. Unversioned local
+  directories and URLs are no longer accepted; offline reloads require the pinned
+  revision in the filesystem cache.
+
 ### Security
 
 - **Legacy bridge redirect containment (#373).** Prevent the standalone

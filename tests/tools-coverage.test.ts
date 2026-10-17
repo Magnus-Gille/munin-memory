@@ -16,6 +16,7 @@ import {
   resetCircuitBreaker,
   embeddingToBuffer,
   getActiveEmbeddingModel,
+  getActiveEmbeddingIdentity,
 } from "../src/embeddings.js";
 import { createTestStorage } from "./helpers/test-storage.js";
 
@@ -127,6 +128,12 @@ function makeEmbedding(seed: number): Float32Array {
     for (let i = 0; i < EMBEDDING_DIM; i++) arr[i] /= norm;
   }
   return arr;
+}
+
+function activeEmbeddingIdentity(): string {
+  const identity = getActiveEmbeddingIdentity();
+  if (identity === null) throw new Error("Test extractor must have an active embedding identity");
+  return identity;
 }
 
 function mockExtractor(text: string, _options: { pooling: string; normalize: boolean }) {
@@ -781,7 +788,7 @@ describe.skipIf(!vecAvailable)("memory_query semantic and hybrid paths", () => {
       validUntil,
     );
     if (!created.id) throw new Error(`Failed to seed ${prefix}/${index}`);
-    storeEmbedding(db, created.id, embeddingToBuffer(makeEmbedding(1)), getActiveEmbeddingModel());
+    storeEmbedding(db, created.id, embeddingToBuffer(makeEmbedding(1)), getActiveEmbeddingModel(), activeEmbeddingIdentity());
     return created.id;
   }
 
@@ -795,7 +802,7 @@ describe.skipIf(!vecAvailable)("memory_query semantic and hybrid paths", () => {
         tags: ["active", `topic:${prefix}`],
       }));
       ids.push(created.id);
-      storeEmbedding(db, created.id, embeddingToBuffer(makeEmbedding(1)), getActiveEmbeddingModel());
+      storeEmbedding(db, created.id, embeddingToBuffer(makeEmbedding(1)), getActiveEmbeddingModel(), activeEmbeddingIdentity());
     }
     return ids;
   }
@@ -816,8 +823,8 @@ describe.skipIf(!vecAvailable)("memory_query semantic and hybrid paths", () => {
       content: "The dog dug in the garden",
     }));
     dogId = dog.id;
-    storeEmbedding(db, catId, embeddingToBuffer(makeEmbedding(1)), getActiveEmbeddingModel());
-    storeEmbedding(db, dogId, embeddingToBuffer(makeEmbedding(2)), getActiveEmbeddingModel());
+    storeEmbedding(db, catId, embeddingToBuffer(makeEmbedding(1)), getActiveEmbeddingModel(), activeEmbeddingIdentity());
+    storeEmbedding(db, dogId, embeddingToBuffer(makeEmbedding(2)), getActiveEmbeddingModel(), activeEmbeddingIdentity());
   });
 
   afterEach(() => {
@@ -851,6 +858,45 @@ describe.skipIf(!vecAvailable)("memory_query semantic and hybrid paths", () => {
     const withHybrid = res.results.find((r: ToolResponse) => r.match?.hybrid_score !== undefined);
     expect(withHybrid).toBeDefined();
     expect(res.search_meta).toBeDefined();
+  });
+
+  it("filters wrong and legacy identities before semantic limit while retaining compatible and lexical matches", async () => {
+    const namespace = "projects/identity-filter";
+    const activeIdentity = activeEmbeddingIdentity();
+    const wrongIdentity = JSON.stringify({ revision: "wrong-revision" });
+    const wrong = writeState(db, namespace, "wrong", "synthetic wrong identity", []).id;
+    const legacy = writeState(db, namespace, "legacy", "synthetic legacy identity", []).id;
+    const compatible = writeState(db, namespace, "compatible", "synthetic compatible identity", []).id;
+    storeEmbedding(db, wrong, embeddingToBuffer(makeEmbedding(1)), getActiveEmbeddingModel(), wrongIdentity);
+    storeEmbedding(db, legacy, embeddingToBuffer(makeEmbedding(1)), getActiveEmbeddingModel());
+    storeEmbedding(db, compatible, embeddingToBuffer(makeEmbedding(2)), getActiveEmbeddingModel(), activeIdentity);
+
+    const semantic = parseToolResponse(await callTool("memory_query", {
+      query: "cat",
+      search_mode: "semantic",
+      namespace,
+      limit: 1,
+    }));
+    expect(semantic.ok).toBe(true);
+    expect(semantic.total).toBe(1);
+    expect(semantic.results.map((result: ToolResponse) => result.id)).toEqual([compatible]);
+
+    const health = parseToolResponse(await callTool("memory_health"));
+    expect(health.sections.embedding).toMatchObject({
+      identity: activeIdentity,
+      compatible_generated: 3,
+      reembedding_backlog: 2,
+    });
+
+    const lexicalOnly = writeState(db, namespace, "lexical-only", "needle lexical fallback", []).id;
+    const hybrid = parseToolResponse(await callTool("memory_query", {
+      query: "needle",
+      search_mode: "hybrid",
+      namespace,
+      limit: 1,
+    }));
+    expect(hybrid.ok).toBe(true);
+    expect(hybrid.results.map((result: ToolResponse) => result.id)).toContain(lexicalOnly);
   });
 
   it("pages deterministic semantic results beyond 50 per page", async () => {
@@ -949,7 +995,7 @@ describe.skipIf(!vecAvailable)("memory_query semantic and hybrid paths", () => {
     for (let i = 0; i < 300; i++) {
       writeState(db, `projects/fusion-lex/item-${String(i).padStart(3, "0")}`, "status", `cat lexical only ${i}`, ["active"]);
       const sem = writeState(db, `projects/fusion-sem/item-${String(i).padStart(3, "0")}`, "status", `nearest neighbour ${i}`, ["active"]);
-      storeEmbedding(db, sem.id, embeddingToBuffer(makeEmbedding(1)), getActiveEmbeddingModel());
+      storeEmbedding(db, sem.id, embeddingToBuffer(makeEmbedding(1)), getActiveEmbeddingModel(), activeEmbeddingIdentity());
     }
 
     const pages: ToolResponse[] = [];
@@ -1038,7 +1084,7 @@ describe.skipIf(!vecAvailable)("memory_query semantic and hybrid paths", () => {
       content: "cat semantic paging corpus semantic-gap missing",
       tags: ["active", "topic:semantic-gap"],
     }));
-    storeEmbedding(db, indexed.id, embeddingToBuffer(makeEmbedding(1)), getActiveEmbeddingModel());
+    storeEmbedding(db, indexed.id, embeddingToBuffer(makeEmbedding(1)), getActiveEmbeddingModel(), activeEmbeddingIdentity());
 
     const res = parseToolResponse(await callTool("memory_query", {
       query: "cat",

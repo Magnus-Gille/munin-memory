@@ -2524,9 +2524,15 @@ describe("queryEntriesByFilter (no FTS)", () => {
     const plan = db.prepare(`EXPLAIN QUERY PLAN ${statement.sql}`)
       .all(...statement.params) as Array<{ detail: string }>;
 
-    expect(plan.map((row) => row.detail)).toEqual(expect.arrayContaining([
-      "SEARCH entries USING INDEX idx_entries_temporal (namespace=?)",
-      "SEARCH entries USING INDEX idx_entries_temporal (namespace>? AND namespace<?)",
+    // Additive columns can change which equivalent namespace-leading index
+    // SQLite selects; preserve the equality-plus-range SEARCH contract.
+    const namespaceSearches = plan.map(({ detail }) => detail.replace(
+      /idx_entries_(?:temporal|ns_classification)/,
+      "namespace_index",
+    ));
+    expect(namespaceSearches).toEqual(expect.arrayContaining([
+      "SEARCH entries USING INDEX namespace_index (namespace=?)",
+      "SEARCH entries USING INDEX namespace_index (namespace>? AND namespace<?)",
     ]));
   });
 

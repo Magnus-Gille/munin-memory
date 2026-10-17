@@ -19,10 +19,13 @@
       "coverage_pct": 0,
       "reembed_in_progress": true,
       "stuck": 0,
-      "stuck_note": "Stuck entries are defined as model-identity-based (generated_stale + generated_null); no embedding_claimed_at column exists for time-based detection.",
+      "stuck_note": "Stuck entries are generated vectors with a different or unknown embedding identity; no embedding_claimed_at column exists for time-based detection.",
       "circuit_breaker": "healthy",
       "embedding_available": false,
-      "status_reason": "Embedding model failed to load"
+      "status_reason": "Embedding model failed to load",
+      "identity": "{\"version\":1,\"model\":\"Xenova/bge-small-en-v1.5\",\"revision\":\"ea104dacec62c0de699686887e3f920caeb4f3e3\",\"dtype\":\"fp32\",\"dimensions\":384,\"pooling\":\"mean\",\"normalize\":true,\"preprocessing\":\"raw-text-v1\",\"transformers_version\":\"4.3.1\",\"onnxruntime_node_version\":\"1.30.0\",\"platform\":\"darwin\",\"arch\":\"arm64\",\"execution_provider\":\"cpu\"}",
+      "compatible_generated": 0,
+      "reembedding_backlog": 8
     },
     "size": {
       "ok": true,

@@ -508,7 +508,7 @@ export function writeState(
       const mutationTime = nextStateMutationTimestamp(existing, now);
       db.prepare(
         `UPDATE entries SET content = ?, tags = ?, updated_at = ?, valid_from = ?, valid_until = ?, classification = ?, agent_id = ?,
-         embedding_status = 'pending', embedding_model = NULL
+         embedding_status = 'pending', embedding_model = NULL, embedding_identity = NULL
          WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1`,
       ).run(
         content,
@@ -679,7 +679,7 @@ export function patchState(
     const mutationTime = nextStateMutationTimestamp(existing, now);
     db.prepare(
       `UPDATE entries SET content = ?, tags = ?, updated_at = ?, valid_from = ?, classification = ?, agent_id = ?,
-       embedding_status = 'pending', embedding_model = NULL
+       embedding_status = 'pending', embedding_model = NULL, embedding_identity = NULL
        WHERE namespace = ? AND key = ? AND entry_type = 'state' AND is_current = 1`,
     ).run(
       content,
@@ -3034,6 +3034,8 @@ export interface SemanticQueryOptions {
    * with callers that do not yet supply a model name.
    */
   queryEmbeddingModel?: string;
+  /** Canonical embedding manifest. Exact-match before ranking; NULL legacy vectors are excluded. */
+  queryEmbeddingIdentity?: string;
 }
 
 export function queryEntriesSemantic(
@@ -3087,6 +3089,7 @@ export function queryEntriesSemanticScored(
     until,
     maxDistance,
     queryEmbeddingModel,
+    queryEmbeddingIdentity,
   } = options;
   const clampedLimit = clampQueryLimit(limit, options);
   const now = nowUTC();
@@ -3118,6 +3121,10 @@ export function queryEntriesSemanticScored(
     if (queryEmbeddingModel !== undefined) {
       sql += " AND e.embedding_model = ?";
       params.push(queryEmbeddingModel);
+    }
+    if (queryEmbeddingIdentity !== undefined) {
+      sql += " AND e.embedding_identity = ?";
+      params.push(queryEmbeddingIdentity);
     }
 
     if (entryType) {
@@ -3170,26 +3177,34 @@ export function queryEntriesSemanticScored(
     return results;
   }
 
-  // When queryEmbeddingModel is set, the global vec0 KNN window can be
+  // With a model or identity filter, the global vec0 KNN window can be
   // starved: if more than knnFetch stale-model vectors rank closer than the
   // active-model candidates, the KNN window fills with entries that are then
   // filtered out — returning empty results even though valid vectors exist.
   //
-  // Fix: use an exact vec_distance_L2 scan pre-filtered by embedding_model so
-  // only model-matched vectors are scored. No ANN window, no starvation.
+  // Use an exact vec_distance_L2 scan pre-filtered by model and identity so
+  // only compatible vectors are scored. No ANN window, no starvation.
   // This mirrors the exactNamespaceScan path; it is the correct semantics for
   // a model-filtered search and is acceptable in production because:
   //   a) The scan is bounded to the model-matched subset (convergence shrinks
   //      this to ~0 stale rows once the worker finishes re-embedding).
   //   b) Correctness beats latency — returning mixed-space noise is far worse
   //      than a slightly slower scan during the convergence window.
-  if (queryEmbeddingModel !== undefined) {
+  if (queryEmbeddingModel !== undefined || queryEmbeddingIdentity !== undefined) {
     let sql = `
       SELECT e.*, vec_distance_L2(v.embedding, ?) AS distance
       FROM entries_vec v
       JOIN entries e ON e.id = v.entry_id
-      WHERE e.embedding_model = ? AND e.is_current = 1`;
-    const params: unknown[] = [queryEmbedding, queryEmbeddingModel];
+      WHERE e.is_current = 1`;
+    const params: unknown[] = [queryEmbedding];
+    if (queryEmbeddingModel !== undefined) {
+      sql += " AND e.embedding_model = ?";
+      params.push(queryEmbeddingModel);
+    }
+    if (queryEmbeddingIdentity !== undefined) {
+      sql += " AND e.embedding_identity = ?";
+      params.push(queryEmbeddingIdentity);
+    }
 
     sql = appendNamespaceSqlFilter(sql, params, "e.namespace", namespace, effectiveNamespaceMode, namespaceSelectors);
 
@@ -3246,7 +3261,7 @@ export function queryEntriesSemanticScored(
   // Fetch enough KNN candidates to satisfy clampedLimit after filtering.
   // vec0 KNN queries can't include tag/namespace predicates, so we
   // over-fetch and filter inline, stopping once we have enough matches.
-  // Only reached when queryEmbeddingModel is NOT set (backward-compat, or
+  // Only reached without model/identity filters (backward-compat, or
   // callers that opt out of the model guard explicitly).
   const knnFetch = Math.min(Math.max(clampedLimit * 10, 100), MAX_QUERY_PROBE_LIMIT);
 
@@ -3417,23 +3432,25 @@ export function storeEmbedding(
   entryId: string,
   embedding: Buffer,
   model: string,
+  identity?: string,
 ): void {
-  const current = db.prepare(
-    "SELECT 1 FROM entries WHERE id = ? AND is_current = 1",
-  ).get(entryId);
-  if (!current) {
+  db.transaction(() => {
+    const current = db.prepare(
+      "SELECT 1 FROM entries WHERE id = ? AND is_current = 1",
+    ).get(entryId);
+    if (!current) {
+      db.prepare("DELETE FROM entries_vec WHERE entry_id = ?").run(entryId);
+      return;
+    }
+    // vec0 has no UPSERT. Keep replacement and provenance in one transaction.
     db.prepare("DELETE FROM entries_vec WHERE entry_id = ?").run(entryId);
-    return;
-  }
-  // Delete existing, then insert (vec0 doesn't support UPSERT)
-  db.prepare("DELETE FROM entries_vec WHERE entry_id = ?").run(entryId);
-  db.prepare(
-    "INSERT INTO entries_vec (entry_id, embedding) VALUES (?, ?)",
-  ).run(entryId, embedding);
-
-  db.prepare(
-    "UPDATE entries SET embedding_status = 'generated', embedding_model = ? WHERE id = ? AND updated_at = (SELECT updated_at FROM entries WHERE id = ?)",
-  ).run(model, entryId, entryId);
+    db.prepare(
+      "INSERT INTO entries_vec (entry_id, embedding) VALUES (?, ?)",
+    ).run(entryId, embedding);
+    db.prepare(
+      "UPDATE entries SET embedding_status = 'generated', embedding_model = ?, embedding_identity = ? WHERE id = ?",
+    ).run(model, identity ?? null, entryId);
+  })();
 }
 
 export function removeEmbedding(
@@ -4819,7 +4836,7 @@ export function getNamespaceEntriesForIntake(
               substr(content, 1, ?) AS content,
               tags, agent_id, owner_principal_id, created_at, updated_at,
               valid_from, valid_until, is_current, classification,
-              embedding_status, embedding_model
+              embedding_status, embedding_model, embedding_identity
        FROM entries
        WHERE namespace = ?
          AND is_current = 1
@@ -5226,20 +5243,20 @@ export interface EmbeddingQueueCounts {
   processing: number;
   generated: number;
   failed: number;
-  /** Entries with embedding_status='generated' whose model matches activeModel. */
+  /** Generated entries matching the active model and, when provided, identity. */
   generated_current: number;
-  /** Entries with embedding_status='generated' whose model is set but != activeModel. */
+  /** Generated entries with known metadata incompatible with the active space. */
   generated_stale: number;
-  /** Entries with embedding_status='generated' whose model is NULL. */
+  /** Generated entries missing model or, in identity-aware mode, identity metadata. */
   generated_null: number;
   /**
-   * Entries that need re-embedding: generated_stale + generated_null + pending.
-   * Does NOT include processing (those are in-flight).
+   * Incompatible generated entries plus pending work. Identity-aware callers
+   * also count failed and processing work until it yields compatible vectors.
    */
   reembedding_backlog: number;
   total: number;
   /**
-   * Percentage of total entries with generated embeddings (0–100), or `null`
+   * Percentage with compatible embeddings (all generated in legacy mode), or `null`
    * when there are no entries at all (total == 0). `null` (not 0) so consumers
    * can distinguish "nothing to cover" from "0% covered".
    */
@@ -5250,32 +5267,63 @@ export function getEmbeddingQueueCounts(
   db: Database.Database,
   activeModel: string,
   isOwner: boolean,
+  activeIdentity?: string,
 ): EmbeddingQueueCounts {
   if (!isOwner) throw new Error("memory_health helpers are owner-only");
+  return countEmbeddingCompatibility(db, activeModel, activeIdentity, true, true);
+}
+
+/** Read-only compatibility preview, including databases that predate identity metadata. */
+export function previewEmbeddingCompatibility(
+  db: Database.Database,
+  activeModel: string,
+  activeIdentity: string,
+  isOwner: boolean,
+): EmbeddingQueueCounts {
+  if (!isOwner) throw new Error("memory_health helpers are owner-only");
+  const columns = db.prepare("PRAGMA table_info(entries)").all() as Array<{ name: string }>;
+  const hasIdentity = columns.some(({ name }) => name === "embedding_identity");
+  const hasCodeHealth = db.prepare(
+    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'code_health_records'",
+  ).get() !== undefined;
+  return countEmbeddingCompatibility(db, activeModel, activeIdentity, hasIdentity, hasCodeHealth);
+}
+
+function countEmbeddingCompatibility(
+  db: Database.Database,
+  activeModel: string,
+  activeIdentity: string | undefined,
+  hasIdentity: boolean,
+  hasCodeHealth: boolean,
+): EmbeddingQueueCounts {
+  const identityAware = activeIdentity !== undefined;
+  const identityColumn = hasIdentity ? "embedding_identity" : "NULL";
+  const compatible = identityAware
+    ? `embedding_model = ? AND ${identityColumn} = ?`
+    : "embedding_model = ?";
+  const unknown = identityAware
+    ? `(embedding_model IS NULL OR ${identityColumn} IS NULL)`
+    : "embedding_model IS NULL";
+  const stale = identityAware
+    ? `embedding_model IS NOT NULL AND ${identityColumn} IS NOT NULL AND (embedding_model != ? OR ${identityColumn} != ?)`
+    : "embedding_model IS NOT NULL AND embedding_model != ?";
+  const params = identityAware
+    ? [activeModel, activeIdentity, activeModel, activeIdentity]
+    : [activeModel, activeModel];
   const rows = db.prepare(
     `SELECT
        SUM(CASE WHEN embedding_status = 'pending'    THEN 1 ELSE 0 END) AS pending,
        SUM(CASE WHEN embedding_status = 'processing' THEN 1 ELSE 0 END) AS processing,
        SUM(CASE WHEN embedding_status = 'generated'  THEN 1 ELSE 0 END) AS generated,
        SUM(CASE WHEN embedding_status = 'failed'     THEN 1 ELSE 0 END) AS failed,
-       SUM(CASE WHEN embedding_status = 'generated' AND embedding_model = ?    THEN 1 ELSE 0 END) AS generated_current,
-       SUM(CASE WHEN embedding_status = 'generated' AND embedding_model != ? AND embedding_model IS NOT NULL THEN 1 ELSE 0 END) AS generated_stale,
-       SUM(CASE WHEN embedding_status = 'generated' AND embedding_model IS NULL THEN 1 ELSE 0 END) AS generated_null,
+       SUM(CASE WHEN embedding_status = 'generated' AND (${compatible}) THEN 1 ELSE 0 END) AS generated_current,
+       SUM(CASE WHEN embedding_status = 'generated' AND (${stale}) THEN 1 ELSE 0 END) AS generated_stale,
+       SUM(CASE WHEN embedding_status = 'generated' AND ${unknown} THEN 1 ELSE 0 END) AS generated_null,
        COUNT(*) AS total
      FROM entries
      WHERE is_current = 1
-       AND NOT EXISTS (SELECT 1 FROM code_health_records chr WHERE chr.entry_id = entries.id)`,
-  ).get(activeModel, activeModel) as {
-    pending: number | null;
-    processing: number | null;
-    generated: number | null;
-    failed: number | null;
-    generated_current: number | null;
-    generated_stale: number | null;
-    generated_null: number | null;
-    total: number | null;
-  };
-
+       ${hasCodeHealth ? "AND NOT EXISTS (SELECT 1 FROM code_health_records chr WHERE chr.entry_id = entries.id)" : ""}`,
+  ).get(...params) as Record<"pending" | "processing" | "generated" | "failed" | "generated_current" | "generated_stale" | "generated_null" | "total", number | null>;
   const pending = rows.pending ?? 0;
   const processing = rows.processing ?? 0;
   const generated = rows.generated ?? 0;
@@ -5284,20 +5332,13 @@ export function getEmbeddingQueueCounts(
   const generated_stale = rows.generated_stale ?? 0;
   const generated_null = rows.generated_null ?? 0;
   const total = rows.total ?? 0;
-  const reembedding_backlog = generated_stale + generated_null + pending;
-  const coverage_pct = total > 0 ? Math.round((generated / total) * 1000) / 10 : null;
-
+  const reembedding_backlog = generated_stale + generated_null + pending
+    + (identityAware ? processing + failed : 0);
+  const covered = identityAware ? generated_current : generated;
+  const coverage_pct = total > 0 ? Math.round((covered / total) * 1000) / 10 : null;
   return {
-    pending,
-    processing,
-    generated,
-    failed,
-    generated_current,
-    generated_stale,
-    generated_null,
-    reembedding_backlog,
-    total,
-    coverage_pct,
+    pending, processing, generated, failed, generated_current, generated_stale,
+    generated_null, reembedding_backlog, total, coverage_pct,
   };
 }
 

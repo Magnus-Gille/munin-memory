@@ -2,8 +2,23 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { homedir } from "node:os";
 
 // Mock @huggingface/transformers before any imports that use it
-const mockPipeline = vi.fn().mockResolvedValue(vi.fn());
-const mockEnv: Record<string, unknown> = {};
+const mockPipelineEnvSnapshots: Array<Record<string, unknown>> = [];
+let mockScratchSequence = 0;
+const mockPipeline = vi.fn().mockImplementation(async () => {
+  mockPipelineEnvSnapshots.push({
+    localModelPath: mockEnv.localModelPath,
+    allowLocalModels: mockEnv.allowLocalModels,
+    allowRemoteModels: mockEnv.allowRemoteModels,
+    cacheDir: mockEnv.cacheDir,
+    useFSCache: mockEnv.useFSCache,
+    useBrowserCache: mockEnv.useBrowserCache,
+    useCustomCache: mockEnv.useCustomCache,
+    remoteHost: mockEnv.remoteHost,
+    remotePathTemplate: mockEnv.remotePathTemplate,
+  });
+  return vi.fn();
+});
+const mockEnv: Record<string, unknown> = { allowRemoteModels: true };
 
 vi.mock("@huggingface/transformers", () => ({
   env: mockEnv,
@@ -30,16 +45,20 @@ vi.mock("node:fs", async (importOriginal) => {
       if (typeof p === "string" && p.endsWith("/hf-cache")) return undefined;
       return actual.mkdirSync(p, opts as Parameters<typeof actual.mkdirSync>[1]);
     },
+    mkdtempSync: (p: string) => `${p}${++mockScratchSequence}`,
+    rmdirSync: () => undefined,
   };
 });
 
-import { initEmbeddings } from "../src/embeddings.js";
+import { _setExtractorForTesting, initEmbeddings } from "../src/embeddings.js";
 
 describe("initEmbeddings cache directory integration", () => {
   const originalDbPath = process.env.MUNIN_MEMORY_DB_PATH;
 
   beforeEach(() => {
     mockPipeline.mockClear();
+    mockPipelineEnvSnapshots.length = 0;
+    _setExtractorForTesting(null);
     delete mockEnv.cacheDir;
   });
 
@@ -59,8 +78,28 @@ describe("initEmbeddings cache directory integration", () => {
 
     const expectedCacheDir = `${homedir()}/.munin-memory/hf-cache`;
 
-    // transformers.env.cacheDir was set to absolute path
-    expect(mockEnv.cacheDir).toBe(expectedCacheDir);
+    // The scoped source environment is visible during pipeline construction, then restored.
+    expect(mockPipelineEnvSnapshots).toHaveLength(1);
+    expect(mockPipelineEnvSnapshots[0]).toMatchObject({
+      cacheDir: expectedCacheDir,
+      localModelPath: expect.stringContaining(".munin-empty-model-source-"),
+      allowLocalModels: true,
+      allowRemoteModels: true,
+      useFSCache: true,
+      useBrowserCache: false,
+      useCustomCache: false,
+    });
+    expect(mockEnv).toMatchObject({
+      localModelPath: undefined,
+      allowLocalModels: undefined,
+      allowRemoteModels: true,
+      cacheDir: undefined,
+      useFSCache: undefined,
+      useBrowserCache: undefined,
+      useCustomCache: undefined,
+      remoteHost: undefined,
+      remotePathTemplate: undefined,
+    });
 
     // pipeline() was called with cache_dir set to the same absolute path
     expect(mockPipeline).toHaveBeenCalledWith(
@@ -78,7 +117,22 @@ describe("initEmbeddings cache directory integration", () => {
 
     const expectedCacheDir = "/var/lib/munin-memory/hf-cache";
 
-    expect(mockEnv.cacheDir).toBe(expectedCacheDir);
+    expect(mockPipelineEnvSnapshots).toHaveLength(1);
+    expect(mockPipelineEnvSnapshots[0]).toMatchObject({
+      cacheDir: expectedCacheDir,
+      localModelPath: expect.stringContaining(".munin-empty-model-source-"),
+    });
+    expect(mockEnv).toMatchObject({
+      localModelPath: undefined,
+      allowLocalModels: undefined,
+      allowRemoteModels: true,
+      cacheDir: undefined,
+      useFSCache: undefined,
+      useBrowserCache: undefined,
+      useCustomCache: undefined,
+      remoteHost: undefined,
+      remotePathTemplate: undefined,
+    });
     expect(mockPipeline).toHaveBeenCalledWith(
       "feature-extraction",
       expect.any(String),
@@ -87,13 +141,30 @@ describe("initEmbeddings cache directory integration", () => {
   });
 
   it("never passes a raw tilde path to transformers", async () => {
-    delete process.env.MUNIN_MEMORY_DB_PATH;
+    process.env.MUNIN_MEMORY_DB_PATH = "~/munin-test/memory.db";
 
     await initEmbeddings();
 
-    const cacheDir = mockEnv.cacheDir as string;
+    const cacheDir = mockPipelineEnvSnapshots[0]?.cacheDir as string;
     expect(cacheDir).toBeDefined();
+    expect(cacheDir).toBe(`${homedir()}/munin-test/hf-cache`);
     expect(cacheDir).not.toContain("~");
     expect(cacheDir.startsWith("/")).toBe(true);
+    expect(mockPipeline).toHaveBeenCalledWith(
+      "feature-extraction",
+      expect.any(String),
+      expect.objectContaining({ cache_dir: cacheDir }),
+    );
+    expect(mockEnv).toMatchObject({
+      localModelPath: undefined,
+      allowLocalModels: undefined,
+      allowRemoteModels: true,
+      cacheDir: undefined,
+      useFSCache: undefined,
+      useBrowserCache: undefined,
+      useCustomCache: undefined,
+      remoteHost: undefined,
+      remotePathTemplate: undefined,
+    });
   });
 });

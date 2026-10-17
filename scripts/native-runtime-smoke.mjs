@@ -96,6 +96,7 @@ async function runChild(argv) {
       generateEmbedding,
       getActiveEmbeddingDtype,
       getActiveEmbeddingModel,
+      getActiveEmbeddingIdentity,
       getEmbeddingCacheDir,
       initEmbeddings,
     } = await import("../dist/embeddings.js");
@@ -161,7 +162,9 @@ async function runChild(argv) {
 
     const entry = readState(db, "native-runtime-smoke", "synthetic");
     assert(entry?.id, "Synthetic entry disappeared before vector storage");
-    storeEmbedding(db, entry.id, embeddingToBuffer(vector), model);
+    const identity = getActiveEmbeddingIdentity();
+    assert(identity, "Loaded embedding identity is unavailable");
+    storeEmbedding(db, entry.id, embeddingToBuffer(vector), model, identity);
     const vectorRow = db.prepare(
       "SELECT entry_id, vec_distance_L2(embedding, ?) AS distance FROM entries_vec WHERE entry_id = ?",
     ).get(embeddingToBuffer(vector), entry.id);
@@ -169,9 +172,9 @@ async function runChild(argv) {
     assert(Number.isFinite(vectorRow.distance) && vectorRow.distance <= 1e-3, `sqlite-vec distance probe failed: ${vectorRow.distance}`);
 
     const stored = db.prepare(
-      "SELECT embedding_status, embedding_model FROM entries WHERE id = ?",
+      "SELECT embedding_status, embedding_model, embedding_identity FROM entries WHERE id = ?",
     ).get(entry.id);
-    assert(stored?.embedding_status === "generated" && stored.embedding_model === model, "Embedding metadata was not persisted");
+    assert(stored?.embedding_status === "generated" && stored.embedding_model === model && stored.embedding_identity === identity, "Embedding metadata was not persisted");
 
     console.log(
       `Native runtime smoke PASS (${phase}; dtype=${dtype}; model=${model}; `
