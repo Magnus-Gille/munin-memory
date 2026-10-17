@@ -1,3 +1,4 @@
+import { PublicValidationError } from "./internal/public-errors.js";
 import type Database from "better-sqlite3";
 import {
   getConfiguredLegacyBearerTransportType,
@@ -229,13 +230,13 @@ export function parseExplicitClassification(
 
   const invalidTagLevels = tagLevels.filter((value) => !isClassificationLevel(value));
   if (invalidTagLevels.length > 0) {
-    throw new Error(
+    throw new PublicValidationError(
       `Invalid classification tag(s): ${invalidTagLevels.map((value) => `"classification:${value}"`).join(", ")}.`,
     );
   }
 
   if (tagLevels.length > 1) {
-    throw new Error(
+    throw new PublicValidationError(
       `Multiple classification tags found: ${tagLevels.map((value) => `"classification:${value}"`).join(", ")}.`,
     );
   }
@@ -243,7 +244,7 @@ export function parseExplicitClassification(
   let paramLevel: ClassificationLevel | undefined;
   if (classification !== undefined && classification !== null) {
     if (!isClassificationLevel(classification)) {
-      throw new Error(
+      throw new PublicValidationError(
         `Invalid classification "${classification}". Expected one of: ${CLASSIFICATION_LEVELS.join(", ")}.`,
       );
     }
@@ -252,7 +253,7 @@ export function parseExplicitClassification(
 
   const tagLevel = tagLevels[0] as ClassificationLevel | undefined;
   if (paramLevel && tagLevel && paramLevel !== tagLevel) {
-    throw new Error(
+    throw new PublicValidationError(
       `classification parameter "${paramLevel}" conflicts with tag "${getClassificationTag(tagLevel)}".`,
     );
   }
@@ -376,7 +377,7 @@ export function resolveStoredClassification(
           source: "explicit",
         };
       }
-      throw new Error(
+      throw new PublicValidationError(
         `Classification "${explicitClassification}" is below namespace floor "${namespaceFloor}" for "${namespace}".`,
       );
     }

@@ -17,6 +17,18 @@ changelog is the canonical record of what moved.
 
 ### Security
 
+- **Safe MCP exception boundary (#368).** Unexpected backend failures return a
+  fixed `internal_error` message and an opaque error reference. Deliberate
+  validation, access, CAS, capacity, and delete-preview errors keep their public
+  contracts. Diagnostic output contains only server-owned stage labels and
+  references; diagnostic and telemetry failures cannot mask tool results or
+  break optional intake/health degradation. Code-health returned errors use the
+  same typed boundary; consolidation preview/background failures and health
+  alerts retain fixed guidance with an error reference instead of provider text.
+  A failed write response can follow
+  a committed write, so inspect state or use an existing replay receipt before
+  retrying.
+
 - **CodeQL action pinning (#366).** Update both CodeQL workflow steps to the
   reviewed v4.38.3 commit and group CodeQL action updates in Dependabot. A
   workflow contract check rejects mutable or mismatched init/analyze pins.

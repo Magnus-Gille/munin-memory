@@ -1,3 +1,4 @@
+import { getPublicValidationMessage, reportUnexpectedError } from "./internal/public-errors.js";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
   ListToolsRequestSchema,
@@ -1311,6 +1312,14 @@ function getVisibleOtherKeysInNamespace(
   );
 }
 
+function logToolCallBestEffort(...args: Parameters<typeof logToolCall>): void {
+  try {
+    logToolCall(...args);
+  } catch {
+    reportUnexpectedError("tool telemetry failed");
+  }
+}
+
 function getVisibleIntakeCandidates(
   db: Database.Database,
   ctx: AccessContext,
@@ -1359,9 +1368,8 @@ function evaluateIntakeAdvisory(
       warnings.push(`[intake:${flag.check}] ${flag.message}`);
     }
     return result;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.warn(`[intake] advisory evaluation failed: ${message}`);
+  } catch {
+    reportUnexpectedError("intake advisory evaluation failed");
     warnings.push(
       "[intake:unavailable] Advisory quality evaluation was unavailable; the write was not blocked.",
     );
@@ -1378,9 +1386,8 @@ function persistIntakeAdvisory(
   if (!result) return;
   try {
     persistIntake(db, entryId, result);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.warn(`[intake] advisory metadata persistence failed: ${message}`);
+  } catch {
+    reportUnexpectedError("intake advisory metadata persistence failed");
     warnings.push(
       "[intake:persistence_unavailable] The memory write succeeded, but optional intake metadata was not persisted.",
     );
@@ -1642,7 +1649,8 @@ function preflightWriteClassification(
       existingClassification,
       allowBelowFloorOverride: classificationOverride === true,
     });
-  } catch {
+  } catch (error) {
+    if (getPublicValidationMessage(error) === undefined) throw error;
     // Classification resolution errors (e.g. below namespace floor) will be
     // caught and reported by the actual write path — skip the visibility check.
     return null;
@@ -2252,11 +2260,9 @@ function resolveProspectiveWriteClassification(
     }
     return { ok: true, classification: resolved.classification };
   } catch (error) {
-    return {
-      ok: false,
-      code: "validation_error",
-      error: (error as Error).message,
-    };
+    const message = getPublicValidationMessage(error);
+    if (message === undefined) throw error;
+    return { ok: false, code: "validation_error", error: message };
   }
 }
 
@@ -3608,7 +3614,9 @@ function resolveReviewClassification(
     if (!visibility.allowed) return { error: visibility.error };
     return { classification: resolved.classification };
   } catch (error) {
-    return { error: (error as Error).message };
+    const message = getPublicValidationMessage(error);
+    if (message === undefined) throw error;
+    return { error: message };
   }
 }
 
@@ -10575,7 +10583,9 @@ export function registerTools(
                     },
                   );
                 } catch (error) {
-                  return errResult("write", "validation_error", (error as Error).message);
+                  const message = getPublicValidationMessage(error);
+                  if (message === undefined) throw error;
+                  return errResult("write", "validation_error", message);
                 }
 
                 if (patchResult.status === "not_found") {
@@ -10767,7 +10777,9 @@ export function registerTools(
                       },
                     );
               } catch (error) {
-                return errResult("write", "validation_error", (error as Error).message);
+                const message = getPublicValidationMessage(error);
+                if (message === undefined) throw error;
+                return errResult("write", "validation_error", message);
               }
 
               if (result.status === "conflict") {
@@ -11110,7 +11122,9 @@ export function registerTools(
                   },
                 );
               } catch (error) {
-                return errResult("update_status", "validation_error", (error as Error).message);
+                const message = getPublicValidationMessage(error);
+                if (message === undefined) throw error;
+                return errResult("update_status", "validation_error", message);
               }
 
               if (result.status === "conflict") {
@@ -12394,7 +12408,9 @@ export function registerTools(
                       classificationOverride: classification_override,
                     });
               } catch (error) {
-                return errResult("log", "validation_error", (error as Error).message);
+                const message = getPublicValidationMessage(error);
+                if (message === undefined) throw error;
+                return errResult("log", "validation_error", message);
               }
               if ("status" in result && result.status === "conflict") {
                 return errResult("log", "conflict", result.message, {
@@ -12722,7 +12738,7 @@ export function registerTools(
                   if (error instanceof DeletePreviewPartialLineageError) {
                     return errResult("delete", "partial_lineage", error.message, { namespace, key: key ?? undefined });
                   }
-                  return errResult("delete", "conflict", (error as Error).message, { namespace, key });
+                  throw error;
                 }
                 const target = key ? `entry "${key}" in "${namespace}"` : `all entries in "${namespace}"`;
                 return okResult("delete", {
@@ -12742,7 +12758,7 @@ export function registerTools(
                 if (error instanceof DeletePreviewPartialLineageError) {
                   return errResult("delete", "partial_lineage", error.message, { namespace, key: key ?? undefined });
                 }
-                return errResult("delete", "conflict", (error as Error).message, { namespace, key: key ?? undefined });
+                throw error;
               }
               const token = generateDeleteToken(namespace, info, key);
               const target = key ? `entry "${key}" in "${namespace}"` : `all entries in "${namespace}"`;
@@ -13096,23 +13112,6 @@ export function registerTools(
               const ovrds = _healthSectionOverrides;
 
               /**
-               * Log a section failure to stderr with the redacted diagnostic.
-               * The raw error text is NEVER returned in the payload — only the
-               * stable opaque string "section_unavailable" is sent to the caller.
-               * This prevents raw exception text, schema names, local paths, and
-               * secret patterns from leaking through the health response.
-               */
-              function logHealthError(section: string, err: unknown): void {
-                // Opaque by construction: log only the section name + the error
-                // CLASS, never the message. Error messages can carry local paths
-                // or secret-shaped values that redactSecrets may not fully catch,
-                // and health is an owner-only diagnostic — the section + class is
-                // enough to investigate (reproduce locally) without log leakage.
-                const errClass = err instanceof Error ? err.constructor.name : typeof err;
-                process.stderr.write(`[munin] memory_health section "${section}" failed (${errClass})\n`);
-              }
-
-              /**
                * Run a section loader (real or injected override), catching any
                * thrown error. On success: sections[name] = { ok: true, ...data }.
                * On failure: sections[name] = { ok: false, error: "section_unavailable" }
@@ -13122,8 +13121,8 @@ export function registerTools(
                 const actualLoader = (ovrds as Record<string, HealthSectionLoader | undefined> | null)?.[name] ?? loader;
                 try {
                   sections[name] = { ok: true, ...actualLoader() };
-                } catch (err) {
-                  logHealthError(name, err);
+                } catch {
+                  reportUnexpectedError(`memory_health section "${name}" failed`);
                   sections[name] = { ok: false, error: "section_unavailable" };
                   partial = true;
                 }
@@ -13335,7 +13334,7 @@ export function registerTools(
           isErr,
         );
         if (!skipToolCallTelemetry) {
-          logToolCall(db, {
+          logToolCallBestEffort(db, {
             sessionId,
             principalId: ctx.principalId,
             toolName: name ?? "unknown",
@@ -13348,15 +13347,19 @@ export function registerTools(
         return result;
       } catch (err) {
         const durationMs = performance.now() - telemetryStart;
-        const message = err instanceof Error ? err.message : String(err);
+        const validationMessage = getPublicValidationMessage(err);
+        const errorReference = validationMessage === undefined
+          ? reportUnexpectedError("tool call failed")
+          : undefined;
+        const message = validationMessage ?? "An unexpected error occurred. Contact the server operator with the error reference. Check whether a write succeeded before retrying.";
         const errorResponse = {
           content: [{
             type: "text" as const,
-            text: JSON.stringify({ ok: false, action: name ?? "unknown", error: "internal_error", message }),
+            text: JSON.stringify({ ok: false, action: name ?? "unknown", error: "internal_error", message, ...(errorReference ? { error_reference: errorReference } : {}) }),
           }],
           isError: true,
         };
-        logToolCall(db, {
+        logToolCallBestEffort(db, {
           sessionId,
           principalId: ctx.principalId,
           toolName: name ?? "unknown",

@@ -1,3 +1,4 @@
+import { reportUnexpectedError } from "./internal/public-errors.js";
 import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import {
@@ -107,6 +108,11 @@ function filterCrossZoneRefs(
     recordCrossZoneBlock(db, sourceNamespace, ref.target_namespace, `Blocked cross-reference: ${reason}`);
   }
   return allowed;
+}
+
+function unexpectedConsolidationError(): string {
+  const reference = reportUnexpectedError("consolidation failed");
+  return `Consolidation failed unexpectedly. Contact the server operator with error reference ${reference ?? "unavailable"}.`;
 }
 
 // --- Configuration from env vars ---
@@ -237,8 +243,8 @@ function maybeWriteHealthAlert(db: Database.Database): void {
   try {
     writeState(db, "meta/system-health", "consolidation", content, ["system_alert", "consolidation"], "consolidation-worker");
     lastWrittenStatus = status;
-  } catch (err) {
-    console.error("consolidation: failed to write health alert entry:", err instanceof Error ? err.message : String(err));
+  } catch {
+    reportUnexpectedError("consolidation health alert write failed");
   }
 }
 
@@ -308,8 +314,8 @@ export function startConsolidationWorker(db: Database.Database): void {
           maybeWriteHealthAlert(db);
         }
       }
-    } catch (err) {
-      console.warn("consolidation: startup reconciliation failed:", err instanceof Error ? err.message : String(err));
+    } catch {
+      reportUnexpectedError("consolidation startup reconciliation failed");
     }
   }
 
@@ -676,9 +682,7 @@ async function callAndParseSynthesis(
     } catch (err) {
       lastError = err;
       if (attempt < maxAttempts) {
-        console.warn(
-          `consolidation: synthesis parse attempt ${attempt}/${maxAttempts} failed, retrying: ${err instanceof Error ? err.message : String(err)}`,
-        );
+        reportUnexpectedError("consolidation synthesis parse failed; retrying");
       }
     }
   }
@@ -736,11 +740,10 @@ export async function consolidateNamespace(
 
     // Step 6: Write results
     return persistRunResults(db, namespace, logs, result, mergedRefs, scannerOrphans, response, metadata, durationMs);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+  } catch {
     return makeRunResult(namespace, {
       duration_ms: Date.now() - startTime,
-      error: message,
+      error: unexpectedConsolidationError(),
     });
   }
 }
@@ -834,8 +837,8 @@ export async function previewConsolidationNamespace(
       preview,
       source_fingerprint: consolidationWindowFingerprint(logs),
     });
-  } catch (err) {
-    return makeRunResult(namespace, { duration_ms: Date.now() - startedAt, error: err instanceof Error ? err.message : String(err) });
+  } catch {
+    return makeRunResult(namespace, { duration_ms: Date.now() - startedAt, error: unexpectedConsolidationError() });
   }
 }
 

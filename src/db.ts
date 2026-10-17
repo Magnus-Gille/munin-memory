@@ -1,3 +1,4 @@
+import { PublicValidationError } from "./internal/public-errors.js";
 import Database from "better-sqlite3";
 import * as sqliteVec from "sqlite-vec";
 import { randomUUID, createHash, type Hash } from "node:crypto";
@@ -450,11 +451,11 @@ export function writeState(
 ): WriteStateResult {
   const namespaceCheck = validateWriteNamespace(namespace);
   if (!namespaceCheck.valid) {
-    throw new Error(namespaceCheck.error);
+    throw new PublicValidationError(namespaceCheck.error ?? "Invalid namespace.");
   }
 
   if (writeOptions?.createIfAbsent === true && expectedUpdatedAt !== undefined) {
-    throw new Error("createIfAbsent and expectedUpdatedAt are mutually exclusive write preconditions");
+    throw new PublicValidationError("createIfAbsent and expectedUpdatedAt are mutually exclusive write preconditions");
   }
 
   const txn = db.transaction(() => {
@@ -602,7 +603,7 @@ export function patchState(
 ): PatchStateResult {
   const namespaceCheck = validateWriteNamespace(namespace);
   if (!namespaceCheck.valid) {
-    throw new Error(namespaceCheck.error);
+    throw new PublicValidationError(namespaceCheck.error ?? "Invalid namespace.");
   }
 
   const txn = db.transaction((): PatchStateResult => {
@@ -914,10 +915,10 @@ export function supersedeState(
       };
     }
     if (validFrom < existing.valid_from) {
-      throw new Error("valid_from cannot precede the correction target's valid_from timestamp.");
+      throw new PublicValidationError("valid_from cannot precede the correction target's valid_from timestamp.");
     }
     if (validFrom > nowUTC() && !(allowExistingFutureBoundary && validFrom === existing.valid_from)) {
-      throw new Error("valid_from cannot be in the future.");
+      throw new PublicValidationError("valid_from cannot be in the future.");
     }
 
     const resolved = resolveWriteClassification(
@@ -928,7 +929,7 @@ export function supersedeState(
       existing.classification,
     );
     if (compareClassificationLevels(resolved.classification, existing.classification) < 0) {
-      throw new Error("A correction cannot lower the classification of the entry it supersedes.");
+      throw new PublicValidationError("A correction cannot lower the classification of the entry it supersedes.");
     }
 
     const now = nowUTC();
@@ -1082,10 +1083,10 @@ export function supersedeLog(
       };
     }
     if (validFrom < existing.valid_from) {
-      throw new Error("valid_from cannot precede the correction target's valid_from timestamp.");
+      throw new PublicValidationError("valid_from cannot precede the correction target's valid_from timestamp.");
     }
     if (validFrom > nowUTC()) {
-      throw new Error("valid_from cannot be in the future.");
+      throw new PublicValidationError("valid_from cannot be in the future.");
     }
     const resolved = resolveWriteClassification(
       db,
@@ -1095,7 +1096,7 @@ export function supersedeLog(
       existing.classification,
     );
     if (compareClassificationLevels(resolved.classification, existing.classification) < 0) {
-      throw new Error("A correction cannot lower the classification of the entry it supersedes.");
+      throw new PublicValidationError("A correction cannot lower the classification of the entry it supersedes.");
     }
 
     const now = nowUTC();
@@ -4364,7 +4365,7 @@ export function getAuditHistory(
   if (since !== undefined) {
     const d = new Date(since);
     if (isNaN(d.getTime())) {
-      throw new Error(`Invalid "since" value: "${since}". Must be a valid ISO 8601 timestamp.`);
+      throw new PublicValidationError(`Invalid "since" value: "${since}". Must be a valid ISO 8601 timestamp.`);
     }
   }
 
@@ -4413,18 +4414,18 @@ export function getAuditHistoryPage(
   if (since !== undefined) {
     const d = new Date(since);
     if (isNaN(d.getTime())) {
-      throw new Error(`Invalid "since" value: "${since}". Must be a valid ISO 8601 timestamp.`);
+      throw new PublicValidationError(`Invalid "since" value: "${since}". Must be a valid ISO 8601 timestamp.`);
     }
   }
 
   if (cursor !== undefined && (!Number.isInteger(cursor) || cursor < 0)) {
-    throw new Error(`Invalid "cursor" value: "${cursor}". Must be a non-negative integer.`);
+    throw new PublicValidationError(`Invalid "cursor" value: "${cursor}". Must be a non-negative integer.`);
   }
   if (olderCursor !== undefined && (!Number.isInteger(olderCursor) || olderCursor < 0)) {
-    throw new Error(`Invalid "older_cursor" value: "${olderCursor}". Must be a non-negative integer.`);
+    throw new PublicValidationError(`Invalid "older_cursor" value: "${olderCursor}". Must be a non-negative integer.`);
   }
   if (cursor !== undefined && olderCursor !== undefined) {
-    throw new Error(`"cursor" and "older_cursor" are mutually exclusive.`);
+    throw new PublicValidationError(`"cursor" and "older_cursor" are mutually exclusive.`);
   }
 
   let sql = "SELECT id, timestamp, agent_id, action, namespace, key, detail, entry_id FROM audit_log WHERE 1=1";

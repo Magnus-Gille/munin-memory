@@ -1,3 +1,4 @@
+import { reportUnexpectedError } from "./internal/public-errors.js";
 import type Database from "better-sqlite3";
 import type {
   Entry,
@@ -98,9 +99,8 @@ function parseTags(raw: string): string[] {
     return Array.isArray(parsed)
       ? parsed.filter((tag): tag is string => typeof tag === "string")
       : [];
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.warn(`[intake] ignored malformed stored tags: ${message}`);
+  } catch {
+    reportUnexpectedError("intake ignored malformed stored tags");
     return [];
   }
 }
