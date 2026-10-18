@@ -10,6 +10,11 @@ changelog is the canonical record of what moved.
 
 ### Added
 
+- A cold-build command for the 500-question LongMemEval-S evidence lane (#341)
+  creates a new snapshot and frozen query vectors from a pinned public dataset
+  and BGE model. Its manifest records model-file, input, output, source and runtime
+  provenance; the existing evaluation command replays those artifacts offline.
+
 - An offline packed-gold entry-ID benchmark lane (#341) uses explicitly supplied
   detached snapshots and frozen query vectors with immutable embedding provenance.
   It records context truncation, input/source hashes and paired all-gold question
@@ -18,6 +23,9 @@ changelog is the canonical record of what moved.
   infrastructure only; the real 500-question baseline and acceptance remain open.
 
 ### Fixed
+
+- Benchmark corpus generation now rebuilds vectors with missing or stale immutable
+  identities, records the active identity, and rejects model-binding changes.
 
 - Bind stored and query embeddings to an immutable model/runtime identity, including
   revision and effective dtype, rather than the model name alone. Migration 31

@@ -84,12 +84,64 @@ Reports are written atomically and cannot overwrite an input or baseline,
 including symlink and hardlink aliases. No baseline is committed for synthetic
 fixtures.
 
+## Fresh 500-question preparation
+
+Preparation is a separate, explicit command. It never runs during evaluation or
+CI, never approves a baseline, and never modifies the retained historical
+artifacts. Use the reviewed public LongMemEval-S raw file; its bytes must match
+SHA-256 `d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442`.
+The manifest names the immutable upstream dataset revision.
+
+```sh
+npm run benchmark:evidence:prepare -- \
+  --input /absolute/path/longmemeval_s_cleaned.json \
+  --output-dir /absolute/path/munin-memory/benchmark/generated/evidence-metric/new-run \
+  --as-of 2026-10-01T00:00:00.000Z \
+  --allow-model-download
+```
+
+The output leaf must not exist, must be beneath `benchmark/generated/`, and must
+not alias a symlink. Preparation owns only that new directory and refuses resume
+or overwrite. Failure preserves its partial outputs and `failure.json`; use a
+different new directory for a corrected attempt. Input hash/count mismatches are
+rejected before model initialization. No source file is deleted or rewritten.
+
+This cold build pins BGE `Xenova/bge-small-en-v1.5` revision
+`ea104dacec62c0de699686887e3f920caeb4f3e3`, fp32, CPU, 384 dimensions, mean pooling
+and normalization through the production embedding initializer. The model cache
+belongs to the new output directory. Downloads are disabled unless the explicit
+flag is present, so a cold cache fails by default. The optional flag enables only
+the production pinned Hugging Face source. There is no reader/judge model call.
+
+The existing adapter builds all 500 questions and 23,854 session entries with
+per-question namespaces. The explicit clock freezes ingestion metadata as well
+as the later evaluation; measured preparation duration uses a monotonic clock.
+All corpus vectors are generated afresh under one captured active identity;
+query vectors share that identity and identical query texts share exact float32
+values. Changed model files, source, inputs or active binding invalidate the run.
+
+Successful output includes `snapshot.db`, `queries.jsonl`, `query-vectors.json`,
+`build-provenance.json`, `manifest.json`, the working `corpus.db`, and `hf-cache/`.
+The snapshot uses SQLite backup, DELETE journal mode, integrity/foreign-key checks
+and no sidecars. The manifest records final input/output SHA-256 hashes and sizes,
+counts, actual canonical embedding identity, Node/package/platform metadata, full
+source Git revision and dirty disclosure, source/lockfile hashes, and hashes of
+the pinned cache's model/config/tokenizer files before and after generation.
+Model-file hashes describe measured local bytes; verification against upstream
+revision file metadata is a separate review step before accepting the artifact.
+
+Then run the existing offline command above with these three generated inputs.
+Its first report remains `not_measured` with exit 2 until manually reviewed.
+Retain original artifacts unchanged: this is a new measured reproduction and
+cannot recover historical generation provenance or independently prove 296/500.
+
 ## Remaining #341 acceptance work
 
 The existing local LongMemEval snapshot and 500-question query set are retained,
 but the legacy snapshot has model-only embedding metadata and there is no frozen
 500-query vector artifact with verified immutable identity. They cannot enter
-this strict offline lane as-is. Verified snapshot storage/provenance, matching
-frozen query vectors, the real 500-question rerun and reviewed published baseline
-remain open under #341. This infrastructure does **not** reproduce or substantiate
-296/500, and this PR adds no CI schedule.
+this strict offline lane as-is. Preparation provides a fresh, provenance-bound
+replacement workflow; the real 500-question rerun, upstream model-file review,
+durable artifact storage and reviewed published baseline remain open until
+performed. Tooling alone does **not** reproduce or substantiate 296/500 and adds
+no CI schedule.
