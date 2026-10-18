@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "release_tag": "benchmark-evidence-longmemeval-s-20261018",
+  "files": [
+    {
+      "path": "snapshot.db",
+      "bytes": 648110080,
+      "sha256": "fe48b7a30433f23d487d05608cecd969734b45686a51e29f5f86ba328059036a",
+      "download": {
+        "url": "https://github.com/Magnus-Gille/munin-memory/releases/download/benchmark-evidence-longmemeval-s-20261018/snapshot.db.gz",
+        "bytes": 353388005,
+        "sha256": "0f7c35b9b969bd611765f89618f46dc305315aef7e61be5932532f5dc9f3ae2b",
+        "encoding": "gzip"
+      }
+    },
+    {
+      "path": "queries.jsonl",
+      "bytes": 266459,
+      "sha256": "274f858907c521cca2663c17fbb8bc5f2e198096d129e717c4c26a65c18ff7f1",
+      "download": {
+        "url": "https://github.com/Magnus-Gille/munin-memory/releases/download/benchmark-evidence-longmemeval-s-20261018/queries.jsonl",
+        "bytes": 266459,
+        "sha256": "274f858907c521cca2663c17fbb8bc5f2e198096d129e717c4c26a65c18ff7f1",
+        "encoding": "identity"
+      }
+    },
+    {
+      "path": "query-vectors.json",
+      "bytes": 5389300,
+      "sha256": "8c76c253a4755e590b85556b93400ef124c69f11518e1d19c6c841a07b46780c",
+      "download": {
+        "url": "https://github.com/Magnus-Gille/munin-memory/releases/download/benchmark-evidence-longmemeval-s-20261018/query-vectors.json",
+        "bytes": 5389300,
+        "sha256": "8c76c253a4755e590b85556b93400ef124c69f11518e1d19c6c841a07b46780c",
+        "encoding": "identity"
+      }
+    },
+    {
+      "path": "build-provenance.json",
+      "bytes": 934,
+      "sha256": "883722ddb7b903e7806ab48be8e9e04e4db0aa7e1ff937ac5ae6b4bdfaeaa749",
+      "download": {
+        "url": "https://github.com/Magnus-Gille/munin-memory/releases/download/benchmark-evidence-longmemeval-s-20261018/build-provenance.json",
+        "bytes": 934,
+        "sha256": "883722ddb7b903e7806ab48be8e9e04e4db0aa7e1ff937ac5ae6b4bdfaeaa749",
+        "encoding": "identity"
+      }
+    },
+    {
+      "path": "manifest.json",
+      "bytes": 6318,
+      "sha256": "38b681f691825a92a61d700c70719d8ab1b8ada7b6b90ff470d99f644706c575",
+      "download": {
+        "url": "https://github.com/Magnus-Gille/munin-memory/releases/download/benchmark-evidence-longmemeval-s-20261018/manifest.json",
+        "bytes": 6318,
+        "sha256": "38b681f691825a92a61d700c70719d8ab1b8ada7b6b90ff470d99f644706c575",
+        "encoding": "identity"
+      }
+    }
+  ]
+}

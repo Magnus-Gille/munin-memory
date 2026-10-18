@@ -1,0 +1,64 @@
+name: Packed evidence regression
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: evidence-regression-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  evidence-regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      MUNIN_EMBEDDINGS_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      # No dependency or data cache: every run demonstrates a cold checkout
+      # can obtain the exact frozen inputs without local state or model calls.
+      - run: npm ci
+      - name: Compare all 500 questions against the reviewed baseline
+        run: |
+          mkdir -p "$RUNNER_TEMP/evidence-results"
+          npm run benchmark:evidence:check -- \
+            --artifacts-dir "$RUNNER_TEMP/evidence-inputs" \
+            --output "$RUNNER_TEMP/evidence-results/report.json"
+      - name: Summarize the result
+        if: always()
+        run: |
+          node --input-type=module <<'JS'
+          import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          const report = join(process.env.RUNNER_TEMP, 'evidence-results/report.json');
+          const receipt = { revision: process.env.GITHUB_SHA, node: process.version, platform: process.platform, arch: process.arch, run_id: process.env.GITHUB_RUN_ID, run_attempt: process.env.GITHUB_RUN_ATTEMPT };
+          if (existsSync(report)) {
+            const result = JSON.parse(readFileSync(report, 'utf8'));
+            writeFileSync(join(process.env.RUNNER_TEMP, 'evidence-results/runner.json'), JSON.stringify(receipt, null, 2) + '\n');
+            appendFileSync(process.env.GITHUB_STEP_SUMMARY, `Packed evidence: **${result.quality_state}**\n\nAll-gold entry IDs: ${result.summary?.all_gold_count ?? 'unavailable'}/${result.summary?.query_count ?? 'unavailable'}. Gained: ${result.comparison?.gained_question_ids?.length ?? 'unavailable'}. Lost: ${result.comparison?.lost_question_ids?.length ?? 'unavailable'}.\n\nThis measures entry-ID presence, not answer accuracy. See the report artifact for per-question changes.\n`);
+          } else {
+            appendFileSync(process.env.GITHUB_STEP_SUMMARY, 'Packed evidence: **invalid / no report**. See the failing setup or download step; this is not a successful comparison.\n');
+          }
+          JS
+      - name: Retain comparison and verification receipts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: packed-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/evidence-results/
+          if-no-files-found: warn
+          retention-days: 30

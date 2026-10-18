@@ -45,13 +45,33 @@ the unversioned config's bytes matched the pinned upstream config. Actual model,
 tokenizer and ONNX loads used the pinned revision. Evaluation never loads a
 model or contacts a provider.
 
-## Retained artifacts and replay
+## Retained artifacts and shared replay
 
-The large frozen inputs remain in the persistent, Git-ignored directory
-`benchmark/generated/evidence-metric/longmemeval-s-20261018` in the primary local
-repository. They are not committed or hosted by this package. Remote durable
-cache/storage and a CI schedule remain undecided. A clean checkout alone does
-not contain the inputs required to replay this baseline.
+The frozen inputs remain in the primary repository's Git-ignored
+`benchmark/generated/evidence-metric/longmemeval-s-20261018` directory.
+`provenance.json` remains the unchanged record of the original run; its local-
+storage note is superseded by the additive `shared-artifacts.json`, which pins
+public asset sizes and SHA-256 hashes and cross-checks per-file provenance. Seven
+assets are published under the non-product release
+[`benchmark-evidence-longmemeval-s-20261018`](https://github.com/Magnus-Gille/munin-memory/releases/tag/benchmark-evidence-longmemeval-s-20261018),
+marked as a prerelease and separate from the `latest` product release.
+Assets include the compressed snapshot, queries, frozen vectors, build
+provenance, manifest and upstream attribution notices. Corrections use a new
+versioned release and reviewed lock update; hashes reject replaced bytes.
+
+From a clean checkout, fetch, verify and compare with:
+
+```sh
+npm run benchmark:evidence:check -- \
+  --artifacts-dir /absolute/path/to/fresh-artifact-directory \
+  --output /absolute/path/to/existing-parent/candidate-report.json
+```
+
+The command downloads or reuses the pinned inputs and writes a verification
+receipt beside the report. The full validation, path-safety and CI contract is
+in the [evidence-lane README](../../README.md). Its daily schedule starts after
+the workflow merges into the default branch. The existing `benchmark:evidence`
+evaluator remains offline; local replay instructions follow.
 
 Run from the repository root and set `ARTIFACT_DIR` to the **absolute** location
 of those retained artifacts. Check hashes before use; the commands below read
@@ -94,11 +114,13 @@ env -u MUNIN_SEMANTIC_MAX_DISTANCE npm run benchmark:evidence -- \
   --output "$ARTIFACT_DIR/offline-replay.json"
 ```
 
-Use a fresh report output path if retaining earlier replay reports. An unchanged
-comparison exits 0; a reproduced regression exits 1; invalid input/configuration
-exits 2. Input bindings and every query's packed/retrieved IDs can be compared
-without running embedding inference. The evaluator validates matching corpus
-provenance and rejects a snapshot requiring SQLite sidecars.
+Use a fresh report output path if retaining earlier replay reports. Unchanged or
+improved comparison exits 0; reproduced per-question regression exits 1;
+invalid or missing input/configuration exits 2. A gain does not offset a lost
+all-gold question. Input bindings and every query's
+packed/retrieved IDs can be compared without running embedding inference. The
+evaluator validates matching corpus provenance and rejects a snapshot requiring
+SQLite sidecars. It does not automatically update the baseline.
 
 Retain these exact frozen inputs to compare against this baseline. A fresh cold
 build creates new file bindings, and a different generation platform/runtime

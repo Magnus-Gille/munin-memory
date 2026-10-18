@@ -28,6 +28,14 @@ changelog is the canonical record of what moved.
   remain `not_measured` (exit 2) until compared with a reviewed baseline; that
   initial state is preserved in the new frozen baseline's original report bytes.
 
+- Published LongMemEval-S benchmark inputs in the versioned, non-product GitHub
+  release `benchmark-evidence-longmemeval-s-20261018`. Its clean-checkout
+  checker verifies pinned sizes, hashes and per-file provenance, downloads or
+  reuses the five inputs, then compares offline and writes a verification
+  receipt. The CI workflow definition covers PRs/pushes to `main`, daily
+  `04:23 UTC`, and manual dispatch with 30-day receipts. The schedule starts
+  after merge. The lane never updates the baseline.
+
 ### Security
 
 - **OAuth consent proxy and identity gates.** Public issuers now require an exact
