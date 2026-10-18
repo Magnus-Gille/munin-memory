@@ -52,10 +52,17 @@ log() { echo "$(ts) $*" | tee -a "$LOG" >&2; }
 # Push a Heimdall status panel. Optional (no-op if the hub env vars are unset).
 # Never logs the token; curl output is discarded.
 push_panel() {
-  local state="$1" message="$2"
-  [ -n "${HEIMDALL_HUB_URL:-}" ] && [ -n "${HEIMDALL_FLEET_TOKEN:-}" ] || return 0
-  curl -fsS --max-time 5 -X POST "$HEIMDALL_HUB_URL" \
-    -H "Authorization: Bearer ${HEIMDALL_FLEET_TOKEN}" \
+  local state="$1" message="$2" token="${HEIMDALL_FLEET_TOKEN:-}"
+  [ -n "${HEIMDALL_HUB_URL:-}" ] && [ -n "$token" ] || return 0
+  case "$token" in
+    *$'\r'*|*$'\n'*)
+      printf '%s\n' 'WARN: refusing Heimdall panel push because the fleet token contains CR/LF' >&2
+      return 0
+      ;;
+  esac
+  printf 'Authorization: Bearer %s\n' "$token" |
+    curl -fsS --max-time 5 -X POST "$HEIMDALL_HUB_URL" \
+    -H @- \
     -H "Content-Type: application/json" \
     -d "{\"service\":\"${SERVICE}\",\"panel\":\"${PANEL}\",\"kind\":\"status\",\"label\":\"Offsite backup\",\"state\":\"${state}\",\"message\":\"${message}\"}" \
     >/dev/null 2>&1 || true
