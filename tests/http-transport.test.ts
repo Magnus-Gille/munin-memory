@@ -529,7 +529,11 @@ describe("stateless HTTP transport", () => {
     ]);
   });
 
-  it("attaches diagnostics (redacted headers + body snippet) to 4xx /mcp logs", async () => {
+  it("keeps failed request logs to structured metadata without request bodies or arbitrary headers", async () => {
+    const bodyCanary = "synthetic-nested-body-canary";
+    const bodyPayload = `${bodyCanary}-${"x".repeat(700)}`;
+    const headerCanary = "synthetic-unknown-header-canary";
+    const requestId = "0b9f3c1e-6d2a-4f7e-9a51-2c8d7e4b1a36";
     const response = await supertest(app)
       .post("/mcp")
       .set({
@@ -539,27 +543,39 @@ describe("stateless HTTP transport", () => {
         "Content-Type": "application/json",
         "mcp-protocol-version": "2099-01-01",
         Cookie: "session=supersecret",
+        "X-Debug-Canary": headerCanary,
+        "X-Munin-Request-Id": requestId,
       })
       .send({
         jsonrpc: "2.0",
         id: 1,
         method: "tools/call",
-        params: { name: "memory_list", arguments: {} },
+        params: { name: "memory_list", arguments: { nested: { value: bodyPayload } } },
       });
 
     expect(response.status).toBe(400);
 
     const entry = requestLogs.at(-1);
-    expect(entry?.status).toBe(400);
-    expect(entry?.path).toBe("/mcp");
-    expect(entry?.diagnostics).toBeDefined();
-    expect(entry?.diagnostics?.headers.authorization).toBe("[REDACTED]");
-    expect(entry?.diagnostics?.headers.cookie).toBe("[REDACTED]");
-    expect(entry?.diagnostics?.headers["mcp-protocol-version"]).toBe("2099-01-01");
-    expect(entry?.diagnostics?.bodySnippet).toContain("tools/call");
+    expect(entry).toMatchObject({
+      method: "POST",
+      path: "/mcp",
+      rpcMethod: "tools/call",
+      toolName: "memory_list",
+      authType: "bearer",
+      clientId: "legacy",
+      requestId,
+      status: 400,
+    });
+    expect(entry?.durationMs).toEqual(expect.any(Number));
+    expect(entry).not.toHaveProperty("diagnostics");
+    const capturedLog = JSON.stringify(entry);
+    expect(capturedLog).not.toContain(bodyCanary);
+    expect(capturedLog).not.toContain(headerCanary);
+    expect(capturedLog).not.toContain("mcp-protocol-version");
+    expect(capturedLog).not.toContain("session=supersecret");
   });
 
-  it("omits diagnostics on 2xx /mcp logs", async () => {
+  it("logs structured attribution for successful /mcp requests", async () => {
     await supertest(app)
       .post("/mcp")
       .set(jsonRpcHeaders())
@@ -571,7 +587,16 @@ describe("stateless HTTP transport", () => {
       })
       .expect(200);
 
-    expect(requestLogs.at(-1)?.diagnostics).toBeUndefined();
+    expect(requestLogs.at(-1)).toMatchObject({
+      method: "POST",
+      path: "/mcp",
+      rpcMethod: "tools/call",
+      toolName: "memory_list",
+      authType: "bearer",
+      clientId: "legacy",
+      status: 200,
+    });
+    expect(requestLogs.at(-1)).not.toHaveProperty("diagnostics");
   });
 });
 

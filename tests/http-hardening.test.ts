@@ -250,10 +250,10 @@ describe("isTrustedConsentRequest", () => {
       trustedHeaderName: "x-auth-user",
       trustedHeaderValue: "owner@example.com",
       allowLocalhost: false,
-    })).toBe(true);
+    }, new URL("https://munin.example.com"))).toBe(true);
   });
 
-  it("accepts loopback requests when localhost consent is enabled", () => {
+  it("rejects loopback proxy peers for a public issuer when localhost consent is enabled", () => {
     const req = {
       get: () => undefined,
       socket: { remoteAddress: "::ffff:127.0.0.1" },
@@ -261,7 +261,7 @@ describe("isTrustedConsentRequest", () => {
 
     expect(isTrustedConsentRequest(req as any, {
       allowLocalhost: true,
-    })).toBe(true);
+    }, new URL("https://munin.example.com"))).toBe(false);
   });
 
   it("rejects untrusted requests", () => {
@@ -274,7 +274,7 @@ describe("isTrustedConsentRequest", () => {
       trustedHeaderName: "x-auth-user",
       trustedHeaderValue: "owner@example.com",
       allowLocalhost: false,
-    })).toBe(false);
+    }, new URL("https://munin.example.com"))).toBe(false);
   });
 });
 

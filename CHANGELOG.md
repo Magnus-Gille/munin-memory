@@ -17,6 +17,18 @@ changelog is the canonical record of what moved.
   remain `not_measured` (exit 2) until compared with a reviewed baseline. This adds
   infrastructure only; the real 500-question baseline and acceptance remain open.
 
+### Security
+
+- **OAuth consent proxy and identity gates.** Public issuers now require an exact
+  trusted proxy header/value match on both consent endpoints; an identity email
+  cannot satisfy that gate. When identity mapping is configured, missing or
+  unresolved identities fail closed, and loopback owner fallback is limited to
+  direct loopback requests for local issuers.
+- **Prevent classification laundering through consolidation.** Snapshot the namespace floor and all log, current status, and prior synthesis classifications before prompt construction; withhold any run above `internal` before contacting a provider, regardless of custom endpoint URL, and enforce the requester's ceiling separately. Persist synthesis at the maximum input classification, ignore model-proposed classification tags, reject stale snapshots after async calls and preview confirmation, and suppress cross-references when their source data exceeds the source namespace floor. The background worker treats this policy skip as ineligible input rather than an API failure.
+- **Redact HTTP error logs.** Keep failed `/mcp` request logs to structured
+  attribution and rate-limit metadata; do not retain or serialize request
+  bodies or arbitrary request headers in diagnostics.
+
 ### Fixed
 
 - Bind stored and query embeddings to an immutable model/runtime identity, including
