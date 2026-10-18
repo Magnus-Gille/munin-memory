@@ -109,9 +109,18 @@ rejected before model initialization. No source file is deleted or rewritten.
 This cold build pins BGE `Xenova/bge-small-en-v1.5` revision
 `ea104dacec62c0de699686887e3f920caeb4f3e3`, fp32, CPU, 384 dimensions, mean pooling
 and normalization through the production embedding initializer. The model cache
-belongs to the new output directory. Downloads are disabled unless the explicit
-flag is present, so a cold cache fails by default. The optional flag enables only
-the production pinned Hugging Face source. There is no reader/judge model call.
+belongs to the new output directory. Fresh preparation requires explicit
+`--allow-model-download`; without it the command rejects before loading the
+runtime, building artifacts or creating output. There is no reader/judge call.
+
+Transformers 4.3.1's pipeline discovery ignores revision and local-only options:
+it can fetch `main` config and tokenizer-existence metadata before loading the
+actual model. Inference separately loads the config, tokenizer and ONNX weights
+with the pinned revision. A successful run's pinned inference files must be
+verified against upstream immutable metadata; retain a separate verification
+receipt for any unversioned discovery config too. This limitation concerns
+preparation. The separate evidence evaluator remains offline and never loads
+Transformers or initializes a model.
 
 The existing adapter builds all 500 questions and 23,854 session entries with
 per-question namespaces. The explicit clock freezes ingestion metadata as well

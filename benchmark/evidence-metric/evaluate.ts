@@ -97,9 +97,10 @@ function validateSnapshot(db: Database.Database, queries: BenchmarkQuery[], vect
     if (!columns.has(col)) throw new Error(`Snapshot lacks required embedding schema: ${col}`);
   }
   if (!db.prepare("SELECT name FROM sqlite_master WHERE name = 'entries_vec'").get()) throw new Error("Snapshot lacks vector support");
-  const rows = db.prepare(`SELECT e.id, e.namespace, e.is_current, e.embedding_status, e.embedding_model, e.embedding_identity,
-    v.entry_id AS vector_id, vec_length(v.embedding) AS dimensions FROM entries e
-    LEFT JOIN entries_vec v ON e.id = v.entry_id`).all() as {
+  const rows = db.prepare(`WITH vector_rows AS MATERIALIZED (SELECT entry_id, vec_length(embedding) AS dimensions FROM entries_vec)
+    SELECT e.id, e.namespace, e.is_current, e.embedding_status, e.embedding_model, e.embedding_identity,
+    v.entry_id AS vector_id, v.dimensions FROM entries e
+    LEFT JOIN vector_rows v ON e.id = v.entry_id`).all() as {
       id: string; namespace: string; is_current: number; embedding_status: string; embedding_model: string | null;
       embedding_identity: string | null; vector_id: string | null; dimensions: number | null;
     }[];

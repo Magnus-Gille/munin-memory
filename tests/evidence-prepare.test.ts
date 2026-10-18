@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,7 +16,7 @@ function fixture() {
   const generated = join(dir, "benchmark/generated"); mkdirSync(generated, { recursive: true });
   const input = join(dir, "raw.json");
   writeFileSync(input, readFileSync(new URL("../benchmark/adapters/longmemeval/fixtures/sample-longmemeval.json", import.meta.url)));
-  return { dir, input, outputDir: join(generated, "fresh"), asOf };
+  return { dir, input, outputDir: join(generated, "fresh"), asOf, allowModelDownload: true };
 }
 function fake(options: ReturnType<typeof fixture>, change?: (runtime: PreparationRuntime) => void) {
   const identity = JSON.stringify({ version: 1, model: BGE_MODEL, revision: BGE_REVISION, dtype: "fp32", dimensions: 384, pooling: "mean", normalize: true, preprocessing: "raw-text-v1", transformers_version: "4.3.1", onnxruntime_node_version: "1.30.0", platform: process.platform, arch: process.arch, execution_provider: "cpu" });
@@ -45,6 +45,19 @@ function fake(options: ReturnType<typeof fixture>, change?: (runtime: Preparatio
   return { runtime, calls, vector, dependencies: { expectedCounts: { questions: 2, entries: 4 }, expectedInputSha256: hashFile(options.input), loadRuntime: () => Promise.resolve(runtime) } };
 }
 describe("fresh evidence preparation", () => {
+  it("refuses preparation without explicit download before loading runtime or creating output", async () => {
+    const options = fixture(); const f = fake(options);
+    const loadRuntime = vi.fn(f.dependencies.loadRuntime);
+    const build = vi.spyOn(f.runtime, "build");
+    const initialize = vi.spyOn(f.runtime, "initialize");
+    const before = hashFile(options.input);
+    await expect(prepare({ ...options, allowModelDownload: undefined }, { ...f.dependencies, loadRuntime })).rejects.toThrow(/--allow-model-download/);
+    expect(loadRuntime).not.toHaveBeenCalled();
+    expect(build).not.toHaveBeenCalled();
+    expect(initialize).not.toHaveBeenCalled();
+    expect(readdirSync(join(options.dir, "benchmark/generated"))).toEqual([]);
+    expect(hashFile(options.input)).toBe(before);
+  });
   it("freezes ingestion, records hashes and exact float32 vectors, and feeds the strict offline lane", async () => {
     const options = fixture(); const before = hashFile(options.input); const f = fake(options);
     const manifest = await prepare(options, f.dependencies);

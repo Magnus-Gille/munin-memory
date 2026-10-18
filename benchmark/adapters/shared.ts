@@ -62,8 +62,9 @@ export async function populateCorpusEmbeddings(dbPath: string): Promise<CorpusEm
     //  - OR the vector row is missing despite generated provenance
     const rows = db
       .prepare(
-        `SELECT e.id, e.content FROM entries e
-         LEFT JOIN entries_vec v ON v.entry_id = e.id
+        `WITH vector_ids AS MATERIALIZED (SELECT DISTINCT entry_id FROM entries_vec)
+         SELECT e.id, e.content FROM entries e
+         LEFT JOIN vector_ids v ON v.entry_id = e.id
          WHERE e.embedding_status != 'generated'
             OR e.embedding_model IS NULL OR e.embedding_model != ?
             OR e.embedding_identity IS NULL OR e.embedding_identity != ?

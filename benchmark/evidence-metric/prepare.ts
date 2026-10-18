@@ -148,9 +148,10 @@ async function detachSnapshot(dbPath: string, snapshot: string, identity: string
   const db = new Database(dbPath, { fileMustExist: true });
   try {
     sqliteVec.load(db);
-    const rows = db.prepare(`SELECT COUNT(*) AS total, SUM(CASE WHEN e.is_current = 1 AND e.embedding_status = 'generated'
-      AND e.embedding_model = ? AND e.embedding_identity = ? AND vec_length(v.embedding) = 384 THEN 1 ELSE 0 END) AS compatible
-      FROM entries e LEFT JOIN entries_vec v ON e.id = v.entry_id`).get(BGE_MODEL, identity) as { total: number; compatible: number };
+    const rows = db.prepare(`WITH vector_rows AS MATERIALIZED (SELECT entry_id, vec_length(embedding) AS dimensions FROM entries_vec)
+      SELECT COUNT(*) AS total, SUM(CASE WHEN e.is_current = 1 AND e.embedding_status = 'generated'
+      AND e.embedding_model = ? AND e.embedding_identity = ? AND v.dimensions = 384 THEN 1 ELSE 0 END) AS compatible
+      FROM entries e LEFT JOIN vector_rows v ON e.id = v.entry_id`).get(BGE_MODEL, identity) as { total: number; compatible: number };
     const vectors = db.prepare("SELECT COUNT(*) AS count FROM entries_vec").get() as { count: number };
     if (rows.total !== expectedEntries || rows.compatible !== expectedEntries || vectors.count !== expectedEntries) throw new Error("Incomplete or incompatible corpus vectors");
     const checkpoint = db.pragma("wal_checkpoint(TRUNCATE)") as { busy: number }[];
@@ -171,6 +172,9 @@ async function detachSnapshot(dbPath: string, snapshot: string, identity: string
 }
 /** Failure leaves the exclusively owned directory and diagnostic receipt for inspection. */
 export async function prepare(options: PreparationOptions, dependencies: PreparationDependencies = { loadRuntime: productionRuntime, expectedCounts: { questions: 500, entries: 23854 }, expectedInputSha256: LONGMEMEVAL_S_SHA256 }): Promise<PreparationManifest> {
+  // Transformers 4.3.1 discovery drops local_files_only before model loading.
+  // A fresh owned cache cannot support an honest offline preparation promise.
+  if (!options.allowModelDownload) throw new Error("Fresh preparation requires explicit --allow-model-download; no output or model initialization was attempted");
   const asOf = normalizeAsOf(options.asOf);
   if (!isAbsolute(options.input)) throw new Error("input must be an explicit absolute path");
   const input = realpathSync(options.input); const inputDigest = digest(input);
