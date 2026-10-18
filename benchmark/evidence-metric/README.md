@@ -16,11 +16,49 @@ npm run benchmark:evidence -- \
 ```
 
 Every input path is explicit. There is no live DB discovery, model initialization,
-embedding generation, corpus population, download, or scheduled workflow. The
+embedding generation, corpus population, or download in this offline command. The
 snapshot must be a detached, checkpointed copy in DELETE journal mode, with no
 WAL, SHM or journal sidecars. Header checks happen before SQLite opens it; all
 connections are read-only. This command never converts a snapshot. Input hashes
 are checked again after evaluation; large files are hashed in bounded chunks.
+
+The command above remains an offline evaluator. For clean-checkout replay,
+`benchmark:evidence:check` downloads and verifies the shared release before
+calling that evaluator:
+
+```sh
+npm run benchmark:evidence:check -- \
+  --artifacts-dir /absolute/path/to/fresh-artifact-directory \
+  --output /absolute/path/to/existing-parent/candidate-report.json
+```
+
+The published, non-product release is
+[`benchmark-evidence-longmemeval-s-20261018`](https://github.com/Magnus-Gille/munin-memory/releases/tag/benchmark-evidence-longmemeval-s-20261018)
+from source revision `d018e26`. It is marked as a prerelease and is not the `latest`
+product release. Its seven assets include `snapshot.db.gz`,
+`queries.jsonl`, `query-vectors.json`, `build-provenance.json`, `manifest.json`,
+`shared-artifacts.json`, and `NOTICE.txt`. The lock pins asset sizes and
+SHA-256 hashes. The checker validates the lock and per-file provenance before
+download/decompression, then checks remote compressed bytes and final files.
+`manifest.json` is not treated as its own trust anchor.
+
+The artifact directory's parent and output parent must exist. The artifact
+directory may be absent (download) or contain exactly five verified regular
+inputs (reuse). Unexpected files, symlinks, SQLite sidecars, and mismatches fail
+without changing existing data. The report and `${output}.verification.json`
+must be fresh; the receipt records exact pins and whether files were downloaded
+or reused. The checker never skips inputs, changes the baseline, or runs model
+inference. Exit **0** means unchanged/improved, **1** a reproduced per-question
+regression, and **2** invalid or missing inputs; gains do not offset a lost
+all-gold question. Corrected bytes require a new versioned release and reviewed
+lock update.
+
+The CI workflow definition runs on PRs and pushes to `main`, daily at
+`04:23 UTC`, and manual dispatch, using a fresh `ubuntu-24.04` runner with Node
+24, read-only permissions, and no data cache. It retains report and receipt
+artifacts for 30 days when produced, including failed comparisons. Scheduled runs
+use the workflow on the default branch, so the schedule starts only after merge. This lane does not call models;
+the separate existing native-runtime smoke still downloads and loads models.
 
 Each non-comment JSONL record requires a unique nonempty `id`, `query`, explicit
 `source` (`manual`, `derived`, or `synthetic`), `search_mode:"hybrid"`, and nonempty
@@ -151,8 +189,10 @@ new run: **297/500 (59.4%)** all-gold questions, from 23,854 freshly embedded
 entries and 500 frozen query vectors. It includes the exact initial report,
 portable provenance and upstream model-file verification receipt. The large
 snapshot/query/vector inputs are retained in the primary repository's persistent,
-Git-ignored `benchmark/generated/evidence-metric/longmemeval-s-20261018` directory;
-the package gives hash checks and explicit offline replay commands.
+Git-ignored `benchmark/generated/evidence-metric/longmemeval-s-20261018` directory.
+A versioned public benchmark-data release makes them available to clean
+checkouts under the checked-in SHA-256 and size lock; it is separate from product
+releases and has no `latest` alias.
 
 All 500 budgets report truncation with retrieved candidates omitted; this does
 not establish that each first block's content was truncated. Entry-ID presence
@@ -162,5 +202,6 @@ artifacts remain unchanged and their model-only metadata is not relabeled.
 
 The separate offline replay exited 0 and matched all 500 rows, bindings and
 summary exactly, with no gained or lost all-gold questions. Source and baseline
-artifacts passed independent review. Remote durable artifact cache/storage and
-a CI schedule remain undecided; this adds no scheduled workflow.
+artifacts passed independent review. Hosted CI verification remains pending. The
+workflow schedule becomes active after merge; the lane compares the pinned shared
+release and never regenerates or automatically updates this baseline.

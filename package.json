@@ -71,7 +71,8 @@
     "scorecard:longmemeval:s": "./scripts/fetch-benchmark-data.sh longmemeval-s && MUNIN_EMBEDDINGS_ENABLED=true tsx benchmark/scorecard/run.ts --profile full",
     "scorecard:publish": "tsx benchmark/scorecard/publish.ts",
     "benchmark:evidence": "tsx benchmark/evidence-metric/run.ts",
-    "benchmark:evidence:prepare": "tsx benchmark/evidence-metric/prepare.ts"
+    "benchmark:evidence:prepare": "tsx benchmark/evidence-metric/prepare.ts",
+    "benchmark:evidence:check": "tsx benchmark/evidence-metric/check.ts"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.3.1",
