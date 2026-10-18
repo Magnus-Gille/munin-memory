@@ -1,0 +1,250 @@
+{
+  "schema_version": 1,
+  "measurement": "new_reproduction_not_historical_provenance",
+  "baseline": {
+    "path": "baseline.json",
+    "bytes": 634600,
+    "sha256": "a705dee0e10c66409bac95404f7b78bed576a7b84facaf77e25c0debb2204e96",
+    "quality_state": "not_measured",
+    "quality_state_meaning": "Initial measured report with no prior-baseline comparison; original bytes are retained."
+  },
+  "summary": {
+    "query_count": 500,
+    "all_gold_count": 297,
+    "all_gold_rate": 0.594,
+    "truncated_query_count": 500
+  },
+  "metric_limitation": "Entry-ID presence in packed context is a proxy, not full content/span coverage. A truncated first block still counts as present; budget.truncated exposes this limitation.",
+  "artifact_storage": {
+    "repository_relative_directory": "benchmark/generated/evidence-metric/longmemeval-s-20261018",
+    "retention": "Local persistent ignored directory in the primary repository; large inputs are not committed.",
+    "remote_durable_cache": "undecided",
+    "ci_schedule": "none"
+  },
+  "source_manifest": {
+    "path": "manifest.json",
+    "bytes": 6318,
+    "sha256": "38b681f691825a92a61d700c70719d8ab1b8ada7b6b90ff470d99f644706c575"
+  },
+  "files": {
+    "snapshot": {
+      "path": "snapshot.db",
+      "bytes": 648110080,
+      "sha256": "fe48b7a30433f23d487d05608cecd969734b45686a51e29f5f86ba328059036a"
+    },
+    "queries": {
+      "path": "queries.jsonl",
+      "bytes": 266459,
+      "sha256": "274f858907c521cca2663c17fbb8bc5f2e198096d129e717c4c26a65c18ff7f1"
+    },
+    "vectors": {
+      "path": "query-vectors.json",
+      "bytes": 5389300,
+      "sha256": "8c76c253a4755e590b85556b93400ef124c69f11518e1d19c6c841a07b46780c"
+    },
+    "build_provenance": {
+      "path": "build-provenance.json",
+      "bytes": 934,
+      "sha256": "883722ddb7b903e7806ab48be8e9e04e4db0aa7e1ff937ac5ae6b4bdfaeaa749"
+    }
+  },
+  "raw_dataset": {
+    "repository_relative_path": "benchmark/data/raw/longmemeval/longmemeval_s_cleaned.json",
+    "bytes": 277383467,
+    "sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"
+  },
+  "dataset": {
+    "adapter": "longmemeval",
+    "split": "s",
+    "granularity": "session",
+    "search_mode": "hybrid",
+    "haystack_policy": "per_question_namespace",
+    "source_url": "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/98d7416c24c778c2fee6e6f3006e7a073259d48f/longmemeval_s_cleaned.json",
+    "expected_input_sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"
+  },
+  "clock": {
+    "as_of": "2026-10-01T00:00:00.000Z"
+  },
+  "embedding": {
+    "model": "Xenova/bge-small-en-v1.5",
+    "identity": "{\"version\":1,\"model\":\"Xenova/bge-small-en-v1.5\",\"revision\":\"ea104dacec62c0de699686887e3f920caeb4f3e3\",\"dtype\":\"fp32\",\"dimensions\":384,\"pooling\":\"mean\",\"normalize\":true,\"preprocessing\":\"raw-text-v1\",\"transformers_version\":\"4.3.1\",\"onnxruntime_node_version\":\"1.30.0\",\"platform\":\"darwin\",\"arch\":\"arm64\",\"execution_provider\":\"cpu\"}",
+    "dimensions": 384,
+    "local_files_only": false
+  },
+  "model_artifacts": {
+    "root": "hf-cache/Xenova/bge-small-en-v1.5/ea104dacec62c0de699686887e3f920caeb4f3e3",
+    "files": [
+      {
+        "path": "config.json",
+        "bytes": 683,
+        "sha256": "fa73f90bf92c8cace1fbcb709626306f2bdbc9ea3e5b5f94b440df9b6aa56350"
+      },
+      {
+        "path": "onnx/model.onnx",
+        "bytes": 133093490,
+        "sha256": "828e1496d7fabb79cfa4dcd84fa38625c0d3d21da474a00f08db0f559940cf35"
+      },
+      {
+        "path": "tokenizer.json",
+        "bytes": 711396,
+        "sha256": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66"
+      },
+      {
+        "path": "tokenizer_config.json",
+        "bytes": 366,
+        "sha256": "9261e7d79b44c8195c1cada2b453e55b00aeb81e907a6664974b4d7776172ab3"
+      }
+    ]
+  },
+  "upstream_model_verification": {
+    "path": "upstream-model-verification.json",
+    "bytes": 2177,
+    "sha256": "8d965d8aed343a81931e981fd78b8466e374f5e12b69795ead5c4161a39bb4ef"
+  },
+  "generation": {
+    "started_at": "2026-10-18T06:46:17.399Z",
+    "completed_at": "2026-10-18T07:48:13.924Z",
+    "elapsed_ms": 3716492,
+    "counts": {
+      "questions": 500,
+      "entries": 23854,
+      "generated": 23854,
+      "failed": 0,
+      "skipped": 0,
+      "vector_rows": 23854,
+      "unique_query_texts": 500
+    },
+    "runtime": {
+      "node": "v26.11.1",
+      "versions": {
+        "node": "26.11.1",
+        "acorn": "8.18.0",
+        "ada": "4.0.0",
+        "amaro": "1.1.11",
+        "ares": "1.34.8",
+        "brotli": "1.2.0",
+        "cldr": "48.0",
+        "icu": "78.3",
+        "libffi": "3.8.0",
+        "llhttp": "9.4.3",
+        "merve": "1.2.2",
+        "modules": "147",
+        "napi": "10",
+        "nbytes": "0.1.4",
+        "ncrypto": "0.0.1",
+        "nghttp2": "1.70.0",
+        "nghttp3": "",
+        "ngtcp2": "",
+        "openssl": "4.0.3",
+        "simdjson": "5.0.3",
+        "simdutf": "9.2.1",
+        "sqlite": "3.53.4",
+        "tz": "2026a",
+        "undici": "8.11.2",
+        "unicode": "17.0",
+        "uv": "1.53.0",
+        "uvwasi": "0.0.23",
+        "v8": "14.6.202.34-node.37",
+        "zlib": "1.2.12",
+        "zstd": "1.5.7"
+      },
+      "platform": "darwin",
+      "arch": "arm64"
+    },
+    "source": {
+      "revision": "9009370463adf739c76f451dcefa161a17ac1a17",
+      "dirty": false,
+      "source_sha256": {
+        "benchmark/evidence-metric/prepare.ts": "e9ed9db3f1e31048d0dcd882752d62ff3a37fcfe17d3d1e2d3da65629a67d808",
+        "benchmark/evidence-metric/clock.ts": "2deee6c189965f3360fea50d362f3947cb83b67cb5a80101f610458b1fcc0709",
+        "benchmark/evidence-metric/metric.ts": "56f794ff548e3b69509c8c42f0c067d16df39491207d2682c7edcd88186edd50",
+        "benchmark/evidence-metric/evaluate.ts": "706b11df49f6a862fed453641c8026dea700944ad9155c78ffd59b0267ab4772",
+        "benchmark/evidence-metric/run.ts": "d076faef77700f273ec8b3e26aedd04ac32895b5136a98cbda0721ea437e2507",
+        "benchmark/adapters/longmemeval/build.ts": "ce6e7ba474548b0e17dd0a6ecf2a718176fefef3d02376749adb52fe50c35e36",
+        "benchmark/adapters/shared.ts": "d1e80b258fcedecf11b97a7fdafb6ce55ea1e4e3c42795a65f33f39054211b2f",
+        "benchmark/runner.ts": "bdab225b528e786e78533762b765db1995eda08900e213d4c32cd0195c860d0f",
+        "benchmark/scorer.ts": "b3be69bc5e53bbfe55c467c3e6970e5f9b680663bc2f7b9e0033bdafc329a4a7",
+        "benchmark/types.ts": "4e4b56d3fa354e8893f21d4c46b9922cf541ed55f05900271e39bea8fcb37afe",
+        "benchmark/answer-quality/serialize.ts": "62aafa28483575c463fe266edbb6afb1aac8aabcc3ddd03c9ea42f2bc9c8ff56",
+        "src/db.ts": "46dd110081935107f495cccb920a0641d64b59c63a7bebebb04a687cdef8c1e2",
+        "src/migrations.ts": "745cff868e39e1d6ae9188b4d3c137adea7e102dec299fc590d7b5b6cd2d2f46",
+        "src/embeddings.ts": "cd76122c34327d6051d5f6ae9ed6b5828615886d7ff166f68938cc1de6124e88",
+        "src/profiles.ts": "7de3d76cb27c903612c2926f9583b78932cd3385a0858930b54ae5c41b15c796",
+        "src/internal/embedding-identity.ts": "682f5c9a6da1a9393c22de3f64995f1c579d0c740080fd4daa735bb254a76a16",
+        "src/internal/embedding-source.ts": "dc946f26f2d4d4a00f3f423d19a61686284d66544d56b4c5ce474677ef18aed6",
+        "src/internal/reranker.ts": "47ed1a2f6322301ec00ec97ec0f8c143feb14210ddcacf8d32ab7191274104a9",
+        "src/internal/retrieval-shared.ts": "14d95fbf815516308d8b24d580157aff489f7789c1632f9ecc10f0bcdec3ac7a",
+        "src/internal/hybrid-fusion.ts": "1b458a9e06d490d3f96bb9abb58f4c6cd2af7a4f921bf57ceeeb2c083fb9c73c",
+        "src/internal/query-probe.ts": "8c5c6ae269dbddb0aac9bdfd48b066e10b4a59a15a68b3785c07ca1b1bbcbdd5",
+        "src/internal/namespace-filter.ts": "cd4af85278c0a29cdd3c0d2238142f903c0ad4c3b61a838eab4a355fa13f1c96"
+      },
+      "package_lock_sha256": "62040ab76a178c29ee7f42dd09f7c9d0bb01659920eb8aae296346878016b900"
+    }
+  },
+  "evaluation": {
+    "bindings": {
+      "snapshot_sha256": "fe48b7a30433f23d487d05608cecd969734b45686a51e29f5f86ba328059036a",
+      "queries_sha256": "274f858907c521cca2663c17fbb8bc5f2e198096d129e717c4c26a65c18ff7f1",
+      "vectors_sha256": "8c76c253a4755e590b85556b93400ef124c69f11518e1d19c6c841a07b46780c",
+      "as_of": "2026-10-01T00:00:00.000Z",
+      "config": {
+        "metric": "packed_gold_entry_id_presence_v1",
+        "runner_mode": "production_ranker",
+        "search_mode": "hybrid",
+        "search_recency_weight": 0,
+        "top_k": 10,
+        "serialization": "linear",
+        "max_estimated_tokens": 8192,
+        "estimator": "utf8_bytes_div4_ceil_v1",
+        "semantic_max_distance": null
+      },
+      "embedding": {
+        "model": "Xenova/bge-small-en-v1.5",
+        "identity": "{\"version\":1,\"model\":\"Xenova/bge-small-en-v1.5\",\"revision\":\"ea104dacec62c0de699686887e3f920caeb4f3e3\",\"dtype\":\"fp32\",\"dimensions\":384,\"pooling\":\"mean\",\"normalize\":true,\"preprocessing\":\"raw-text-v1\",\"transformers_version\":\"4.3.1\",\"onnxruntime_node_version\":\"1.30.0\",\"platform\":\"darwin\",\"arch\":\"arm64\",\"execution_provider\":\"cpu\"}",
+        "dimensions": 384
+      }
+    },
+    "lineage": {
+      "source_revision": "fb00719b07651d7bf935314840773662a51363fe",
+      "source_sha256": {
+        "benchmark/evidence-metric/clock.ts": "2deee6c189965f3360fea50d362f3947cb83b67cb5a80101f610458b1fcc0709",
+        "benchmark/evidence-metric/metric.ts": "56f794ff548e3b69509c8c42f0c067d16df39491207d2682c7edcd88186edd50",
+        "benchmark/evidence-metric/evaluate.ts": "501334b1417b52d3439f76ab682ce66a0451e62228451d835569dfdf0d7ad192",
+        "benchmark/evidence-metric/run.ts": "d076faef77700f273ec8b3e26aedd04ac32895b5136a98cbda0721ea437e2507",
+        "benchmark/runner.ts": "bdab225b528e786e78533762b765db1995eda08900e213d4c32cd0195c860d0f",
+        "benchmark/scorer.ts": "b3be69bc5e53bbfe55c467c3e6970e5f9b680663bc2f7b9e0033bdafc329a4a7",
+        "benchmark/types.ts": "4e4b56d3fa354e8893f21d4c46b9922cf541ed55f05900271e39bea8fcb37afe",
+        "benchmark/answer-quality/serialize.ts": "62aafa28483575c463fe266edbb6afb1aac8aabcc3ddd03c9ea42f2bc9c8ff56",
+        "src/db.ts": "46dd110081935107f495cccb920a0641d64b59c63a7bebebb04a687cdef8c1e2",
+        "src/migrations.ts": "745cff868e39e1d6ae9188b4d3c137adea7e102dec299fc590d7b5b6cd2d2f46",
+        "src/embeddings.ts": "cd76122c34327d6051d5f6ae9ed6b5828615886d7ff166f68938cc1de6124e88",
+        "src/internal/reranker.ts": "47ed1a2f6322301ec00ec97ec0f8c143feb14210ddcacf8d32ab7191274104a9",
+        "src/internal/retrieval-shared.ts": "14d95fbf815516308d8b24d580157aff489f7789c1632f9ecc10f0bcdec3ac7a",
+        "src/internal/hybrid-fusion.ts": "1b458a9e06d490d3f96bb9abb58f4c6cd2af7a4f921bf57ceeeb2c083fb9c73c",
+        "src/internal/query-probe.ts": "8c5c6ae269dbddb0aac9bdfd48b066e10b4a59a15a68b3785c07ca1b1bbcbdd5",
+        "src/internal/namespace-filter.ts": "cd4af85278c0a29cdd3c0d2238142f903c0ad4c3b61a838eab4a355fa13f1c96"
+      }
+    },
+    "runtime_note": "The initial evidence report records evaluator source lineage and embedding runtime identity; it does not separately record the evaluator process runtime."
+  },
+  "repeat_verification": {
+    "status": "reproduced",
+    "report": {
+      "path": "baseline-replay.json",
+      "bytes": 726452,
+      "sha256": "7c0a5e38ffd768c29b525c3f6afffcc2edce9b34f3d57b5676cea12a77cd06f8",
+      "retention": "Full report retained locally in the artifact directory; not committed."
+    },
+    "exit_code": 0,
+    "quality_state": "unchanged",
+    "identical_rows": 500,
+    "row_equality": "Exact rows-array equality, including query order, retrieved/packed/gold IDs, budgets and truncation flags.",
+    "bindings_equal": true,
+    "summary_equal": true,
+    "gained_question_ids": [],
+    "lost_question_ids": [],
+    "source_revision": "fb00719b07651d7bf935314840773662a51363fe",
+    "baseline_sha256": "a705dee0e10c66409bac95404f7b78bed576a7b84facaf77e25c0debb2204e96"
+  },
+  "review_status": "reviewed_local_baseline"
+}

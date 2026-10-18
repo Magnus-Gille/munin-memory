@@ -15,12 +15,18 @@ changelog is the canonical record of what moved.
   and BGE model. Its manifest records model-file, input, output, source and runtime
   provenance; the existing evaluation command replays those artifacts offline.
 
+- A frozen LongMemEval-S packed entry-ID baseline (#341) records a new 297/500
+  (59.4%) measurement with exact per-question rows, portable provenance and an
+  upstream model-file verification receipt. Large inputs remain in local ignored
+  storage with hash-checked offline replay instructions. This does not reproduce
+  the historical 296/500 result or claim an attributable improvement.
+
 - An offline packed-gold entry-ID benchmark lane (#341) uses explicitly supplied
   detached snapshots and frozen query vectors with immutable embedding provenance.
   It records context truncation, input/source hashes and paired all-gold question
   changes, requiring a reproduced regression before exit 1. Initial candidates
-  remain `not_measured` (exit 2) until compared with a reviewed baseline. This adds
-  infrastructure only; the real 500-question baseline and acceptance remain open.
+  remain `not_measured` (exit 2) until compared with a reviewed baseline; that
+  initial state is preserved in the new frozen baseline's original report bytes.
 
 ### Fixed
 

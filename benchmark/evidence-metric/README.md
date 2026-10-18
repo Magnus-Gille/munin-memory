@@ -144,13 +144,23 @@ Its first report remains `not_measured` with exit 2 until manually reviewed.
 Retain original artifacts unchanged: this is a new measured reproduction and
 cannot recover historical generation provenance or independently prove 296/500.
 
-## Remaining #341 acceptance work
+## Frozen 500-question baseline
 
-The existing local LongMemEval snapshot and 500-question query set are retained,
-but the legacy snapshot has model-only embedding metadata and there is no frozen
-500-query vector artifact with verified immutable identity. They cannot enter
-this strict offline lane as-is. Preparation provides a fresh, provenance-bound
-replacement workflow; the real 500-question rerun, upstream model-file review,
-durable artifact storage and reviewed published baseline remain open until
-performed. Tooling alone does **not** reproduce or substantiate 296/500 and adds
-no CI schedule.
+The [2026-10-18 package](baselines/longmemeval-s-20261018/README.md) records a real
+new run: **297/500 (59.4%)** all-gold questions, from 23,854 freshly embedded
+entries and 500 frozen query vectors. It includes the exact initial report,
+portable provenance and upstream model-file verification receipt. The large
+snapshot/query/vector inputs are retained in the primary repository's persistent,
+Git-ignored `benchmark/generated/evidence-metric/longmemeval-s-20261018` directory;
+the package gives hash checks and explicit offline replay commands.
+
+All 500 budgets report truncation with retrieved candidates omitted; this does
+not establish that each first block's content was truncated. Entry-ID presence
+remains a retrieval/packing proxy. This new measurement does **not** reproduce
+the historical 296/500 result or establish an attributable improvement. Legacy
+artifacts remain unchanged and their model-only metadata is not relabeled.
+
+The separate offline replay exited 0 and matched all 500 rows, bindings and
+summary exactly, with no gained or lost all-gold questions. Source and baseline
+artifacts passed independent review. Remote durable artifact cache/storage and
+a CI schedule remain undecided; this adds no scheduled workflow.
