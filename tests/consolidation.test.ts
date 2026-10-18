@@ -8,6 +8,7 @@ import {
   appendLog,
   getConsolidationMetadata,
   getCrossReferences,
+  setNamespaceClassificationFloor,
   upsertConsolidationMetadata,
 } from "../src/db.js";
 import {
@@ -91,6 +92,7 @@ const mockCallApi = vi.fn<(prompt: string) => Promise<ChatCompletionResponse>>()
   .mockResolvedValue(cannedResponse);
 
 let db: Database.Database;
+let savedConfig: { batchSize: number; minLogs: number; maxLogsPerRun: number };
 
 // Save/restore env vars
 let savedEnv: Record<string, string | undefined> = {};
@@ -98,10 +100,16 @@ let savedEnv: Record<string, string | undefined> = {};
 beforeEach(() => {
   cleanupTestDb();
   db = initDatabase(TEST_DB_PATH);
+  savedConfig = {
+    batchSize: _consolidationConfig.batchSize,
+    minLogs: _consolidationConfig.minLogs,
+    maxLogsPerRun: _consolidationConfig.maxLogsPerRun,
+  };
   mockCallApi.mockClear();
   // Save env vars
   savedEnv = {
     MUNIN_CONSOLIDATION_ENABLED: process.env.MUNIN_CONSOLIDATION_ENABLED,
+    MUNIN_LIBRARIAN_ENABLED: process.env.MUNIN_LIBRARIAN_ENABLED,
     OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY,
   };
   // Reset circuit breaker state
@@ -111,6 +119,9 @@ beforeEach(() => {
 afterEach(async () => {
   await stopConsolidationWorker();
   db.close();
+  _consolidationConfig.batchSize = savedConfig.batchSize;
+  _consolidationConfig.minLogs = savedConfig.minLogs;
+  _consolidationConfig.maxLogsPerRun = savedConfig.maxLogsPerRun;
   cleanupTestDb();
   // Restore env vars
   for (const [key, value] of Object.entries(savedEnv)) {
@@ -366,7 +377,7 @@ describe("strict manual consolidation grounding (#270)", () => {
     const persisted = persistGroundedPreview(
       db, "projects/aurora-stale", preview.preview!, preview.token_count, preview.duration_ms, preview.source_fingerprint!,
     );
-    expect(persisted.error).toBe("preview_stale: source logs changed since the preview");
+    expect(persisted.error).toMatch(/preview_stale: consolidation source snapshot changed/);
     expect(readState(db, "projects/aurora-stale", "synthesis")).toBeNull();
   });
 });
@@ -497,6 +508,217 @@ describe("parseSynthesisResponse", () => {
 // ─── consolidateNamespace ────────────────────────────────────────────────────
 
 describe("consolidateNamespace", () => {
+  it.each(["log", "status", "synthesis"] as const)(
+    "withholds a %s above the trusted internal provider ceiling before calling the model",
+    async (sourceKind) => {
+      const namespace = `projects/restricted-${sourceKind}`;
+      for (let i = 0; i < 3; i++) appendLog(db, namespace, `Internal log ${i}`, []);
+      if (sourceKind === "log") {
+        appendLog(db, namespace, "Restricted log body", [], "test", { classification: "client-restricted" });
+      } else {
+        writeState(
+          db, namespace, sourceKind, `Restricted ${sourceKind} body`, [], "test", undefined, undefined,
+          { classification: "client-restricted" },
+        );
+      }
+
+      const model = vi.fn<(prompt: string) => Promise<ChatCompletionResponse>>().mockResolvedValue(cannedResponse);
+      const result = await consolidateNamespace(db, namespace, model);
+
+      expect(result.error).toMatch(/classification/i);
+      expect(model).not.toHaveBeenCalled();
+      if (sourceKind === "synthesis") {
+        expect(readState(db, namespace, "synthesis")!.content).toBe("Restricted synthesis body");
+      } else {
+        expect(readState(db, namespace, "synthesis")).toBeNull();
+      }
+    },
+  );
+
+  it("withholds a restricted status from manual preview before the model call", async () => {
+    const namespace = "projects/restricted-manual-status";
+    for (let i = 0; i < 3; i++) appendLog(db, namespace, `Internal log ${i}`, []);
+    writeState(db, namespace, "status", "Restricted status body", [], "test", undefined, undefined,
+      { classification: "client-confidential" });
+    const model = vi.fn<(prompt: string) => Promise<ChatCompletionResponse>>().mockResolvedValue(cannedResponse);
+
+    const result = await previewConsolidationNamespace(db, namespace, model);
+
+    expect(result.error).toMatch(/classification/i);
+    expect(model).not.toHaveBeenCalled();
+    expect(result.preview).toBeUndefined();
+  });
+
+  it("enforces the requester's entry ceiling even when librarian filtering is disabled", async () => {
+    process.env.MUNIN_LIBRARIAN_ENABLED = "false";
+    const namespace = "projects/ceiling-entry";
+    for (let i = 0; i < 3; i++) appendLog(db, namespace, `Internal log ${i}`, []);
+    appendLog(db, namespace, "Confidential log body", [], "test", { classification: "client-confidential" });
+    const ctx: AccessContext = {
+      principalId: "agent:limited",
+      principalType: "agent",
+      accessibleNamespaces: [{ pattern: "projects/*", permissions: "rw" }],
+      maxClassification: "internal",
+    };
+    const model = vi.fn<(prompt: string) => Promise<ChatCompletionResponse>>().mockResolvedValue(cannedResponse);
+
+    const result = await consolidateNamespace(db, namespace, model, ctx);
+
+    expect(result.error).toBe("access_denied");
+    expect(model).not.toHaveBeenCalled();
+  });
+
+  it("stamps synthesis with the maximum source class and ignores a model-proposed lower class", async () => {
+    const namespace = "projects/mixed-class-output";
+    setNamespaceClassificationFloor(db, "projects/*", "public");
+    appendLog(db, namespace, "Public log", [], "test", { classification: "public" });
+    appendLog(db, namespace, "Internal log 1", [], "test", { classification: "internal" });
+    appendLog(db, namespace, "Internal log 2", [], "test", { classification: "internal" });
+    const response: ChatCompletionResponse = {
+      choices: [{ message: { content: JSON.stringify({
+        status_content: "Mixed-class synthesis",
+        tags: ["active", "classification:public"],
+        cross_references: [{
+          target_namespace: "projects/other", reference_type: "related_to",
+          context: "Derived from mixed-class sources", confidence: 0.8,
+        }],
+      }) } }],
+      usage: { completion_tokens: 10 },
+    };
+    const model = vi.fn<(prompt: string) => Promise<ChatCompletionResponse>>().mockResolvedValue(response);
+
+    const result = await consolidateNamespace(db, namespace, model);
+    const stored = db.prepare("SELECT classification, tags FROM entries WHERE namespace = ? AND key = 'synthesis' AND is_current = 1")
+      .get(namespace) as { classification: string; tags: string } | undefined;
+
+    expect(result.error).toBeUndefined();
+    expect(stored?.classification).toBe("internal");
+    expect(JSON.parse(stored!.tags)).toContain("classification:internal");
+    expect(JSON.parse(stored!.tags)).not.toContain("classification:public");
+    // The references table has no row classification, so a public-floor source
+    // must not publish a relationship derived from internal input.
+    expect(getCrossReferences(db, namespace)).toHaveLength(0);
+  });
+
+  it("rejects a result when prompt inputs or their classification policy change during the model call", async () => {
+    const mutations = ["log_content", "log_classification", "status", "synthesis", "floor", "cursor"] as const;
+    for (const mutation of mutations) {
+      const namespace = `projects/stale-${mutation}`;
+      const logs = Array.from({ length: 3 }, (_, i) => appendLog(db, namespace, `Original ${i}`, []));
+      if (mutation === "status") writeState(db, namespace, "status", "Original status", []);
+      if (mutation === "synthesis") writeState(db, namespace, "synthesis", "Original synthesis", []);
+      let resolveResponse!: (response: ChatCompletionResponse) => void;
+      const pending = new Promise<ChatCompletionResponse>((resolve) => { resolveResponse = resolve; });
+      const model = vi.fn<(prompt: string) => Promise<ChatCompletionResponse>>().mockReturnValue(pending);
+      const running = consolidateNamespace(db, namespace, model);
+      expect(model).toHaveBeenCalledTimes(1);
+
+      switch (mutation) {
+        case "log_content":
+          db.prepare("UPDATE entries SET content = ? WHERE id = ?").run("Changed log", logs[0].id);
+          break;
+        case "log_classification":
+          db.prepare("UPDATE entries SET classification = ? WHERE id = ?").run("client-confidential", logs[0].id);
+          break;
+        case "status":
+          writeState(db, namespace, "status", "Changed status", []);
+          break;
+        case "synthesis":
+          writeState(db, namespace, "synthesis", "Changed prior synthesis", []);
+          break;
+        case "floor":
+          setNamespaceClassificationFloor(db, namespace, "public");
+          break;
+        case "cursor":
+          upsertConsolidationMetadata(db, {
+            namespace, last_consolidated_at: "2026-01-01T00:00:00.000Z", last_log_id: logs[0].id,
+            last_log_created_at: logs[0].timestamp, synthesis_model: "test", synthesis_token_count: null,
+            run_duration_ms: null,
+          });
+          break;
+      }
+      resolveResponse(cannedResponse);
+      const result = await running;
+      expect(result.error, mutation).toContain(
+        "Consolidation failed unexpectedly. Contact the server operator with error reference",
+      );
+      if (mutation === "synthesis") {
+        expect(readState(db, namespace, "synthesis")?.content).toBe("Changed prior synthesis");
+      } else {
+        expect(readState(db, namespace, "synthesis")).toBeNull();
+      }
+      expect(getConsolidationMetadata(db, namespace)?.last_log_id ?? null).toBe(
+        mutation === "cursor" ? logs[0].id : null,
+      );
+    }
+  });
+
+  it("invalidates a strict preview when status or classification changes before confirmation", async () => {
+    const namespace = "projects/stale-preview-status";
+    const source = appendLog(db, namespace, "The launch is scheduled for Friday.", []);
+    const response: ChatCompletionResponse = {
+      choices: [{ message: { content: JSON.stringify({
+        status_content: "ignored", tags: [], cross_references: [],
+        claims: [{ text: "The launch is scheduled for Friday.", source_log_ids: [source.id] }],
+      }) } }],
+      usage: { completion_tokens: 1 },
+    };
+    const preview = await previewConsolidationNamespace(db, namespace, async () => response);
+    expect(preview.error).toBeUndefined();
+    writeState(db, namespace, "status", "Changed after preview", []);
+
+    const persisted = persistGroundedPreview(
+      db, namespace, preview.preview!, preview.token_count, preview.duration_ms, preview.source_fingerprint!,
+    );
+
+    expect(persisted.error).toMatch(/stale/i);
+    expect(readState(db, namespace, "synthesis")).toBeNull();
+  });
+
+  it("invalidates a strict preview when a source log is reclassified before confirmation", async () => {
+    const namespace = "projects/stale-preview-classification";
+    const source = appendLog(db, namespace, "The launch is scheduled for Friday.", []);
+    const response: ChatCompletionResponse = {
+      choices: [{ message: { content: JSON.stringify({
+        status_content: "ignored", tags: [], cross_references: [],
+        claims: [{ text: "The launch is scheduled for Friday.", source_log_ids: [source.id] }],
+      }) } }],
+      usage: { completion_tokens: 1 },
+    };
+    const preview = await previewConsolidationNamespace(db, namespace, async () => response);
+    db.prepare("UPDATE entries SET classification = ? WHERE id = ?").run("client-confidential", source.id);
+
+    const persisted = persistGroundedPreview(
+      db, namespace, preview.preview!, preview.token_count, preview.duration_ms, preview.source_fingerprint!,
+    );
+
+    expect(persisted.error).toMatch(/preview_stale/);
+    expect(readState(db, namespace, "synthesis")).toBeNull();
+  });
+
+  it("persists an internal-class strict preview with its server-owned classification tag", async () => {
+    const namespace = "projects/grounded-class-output";
+    const source = appendLog(db, namespace, "The launch is scheduled for Friday.", []);
+    const response: ChatCompletionResponse = {
+      choices: [{ message: { content: JSON.stringify({
+        status_content: "ignored", tags: ["classification:public"], cross_references: [],
+        claims: [{ text: "The launch is scheduled for Friday.", source_log_ids: [source.id] }],
+      }) } }],
+      usage: { completion_tokens: 1 },
+    };
+    const preview = await previewConsolidationNamespace(db, namespace, async () => response);
+    const persisted = persistGroundedPreview(
+      db, namespace, preview.preview!, preview.token_count, preview.duration_ms, preview.source_fingerprint!,
+    );
+    const stored = db.prepare("SELECT classification, tags FROM entries WHERE namespace = ? AND key = 'synthesis' AND is_current = 1")
+      .get(namespace) as { classification: string; tags: string };
+
+    expect(persisted.error).toBeUndefined();
+    expect(stored.classification).toBe("internal");
+    expect(JSON.parse(stored.tags)).toContain("classification:internal");
+    expect(JSON.parse(stored.tags)).not.toContain("classification:public");
+  });
+
   it("consolidates namespace with 3 logs — writes synthesis, cross_refs, metadata", async () => {
     for (let i = 0; i < 3; i++) {
       appendLog(db, "projects/alpha", `Log entry ${i}`, ["progress"]);
@@ -931,7 +1153,7 @@ describe("cross-zone exfil guard", () => {
     expect(crossZoneBlocks(db).length).toBe(0);
   });
 
-  it("allows a sensitive source to reference a less-sensitive namespace", async () => {
+  it("withholds a client-confidential source before references can be generated", async () => {
     writeState(db, "projects/beta", "status", "beta status", ["active"]);
     for (let i = 0; i < 3; i++) appendLog(db, "clients/acme", `Log ${i}`, []);
 
@@ -943,10 +1165,12 @@ describe("cross-zone exfil guard", () => {
         ]),
       );
 
-    await consolidateNamespace(db, "clients/acme", mock);
+    const result = await consolidateNamespace(db, "clients/acme", mock);
 
     const refs = getCrossReferences(db, "clients/acme").map((r) => r.target_namespace);
-    expect(refs).toContain("projects/beta");
+    expect(result.error).toMatch(/classification_unavailable/);
+    expect(mock).not.toHaveBeenCalled();
+    expect(refs).not.toContain("projects/beta");
     expect(crossZoneBlocks(db).length).toBe(0);
   });
 
@@ -1332,6 +1556,19 @@ describe("isConsolidationAvailable", () => {
 // ─── Orphaned cross-reference scanner ────────────────────────────────────────
 
 describe("loadTargetVocabulary", () => {
+  it("excludes restricted-only targets but keeps mixed targets and ignores their restricted state", () => {
+    writeState(db, "projects/restrictedtarget", "status", "projects/alpha is mentioned twice", [], "test", undefined, undefined,
+      { classification: "client-confidential" });
+    writeState(db, "projects/mixedtarget", "status", "projects/alpha is mentioned twice", [], "test", undefined, undefined,
+      { classification: "client-confidential" });
+    writeState(db, "projects/mixedtarget", "synthesis", "ordinary internal state", []);
+
+    const targets = loadTargetVocabulary(db, "projects/alpha").map(({ namespace }) => namespace);
+    expect(targets).not.toContain("projects/restrictedtarget");
+    expect(targets).toContain("projects/mixedtarget");
+    expect(isOrphaned(db, "projects/alpha", "projects/mixedtarget", "internal")).toBe(true);
+  });
+
   it("returns tracked namespaces and excludes the source", () => {
     // Targets at or below the source floor only; cross-zone pruning is covered
     // by the dedicated "cross-zone exfil guard" tests below.
@@ -1452,6 +1689,13 @@ describe("isOrphaned", () => {
   it("returns false when target synthesis (not status) mentions source", () => {
     writeState(db, "projects/target", "synthesis", "Uses source as its primary feed.", []);
     expect(isOrphaned(db, "projects/source", "projects/target")).toBe(false);
+  });
+
+  it("ignores reciprocal state above the source or requester classification ceiling", () => {
+    writeState(db, "projects/target", "status", "depends on projects/source", [], "test", undefined, undefined,
+      { classification: "client-confidential" });
+    expect(isOrphaned(db, "projects/source", "projects/target")).toBe(true);
+    expect(isOrphaned(db, "projects/source", "projects/target", "client-confidential")).toBe(false);
   });
 
   it("returns true when target mentions something else, not the source", () => {
@@ -2345,6 +2589,44 @@ describe("processConsolidationBatch success path — stubbed fetch", () => {
       .get() as { content: string } | undefined;
     expect(synthesis).toBeDefined();
     expect(synthesis!.content).toContain("Batch-processed synthesis");
+  });
+
+  it("does not let restricted backlog consume batch slots across worker ticks", async () => {
+    const batchSize = _consolidationConfig.batchSize;
+    const minLogs = _consolidationConfig.minLogs;
+    const maxLogsPerRun = _consolidationConfig.maxLogsPerRun;
+    _consolidationConfig.batchSize = 2;
+    _consolidationConfig.minLogs = 2;
+    _consolidationConfig.maxLogsPerRun = 1;
+
+    const restricted = ["projects/restricted-a", "projects/restricted-b"];
+    for (const namespace of restricted) {
+      for (let i = 0; i < 3; i++) appendLog(db, namespace, `restricted backlog ${i}`, []);
+      setNamespaceClassificationFloor(db, namespace, "client-confidential", "test");
+    }
+    for (let i = 0; i < 3; i++) appendLog(db, "projects/internal-progress", `internal backlog ${i}`, []);
+
+    const payload = JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+      status_content: "Progressed", tags: [], cross_references: [],
+    }) } }] });
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(JSON.parse(payload)) } as unknown as Response);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    _setApiKey("stub-key");
+    _setWorkerDb(db);
+
+    await processConsolidationBatch();
+    await processConsolidationBatch();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(readState(db, "projects/internal-progress", "synthesis")).not.toBeNull();
+    for (const namespace of restricted) {
+      expect(readState(db, namespace, "synthesis")).toBeNull();
+      expect(getConsolidationMetadata(db, namespace)?.last_log_id ?? null).toBeNull();
+    }
+
+    _consolidationConfig.batchSize = batchSize;
+    _consolidationConfig.minLogs = minLogs;
+    _consolidationConfig.maxLogsPerRun = maxLogsPerRun;
   });
 
   it("covers the orphans > 0 log message in processConsolidationBatch success path", async () => {

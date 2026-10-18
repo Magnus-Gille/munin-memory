@@ -18,6 +18,8 @@ import {
   resolveNamespaceClassificationFloor,
   compareClassificationLevels,
   classificationAllowed,
+  normalizeStoredClassification,
+  syncClassificationTag,
 } from "./librarian.js";
 import { canRead, getContextMaxClassification } from "./access.js";
 import type { AccessContext } from "./access.js";
@@ -134,6 +136,11 @@ const config = {
   // keeps a transient glitch from counting toward the circuit breaker (#131).
   maxAttempts: Math.max(1, parseInt(process.env.MUNIN_CONSOLIDATION_MAX_ATTEMPTS ?? "2", 10) || 2),
 };
+
+// No consolidation provider has an explicit high-classification approval yet.
+// A custom OpenAI-compatible URL is not evidence that its endpoint is local or
+// otherwise approved, so every provider path is limited to internal inputs.
+const MAX_CONSOLIDATION_CLASSIFICATION: ClassificationLevel = "internal";
 
 // --- OpenRouter API types ---
 
@@ -408,10 +415,26 @@ export async function processConsolidationBatch(): Promise<void> {
 
   try {
     const db = workerDb;
-    const candidates = getNamespacesNeedingConsolidation(db, config.minLogs).slice(0, config.batchSize);
+    // Policy-denied backlog is not an attempted run and must not occupy a
+    // batch slot forever. Snapshot each candidate's authoritative inputs before
+    // applying the run limit; consolidateNamespace takes a fresh snapshot again
+    // immediately before prompt dispatch.
+    const candidates = getNamespacesNeedingConsolidation(db, config.minLogs)
+      .filter((candidate) => {
+        const snapshot = readConsolidationSnapshot(db, candidate.namespace);
+        return snapshot.logs.length > 0 && checkSnapshotPolicy(snapshot) === null;
+      })
+      .slice(0, config.batchSize);
 
     for (const candidate of candidates) {
       const result = await consolidateNamespace(db, candidate.namespace);
+
+      // A provider-policy skip is expected and must not trip the API failure
+      // circuit breaker. It remains eligible for processing if policy changes.
+      if (result.error?.startsWith("classification_unavailable:")) {
+        console.warn(`Consolidation skipped for ${candidate.namespace}: provider policy does not allow these inputs`);
+        continue;
+      }
 
       if (result.error) {
         circuitBreakerFailures++;
@@ -474,10 +497,112 @@ function makeRunResult(
   };
 }
 
-function consolidationWindowFingerprint(logs: Entry[]): string {
-  return createHash("sha256")
-    .update(logs.map((log) => `${log.id}\0${log.created_at}\0${log.content}`).join("\n"))
-    .digest("hex");
+interface ConsolidationSnapshot {
+  namespace: string;
+  namespaceFloor: ClassificationLevel;
+  maxClassification: ClassificationLevel;
+  metadata: ReturnType<typeof getConsolidationMetadata>;
+  logs: Entry[];
+  existingStatus: Entry | undefined;
+  existingSynthesis: Entry | undefined;
+  fingerprint: string;
+}
+
+function maximumClassification(levels: ClassificationLevel[]): ClassificationLevel {
+  return levels.reduce(
+    (maximum, level) => compareClassificationLevels(level, maximum) > 0 ? level : maximum,
+    "public" as ClassificationLevel,
+  );
+}
+
+function snapshotFingerprint(snapshot: Omit<ConsolidationSnapshot, "fingerprint" | "maxClassification">): string {
+  const fingerprintInput = {
+    namespace: snapshot.namespace,
+    namespaceFloor: snapshot.namespaceFloor,
+    cursor: {
+      last_log_id: snapshot.metadata?.last_log_id ?? null,
+      last_log_created_at: snapshot.metadata?.last_log_created_at ?? null,
+      drain_in_progress: snapshot.metadata?.drain_in_progress ?? 0,
+    },
+    logs: snapshot.logs.map((entry) => ({
+      id: entry.id,
+      content: entry.content,
+      tags: entry.tags,
+      classification: normalizeStoredClassification(entry.classification),
+      created_at: entry.created_at,
+      updated_at: entry.updated_at,
+      valid_from: entry.valid_from,
+      valid_until: entry.valid_until,
+    })),
+    status: snapshot.existingStatus ? {
+      id: snapshot.existingStatus.id,
+      content: snapshot.existingStatus.content,
+      tags: snapshot.existingStatus.tags,
+      classification: normalizeStoredClassification(snapshot.existingStatus.classification),
+      updated_at: snapshot.existingStatus.updated_at,
+    } : null,
+    synthesis: snapshot.existingSynthesis ? {
+      id: snapshot.existingSynthesis.id,
+      content: snapshot.existingSynthesis.content,
+      tags: snapshot.existingSynthesis.tags,
+      classification: normalizeStoredClassification(snapshot.existingSynthesis.classification),
+      updated_at: snapshot.existingSynthesis.updated_at,
+    } : null,
+  };
+  return createHash("sha256").update(JSON.stringify(fingerprintInput)).digest("hex");
+}
+
+/** Capture every classification-bearing input to a synthesis from one DB read transaction. */
+function readConsolidationSnapshot(db: Database.Database, namespace: string): ConsolidationSnapshot {
+  const read = db.transaction(() => {
+    const metadata = getConsolidationMetadata(db, namespace);
+    const logs = getLogsForConsolidation(
+      db,
+      namespace,
+      metadata?.last_log_created_at ?? null,
+      metadata?.last_log_id ?? null,
+      config.maxLogsPerRun,
+    );
+    const states = db.prepare(
+      `SELECT * FROM entries
+       WHERE namespace = ? AND key IN ('status', 'synthesis')
+         AND entry_type = 'state' AND is_current = 1`,
+    ).all(namespace) as Entry[];
+    const existingStatus = states.find((entry) => entry.key === "status");
+    const existingSynthesis = states.find((entry) => entry.key === "synthesis");
+    const namespaceFloor = resolveNamespaceClassificationFloor(db, namespace);
+    const base = { namespace, namespaceFloor, metadata, logs, existingStatus, existingSynthesis };
+    const maxClassification = maximumClassification([
+      namespaceFloor,
+      ...logs.map((entry) => normalizeStoredClassification(entry.classification)),
+      ...(existingStatus ? [normalizeStoredClassification(existingStatus.classification)] : []),
+      ...(existingSynthesis ? [normalizeStoredClassification(existingSynthesis.classification)] : []),
+    ]);
+    return { ...base, maxClassification, fingerprint: snapshotFingerprint(base) };
+  });
+  return read();
+}
+
+function assertSnapshotCurrent(db: Database.Database, snapshot: ConsolidationSnapshot): void {
+  if (readConsolidationSnapshot(db, snapshot.namespace).fingerprint !== snapshot.fingerprint) {
+    throw new Error("consolidation_stale: source content, classification, floor, or cursor changed during synthesis");
+  }
+}
+
+function checkSnapshotPolicy(
+  snapshot: ConsolidationSnapshot,
+  ctx?: AccessContext,
+): ConsolidationRunResult | null {
+  // Requester clearance is independent of the optional Librarian read filter.
+  if (ctx && !classificationAllowed(snapshot.maxClassification, getContextMaxClassification(ctx))) {
+    return makeRunResult(snapshot.namespace, { error: "access_denied" });
+  }
+  if (compareClassificationLevels(snapshot.maxClassification, MAX_CONSOLIDATION_CLASSIFICATION) > 0) {
+    return makeRunResult(snapshot.namespace, {
+      error: "classification_unavailable: no consolidation provider is approved above internal",
+    });
+  }
+  return null;
 }
 
 // Step 0 helper: returns an access_denied result when ctx blocks this namespace,
@@ -494,22 +619,6 @@ function checkAccessGuard(
   return null;
 }
 
-// Step 2 helper: reads the current status and synthesis state entries.
-function readExistingStateEntries(
-  db: Database.Database,
-  namespace: string,
-): { existingStatus: { content: string; tags: string } | undefined; existingSynthesis: { content: string; tags: string } | undefined } {
-  const existingStatus = db
-    .prepare("SELECT content, tags FROM entries WHERE namespace = ? AND key = 'status' AND entry_type = 'state' AND is_current = 1")
-    .get(namespace) as { content: string; tags: string } | undefined;
-
-  const existingSynthesis = db
-    .prepare("SELECT content, tags FROM entries WHERE namespace = ? AND key = 'synthesis' AND entry_type = 'state' AND is_current = 1")
-    .get(namespace) as { content: string; tags: string } | undefined;
-
-  return { existingStatus, existingSynthesis };
-}
-
 interface RefDiscoveryResult {
   mergedRefs: SynthesisResult["cross_references"];
   scannerOrphans: SynthesisResult["cross_references"];
@@ -522,8 +631,15 @@ function discoverAndFilterRefs(
   namespace: string,
   logs: Entry[],
   llmRefs: SynthesisResult["cross_references"],
+  sourceClassification: ClassificationLevel,
+  sourceFloor: ClassificationLevel,
   ctx?: AccessContext,
 ): RefDiscoveryResult {
+  // cross_references has no row-level classification, so a derived edge may
+  // only be stored when it is no more sensitive than its source namespace.
+  if (compareClassificationLevels(sourceClassification, sourceFloor) > 0) {
+    return { mergedRefs: [], scannerOrphans: [] };
+  }
   // ctx is threaded so the scanner prunes out-of-zone targets BEFORE reading
   // their state content (not just at the chokepoint below).
   const scanner = discoverOrphanedReferences(db, namespace, logs, ctx);
@@ -556,8 +672,7 @@ function discoverAndFilterRefs(
 // secret-scan failure, or a success result on clean write.
 function persistRunResults(
   db: Database.Database,
-  namespace: string,
-  logs: Entry[],
+  snapshot: ConsolidationSnapshot,
   result: SynthesisResult,
   mergedRefs: SynthesisResult["cross_references"],
   scannerOrphans: SynthesisResult["cross_references"],
@@ -565,6 +680,26 @@ function persistRunResults(
   metadata: ReturnType<typeof getConsolidationMetadata>,
   durationMs: number,
 ): ConsolidationRunResult {
+  const persist = db.transaction(() => persistRunResultsInTransaction(
+    db, snapshot, result, mergedRefs, scannerOrphans, response, metadata, durationMs,
+  ));
+  // Lock out concurrent writers before rechecking the captured inputs. The
+  // check and all three output writes then share the same transaction.
+  return persist.immediate();
+}
+
+function persistRunResultsInTransaction(
+  db: Database.Database,
+  snapshot: ConsolidationSnapshot,
+  result: SynthesisResult,
+  mergedRefs: SynthesisResult["cross_references"],
+  scannerOrphans: SynthesisResult["cross_references"],
+  response: ChatCompletionResponse,
+  metadata: ReturnType<typeof getConsolidationMetadata>,
+  durationMs: number,
+): ConsolidationRunResult {
+  const { namespace, logs, maxClassification, namespaceFloor } = snapshot;
+  assertSnapshotCurrent(db, snapshot);
   // Backstop: re-scan EVERY model-produced string that will be persisted —
   // status_content AND every cross-reference context (both are surfaced to the
   // owner) — for secrets before writing anything. Untrusted log content flows
@@ -573,7 +708,8 @@ function persistRunResults(
   // last-good synthesis, and do NOT advance the drain cursor (so the window is
   // re-examined, not silently consumed). The circuit breaker bounds repeated
   // failures. (security: synthesis poisoning)
-  const persistedModelStrings = [result.status_content, ...mergedRefs.map((r) => r.context ?? "")];
+  const refsToPersist = compareClassificationLevels(maxClassification, namespaceFloor) <= 0 ? mergedRefs : [];
+  const persistedModelStrings = [result.status_content, ...refsToPersist.map((r) => r.context ?? "")];
   if (persistedModelStrings.some((s) => !scanForSecrets(s).valid)) {
     console.warn(
       `consolidation: run for "${namespace}" withheld — generated content failed the secret scan; ` +
@@ -596,10 +732,13 @@ function persistRunResults(
   // LLM proposed, so machine synthesis is always distinguishable and filterable
   // from owner-authored facts on the primary read path (reinforces the
   // constitutional data-not-commands rule). See decisions/letta-harvest.
-  const synthesisTags = [...new Set([...result.tags, "source:synthesis"])];
+  const synthesisTags = syncClassificationTag(
+    [...new Set([...result.tags.filter((tag) => !tag.startsWith("classification:")), "source:synthesis"])],
+    maxClassification,
+  );
   writeState(db, namespace, "synthesis", result.status_content, synthesisTags, "consolidation-worker");
 
-  const refRows = mergedRefs.map((ref) => ({
+  const refRows = refsToPersist.map((ref) => ({
     source_namespace: namespace,
     target_namespace: ref.target_namespace,
     reference_type: ref.reference_type,
@@ -633,25 +772,9 @@ function persistRunResults(
     token_count: response.usage?.completion_tokens ?? null,
     provider_cost_usd: response.usage?.cost ?? null,
     duration_ms: durationMs,
-    cross_references_found: mergedRefs.length,
+    cross_references_found: refsToPersist.length,
     orphans_discovered: scannerOrphans.length,
   };
-}
-
-// Step 1 helper: reads the consolidation metadata and the pending log window.
-function readLogsWindow(
-  db: Database.Database,
-  namespace: string,
-): { metadata: ReturnType<typeof getConsolidationMetadata>; logs: Entry[] } {
-  const metadata = getConsolidationMetadata(db, namespace);
-  const logs = getLogsForConsolidation(
-    db,
-    namespace,
-    metadata?.last_log_created_at ?? null,
-    metadata?.last_log_id ?? null,
-    config.maxLogsPerRun,
-  );
-  return { metadata, logs };
 }
 
 // Steps 3–4 helper: dispatches the API call and parses the synthesis response.
@@ -659,6 +782,7 @@ async function callAndParseSynthesis(
   doCall: (prompt: string) => Promise<ChatCompletionResponse>,
   prompt: string,
   maxAttempts: number = config.maxAttempts,
+  onResponse?: () => void,
 ): Promise<{ response: ChatCompletionResponse; result: SynthesisResult; durationMs: number }> {
   // Re-roll on an unparseable response before surfacing the error. The model's
   // malformed-JSON failures are non-deterministic, so a fresh sample usually
@@ -672,6 +796,9 @@ async function callAndParseSynthesis(
   let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const response = await doCall(prompt);
+    // Keep snapshot failures outside the parse retry: a stale prompt cannot be
+    // made current by asking the model for another completion.
+    onResponse?.();
     try {
       const text = response.choices?.[0]?.message?.content;
       if (!text) {
@@ -703,15 +830,14 @@ export async function consolidateNamespace(
     if (denied) return denied;
   }
 
-  // Step 1: Read current state
-  const { metadata, logs } = readLogsWindow(db, namespace);
-
+  // Step 1: Capture the prompt inputs and their effective classification together.
+  const snapshot = readConsolidationSnapshot(db, namespace);
+  const { logs, existingStatus, existingSynthesis } = snapshot;
   if (logs.length === 0) {
     return makeRunResult(namespace, {});
   }
-
-  // Step 2: Read existing entries
-  const { existingStatus, existingSynthesis } = readExistingStateEntries(db, namespace);
+  const policyDenial = checkSnapshotPolicy(snapshot, ctx);
+  if (policyDenial) return policyDenial;
 
   // Step 3: Build prompt and resolve caller.
   // Pass status tags so the prompt builder can determine Ground Truth trust (#150).
@@ -733,13 +859,27 @@ export async function consolidateNamespace(
 
   try {
     // Steps 3–4: call API and parse response
-    const { response, result, durationMs } = await callAndParseSynthesis(doCall, prompt);
+    const { response, result, durationMs } = await callAndParseSynthesis(
+      doCall,
+      prompt,
+      config.maxAttempts,
+      () => assertSnapshotCurrent(db, snapshot),
+    );
 
     // Step 5: Discover orphaned cross-references via scanner, merge with LLM refs.
-    const { mergedRefs, scannerOrphans } = discoverAndFilterRefs(db, namespace, logs, result.cross_references, ctx);
+    const { mergedRefs, scannerOrphans } = discoverAndFilterRefs(
+      db,
+      namespace,
+      logs,
+      result.cross_references,
+      snapshot.maxClassification,
+      snapshot.namespaceFloor,
+      ctx,
+    );
 
     // Step 6: Write results
-    return persistRunResults(db, namespace, logs, result, mergedRefs, scannerOrphans, response, metadata, durationMs);
+    assertSnapshotCurrent(db, snapshot);
+    return persistRunResults(db, snapshot, result, mergedRefs, scannerOrphans, response, snapshot.metadata, durationMs);
   } catch {
     return makeRunResult(namespace, {
       duration_ms: Date.now() - startTime,
@@ -806,9 +946,11 @@ export async function previewConsolidationNamespace(
     const denied = checkAccessGuard(db, namespace, ctx);
     if (denied) return denied;
   }
-  const { logs } = readLogsWindow(db, namespace);
+  const snapshot = readConsolidationSnapshot(db, namespace);
+  const { logs, existingStatus, existingSynthesis } = snapshot;
   if (logs.length === 0) return makeRunResult(namespace, {});
-  const { existingStatus, existingSynthesis } = readExistingStateEntries(db, namespace);
+  const policyDenial = checkSnapshotPolicy(snapshot, ctx);
+  if (policyDenial) return policyDenial;
   const prompt = buildSynthesisPrompt(namespace, existingStatus?.content ?? null, existingSynthesis?.content ?? null, logs,
     existingStatus ? parseTags(existingStatus.tags) : undefined, true);
   const doCall = callApi ?? callOpenRouter;
@@ -817,7 +959,12 @@ export async function previewConsolidationNamespace(
   }
   const startedAt = Date.now();
   try {
-    const { response, result, durationMs } = await callAndParseSynthesis(doCall, prompt);
+    const { response, result, durationMs } = await callAndParseSynthesis(
+      doCall,
+      prompt,
+      config.maxAttempts,
+      () => assertSnapshotCurrent(db, snapshot),
+    );
     const groundingError = validateStrictGrounding(result, logs);
     if (groundingError) return makeRunResult(namespace, { duration_ms: durationMs, error: `grounding_rejected: ${groundingError}` });
     const claims = result.claims!;
@@ -829,13 +976,14 @@ export async function previewConsolidationNamespace(
       tags: [],
       cross_references: [],
     };
+    assertSnapshotCurrent(db, snapshot);
     return makeRunResult(namespace, {
       logs_processed: logs.length,
       token_count: response.usage?.completion_tokens ?? null,
       provider_cost_usd: response.usage?.cost ?? null,
       duration_ms: durationMs,
       preview,
-      source_fingerprint: consolidationWindowFingerprint(logs),
+      source_fingerprint: snapshot.fingerprint,
     });
   } catch {
     return makeRunResult(namespace, { duration_ms: Date.now() - startedAt, error: unexpectedConsolidationError() });
@@ -856,18 +1004,20 @@ export function persistGroundedPreview(
     const denied = checkAccessGuard(db, namespace, ctx);
     if (denied) return denied;
   }
-  const { metadata, logs } = readLogsWindow(db, namespace);
-  if (consolidationWindowFingerprint(logs) !== expectedSourceFingerprint) {
-    return makeRunResult(namespace, { error: "preview_stale: source logs changed since the preview" });
+  const snapshot = readConsolidationSnapshot(db, namespace);
+  if (snapshot.fingerprint !== expectedSourceFingerprint) {
+    return makeRunResult(namespace, { error: "preview_stale: consolidation source snapshot changed since the preview" });
   }
-  const groundingError = validateStrictGrounding(preview, logs);
+  const policyDenial = checkSnapshotPolicy(snapshot, ctx);
+  if (policyDenial) return policyDenial;
+  const groundingError = validateStrictGrounding(preview, snapshot.logs);
   if (groundingError) return makeRunResult(namespace, { error: `preview_stale: ${groundingError}` });
   const mergedRefs: SynthesisResult["cross_references"] = [];
   const scannerOrphans: SynthesisResult["cross_references"] = [];
   const response: ChatCompletionResponse = tokenCount === null
     ? { choices: [] }
     : { choices: [], usage: { prompt_tokens: 0, completion_tokens: tokenCount } };
-  return persistRunResults(db, namespace, logs, preview, mergedRefs, scannerOrphans, response, metadata, durationMs);
+  return persistRunResults(db, snapshot, preview, mergedRefs, scannerOrphans, response, snapshot.metadata, durationMs);
 }
 
 // --- Orphaned cross-reference discovery (scanner) ---
@@ -906,9 +1056,13 @@ export function loadTargetVocabulary(
   sourceNamespace: string,
   ctx?: AccessContext,
 ): TargetNamespace[] {
+  const sourceFloor = resolveNamespaceClassificationFloor(db, sourceNamespace);
+  const maxClassification = ctx && compareClassificationLevels(getContextMaxClassification(ctx), sourceFloor) < 0
+    ? getContextMaxClassification(ctx)
+    : sourceFloor;
   const rows = db
     .prepare(
-      `SELECT DISTINCT namespace FROM entries
+      `SELECT namespace, classification FROM entries
        WHERE (namespace GLOB 'projects/*'
           OR namespace GLOB 'clients/*'
           OR namespace GLOB 'people/*'
@@ -924,18 +1078,20 @@ export function loadTargetVocabulary(
            SELECT 1 FROM code_health_records chr WHERE chr.entry_id = entries.id
          )`,
     )
-    .all(sourceNamespace) as Array<{ namespace: string }>;
+    .all(sourceNamespace) as Array<{ namespace: string; classification: ClassificationLevel }>;
 
   // Blanket cross-zone guard: never scan or link namespaces more sensitive than
   // the source — prevents the orphan scanner from even reading their content.
-  const sourceFloor = resolveNamespaceClassificationFloor(db, sourceNamespace);
-
   const targets: TargetNamespace[] = [];
+  const seen = new Set<string>();
   for (const row of rows) {
+    if (seen.has(row.namespace)) continue;
+    if (!classificationAllowed(normalizeStoredClassification(row.classification), maxClassification)) continue;
     const segments = row.namespace.split("/");
     const bareName = segments[segments.length - 1] ?? "";
     if (bareName.length < MIN_BARE_NAME_LENGTH) continue;
     if (!isTargetWithinZone(db, sourceFloor, row.namespace, ctx)) continue;
+    seen.add(row.namespace);
     targets.push({ namespace: row.namespace, bareName });
   }
   return targets;
@@ -974,17 +1130,21 @@ export function isOrphaned(
   db: Database.Database,
   sourceNamespace: string,
   targetNamespace: string,
+  maxClassification: ClassificationLevel = resolveNamespaceClassificationFloor(db, sourceNamespace),
 ): boolean {
   const rows = db
     .prepare(
-      `SELECT content FROM entries
+      `SELECT content, classification FROM entries
        WHERE namespace = ? AND entry_type = 'state' AND is_current = 1 AND key IN ('status', 'synthesis')`,
     )
-    .all(targetNamespace) as Array<{ content: string }>;
+    .all(targetNamespace) as Array<{ content: string; classification: ClassificationLevel }>;
 
-  if (rows.length === 0) return true;
+  const visibleRows = rows.filter((row) =>
+    classificationAllowed(normalizeStoredClassification(row.classification), maxClassification),
+  );
+  if (visibleRows.length === 0) return true;
 
-  const corpus = rows.map((r) => r.content).join("\n");
+  const corpus = visibleRows.map((r) => r.content).join("\n");
   const sourceSegments = sourceNamespace.split("/");
   const sourceBare = sourceSegments[sourceSegments.length - 1] ?? "";
 
@@ -1053,11 +1213,15 @@ export function discoverOrphanedReferences(
   ctx?: AccessContext,
 ): ScannerResult {
   const targets = loadTargetVocabulary(db, sourceNamespace, ctx);
+  const sourceFloor = resolveNamespaceClassificationFloor(db, sourceNamespace);
+  const reciprocalMax = ctx && compareClassificationLevels(getContextMaxClassification(ctx), sourceFloor) < 0
+    ? getContextMaxClassification(ctx)
+    : sourceFloor;
   const hits = scanMentions(logs, targets);
   const orphans: SynthesisResult["cross_references"] = [];
   let droppedByReciprocal = 0;
   for (const hit of hits) {
-    if (!isOrphaned(db, sourceNamespace, hit.targetNamespace)) {
+    if (!isOrphaned(db, sourceNamespace, hit.targetNamespace, reciprocalMax)) {
       droppedByReciprocal++;
       continue;
     }

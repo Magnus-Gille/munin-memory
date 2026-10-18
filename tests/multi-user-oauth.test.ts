@@ -278,8 +278,13 @@ describe("resolveConsentIdentity", () => {
   };
 
   it("returns owner for trusted header match", () => {
-    const req = mockRequest({ "x-proxy-user": "owner@example.com" });
-    const result = resolveConsentIdentity(req, baseConfig, db);
+    db.prepare("UPDATE principals SET email = ?, email_lower = ? WHERE principal_id = 'owner'")
+      .run("owner@example.com", "owner@example.com");
+    const req = mockRequest({
+      "x-proxy-user": "owner@example.com",
+      "x-user-email": "owner@example.com",
+    });
+    const result = resolveConsentIdentity(req, baseConfig, db, new URL("https://munin.example.com"));
     expect(result).not.toBeNull();
     expect(result!.isOwner).toBe(true);
     expect(result!.principalId).toBe("owner");
@@ -293,8 +298,8 @@ describe("resolveConsentIdentity", () => {
       email: "alice@example.com",
     });
 
-    const req = mockRequest({ "x-user-email": "alice@example.com" });
-    const result = resolveConsentIdentity(req, baseConfig, db);
+    const req = mockRequest({ "x-proxy-user": "owner@example.com", "x-user-email": "alice@example.com" });
+    const result = resolveConsentIdentity(req, baseConfig, db, new URL("https://munin.example.com"));
     expect(result).not.toBeNull();
     expect(result!.principalId).toBe("alice");
     expect(result!.isOwner).toBe(false);
@@ -309,15 +314,15 @@ describe("resolveConsentIdentity", () => {
       email: "Alice@Example.COM",
     });
 
-    const req = mockRequest({ "x-user-email": "alice@example.com" });
-    const result = resolveConsentIdentity(req, baseConfig, db);
+    const req = mockRequest({ "x-proxy-user": "owner@example.com", "x-user-email": "alice@example.com" });
+    const result = resolveConsentIdentity(req, baseConfig, db, new URL("https://munin.example.com"));
     expect(result).not.toBeNull();
     expect(result!.principalId).toBe("alice");
   });
 
   it("returns null for unknown email (fail-closed)", () => {
-    const req = mockRequest({ "x-user-email": "unknown@example.com" });
-    const result = resolveConsentIdentity(req, baseConfig, db);
+    const req = mockRequest({ "x-proxy-user": "owner@example.com", "x-user-email": "unknown@example.com" });
+    const result = resolveConsentIdentity(req, baseConfig, db, new URL("https://munin.example.com"));
     expect(result).toBeNull();
   });
 
@@ -331,8 +336,8 @@ describe("resolveConsentIdentity", () => {
     db.prepare("UPDATE principals SET revoked_at = datetime('now') WHERE principal_id = ?")
       .run("revoked-user");
 
-    const req = mockRequest({ "x-user-email": "revoked@example.com" });
-    const result = resolveConsentIdentity(req, baseConfig, db);
+    const req = mockRequest({ "x-proxy-user": "owner@example.com", "x-user-email": "revoked@example.com" });
+    const result = resolveConsentIdentity(req, baseConfig, db, new URL("https://munin.example.com"));
     expect(result).toBeNull();
   });
 
@@ -345,22 +350,22 @@ describe("resolveConsentIdentity", () => {
       expiresAt: "2020-01-01T00:00:00Z",
     });
 
-    const req = mockRequest({ "x-user-email": "expired@example.com" });
-    const result = resolveConsentIdentity(req, baseConfig, db);
+    const req = mockRequest({ "x-proxy-user": "owner@example.com", "x-user-email": "expired@example.com" });
+    const result = resolveConsentIdentity(req, baseConfig, db, new URL("https://munin.example.com"));
     expect(result).toBeNull();
   });
 
   it("returns owner for localhost when allowed", () => {
-    const config = { ...baseConfig, allowLocalhost: true };
+    const config: ConsentAuthConfig = { allowLocalhost: true };
     const req = mockRequest({}, "127.0.0.1");
-    const result = resolveConsentIdentity(req, config, db);
+    const result = resolveConsentIdentity(req, config, db, new URL("https://localhost:3030"));
     expect(result).not.toBeNull();
     expect(result!.isOwner).toBe(true);
   });
 
   it("returns null for localhost when not allowed", () => {
     const req = mockRequest({}, "127.0.0.1");
-    const result = resolveConsentIdentity(req, baseConfig, db);
+    const result = resolveConsentIdentity(req, baseConfig, db, new URL("https://munin.example.com"));
     expect(result).toBeNull();
   });
 
@@ -370,11 +375,16 @@ describe("resolveConsentIdentity", () => {
       .run("owner@example.com", "owner@example.com");
 
     const config: ConsentAuthConfig = {
+      trustedHeaderName: "x-proxy-user",
+      trustedHeaderValue: "owner@example.com",
       identityHeaderName: "x-user-email",
       allowLocalhost: false,
     };
-    const req = mockRequest({ "x-user-email": "owner@example.com" });
-    const result = resolveConsentIdentity(req, config, db);
+    const req = mockRequest({
+      "x-proxy-user": "owner@example.com",
+      "x-user-email": "owner@example.com",
+    });
+    const result = resolveConsentIdentity(req, config, db, new URL("https://munin.example.com"));
     expect(result).not.toBeNull();
     expect(result!.principalId).toBe("owner");
     expect(result!.isOwner).toBe(true);

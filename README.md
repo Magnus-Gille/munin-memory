@@ -21,7 +21,7 @@ For the full argument, see [Resilient and Sovereign AI](https://gille.ai/en/blog
 
 Munin is more than a key-value store for AI. The features are designed around how an assistant actually needs to think across time, across devices, and across people.
 
-- **Background consolidation (the "sleep" feature)** — an optional worker periodically synthesizes recent log entries into an enriched `synthesis` entry via an OpenRouter LLM call, extracting decisions, open threads, and cross-namespace references. The human-maintained `status` entry is treated as ground truth: the synthesizer supplements it, but can never override phase or lifecycle. Ground-truth anchoring is enforced in the prompt, not by trust.
+- **Background consolidation (the "sleep" feature)** — an optional worker periodically synthesizes recent log entries into an enriched `synthesis` entry via the configured LLM endpoint, extracting decisions, open threads, and cross-namespace references. The human-maintained `status` entry is treated as ground truth: the synthesizer supplements it, but can never override phase or lifecycle. Ground-truth anchoring is enforced in the prompt, not by trust. Consolidation is limited to `internal` inputs until a provider has explicit approval for higher classifications; a custom endpoint URL alone is not treated as proof of local or approved processing. `client-confidential` and `client-restricted` inputs are skipped before any provider call.
 - **Computed lifecycle dashboard** — `memory_orient` returns a single "where is everything" view, computed dynamically from status entries in `projects/*` and `clients/*` and grouped by lifecycle (active, blocked, completed, stopped, maintenance, archived). The default handshake is `detail:"compact"`; `detail:"beginner"` swaps live estate data for the mental model, starter tool index, workflows, and safe write examples. No manual workbench to keep current.
 - **Retrospective synthesis tools** — `memory_narrative`, `memory_commitments`, `memory_patterns`, and `memory_handoff` derive reviewable, source-backed signals from logs and audit history: blocker age, decision churn, open commitments, anti-patterns, and handoff packs between environments or agents. `memory_commitments` is deliberately conservative: canonical tracked-status `Next Steps`, dated future clauses in visible tracked-status prose, explicit `memory_log` commitment phrases such as `We agreed to: ...` or `I commit to: ...`, and future-dated `memory_log` phrases can surface here. Generic non-status state fields are not commitment sources. Legacy plain markdown status blobs with ad-hoc `Next Steps:` headings remain readable but are not commitment-eligible until migrated to the canonical structure. Every surfaced signal is tied to an explicit source entry — no hidden policy, no hallucinated summaries.
 - **Two memory types** — state entries (mutable, current truth) and log entries (append-only, chronological history). A clean conceptual model that maps to how projects actually evolve.
@@ -193,7 +193,7 @@ the exact rule; if it only writes state keys directly in one namespace, omit the
 
 ### Connect from an OAuth-capable client
 
-When running in HTTP mode, the server exposes OAuth 2.1 endpoints. Configure your MCP client with the server URL and the OAuth flow handles authentication automatically. For public deployments, OAuth consent is now fail-closed: you must configure a trusted proxy-authenticated header/value pair for `/authorize` and `/authorize/approve`, or the server will refuse to serve public consent. See the configuration below and the route/provider contracts in `src/index.ts` and `src/oauth.ts` for details.
+When running in HTTP mode, the server exposes OAuth 2.1 endpoints. Configure your MCP client with the server URL and the OAuth flow handles authentication automatically. For public deployments, `/authorize` and `/authorize/approve` require the configured trusted proxy header/value pair. If `MUNIN_OAUTH_IDENTITY_HEADER` is configured, the request must also include an email that resolves to one active principal, including the owner; that identity header never replaces the proxy gate. Loopback owner consent is available only when the issuer URL is local and the request connects directly over loopback.
 
 ## Configuration
 
@@ -221,7 +221,8 @@ All configuration is via environment variables. Copy `.env.example` for a starti
 | `MUNIN_OAUTH_CLIENT_SECRET_KEY` | — | Optional dedicated key for encrypting confidential OAuth client secrets at rest; defaults to `MUNIN_API_KEY` |
 | `MUNIN_OAUTH_TRUSTED_USER_HEADER` | — | Trusted header name required for public OAuth consent |
 | `MUNIN_OAUTH_TRUSTED_USER_VALUE` | — | Exact trusted header value required for public OAuth consent |
-| `MUNIN_OAUTH_ALLOW_LOCALHOST_CONSENT` | `true` | Allow consent on loopback-only local development |
+| `MUNIN_OAUTH_IDENTITY_HEADER` | — | Optional trusted-proxy header containing the authenticated user's email; requires the trusted header/value gate and must resolve to one active principal |
+| `MUNIN_OAUTH_ALLOW_LOCALHOST_CONSENT` | `true` | Allow consent from direct loopback connections when the issuer URL is local |
 | `MUNIN_OWNER_ALIASES` | legacy compatibility alias | Optional comma-separated owner names recognized by orientation and injection checks |
 | `MUNIN_OWNER_PROFILE_NAMESPACE` | `people/owner` | Canonical owner-profile namespace; lookup falls back to existing `people/magnus` data |
 
@@ -399,7 +400,7 @@ The included deployment path is a generic systemd-oriented starting point:
 1. **Deploy the code** — `./scripts/deploy-rpi.sh <your-pi-hostname>`
 2. **Install the systemd service** — see `munin-memory.service` as a template
 3. **Set up a reverse proxy** — Cloudflare Tunnel, Tailscale, WireGuard, nginx, or whatever fits your setup
-4. **Configure OAuth** — set `MUNIN_OAUTH_ISSUER_URL` to your public domain and configure `MUNIN_OAUTH_TRUSTED_USER_HEADER` + `MUNIN_OAUTH_TRUSTED_USER_VALUE` so browser consent is only available to your authenticated user
+4. **Configure OAuth** — set `MUNIN_OAUTH_ISSUER_URL` to your public domain and configure `MUNIN_OAUTH_TRUSTED_USER_HEADER` + `MUNIN_OAUTH_TRUSTED_USER_VALUE` as the trusted proxy gate. For multi-principal consent, also set `MUNIN_OAUTH_IDENTITY_HEADER` to the proxy-authenticated user's email header.
 
 The script renders the placeholders in `munin-memory.service`, refuses to deploy
 over an existing Git checkout, and does not copy `.env` or database files. Review
