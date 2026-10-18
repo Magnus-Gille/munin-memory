@@ -30,6 +30,8 @@ changelog is the canonical record of what moved.
 
 ### Security
 
+- Keep offsite backup and snapshot Heimdall bearer tokens out of curl arguments,
+  and reject tokens containing CR/LF before sending a panel update.
 - **OAuth consent proxy and identity gates.** Public issuers now require an exact
   trusted proxy header/value match on both consent endpoints; an identity email
   cannot satisfy that gate. When identity mapping is configured, missing or
