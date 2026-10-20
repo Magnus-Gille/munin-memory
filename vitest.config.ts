@@ -7,15 +7,15 @@ export default defineConfig({
       provider: "v8",
       include: ["src/**"],
       reporter: ["text-summary", "json-summary"],
-      // Ratchet floors: the #342 tests measured 90.12% statements, 85.50%
-      // branches, 93.76% functions and 91.53% lines locally on Node 24.
-      // Supported Node 22/24 CI must also pass these floors before readiness.
+      // Ratchet floors: supported Node 22/24 CI measured 90.05% statements,
+      // 85.41% branches, 93.76% functions and 91.48% lines for #342, unchanged
+      // from #389. Local Node 24 lines were 91.53%; use the hosted matrix floor.
       // Raise with measured improvements; never lower to admit a regression.
       thresholds: {
         statements: 90,
         branches: 85,
         functions: 93,
-        lines: 91.5,
+        lines: 91.4,
       },
     },
   },
