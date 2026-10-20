@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import Database from "better-sqlite3";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, lstatSync, readlinkSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -77,10 +77,37 @@ describe("LongMemEval gold-turn artifact", () => {
       const snapshotSha = shaBytes(readFileSync(snapshotPath));
       prepareGoldTurnsCli(["--raw", rawPath, "--queries", queryPath, "--snapshot", snapshotPath, "--out", outputPath], shaBytes(readFileSync(rawPath)));
       expect(existsSync(outputPath)).toBe(true);
+      expect(statSync(outputPath).mode & 0o777).toBe(0o600);
       expect(shaBytes(readFileSync(snapshotPath))).toBe(snapshotSha);
       expect(["-wal", "-shm", "-journal"].some((suffix) => existsSync(snapshotPath + suffix))).toBe(false);
       expect(() => prepareGoldTurnsCli(["--raw", rawPath, "--queries", queryPath, "--snapshot", snapshotPath, "--out", rawPath], shaBytes(readFileSync(rawPath)))).toThrow(/alias/);
       expect(() => prepareGoldTurnsCli(["--raw", rawPath, "--queries", queryPath, "--snapshot", snapshotPath, "--out", outputPath], shaBytes(readFileSync(rawPath)))).toThrow(/overwrite/);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it.each(["existing file", "dangling symlink"])("refuses an output collision (%s) without altering sources or targets", (collision) => {
+    const dir = mkdtempSync(join(tmpdir(), "munin-gold-collision-"));
+    try {
+      const rawPath = join(dir, "raw.json"); const queryPath = join(dir, "queries.jsonl"); const snapshotPath = join(dir, "snapshot.db"); const outputPath = join(dir, "gold.json");
+      writeFileSync(rawPath, JSON.stringify(raw)); writeFileSync(queryPath, `${JSON.stringify(query)}\n`);
+      const db = new Database(snapshotPath);
+      db.exec("CREATE TABLE entries (id TEXT PRIMARY KEY, content TEXT NOT NULL)");
+      db.prepare("INSERT INTO entries (id, content) VALUES (?, ?)").run(query.expected_ids[0], content);
+      db.close();
+      const inputPaths = [rawPath, queryPath, snapshotPath];
+      const originalBytes = inputPaths.map((path) => readFileSync(path));
+      const missingTarget = join(dir, "must-stay-absent.json");
+      if (collision === "existing file") writeFileSync(outputPath, "preserve existing artifact\n");
+      else symlinkSync(missingTarget, outputPath);
+      expect(() => prepareGoldTurnsCli(["--raw", rawPath, "--queries", queryPath, "--snapshot", snapshotPath, "--out", outputPath], shaBytes(originalBytes[0]!))).toThrow("Output already exists; refusing overwrite");
+      inputPaths.forEach((path, index) => expect(readFileSync(path).equals(originalBytes[index]!)).toBe(true));
+      if (collision === "existing file") expect(readFileSync(outputPath, "utf8")).toBe("preserve existing artifact\n");
+      else {
+        expect(lstatSync(outputPath).isSymbolicLink()).toBe(true);
+        expect(readlinkSync(outputPath)).toBe(missingTarget);
+        expect(existsSync(missingTarget)).toBe(false);
+      }
+      expect(["-wal", "-shm", "-journal"].some((suffix) => existsSync(snapshotPath + suffix))).toBe(false);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 

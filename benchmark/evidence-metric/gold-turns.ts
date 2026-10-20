@@ -222,7 +222,7 @@ function assertInputFile(path: string): string {
 function assertNoSnapshotSidecars(snapshotPath: string): void {
   for (const suffix of ["-wal", "-shm", "-journal"]) if (existsSync(snapshotPath + suffix)) throw new Error(`Snapshot has a SQLite sidecar: ${suffix}`);
 }
-function assertNewOutput(path: string, inputs: string[]): string {
+function assertOutputPath(path: string, inputs: string[]): string {
   const output = resolve(path); let current = dirname(output);
   while (true) {
     const info = lstatSync(current); if (info.isSymbolicLink()) throw new Error("Output path cannot use symlink parents");
@@ -230,7 +230,6 @@ function assertNewOutput(path: string, inputs: string[]): string {
   }
   const parent = realpathSync(dirname(output)); const canonical = resolve(parent, output.slice(dirname(output).length + 1));
   if (inputs.includes(canonical) || inputs.includes(output)) throw new Error("Output must not alias an input");
-  if (existsSync(output)) throw new Error("Output already exists; refusing overwrite");
   if (!statSync(parent).isDirectory()) throw new Error("Output parent must be a directory");
   return canonical;
 }
@@ -263,7 +262,7 @@ export function prepareGoldTurnsCli(argv = process.argv.slice(2), pinnedDatasetS
   const args = parseCli(argv); const inputPaths = [assertInputFile(args.raw!), assertInputFile(args.queries!), assertInputFile(args.snapshot!)];
   const identities = inputPaths.map((path) => { const info = statSync(path); return `${info.dev}:${info.ino}`; });
   if (new Set(identities).size !== inputPaths.length) throw new Error("Raw dataset, query file, and snapshot must be distinct files");
-  const output = assertNewOutput(args.out!, inputPaths);
+  const output = assertOutputPath(args.out!, inputPaths);
   assertNoSnapshotSidecars(inputPaths[2]!);
   const startingHashes = inputPaths.map(hashFile);
   if (startingHashes[0] !== pinnedDatasetSha256) throw new Error("Raw dataset SHA-256 differs from the pinned LongMemEval-S source");
@@ -277,8 +276,12 @@ export function prepareGoldTurnsCli(argv = process.argv.slice(2), pinnedDatasetS
   const json = `${JSON.stringify(artifact, null, 2)}\n`;
   assertNoSnapshotSidecars(inputPaths[2]!);
   if (inputPaths.some((path, index) => hashFile(path) !== startingHashes[index])) throw new Error("An input changed during gold-turn preparation");
-  if (existsSync(output)) throw new Error("Output appeared during preparation; refusing overwrite");
-  const outFd = openSync(output, "wx", 0o600);
+  let outFd: number;
+  try { outFd = openSync(output, "wx", 0o600); }
+  catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "EEXIST") throw new Error("Output already exists; refusing overwrite", { cause: error });
+    throw error;
+  }
   try { writeFileSync(outFd, json, "utf8"); } finally { closeSync(outFd); }
 }
 
