@@ -119,7 +119,9 @@ Both comparison flags are optional and independent. Passage comparison requires
 `--gold-turns`; the offline evaluator also requires `--baseline`. Every control
 row must reproduce the frozen #341 baseline exactly before a comparison is valid.
 The committed annotation artifact makes replay possible without downloading the
-large raw dataset. CI runs both experiments and retains their full per-query
+large raw dataset. The shared checker pins its reviewed SHA-256 and rejects
+changed annotations before evaluation; updating labels requires a reviewed pin
+change. CI runs both experiments and retains their full per-query
 reports. An experimental loss does not change the legacy control's exit status;
 green checks alone do not recommend adopting a candidate.
 

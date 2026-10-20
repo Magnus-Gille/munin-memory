@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { assertSafeParents, fetchSharedArtifacts, loadSharedContract, type VerificationReceipt } from "./shared-artifacts.js";
 
 const USAGE = "Usage: npm run benchmark:evidence:check -- --artifacts-dir DIR --output PATH [--packing-comparison skip-oversized] [--passage-comparison query-passages-v1 --gold-turns PATH]";
+/** Reviewed against the pinned upstream dataset; updating labels requires a new reviewed digest. */
+const SHARED_GOLD_TURNS_SHA256 = "47dc2a2e8bdd1af0fb1b3d5aa39e68a4716548b8ad11d5587f06a7eac61a55db";
 type Contract = Awaited<ReturnType<typeof loadSharedContract>>;
 export interface CheckDependencies {
   loadContract: () => Promise<Contract>;
@@ -46,6 +49,11 @@ function assertOutput(output: string, artifactsDir: string, metadataPaths: strin
 function record(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
+function assertReviewedGoldTurns(path: string): void {
+  if (createHash("sha256").update(readFileSync(path)).digest("hex") !== SHARED_GOLD_TURNS_SHA256) {
+    throw new Error(`Shared passage comparison requires the reviewed gold-turn artifact SHA-256 ${SHARED_GOLD_TURNS_SHA256}`);
+  }
+}
 /** Check only the experiment fields consumed by the hosted summary. */
 function validPackingComparison(value: unknown): boolean {
   const comparison = record(value);
@@ -71,7 +79,7 @@ function validPassageComparison(value: unknown): boolean {
     || comparison.coordinate_system !== "utf16_code_units" || comparison.chunk_max_utf8_bytes !== 2048) return false;
   const lineage = record(comparison.lineage); const source = record(lineage?.source);
   const sha = (value: unknown) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
-  if (!lineage || !source || !sha(lineage.gold_turns_sha256) || !sha(lineage.gold_turns_source_sha256)
+  if (!lineage || !source || lineage.gold_turns_sha256 !== SHARED_GOLD_TURNS_SHA256 || !sha(lineage.gold_turns_source_sha256)
     || !["dataset_sha256", "snapshot_sha256", "queries_sha256"].every((key) => sha(source[key]))) return false;
   const proxy = record(comparison.entry_id_proxy);
   if (!proxy || !validPackingComparison({ ...proxy, strategy: "skip-oversized", control_reproduced: true })) return false;
@@ -104,7 +112,9 @@ export async function main(args: string[], dependencies: CheckDependencies = { l
     const receiptPath = output + ".verification.json";
     assertOutput(output, artifactsDir, metadataPaths);
     assertOutput(receiptPath, artifactsDir, metadataPaths);
+    if (goldTurns) assertReviewedGoldTurns(goldTurns);
     const receipt = await dependencies.fetchArtifacts(artifactsDir, contract.manifest);
+    if (goldTurns) assertReviewedGoldTurns(goldTurns);
     assertOutput(output, artifactsDir, metadataPaths);
     assertOutput(receiptPath, artifactsDir, metadataPaths);
     writeFileSync(receiptPath, JSON.stringify({ schema_version: 1, ...receipt }, null, 2) + "\n", { flag: "wx", mode: 0o600 });

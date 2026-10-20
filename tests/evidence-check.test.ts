@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { main, type CheckDependencies } from "../benchmark/evidence-metric/check.js";
 import { RELEASE_TAG } from "../benchmark/evidence-metric/shared-artifacts.js";
+import type { GoldTurnArtifact } from "../benchmark/evidence-metric/gold-turns.js";
+const REVIEWED_GOLD_TURNS_SHA256 = "47dc2a2e8bdd1af0fb1b3d5aa39e68a4716548b8ad11d5587f06a7eac61a55db";
+const reviewedGoldTurns = readFileSync(new URL("../benchmark/evidence-metric/comparisons/longmemeval-s-passages-20261020/gold-turns.json", import.meta.url));
 let dir: string;
 let deps: CheckDependencies;
 let output: string;
@@ -18,6 +21,7 @@ beforeEach(() => {
 });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); rmSync(dir, { recursive: true, force: true }); });
 const args = () => ["--artifacts-dir", artifactDir, "--output", output];
+const writeReviewedGoldTurns = () => { const path = join(dir, "gold-turns.json"); writeFileSync(path, reviewedGoldTurns); return path; };
 it.each([0, 1, 2] as const)("preserves offline evaluator exit %i and supplies only fixed arguments", async (code) => {
   vi.stubEnv("MUNIN_SEMANTIC_MAX_DISTANCE", "0.001");
   deps.execute = vi.fn(async (_args, env) => { expect(env.MUNIN_SEMANTIC_MAX_DISTANCE).toBeUndefined(); writeFileSync(output, JSON.stringify({ quality_state: code === 1 ? "regressed" : code === 2 ? "invalid" : "improved", comparison: { gained_question_ids: ["g1"], lost_question_ids: code === 1 ? ["l1"] : [], reproduced: code === 1 } })); return code; });
@@ -104,7 +108,7 @@ it("preserves invalid2 reports when the requested packing comparison cannot run"
 
 const passageComparison = () => ({
   strategy: "query-passages-v1", control_reproduced: true, coordinate_system: "utf16_code_units", chunk_max_utf8_bytes: 2048,
-  lineage: { gold_turns_sha256: "a".repeat(64), gold_turns_source_sha256: "b".repeat(64), source: { dataset_sha256: "c".repeat(64), snapshot_sha256: "d".repeat(64), queries_sha256: "e".repeat(64) } },
+  lineage: { gold_turns_sha256: REVIEWED_GOLD_TURNS_SHA256, gold_turns_source_sha256: "b".repeat(64), source: { dataset_sha256: "c".repeat(64), snapshot_sha256: "d".repeat(64), queries_sha256: "e".repeat(64) } },
   entry_id_proxy: packingComparison(),
   annotated_message_coverage: {
     metric: "full_original_annotated_message_coverage_v1", eligible_question_count: 2, eligible_question_ids: ["gain", "loss"], excluded_question_ids: ["excluded"], annotated_message_count: 4,
@@ -115,7 +119,7 @@ const passageComparison = () => ({
   },
 });
 it("forwards the explicit passage strategy and labels while keeping a candidate regression informational", async () => {
-  const labels = join(dir, "gold-turns.json"); writeFileSync(labels, "annotations");
+  const labels = writeReviewedGoldTurns();
   deps.execute = vi.fn(async () => {
     writeFileSync(output, JSON.stringify({ quality_state: "unchanged", comparison: { gained_question_ids: [], lost_question_ids: [] }, passage_comparison: passageComparison() }));
     return 0;
@@ -138,12 +142,46 @@ it.each([
   { ...passageComparison(), coordinate_system: "bytes" },
   { ...passageComparison(), chunk_max_utf8_bytes: 4096 },
   { ...passageComparison(), lineage: undefined },
+  { ...passageComparison(), lineage: { ...passageComparison().lineage, gold_turns_sha256: "0".repeat(64) } },
   { ...passageComparison(), entry_id_proxy: undefined },
   { ...passageComparison(), annotated_message_coverage: { ...passageComparison().annotated_message_coverage, eligible_question_count: 3 } },
   { ...passageComparison(), annotated_message_coverage: { ...passageComparison().annotated_message_coverage, candidate_packed: { all_turn_count: 1, all_turn_rate: 1, covered_message_count: 2 } } },
   { ...passageComparison(), annotated_message_coverage: { ...passageComparison().annotated_message_coverage, regression: false } },
 ])("fails closed for malformed requested passage comparison %#", async (passage_comparison) => {
-  const labels = join(dir, "gold-turns.json"); writeFileSync(labels, "annotations");
+  const labels = writeReviewedGoldTurns();
   deps.execute = async () => { writeFileSync(output, JSON.stringify({ quality_state: "unchanged", comparison: { gained_question_ids: [], lost_question_ids: [] }, passage_comparison })); return 0; };
   expect(await main([...args(), "--passage-comparison", "query-passages-v1", "--gold-turns", labels], deps)).toBe(2);
+});
+
+it.each(["all-empty turns", "changed offset", "changed source binding", "whitespace"])("rejects unreviewed annotation bytes (%s) before downloading or evaluating", async (change) => {
+  const labels = writeReviewedGoldTurns();
+  const artifact = JSON.parse(reviewedGoldTurns.toString("utf8")) as GoldTurnArtifact;
+  if (change === "all-empty turns") artifact.queries.forEach((query) => query.entries.forEach((entry) => { entry.turns = []; }));
+  if (change === "changed offset") artifact.queries.flatMap((query) => query.entries).find((entry) => entry.turns.length > 0)!.turns[0].start++;
+  if (change === "changed source binding") artifact.source.dataset_sha256 = "0".repeat(64);
+  writeFileSync(labels, change === "whitespace" ? Buffer.concat([reviewedGoldTurns, Buffer.from("\n")]) : JSON.stringify(artifact, null, 2) + "\n");
+  deps.execute = vi.fn(async () => {
+    writeFileSync(output, JSON.stringify({ quality_state: "unchanged", comparison: { gained_question_ids: [], lost_question_ids: [] }, passage_comparison: passageComparison() }));
+    return 0;
+  });
+  expect(await main([...args(), "--passage-comparison", "query-passages-v1", "--gold-turns", labels], deps)).toBe(2);
+  expect(deps.fetchArtifacts).not.toHaveBeenCalled();
+  expect(deps.execute).not.toHaveBeenCalled();
+});
+
+it("rechecks reviewed annotations after an asynchronous download before evaluating", async () => {
+  const labels = writeReviewedGoldTurns();
+  const fetch = deps.fetchArtifacts;
+  deps.fetchArtifacts = vi.fn(async (...params) => {
+    const receipt = await fetch(...params);
+    writeFileSync(labels, Buffer.concat([reviewedGoldTurns, Buffer.from("\n")]));
+    return receipt;
+  });
+  deps.execute = vi.fn(async () => {
+    writeFileSync(output, JSON.stringify({ quality_state: "unchanged", comparison: { gained_question_ids: [], lost_question_ids: [] }, passage_comparison: passageComparison() }));
+    return 0;
+  });
+  expect(await main([...args(), "--passage-comparison", "query-passages-v1", "--gold-turns", labels], deps)).toBe(2);
+  expect(deps.fetchArtifacts).toHaveBeenCalledOnce();
+  expect(deps.execute).not.toHaveBeenCalled();
 });
