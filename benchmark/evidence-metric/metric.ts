@@ -1,4 +1,4 @@
-import { serializeContext, type SerializedContextBudget } from "../answer-quality/serialize.js";
+import { serializeContext, type SerializedContextBudget, type ContextOverflowPolicy } from "../answer-quality/serialize.js";
 import type { BenchmarkQuery } from "../types.js";
 import type { Entry } from "../../src/types.js";
 
@@ -69,8 +69,8 @@ export function validateVectors(value: unknown, queries: BenchmarkQuery[], sha: 
   if (Object.keys(vectors).length !== queries.length) throw new Error("Frozen vectors must match the query IDs exactly");
   return v as unknown as FrozenVectors;
 }
-export function packEvidence(queryId: string, expectedIds: string[], entries: Entry[]): EvidenceRow {
-  const packed = serializeContext(entries, "linear", { maxEstimatedTokens: 8192, estimator: CONFIG.estimator });
+export function packEvidence(queryId: string, expectedIds: string[], entries: Entry[], overflowPolicy: ContextOverflowPolicy = "stop"): EvidenceRow {
+  const packed = serializeContext(entries, "linear", { maxEstimatedTokens: 8192, estimator: CONFIG.estimator, overflowPolicy });
   const present = expectedIds.filter((id) => packed.orderedIds.includes(id));
   return {
     query_id: queryId, expected_ids: [...expectedIds], retrieved_ids: entries.map((e) => e.id),
@@ -83,7 +83,7 @@ export function canonical(value: unknown): string {
   if (value !== null && typeof value === "object") return `{${Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${JSON.stringify(k)}:${canonical(v)}`).join(",")}}`;
   return JSON.stringify(value);
 }
-export function validateRows(value: unknown): EvidenceRow[] {
+function validateEvidenceRows(value: unknown, order: "prefix" | "subsequence"): EvidenceRow[] {
   if (!Array.isArray(value) || value.length === 0) throw new Error("Report rows must be nonempty");
   for (const raw of value) {
     const row = object(raw);
@@ -92,7 +92,16 @@ export function validateRows(value: unknown): EvidenceRow[] {
     const retrieved = ids(row.retrieved_ids, "report retrieved_ids", true);
     const packed = ids(row.packed_ids, "report packed_ids", true);
     const present = ids(row.present_gold_ids, "report present_gold_ids", true);
-    if (retrieved.length > 10 || canonical(packed) !== canonical(retrieved.slice(0, packed.length))
+    let lastIndex = -1;
+    const validOrder = order === "prefix"
+      ? canonical(packed) === canonical(retrieved.slice(0, packed.length))
+      : packed.every((id) => {
+        const index = retrieved.indexOf(id, lastIndex + 1);
+        if (index === -1) return false;
+        lastIndex = index;
+        return true;
+      });
+    if (retrieved.length > 10 || !validOrder
       || canonical(present) !== canonical(expected.filter((id) => packed.includes(id)))
       || row.all_gold !== (present.length === expected.length)) throw new Error("Inconsistent report evidence IDs");
     const budget = object(row.budget);
@@ -105,6 +114,58 @@ export function validateRows(value: unknown): EvidenceRow[] {
   }
   ids(value.map((r: EvidenceRow) => r.query_id), "report query IDs");
   return value as EvidenceRow[];
+}
+/** Legacy v1 reports require a retrieval prefix, including a truncated first item. */
+export function validateRows(value: unknown): EvidenceRow[] { return validateEvidenceRows(value, "prefix"); }
+/** Whole-entry skip packing permits only an ordered subsequence of retrieval. */
+export function validateCandidateRows(value: unknown): EvidenceRow[] { return validateEvidenceRows(value, "subsequence"); }
+/** Bind strategy comparisons to the exact frozen control, not only aggregate rates. */
+export function assertControlReproduced(baseline: EvidenceRow[], control: EvidenceRow[]): void {
+  validateRows(baseline); validateRows(control);
+  const sorted = (rows: EvidenceRow[]) => [...rows].sort((a, b) => a.query_id.localeCompare(b.query_id));
+  if (canonical(sorted(baseline)) !== canonical(sorted(control))) {
+    throw new Error("Packing comparison control rows do not reproduce the frozen baseline exactly");
+  }
+}
+export type GoldStage = "all_gold" | "partial_gold" | "no_gold";
+function goldStage(expected: string[], actual: string[]): GoldStage {
+  const count = expected.filter((id) => actual.includes(id)).length;
+  return count === expected.length ? "all_gold" : count > 0 ? "partial_gold" : "no_gold";
+}
+/** Gold labels measure the result only; both packers have already consumed the same ranked entries. */
+export function comparePackingRows(control: EvidenceRow[], candidate: EvidenceRow[]) {
+  validateRows(control); validateCandidateRows(candidate);
+  const byId = new Map(candidate.map((row) => [row.query_id, row]));
+  if (control.length !== candidate.length) throw new Error("Packing comparisons require the same query IDs");
+  const stages = {
+    retrieval: { all_gold: 0, partial_gold: 0, no_gold: 0 },
+    legacy_packed: { all_gold: 0, partial_gold: 0, no_gold: 0 },
+    candidate_packed: { all_gold: 0, partial_gold: 0, no_gold: 0 },
+  };
+  const queries = control.map((before) => {
+    const after = byId.get(before.query_id);
+    if (!after || canonical(before.retrieved_ids) !== canonical(after.retrieved_ids)
+      || canonical(before.expected_ids) !== canonical(after.expected_ids)) {
+      throw new Error("Packing comparisons require the same retrieved order and gold IDs per query");
+    }
+    const retrieval_stage = goldStage(before.expected_ids, before.retrieved_ids);
+    const legacy_packed_stage = goldStage(before.expected_ids, before.packed_ids);
+    const candidate_packed_stage = goldStage(after.expected_ids, after.packed_ids);
+    stages.retrieval[retrieval_stage]++;
+    stages.legacy_packed[legacy_packed_stage]++;
+    stages.candidate_packed[candidate_packed_stage]++;
+    return {
+      query_id: before.query_id, expected_ids: [...before.expected_ids], retrieved_ids: [...before.retrieved_ids],
+      legacy_packed_ids: [...before.packed_ids], candidate_packed_ids: [...after.packed_ids],
+      candidate_budget: { ...after.budget }, retrieval_stage, legacy_packed_stage, candidate_packed_stage,
+      legacy_all_gold: before.all_gold, candidate_all_gold: after.all_gold,
+      gained_ids: after.present_gold_ids.filter((id) => !before.present_gold_ids.includes(id)),
+      lost_ids: before.present_gold_ids.filter((id) => !after.present_gold_ids.includes(id)),
+    };
+  });
+  const gained_question_ids = queries.filter((q) => !q.legacy_all_gold && q.candidate_all_gold).map((q) => q.query_id);
+  const lost_question_ids = queries.filter((q) => q.legacy_all_gold && !q.candidate_all_gold).map((q) => q.query_id);
+  return { regression: lost_question_ids.length > 0, gained_question_ids, lost_question_ids, stages, queries };
 }
 export function compareRows(baseline: EvidenceRow[], current: EvidenceRow[]) {
   validateRows(baseline); validateRows(current);

@@ -53,6 +53,54 @@ regression, and **2** invalid or missing inputs; gains do not offset a lost
 all-gold question. Corrected bytes require a new versioned release and reviewed
 lock update.
 
+## Fixed-budget packing comparison (#342)
+
+The [2026-10-20 measured comparison](comparisons/longmemeval-s-20261020/README.md)
+reproduces the 500-question control and reports the candidate's gains, losses,
+context-size tradeoff and remaining packing gap.
+
+Add `--packing-comparison skip-oversized` to either command to compare packing
+policies at the same **8,192 estimated-token** budget. The offline command also
+requires `--baseline`; the shared checker supplies its reviewed baseline.
+
+```sh
+npm run benchmark:evidence:check -- \
+  --artifacts-dir /absolute/path/to/fresh-artifact-directory \
+  --output /absolute/path/to/existing-parent/packing-report.json \
+  --packing-comparison skip-oversized
+```
+
+The control is the unchanged #341 serializer: preserve retrieval order, truncate
+the first block if necessary, and stop at the first overflowing block. The
+candidate skips a whole block that does not fit and considers later entries,
+without truncating content, changing the retrieved order, or consulting gold
+labels. Both use identical headers, separators and the pinned UTF-8 byte
+estimator. This is an experiment; it does not select a new default packing policy.
+
+Every control row must reproduce the reviewed baseline, including retrieved and
+packed order and budget metadata. A mismatch invalidates the experiment rather
+than attributing a retrieval or input change to packing. The frozen baseline's
+bytes, configuration and primary regression policy remain unchanged. Future
+retrieval changes may therefore require a separately reviewed baseline before
+this strict packing comparison can run.
+
+The optional `packing_comparison` section reports all/some/no-gold counts at
+three stages: retrieved top 10, legacy packing and candidate packing. Per-query
+rows retain candidate IDs and budget, stages, and gained/lost gold IDs.
+`gained_question_ids` and `lost_question_ids` report transitions in all-gold
+presence; `regression` is true for any lost all-gold question even if the net
+count improves. Partial gold-ID losses remain visible in individual rows.
+
+The report's existing `quality_state`, `comparison` and exit status describe the
+unchanged control against #341. Experimental candidate losses are reported
+separately, so a green control check is not approval to adopt the candidate.
+The CI summary displays both stages and gains/losses, and retains the full report.
+The legacy first-block ID can count even when only part of its content fits;
+candidate whole-block presence does not prove answer correctness or semantic
+evidence coverage. No reader or judge model is run.
+
+## Execution and frozen input contract
+
 The CI workflow definition runs on PRs and pushes to `main`, daily at
 `04:23 UTC`, and manual dispatch, using a fresh `ubuntu-24.04` runner with Node
 24, read-only permissions, and no data cache. It retains report and receipt

@@ -1,0 +1,444 @@
+{
+  "schema_version": 1,
+  "purpose": "Measured #342 packing experiment; not a replacement baseline",
+  "measured_date": "2026-10-20",
+  "runtime": {
+    "node": "v24.22.0",
+    "platform": "darwin",
+    "arch": "arm64",
+    "sqlite": "3.53.2",
+    "sqlite_vec": "v0.1.9"
+  },
+  "full_report_sha256": "09116125694701fa48a7db51a0d64523442a488a7a8fac71e66c8e7b8250189d",
+  "bindings": {
+    "snapshot_sha256": "fe48b7a30433f23d487d05608cecd969734b45686a51e29f5f86ba328059036a",
+    "queries_sha256": "274f858907c521cca2663c17fbb8bc5f2e198096d129e717c4c26a65c18ff7f1",
+    "vectors_sha256": "8c76c253a4755e590b85556b93400ef124c69f11518e1d19c6c841a07b46780c",
+    "as_of": "2026-10-01T00:00:00.000Z",
+    "config": {
+      "metric": "packed_gold_entry_id_presence_v1",
+      "runner_mode": "production_ranker",
+      "search_mode": "hybrid",
+      "search_recency_weight": 0,
+      "top_k": 10,
+      "serialization": "linear",
+      "max_estimated_tokens": 8192,
+      "estimator": "utf8_bytes_div4_ceil_v1",
+      "semantic_max_distance": null
+    },
+    "embedding": {
+      "model": "Xenova/bge-small-en-v1.5",
+      "identity": "{\"version\":1,\"model\":\"Xenova/bge-small-en-v1.5\",\"revision\":\"ea104dacec62c0de699686887e3f920caeb4f3e3\",\"dtype\":\"fp32\",\"dimensions\":384,\"pooling\":\"mean\",\"normalize\":true,\"preprocessing\":\"raw-text-v1\",\"transformers_version\":\"4.3.1\",\"onnxruntime_node_version\":\"1.30.0\",\"platform\":\"darwin\",\"arch\":\"arm64\",\"execution_provider\":\"cpu\"}",
+      "dimensions": 384
+    }
+  },
+  "lineage": {
+    "source_revision": "b3a8fcd99dda733fbe3ad28f874b9160e72ffec8",
+    "source_sha256": {
+      "benchmark/evidence-metric/clock.ts": "2deee6c189965f3360fea50d362f3947cb83b67cb5a80101f610458b1fcc0709",
+      "benchmark/evidence-metric/metric.ts": "2aa07a648fd6abb1540af1e963ddf23ae49d4b9f837f0f54abe718da45f9bc26",
+      "benchmark/evidence-metric/evaluate.ts": "e3f37de6ecf293816494e6c397acd336b06d3ff30ae5b8155a84c9870afbbc8c",
+      "benchmark/evidence-metric/run.ts": "ef6c9d6df0262eb4de48d48cf3ac56783cf06e5835e8bae54297643dd801013b",
+      "benchmark/runner.ts": "bdab225b528e786e78533762b765db1995eda08900e213d4c32cd0195c860d0f",
+      "benchmark/scorer.ts": "b3be69bc5e53bbfe55c467c3e6970e5f9b680663bc2f7b9e0033bdafc329a4a7",
+      "benchmark/types.ts": "4e4b56d3fa354e8893f21d4c46b9922cf541ed55f05900271e39bea8fcb37afe",
+      "benchmark/answer-quality/serialize.ts": "d54724a5727dca91fc75d7423d1bbdc14116bd8ea1144f3fa4314b332f3fbba8",
+      "src/db.ts": "46dd110081935107f495cccb920a0641d64b59c63a7bebebb04a687cdef8c1e2",
+      "src/migrations.ts": "745cff868e39e1d6ae9188b4d3c137adea7e102dec299fc590d7b5b6cd2d2f46",
+      "src/embeddings.ts": "cd76122c34327d6051d5f6ae9ed6b5828615886d7ff166f68938cc1de6124e88",
+      "src/internal/reranker.ts": "47ed1a2f6322301ec00ec97ec0f8c143feb14210ddcacf8d32ab7191274104a9",
+      "src/internal/retrieval-shared.ts": "14d95fbf815516308d8b24d580157aff489f7789c1632f9ecc10f0bcdec3ac7a",
+      "src/internal/hybrid-fusion.ts": "1b458a9e06d490d3f96bb9abb58f4c6cd2af7a4f921bf57ceeeb2c083fb9c73c",
+      "src/internal/query-probe.ts": "8c5c6ae269dbddb0aac9bdfd48b066e10b4a59a15a68b3785c07ca1b1bbcbdd5",
+      "src/internal/namespace-filter.ts": "cd4af85278c0a29cdd3c0d2238142f903c0ad4c3b61a838eab4a355fa13f1c96"
+    },
+    "baseline_sha256": "a705dee0e10c66409bac95404f7b78bed576a7b84facaf77e25c0debb2204e96"
+  },
+  "metric_limitation": "Entry-ID presence in packed context is a proxy, not full content/span coverage. A truncated first block still counts as present; budget.truncated exposes this limitation.",
+  "quality_state": "unchanged",
+  "legacy_summary": {
+    "query_count": 500,
+    "all_gold_count": 297,
+    "all_gold_rate": 0.594,
+    "truncated_query_count": 500
+  },
+  "packing_comparison": {
+    "strategy": "skip-oversized",
+    "control_reproduced": true,
+    "regression": false,
+    "gained_question_ids": [
+      "longmemeval-s-ccb36322",
+      "longmemeval-s-f4f1d8a4",
+      "longmemeval-s-f4f1d8a4_abs",
+      "longmemeval-s-gpt4_d31cdae3"
+    ],
+    "lost_question_ids": [],
+    "stages": {
+      "retrieval": {
+        "all_gold": 457,
+        "partial_gold": 35,
+        "no_gold": 8
+      },
+      "legacy_packed": {
+        "all_gold": 297,
+        "partial_gold": 154,
+        "no_gold": 49
+      },
+      "candidate_packed": {
+        "all_gold": 301,
+        "partial_gold": 154,
+        "no_gold": 45
+      }
+    }
+  },
+  "gold_id_changes": {
+    "questions_gaining_any_gold_id": 7,
+    "questions_losing_any_gold_id": 0,
+    "total_gained_ids": 7,
+    "total_lost_ids": 0
+  },
+  "packing_changed_question_count": 281,
+  "budget_distributions": {
+    "legacy": {
+      "mean_estimated_tokens": 6464.184,
+      "median_estimated_tokens": 6709.5,
+      "p90_estimated_tokens_nearest_rank": 7889,
+      "min_estimated_tokens": 2720,
+      "max_estimated_tokens": 8186,
+      "mean_included_entries": 2.068,
+      "total_included_entries": 1034,
+      "empty_context_count": 0
+    },
+    "candidate": {
+      "mean_estimated_tokens": 7489.506,
+      "median_estimated_tokens": 7619.5,
+      "p90_estimated_tokens_nearest_rank": 8095,
+      "min_estimated_tokens": 5200,
+      "max_estimated_tokens": 8190,
+      "mean_included_entries": 2.792,
+      "total_included_entries": 1396,
+      "empty_context_count": 0
+    }
+  },
+  "changed_gold_queries": [
+    {
+      "query_id": "longmemeval-s-ccb36322",
+      "expected_ids": [
+        "longmemeval:s:ccb36322:answer_f1fbb330"
+      ],
+      "retrieved_ids": [
+        "longmemeval:s:ccb36322:06d1a1a0",
+        "longmemeval:s:ccb36322:bdcee74e_3",
+        "longmemeval:s:ccb36322:162ff451",
+        "longmemeval:s:ccb36322:answer_f1fbb330",
+        "longmemeval:s:ccb36322:facfdfe2",
+        "longmemeval:s:ccb36322:8b1019b8_1",
+        "longmemeval:s:ccb36322:6d52ee93_1",
+        "longmemeval:s:ccb36322:522dd987_4",
+        "longmemeval:s:ccb36322:c38b33ae",
+        "longmemeval:s:ccb36322:06eccfec"
+      ],
+      "legacy_packed_ids": [
+        "longmemeval:s:ccb36322:06d1a1a0",
+        "longmemeval:s:ccb36322:bdcee74e_3"
+      ],
+      "candidate_packed_ids": [
+        "longmemeval:s:ccb36322:06d1a1a0",
+        "longmemeval:s:ccb36322:bdcee74e_3",
+        "longmemeval:s:ccb36322:answer_f1fbb330"
+      ],
+      "candidate_budget": {
+        "max_estimated_tokens": 8192,
+        "estimated_tokens": 7300,
+        "estimator": "utf8_bytes_div4_ceil_v1",
+        "truncated": true,
+        "candidate_entry_count": 10,
+        "included_entry_count": 3,
+        "dropped_entry_count": 7
+      },
+      "retrieval_stage": "all_gold",
+      "legacy_packed_stage": "no_gold",
+      "candidate_packed_stage": "all_gold",
+      "legacy_all_gold": false,
+      "candidate_all_gold": true,
+      "gained_ids": [
+        "longmemeval:s:ccb36322:answer_f1fbb330"
+      ],
+      "lost_ids": []
+    },
+    {
+      "query_id": "longmemeval-s-f4f1d8a4",
+      "expected_ids": [
+        "longmemeval:s:f4f1d8a4:answer_f5b33470"
+      ],
+      "retrieved_ids": [
+        "longmemeval:s:f4f1d8a4:3aac691d_2",
+        "longmemeval:s:f4f1d8a4:a07f9d5c_2",
+        "longmemeval:s:f4f1d8a4:eb682e52_2",
+        "longmemeval:s:f4f1d8a4:answer_f5b33470",
+        "longmemeval:s:f4f1d8a4:sharegpt_b9zLyT6_0",
+        "longmemeval:s:f4f1d8a4:6f051087_2",
+        "longmemeval:s:f4f1d8a4:64934c76",
+        "longmemeval:s:f4f1d8a4:sharegpt_wN1ifmB_55",
+        "longmemeval:s:f4f1d8a4:ultrachat_67942",
+        "longmemeval:s:f4f1d8a4:2bfea7af"
+      ],
+      "legacy_packed_ids": [
+        "longmemeval:s:f4f1d8a4:3aac691d_2",
+        "longmemeval:s:f4f1d8a4:a07f9d5c_2"
+      ],
+      "candidate_packed_ids": [
+        "longmemeval:s:f4f1d8a4:3aac691d_2",
+        "longmemeval:s:f4f1d8a4:a07f9d5c_2",
+        "longmemeval:s:f4f1d8a4:answer_f5b33470"
+      ],
+      "candidate_budget": {
+        "max_estimated_tokens": 8192,
+        "estimated_tokens": 8067,
+        "estimator": "utf8_bytes_div4_ceil_v1",
+        "truncated": true,
+        "candidate_entry_count": 10,
+        "included_entry_count": 3,
+        "dropped_entry_count": 7
+      },
+      "retrieval_stage": "all_gold",
+      "legacy_packed_stage": "no_gold",
+      "candidate_packed_stage": "all_gold",
+      "legacy_all_gold": false,
+      "candidate_all_gold": true,
+      "gained_ids": [
+        "longmemeval:s:f4f1d8a4:answer_f5b33470"
+      ],
+      "lost_ids": []
+    },
+    {
+      "query_id": "longmemeval-s-f4f1d8a4_abs",
+      "expected_ids": [
+        "longmemeval:s:f4f1d8a4_abs:answer_f5b33470_abs"
+      ],
+      "retrieved_ids": [
+        "longmemeval:s:f4f1d8a4_abs:1dd13331_1",
+        "longmemeval:s:f4f1d8a4_abs:31299b8e_2",
+        "longmemeval:s:f4f1d8a4_abs:ea3db78e_2",
+        "longmemeval:s:f4f1d8a4_abs:answer_f5b33470_abs",
+        "longmemeval:s:f4f1d8a4_abs:sharegpt_n7xJvjp_0",
+        "longmemeval:s:f4f1d8a4_abs:f252001e",
+        "longmemeval:s:f4f1d8a4_abs:sharegpt_jerQm7S_17",
+        "longmemeval:s:f4f1d8a4_abs:ultrachat_39395",
+        "longmemeval:s:f4f1d8a4_abs:facef6e0_4",
+        "longmemeval:s:f4f1d8a4_abs:ultrachat_317545"
+      ],
+      "legacy_packed_ids": [
+        "longmemeval:s:f4f1d8a4_abs:1dd13331_1",
+        "longmemeval:s:f4f1d8a4_abs:31299b8e_2"
+      ],
+      "candidate_packed_ids": [
+        "longmemeval:s:f4f1d8a4_abs:1dd13331_1",
+        "longmemeval:s:f4f1d8a4_abs:31299b8e_2",
+        "longmemeval:s:f4f1d8a4_abs:answer_f5b33470_abs"
+      ],
+      "candidate_budget": {
+        "max_estimated_tokens": 8192,
+        "estimated_tokens": 8152,
+        "estimator": "utf8_bytes_div4_ceil_v1",
+        "truncated": true,
+        "candidate_entry_count": 10,
+        "included_entry_count": 3,
+        "dropped_entry_count": 7
+      },
+      "retrieval_stage": "all_gold",
+      "legacy_packed_stage": "no_gold",
+      "candidate_packed_stage": "all_gold",
+      "legacy_all_gold": false,
+      "candidate_all_gold": true,
+      "gained_ids": [
+        "longmemeval:s:f4f1d8a4_abs:answer_f5b33470_abs"
+      ],
+      "lost_ids": []
+    },
+    {
+      "query_id": "longmemeval-s-gpt4_a56e767c",
+      "expected_ids": [
+        "longmemeval:s:gpt4_a56e767c:answer_cf9e3940_2",
+        "longmemeval:s:gpt4_a56e767c:answer_cf9e3940_1",
+        "longmemeval:s:gpt4_a56e767c:answer_cf9e3940_3"
+      ],
+      "retrieved_ids": [
+        "longmemeval:s:gpt4_a56e767c:answer_cf9e3940_3",
+        "longmemeval:s:gpt4_a56e767c:d75245ea",
+        "longmemeval:s:gpt4_a56e767c:answer_cf9e3940_1",
+        "longmemeval:s:gpt4_a56e767c:88c8df0e_3",
+        "longmemeval:s:gpt4_a56e767c:15998e39_2",
+        "longmemeval:s:gpt4_a56e767c:answer_cf9e3940_2",
+        "longmemeval:s:gpt4_a56e767c:dac54d1e_1",
+        "longmemeval:s:gpt4_a56e767c:f56e6152_1",
+        "longmemeval:s:gpt4_a56e767c:7a819e6f_1",
+        "longmemeval:s:gpt4_a56e767c:sharegpt_H2ddZjb_13"
+      ],
+      "legacy_packed_ids": [
+        "longmemeval:s:gpt4_a56e767c:answer_cf9e3940_3"
+      ],
+      "candidate_packed_ids": [
+        "longmemeval:s:gpt4_a56e767c:answer_cf9e3940_3",
+        "longmemeval:s:gpt4_a56e767c:answer_cf9e3940_1"
+      ],
+      "candidate_budget": {
+        "max_estimated_tokens": 8192,
+        "estimated_tokens": 7850,
+        "estimator": "utf8_bytes_div4_ceil_v1",
+        "truncated": true,
+        "candidate_entry_count": 10,
+        "included_entry_count": 2,
+        "dropped_entry_count": 8
+      },
+      "retrieval_stage": "all_gold",
+      "legacy_packed_stage": "partial_gold",
+      "candidate_packed_stage": "partial_gold",
+      "legacy_all_gold": false,
+      "candidate_all_gold": false,
+      "gained_ids": [
+        "longmemeval:s:gpt4_a56e767c:answer_cf9e3940_1"
+      ],
+      "lost_ids": []
+    },
+    {
+      "query_id": "longmemeval-s-28dc39ac",
+      "expected_ids": [
+        "longmemeval:s:28dc39ac:answer_8d015d9d_3",
+        "longmemeval:s:28dc39ac:answer_8d015d9d_5",
+        "longmemeval:s:28dc39ac:answer_8d015d9d_2",
+        "longmemeval:s:28dc39ac:answer_8d015d9d_4",
+        "longmemeval:s:28dc39ac:answer_8d015d9d_1"
+      ],
+      "retrieved_ids": [
+        "longmemeval:s:28dc39ac:answer_8d015d9d_2",
+        "longmemeval:s:28dc39ac:answer_8d015d9d_4",
+        "longmemeval:s:28dc39ac:answer_8d015d9d_3",
+        "longmemeval:s:28dc39ac:answer_8d015d9d_5",
+        "longmemeval:s:28dc39ac:answer_8d015d9d_1",
+        "longmemeval:s:28dc39ac:42bcee92_2",
+        "longmemeval:s:28dc39ac:cbd18c72",
+        "longmemeval:s:28dc39ac:bfa499f7",
+        "longmemeval:s:28dc39ac:df003c93_3",
+        "longmemeval:s:28dc39ac:4ed9cd1b_1"
+      ],
+      "legacy_packed_ids": [
+        "longmemeval:s:28dc39ac:answer_8d015d9d_2"
+      ],
+      "candidate_packed_ids": [
+        "longmemeval:s:28dc39ac:answer_8d015d9d_2",
+        "longmemeval:s:28dc39ac:answer_8d015d9d_5"
+      ],
+      "candidate_budget": {
+        "max_estimated_tokens": 8192,
+        "estimated_tokens": 8081,
+        "estimator": "utf8_bytes_div4_ceil_v1",
+        "truncated": true,
+        "candidate_entry_count": 10,
+        "included_entry_count": 2,
+        "dropped_entry_count": 8
+      },
+      "retrieval_stage": "all_gold",
+      "legacy_packed_stage": "partial_gold",
+      "candidate_packed_stage": "partial_gold",
+      "legacy_all_gold": false,
+      "candidate_all_gold": false,
+      "gained_ids": [
+        "longmemeval:s:28dc39ac:answer_8d015d9d_5"
+      ],
+      "lost_ids": []
+    },
+    {
+      "query_id": "longmemeval-s-gpt4_d31cdae3",
+      "expected_ids": [
+        "longmemeval:s:gpt4_d31cdae3:answer_8464304d_1",
+        "longmemeval:s:gpt4_d31cdae3:answer_8464304d_2"
+      ],
+      "retrieved_ids": [
+        "longmemeval:s:gpt4_d31cdae3:answer_8464304d_2",
+        "longmemeval:s:gpt4_d31cdae3:ultrachat_324099",
+        "longmemeval:s:gpt4_d31cdae3:de695a4e",
+        "longmemeval:s:gpt4_d31cdae3:answer_8464304d_1",
+        "longmemeval:s:gpt4_d31cdae3:55033f6f",
+        "longmemeval:s:gpt4_d31cdae3:5ace29d7_1",
+        "longmemeval:s:gpt4_d31cdae3:7614c21f_2",
+        "longmemeval:s:gpt4_d31cdae3:sharegpt_dBFf2EE_0",
+        "longmemeval:s:gpt4_d31cdae3:ultrachat_271005",
+        "longmemeval:s:gpt4_d31cdae3:98e1dcd8_1"
+      ],
+      "legacy_packed_ids": [
+        "longmemeval:s:gpt4_d31cdae3:answer_8464304d_2",
+        "longmemeval:s:gpt4_d31cdae3:ultrachat_324099"
+      ],
+      "candidate_packed_ids": [
+        "longmemeval:s:gpt4_d31cdae3:answer_8464304d_2",
+        "longmemeval:s:gpt4_d31cdae3:ultrachat_324099",
+        "longmemeval:s:gpt4_d31cdae3:answer_8464304d_1"
+      ],
+      "candidate_budget": {
+        "max_estimated_tokens": 8192,
+        "estimated_tokens": 8008,
+        "estimator": "utf8_bytes_div4_ceil_v1",
+        "truncated": true,
+        "candidate_entry_count": 10,
+        "included_entry_count": 3,
+        "dropped_entry_count": 7
+      },
+      "retrieval_stage": "all_gold",
+      "legacy_packed_stage": "partial_gold",
+      "candidate_packed_stage": "all_gold",
+      "legacy_all_gold": false,
+      "candidate_all_gold": true,
+      "gained_ids": [
+        "longmemeval:s:gpt4_d31cdae3:answer_8464304d_1"
+      ],
+      "lost_ids": []
+    },
+    {
+      "query_id": "longmemeval-s-2698e78f_abs",
+      "expected_ids": [
+        "longmemeval:s:2698e78f_abs:answer_9282283d_abs_1",
+        "longmemeval:s:2698e78f_abs:answer_9282283d_abs_2"
+      ],
+      "retrieved_ids": [
+        "longmemeval:s:2698e78f_abs:sharegpt_IsRvBnc_11",
+        "longmemeval:s:2698e78f_abs:cdba3d9f_1",
+        "longmemeval:s:2698e78f_abs:3d94eae8",
+        "longmemeval:s:2698e78f_abs:9316aae3_1",
+        "longmemeval:s:2698e78f_abs:answer_9282283d_abs_2",
+        "longmemeval:s:2698e78f_abs:2e18c90b_1",
+        "longmemeval:s:2698e78f_abs:ultrachat_526292",
+        "longmemeval:s:2698e78f_abs:eae760f6",
+        "longmemeval:s:2698e78f_abs:ce291e98",
+        "longmemeval:s:2698e78f_abs:9bd6beaa_1"
+      ],
+      "legacy_packed_ids": [
+        "longmemeval:s:2698e78f_abs:sharegpt_IsRvBnc_11",
+        "longmemeval:s:2698e78f_abs:cdba3d9f_1"
+      ],
+      "candidate_packed_ids": [
+        "longmemeval:s:2698e78f_abs:sharegpt_IsRvBnc_11",
+        "longmemeval:s:2698e78f_abs:cdba3d9f_1",
+        "longmemeval:s:2698e78f_abs:answer_9282283d_abs_2"
+      ],
+      "candidate_budget": {
+        "max_estimated_tokens": 8192,
+        "estimated_tokens": 7729,
+        "estimator": "utf8_bytes_div4_ceil_v1",
+        "truncated": true,
+        "candidate_entry_count": 10,
+        "included_entry_count": 3,
+        "dropped_entry_count": 7
+      },
+      "retrieval_stage": "partial_gold",
+      "legacy_packed_stage": "no_gold",
+      "candidate_packed_stage": "partial_gold",
+      "legacy_all_gold": false,
+      "candidate_all_gold": false,
+      "gained_ids": [
+        "longmemeval:s:2698e78f_abs:answer_9282283d_abs_2"
+      ],
+      "lost_ids": []
+    }
+  ]
+}

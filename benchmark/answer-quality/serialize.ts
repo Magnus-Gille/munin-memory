@@ -26,9 +26,13 @@ export interface SerializedContext {
   budget: SerializedContextBudget;
 }
 
+export type ContextOverflowPolicy = "stop" | "skip-oversized";
+
 export interface SerializeContextBudgetOptions {
   maxEstimatedTokens: number;
   estimator: "utf8_bytes_div4_ceil_v1";
+  /** Default preserves stop-on-overflow and first-entry truncation. */
+  overflowPolicy?: ContextOverflowPolicy;
 }
 
 export interface SerializedContextBudget {
@@ -79,6 +83,10 @@ export function serializeContext(
   budgetOptions?: SerializeContextBudgetOptions,
 ): SerializedContext {
   const estimator = "utf8_bytes_div4_ceil_v1" as const;
+  const overflowPolicy = budgetOptions?.overflowPolicy ?? "stop";
+  if (overflowPolicy !== "stop" && overflowPolicy !== "skip-oversized") {
+    throw new Error("Unsupported context overflow policy.");
+  }
   if (
     budgetOptions !== undefined
     && (
@@ -135,6 +143,9 @@ export function serializeContext(
       orderedIds.push(entry.id);
       continue;
     }
+
+    // The experimental policy keeps whole entries only, in the same display order.
+    if (overflowPolicy === "skip-oversized") continue;
 
     if (blocks.length === 0 && maxBytes > 0) {
       const prefix = `${header}\n`;

@@ -37,7 +37,8 @@ jobs:
           mkdir -p "$RUNNER_TEMP/evidence-results"
           npm run benchmark:evidence:check -- \
             --artifacts-dir "$RUNNER_TEMP/evidence-inputs" \
-            --output "$RUNNER_TEMP/evidence-results/report.json"
+            --output "$RUNNER_TEMP/evidence-results/report.json" \
+            --packing-comparison skip-oversized
       - name: Summarize the result
         if: always()
         run: |
@@ -50,6 +51,10 @@ jobs:
             const result = JSON.parse(readFileSync(report, 'utf8'));
             writeFileSync(join(process.env.RUNNER_TEMP, 'evidence-results/runner.json'), JSON.stringify(receipt, null, 2) + '\n');
             appendFileSync(process.env.GITHUB_STEP_SUMMARY, `Packed evidence: **${result.quality_state}**\n\nAll-gold entry IDs: ${result.summary?.all_gold_count ?? 'unavailable'}/${result.summary?.query_count ?? 'unavailable'}. Gained: ${result.comparison?.gained_question_ids?.length ?? 'unavailable'}. Lost: ${result.comparison?.lost_question_ids?.length ?? 'unavailable'}.\n\nThis measures entry-ID presence, not answer accuracy. See the report artifact for per-question changes.\n`);
+            const packing = result.packing_comparison;
+            if (packing) {
+              appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\nPacking experiment at **8,192 estimated tokens** (${packing.strategy}):\n\n| Stage | All gold | Some gold | No gold |\n| --- | ---: | ---: | ---: |\n${[['Retrieved top 10', packing.stages.retrieval], ['Legacy packing', packing.stages.legacy_packed], ['Candidate packing', packing.stages.candidate_packed]].map(([name, stage]) => `| ${name} | ${stage.all_gold} | ${stage.partial_gold} | ${stage.no_gold} |`).join('\n')}\n\nGained all-gold questions: ${packing.gained_question_ids.length}. Lost: ${packing.lost_question_ids.length}. Any loss: ${packing.regression}. The candidate is experimental; the default packing and reviewed baseline are unchanged. Full per-question gold-ID gains/losses are in the report.\n`);
+            }
           } else {
             appendFileSync(process.env.GITHUB_STEP_SUMMARY, 'Packed evidence: **invalid / no report**. See the failing setup or download step; this is not a successful comparison.\n');
           }

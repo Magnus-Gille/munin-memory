@@ -10,6 +10,12 @@ changelog is the canonical record of what moved.
 
 ### Added
 
+- An opt-in fixed-budget context-packing comparison (#342) reuses the frozen
+  #341 retrieval baseline at 8,192 estimated tokens. It compares legacy packing
+  with skipping oversized entries, reports retrieval/packing stages and paired
+  gold-ID gains/losses, and requires exact control reproduction. Default packing,
+  baseline bytes and the existing regression policy remain unchanged.
+
 - A cold-build command for the 500-question LongMemEval-S evidence lane (#341)
   creates a new snapshot and frozen query vectors from a pinned public dataset
   and BGE model. Its manifest records model-file, input, output, source and runtime
