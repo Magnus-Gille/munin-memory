@@ -14,10 +14,10 @@ export default defineConfig({
       // the pre-health baseline (86/81/89/87). Raise when coverage rises; never lower
       // to admit a regression.
       thresholds: {
-        statements: 89.5,
-        branches: 84.5,
+        statements: 90,
+        branches: 85,
         functions: 93,
-        lines: 91,
+        lines: 91.5,
       },
     },
   },
