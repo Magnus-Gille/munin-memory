@@ -99,6 +99,86 @@ The legacy first-block ID can count even when only part of its content fits;
 candidate whole-block presence does not prove answer correctness or semantic
 evidence coverage. No reader or judge model is run.
 
+## Query-based passage comparison (#342)
+
+The optional `query-passages-v1` experiment packs verbatim source slices rather
+than whole entries. It uses the same retrieved top 10, frozen query vectors,
+clock and **8,192 estimated-token** budget. No model is called. The budget uses
+the existing `ceil(UTF-8 bytes / 4)` estimator; it is not a model tokenizer count.
+
+```sh
+npm run benchmark:evidence:check -- \
+  --artifacts-dir /absolute/path/to/fresh-artifact-directory \
+  --output /absolute/path/to/existing-parent/passages-report.json \
+  --packing-comparison skip-oversized \
+  --passage-comparison query-passages-v1 \
+  --gold-turns benchmark/evidence-metric/comparisons/longmemeval-s-passages-20261020/gold-turns.json
+```
+
+Both comparison flags are optional and independent. Passage comparison requires
+`--gold-turns`; the offline evaluator also requires `--baseline`. Every control
+row must reproduce the frozen #341 baseline exactly before a comparison is valid.
+The committed annotation artifact makes replay possible without downloading the
+large raw dataset. CI runs both experiments and retains their full per-query
+reports. An experimental loss does not change the legacy control's exit status;
+green checks alone do not recommend adopting a candidate.
+
+The algorithm is fixed before measurement. It splits text at line boundaries
+into non-overlapping chunks of at most 2,048 UTF-8 bytes, splitting longer lines
+only at Unicode code-point boundaries. It ranks chunks by unique query-term
+overlap divided by the square root of the number of unique terms in the chunk.
+Terms use the existing Unicode term normalization. There is no stopword list,
+label-based score or learned component. Ties use retrieval position and source
+offset. A single greedy pass accepts each chunk if the fully rendered context
+fits, including headers, separators and range labels. Adjacent accepted ranges
+are coalesced; display order follows retrieval position and source offset.
+
+The selector receives only the query and retrieved entries. Gold labels, answer
+strings and expected IDs are never selection inputs. Half-open UTF-16 source
+offsets identify exact content slices; these coordinates differ from the UTF-8
+byte budget. The experiment is confined to benchmark serialization and does not
+change production retrieval, authorization or the default reader context.
+
+`passage_comparison` distinguishes two measurements:
+
+- **Entry-ID presence** preserves the historical proxy, including its limitation
+  that even a small slice can count as a present source.
+- **Complete annotated-message coverage** requires every character of each
+  upstream `has_answer:true` message to appear in the selected ranges. The
+  control is scored from its actual serialized text, including first-entry
+  truncation. A question enters the primary denominator only when every
+  expected session contains at least one positively annotated message; other
+  question IDs are explicitly excluded. This is a conservative message-level
+  proxy, not answer-span coverage, judged relevance or reader answer accuracy.
+
+Rows expose selected ranges, budgets and gained/lost message identities, including
+partial losses on questions that remain incomplete. Aggregate gains and losses
+are paired by question; a net improvement does not conceal individual regressions.
+
+### Reproduce the annotation artifact
+
+The small artifact stores only offsets, IDs and hashes. It derives existing
+public dataset labels; it adds no human labels or inferred answer spans. Obtain
+the pinned raw LongMemEval-S input described below, then run:
+
+```sh
+npm run benchmark:evidence:gold-turns -- \
+  --raw /absolute/path/longmemeval_s_cleaned.json \
+  --queries /absolute/path/frozen-inputs/queries.jsonl \
+  --snapshot /absolute/path/frozen-inputs/snapshot.db \
+  --out /absolute/path/to/existing-parent/gold-turns.json
+```
+
+Preparation verifies the pinned raw SHA-256, joins original question/session IDs,
+requires exact flattened text equality with the frozen snapshot, and calculates
+message ranges without searching for answer strings. It refuses output overwrite
+and input aliases and opens only a detached read-only snapshot. No network or
+inference is involved. Runtime validation checks query/snapshot bindings, entry
+content hashes and range structure. It cannot independently prove upstream label
+truth without the raw dataset; that is established by reproducible preparation
+and the reviewed artifact. Reports bind the annotation artifact and optional
+source module by hash and recheck them after evaluation.
+
 ## Execution and frozen input contract
 
 The CI workflow definition runs on PRs and pushes to `main`, daily at

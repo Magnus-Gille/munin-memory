@@ -1,6 +1,7 @@
-import { serializeContext, type SerializedContextBudget, type ContextOverflowPolicy } from "../answer-quality/serialize.js";
+import { coalesceSourceRanges, serializeContext, serializeContextWithRanges, serializeQueryPassages, type EntrySourceRange, type SerializedContextBudget, type ContextOverflowPolicy } from "../answer-quality/serialize.js";
 import type { BenchmarkQuery } from "../types.js";
 import type { Entry } from "../../src/types.js";
+import type { GoldTurnQuery } from "./gold-turns.js";
 
 export const CONFIG = {
   metric: "packed_gold_entry_id_presence_v1",
@@ -76,6 +77,95 @@ export function packEvidence(queryId: string, expectedIds: string[], entries: En
     query_id: queryId, expected_ids: [...expectedIds], retrieved_ids: entries.map((e) => e.id),
     packed_ids: packed.orderedIds, present_gold_ids: present,
     all_gold: present.length === expectedIds.length, budget: packed.budget,
+  };
+}
+export interface PassageEvidenceRow extends EvidenceRow {
+  selected_ranges: EntrySourceRange[];
+  legacy_ranges: EntrySourceRange[];
+  retrieval_ranges: EntrySourceRange[];
+}
+/** Selection finishes before any gold labels are inspected. */
+export function packPassageEvidence(queryId: string, query: string, expectedIds: string[], entries: Entry[]): PassageEvidenceRow {
+  const budget = { maxEstimatedTokens: CONFIG.max_estimated_tokens, estimator: CONFIG.estimator };
+  const packed = serializeQueryPassages(query, entries, budget);
+  const legacy = serializeContextWithRanges(entries, "linear", budget);
+  const present = expectedIds.filter((id) => packed.orderedIds.includes(id));
+  return {
+    query_id: queryId, expected_ids: [...expectedIds], retrieved_ids: entries.map((e) => e.id),
+    packed_ids: packed.orderedIds, present_gold_ids: present,
+    all_gold: present.length === expectedIds.length, budget: packed.budget,
+    selected_ranges: packed.selectedRanges, legacy_ranges: legacy.selectedRanges,
+    retrieval_ranges: entries.map((entry) => ({ entry_id: entry.id, start: 0, end: entry.content.length })),
+  };
+}
+
+export interface CoveredGoldTurn extends EntrySourceRange { message_index: number }
+/** A snippet earns credit only when the range union covers the complete original message. */
+export function coveredGoldTurns(labels: GoldTurnQuery, ranges: EntrySourceRange[]): CoveredGoldTurn[] {
+  return labels.entries.flatMap((entry) => {
+    const union = coalesceSourceRanges(ranges.filter((range) => range.entry_id === entry.entry_id));
+    return entry.turns.filter((turn) => union.some((range) => range.start <= turn.start && range.end >= turn.end))
+      .map((turn) => ({ entry_id: entry.entry_id, ...turn }));
+  });
+}
+
+/** Paired diagnostics; the primary legacy metric and exit policy stay separate. */
+export function comparePassageRows(control: EvidenceRow[], candidate: PassageEvidenceRow[], labels: ReadonlyMap<string, GoldTurnQuery>) {
+  const proxy = comparePackingRows(control, candidate);
+  const byId = new Map(candidate.map((row) => [row.query_id, row]));
+  const turnKey = (turn: CoveredGoldTurn) => canonical(turn);
+  const queries = proxy.queries.map((row) => {
+    const after = byId.get(row.query_id)!;
+    const gold = labels.get(row.query_id);
+    if (!gold || canonical(gold.entries.map((entry) => entry.entry_id).sort()) !== canonical([...row.expected_ids].sort())) {
+      throw new Error("Passage comparison requires exact query/entry annotations");
+    }
+    const eligible = gold.entries.every((entry) => entry.turns.length > 0);
+    const goldTurnCount = gold.entries.reduce((sum, entry) => sum + entry.turns.length, 0);
+    const retrieval = coveredGoldTurns(gold, after.retrieval_ranges);
+    const legacy = coveredGoldTurns(gold, after.legacy_ranges);
+    const selected = coveredGoldTurns(gold, after.selected_ranges);
+    const beforeKeys = new Set(legacy.map(turnKey));
+    const afterKeys = new Set(selected.map(turnKey));
+    return {
+      ...row,
+      legacy_budget: { ...control.find((before) => before.query_id === row.query_id)!.budget },
+      legacy_ranges: after.legacy_ranges.map((range) => ({ ...range })),
+      candidate_ranges: after.selected_ranges.map((range) => ({ ...range })),
+      annotated_messages: {
+        eligible, gold_turn_count: goldTurnCount,
+        retrieval_covered_turns: retrieval, legacy_covered_turns: legacy, candidate_covered_turns: selected,
+        retrieval_all_turns: eligible ? retrieval.length === goldTurnCount : null,
+        legacy_all_turns: eligible ? legacy.length === goldTurnCount : null,
+        candidate_all_turns: eligible ? selected.length === goldTurnCount : null,
+        gained_turns: selected.filter((turn) => !beforeKeys.has(turnKey(turn))),
+        lost_turns: legacy.filter((turn) => !afterKeys.has(turnKey(turn))),
+      },
+    };
+  });
+  const eligible = queries.filter((row) => row.annotated_messages.eligible);
+  const gained = eligible.filter((row) => !row.annotated_messages.legacy_all_turns && row.annotated_messages.candidate_all_turns).map((row) => row.query_id);
+  const lost = eligible.filter((row) => row.annotated_messages.legacy_all_turns && !row.annotated_messages.candidate_all_turns).map((row) => row.query_id);
+  const stage = (all: "retrieval_all_turns" | "legacy_all_turns" | "candidate_all_turns", covered: "retrieval_covered_turns" | "legacy_covered_turns" | "candidate_covered_turns") => {
+    const count = eligible.filter((row) => row.annotated_messages[all]).length;
+    return {
+      all_turn_count: count, all_turn_rate: eligible.length === 0 ? null : count / eligible.length,
+      covered_message_count: queries.reduce((sum, row) => sum + row.annotated_messages[covered].length, 0),
+    };
+  };
+  return {
+    entry_id_proxy: { regression: proxy.regression, gained_question_ids: proxy.gained_question_ids, lost_question_ids: proxy.lost_question_ids, stages: proxy.stages },
+    annotated_message_coverage: {
+      metric: "full_original_annotated_message_coverage_v1" as const,
+      eligible_question_count: eligible.length, eligible_question_ids: eligible.map((row) => row.query_id),
+      excluded_question_ids: queries.filter((row) => !row.annotated_messages.eligible).map((row) => row.query_id),
+      annotated_message_count: queries.reduce((sum, row) => sum + row.annotated_messages.gold_turn_count, 0),
+      retrieval: stage("retrieval_all_turns", "retrieval_covered_turns"),
+      legacy_packed: stage("legacy_all_turns", "legacy_covered_turns"),
+      candidate_packed: stage("candidate_all_turns", "candidate_covered_turns"),
+      regression: lost.length > 0, gained_question_ids: gained, lost_question_ids: lost,
+    },
+    queries,
   };
 }
 export function canonical(value: unknown): string {

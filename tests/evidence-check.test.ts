@@ -101,3 +101,49 @@ it("preserves invalid2 reports when the requested packing comparison cannot run"
   deps.execute = async () => { writeFileSync(output, JSON.stringify({ quality_state: "invalid" })); return 2; };
   expect(await main([...args(), "--packing-comparison", "skip-oversized"], deps)).toBe(2);
 });
+
+const passageComparison = () => ({
+  strategy: "query-passages-v1", control_reproduced: true, coordinate_system: "utf16_code_units", chunk_max_utf8_bytes: 2048,
+  lineage: { gold_turns_sha256: "a".repeat(64), gold_turns_source_sha256: "b".repeat(64), source: { dataset_sha256: "c".repeat(64), snapshot_sha256: "d".repeat(64), queries_sha256: "e".repeat(64) } },
+  entry_id_proxy: packingComparison(),
+  annotated_message_coverage: {
+    metric: "full_original_annotated_message_coverage_v1", eligible_question_count: 2, eligible_question_ids: ["gain", "loss"], excluded_question_ids: ["excluded"], annotated_message_count: 4,
+    retrieval: { all_turn_count: 2, all_turn_rate: 1, covered_message_count: 4 },
+    legacy_packed: { all_turn_count: 1, all_turn_rate: 0.5, covered_message_count: 2 },
+    candidate_packed: { all_turn_count: 1, all_turn_rate: 0.5, covered_message_count: 2 },
+    regression: true, gained_question_ids: ["gain"], lost_question_ids: ["loss"],
+  },
+});
+it("forwards the explicit passage strategy and labels while keeping a candidate regression informational", async () => {
+  const labels = join(dir, "gold-turns.json"); writeFileSync(labels, "annotations");
+  deps.execute = vi.fn(async () => {
+    writeFileSync(output, JSON.stringify({ quality_state: "unchanged", comparison: { gained_question_ids: [], lost_question_ids: [] }, passage_comparison: passageComparison() }));
+    return 0;
+  });
+  expect(await main([...args(), "--passage-comparison", "query-passages-v1", "--gold-turns", labels], deps)).toBe(0);
+  expect(deps.execute).toHaveBeenCalledWith(expect.arrayContaining(["--passage-comparison", "query-passages-v1", "--gold-turns", labels]), expect.any(Object));
+});
+it("requires paired valid passage arguments and protects label aliases before downloading", async () => {
+  const labels = join(dir, "gold-turns.json"); writeFileSync(labels, "preserve");
+  for (const extra of [["--gold-turns", labels], ["--passage-comparison", "query-passages-v1"], ["--passage-comparison", "other", "--gold-turns", labels]]) expect(await main([...args(), ...extra], deps)).toBe(2);
+  output = labels;
+  expect(await main([...args(), "--passage-comparison", "query-passages-v1", "--gold-turns", labels], deps)).toBe(2);
+  expect(readFileSync(labels, "utf8")).toBe("preserve");
+  expect(deps.fetchArtifacts).not.toHaveBeenCalled();
+});
+it.each([
+  undefined,
+  { ...passageComparison(), strategy: "other" },
+  { ...passageComparison(), control_reproduced: false },
+  { ...passageComparison(), coordinate_system: "bytes" },
+  { ...passageComparison(), chunk_max_utf8_bytes: 4096 },
+  { ...passageComparison(), lineage: undefined },
+  { ...passageComparison(), entry_id_proxy: undefined },
+  { ...passageComparison(), annotated_message_coverage: { ...passageComparison().annotated_message_coverage, eligible_question_count: 3 } },
+  { ...passageComparison(), annotated_message_coverage: { ...passageComparison().annotated_message_coverage, candidate_packed: { all_turn_count: 1, all_turn_rate: 1, covered_message_count: 2 } } },
+  { ...passageComparison(), annotated_message_coverage: { ...passageComparison().annotated_message_coverage, regression: false } },
+])("fails closed for malformed requested passage comparison %#", async (passage_comparison) => {
+  const labels = join(dir, "gold-turns.json"); writeFileSync(labels, "annotations");
+  deps.execute = async () => { writeFileSync(output, JSON.stringify({ quality_state: "unchanged", comparison: { gained_question_ids: [], lost_question_ids: [] }, passage_comparison })); return 0; };
+  expect(await main([...args(), "--passage-comparison", "query-passages-v1", "--gold-turns", labels], deps)).toBe(2);
+});

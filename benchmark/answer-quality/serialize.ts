@@ -11,7 +11,7 @@
  */
 
 import type { Entry } from "../../src/types.js";
-import { serializeOrder, type SerializationMode } from "../../src/internal/retrieval-shared.js";
+import { serializeOrder, splitUnicodeTerms, type SerializationMode } from "../../src/internal/retrieval-shared.js";
 
 export interface SerializedContext {
   /** The text block passed to the answer model. */
@@ -176,6 +176,141 @@ export function serializeContext(
       candidate_entry_count: displayEntries.length,
       included_entry_count: orderedIds.length,
       dropped_entry_count: droppedEntryCount,
+    },
+  };
+}
+
+/** Half-open offsets into the original Entry.content, measured in UTF-16 code units. */
+export interface SourceRange { start: number; end: number }
+export interface EntrySourceRange extends SourceRange { entry_id: string }
+export interface SerializedPassageContext extends SerializedContext {
+  selectedRanges: EntrySourceRange[];
+}
+
+/** Expose provenance without changing any legacy serialization bytes or return fields. */
+export function serializeContextWithRanges(
+  entries: Entry[], mode: SerializationMode, budgetOptions?: SerializeContextBudgetOptions,
+): { context: SerializedContext; selectedRanges: EntrySourceRange[] } {
+  const context = serializeContext(entries, mode, budgetOptions);
+  const display = serializeOrder(entries, mode);
+  const selectedRanges: EntrySourceRange[] = [];
+  let offset = 0;
+  for (const [index, id] of context.orderedIds.entries()) {
+    const entry = display.find((candidate) => candidate.id === id)!;
+    const label = entry.key ? `${entry.namespace}/${entry.key}` : entry.namespace;
+    const header = `[${index + 1}] ${label} (${entry.updated_at ?? entry.created_at})\n`;
+    if (index > 0) offset += 2;
+    offset += header.length;
+    const length = Math.min(entry.content.length, context.text.length - offset);
+    selectedRanges.push({ entry_id: id, start: 0, end: length });
+    offset += length;
+  }
+  return { context, selectedRanges };
+}
+
+export const PASSAGE_MAX_UTF8_BYTES = 2048;
+/** Partition source exactly, preferring complete newline-terminated lines. */
+export function splitSourcePassages(content: string): SourceRange[] {
+  const ranges: SourceRange[] = [];
+  let start = 0;
+  let end = 0;
+  let used = 0;
+  const flush = () => {
+    if (end > start) ranges.push({ start, end });
+    start = end;
+    used = 0;
+  };
+  while (end < content.length) {
+    const newline = content.indexOf("\n", end);
+    const lineEnd = newline === -1 ? content.length : newline + 1;
+    const line = content.slice(end, lineEnd);
+    const lineBytes = Buffer.byteLength(line, "utf8");
+    if (lineBytes <= PASSAGE_MAX_UTF8_BYTES) {
+      if (used + lineBytes > PASSAGE_MAX_UTF8_BYTES) flush();
+      end = lineEnd;
+      used += lineBytes;
+      continue;
+    }
+    // An oversized line cannot share its initial chunk with the preceding line.
+    flush();
+    for (const character of line) {
+      const bytes = Buffer.byteLength(character, "utf8");
+      if (used + bytes > PASSAGE_MAX_UTF8_BYTES) flush();
+      end += character.length;
+      used += bytes;
+    }
+  }
+  flush();
+  return ranges;
+}
+
+/** Source order union; adjacent chunks become one exact source slice. */
+export function coalesceSourceRanges(ranges: SourceRange[]): SourceRange[] {
+  const result: SourceRange[] = [];
+  for (const range of [...ranges].sort((a, b) => a.start - b.start || a.end - b.end)) {
+    const previous = result.at(-1);
+    if (previous && range.start <= previous.end) previous.end = Math.max(previous.end, range.end);
+    else result.push({ ...range });
+  }
+  return result;
+}
+
+function renderPassages(entries: Entry[], selected: Map<number, SourceRange[]>): { text: string; orderedIds: string[]; selectedRanges: EntrySourceRange[] } {
+  const blocks: string[] = [];
+  const orderedIds: string[] = [];
+  const selectedRanges: EntrySourceRange[] = [];
+  for (const [index, entry] of entries.entries()) {
+    const ranges = coalesceSourceRanges(selected.get(index) ?? []);
+    if (ranges.length === 0) continue;
+    const label = entry.key ? `${entry.namespace}/${entry.key}` : entry.namespace;
+    const header = `[${blocks.length + 1}] ${label} (${entry.updated_at ?? entry.created_at})`;
+    const body = ranges.map(({ start, end }) => `[source utf16 ${start}:${end}]\n${entry.content.slice(start, end)}`).join("\n");
+    blocks.push(`${header}\n${body}`);
+    orderedIds.push(entry.id);
+    selectedRanges.push(...ranges.map((range) => ({ entry_id: entry.id, ...range })));
+  }
+  return { text: blocks.join("\n\n"), orderedIds, selectedRanges };
+}
+
+/**
+ * Frozen query-passages-v1 candidate. Labels and answers are deliberately absent
+ * from the API: selection uses only query terms and ranked retrieved source text.
+ */
+export function serializeQueryPassages(
+  query: string, entries: Entry[], budgetOptions: SerializeContextBudgetOptions,
+): SerializedPassageContext {
+  if (budgetOptions.estimator !== "utf8_bytes_div4_ceil_v1"
+    || !Number.isSafeInteger(budgetOptions.maxEstimatedTokens) || budgetOptions.maxEstimatedTokens <= 0
+    || budgetOptions.maxEstimatedTokens > 8192) {
+    throw new Error("Passage budget requires a positive safe-integer maxEstimatedTokens <= 8192 and utf8_bytes_div4_ceil_v1.");
+  }
+  const queryTerms = new Set(splitUnicodeTerms(query));
+  const passages = entries.flatMap((entry, retrievalRank) => splitSourcePassages(entry.content).map((range) => {
+    const terms = new Set(splitUnicodeTerms(entry.content.slice(range.start, range.end)));
+    const overlap = [...terms].filter((term) => queryTerms.has(term)).length;
+    return { ...range, retrievalRank, score: overlap / Math.sqrt(Math.max(1, terms.size)) };
+  })).sort((a, b) => b.score - a.score || a.retrievalRank - b.retrievalRank || a.start - b.start);
+  const selected = new Map<number, SourceRange[]>();
+  let rendered = renderPassages(entries, selected);
+  for (const passage of passages) {
+    const previous = selected.get(passage.retrievalRank) ?? [];
+    selected.set(passage.retrievalRank, [...previous, { start: passage.start, end: passage.end }]);
+    const candidate = renderPassages(entries, selected);
+    if (Buffer.byteLength(candidate.text, "utf8") <= budgetOptions.maxEstimatedTokens * 4) rendered = candidate;
+    else selected.set(passage.retrievalRank, previous);
+  }
+  const estimatedTokens = estimateContextTokens(rendered.text);
+  const selectedContentLength = rendered.selectedRanges.reduce((sum, range) => sum + range.end - range.start, 0);
+  return {
+    ...rendered,
+    estimatedTokens,
+    budget: {
+      max_estimated_tokens: budgetOptions.maxEstimatedTokens, estimated_tokens: estimatedTokens,
+      estimator: "utf8_bytes_div4_ceil_v1",
+      truncated: selectedContentLength < entries.reduce((sum, entry) => sum + entry.content.length, 0)
+        || rendered.orderedIds.length < entries.length,
+      candidate_entry_count: entries.length, included_entry_count: rendered.orderedIds.length,
+      dropped_entry_count: entries.length - rendered.orderedIds.length,
     },
   };
 }

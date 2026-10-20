@@ -10,6 +10,13 @@ changelog is the canonical record of what moved.
 
 ### Added
 
+- An opt-in query-based passage-packing experiment (#342) compares verbatim text
+  slices with the frozen #341 control at the same 8,192 estimated-token budget.
+  It reports paired gains and losses in entry-ID presence and complete annotated
+  message coverage, with source offsets and an explicitly labelled subset.
+  Public dataset annotations are reproducibly derived and never enter passage
+  selection. Default packing and the frozen baseline remain unchanged.
+
 - An opt-in fixed-budget context-packing comparison (#342) reuses the frozen
   #341 retrieval baseline at 8,192 estimated tokens. It compares legacy packing
   with skipping oversized entries, reports retrieval/packing stages and paired
