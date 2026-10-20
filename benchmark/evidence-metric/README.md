@@ -55,6 +55,10 @@ lock update.
 
 ## Fixed-budget packing comparison (#342)
 
+The [2026-10-20 measured comparison](comparisons/longmemeval-s-20261020/README.md)
+reproduces the 500-question control and reports the candidate's gains, losses,
+context-size tradeoff and remaining packing gap.
+
 Add `--packing-comparison skip-oversized` to either command to compare packing
 policies at the same **8,192 estimated-token** budget. The offline command also
 requires `--baseline`; the shared checker supplies its reviewed baseline.
