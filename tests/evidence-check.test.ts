@@ -58,3 +58,46 @@ it("requires a reproduced regression report for evaluator exit1", async () => {
   deps.execute = async () => { writeFileSync(output, JSON.stringify({ quality_state: "regressed", comparison: { gained_question_ids: [], lost_question_ids: ["lost"], reproduced: false } })); return 1; };
   expect(await main(args(), deps)).toBe(2);
 });
+
+
+const packingComparison = () => ({
+  strategy: "skip-oversized", control_reproduced: true, regression: true, gained_question_ids: ["gain"], lost_question_ids: ["loss"],
+  stages: { retrieval: { all_gold: 2, partial_gold: 1, no_gold: 0 }, legacy_packed: { all_gold: 1, partial_gold: 1, no_gold: 1 }, candidate_packed: { all_gold: 1, partial_gold: 1, no_gold: 1 } },
+});
+it("forwards an explicit packing comparison after fixed shared input verification", async () => {
+  deps.execute = vi.fn(async () => {
+    writeFileSync(output, JSON.stringify({ quality_state: "unchanged", comparison: { gained_question_ids: [], lost_question_ids: [] }, packing_comparison: packingComparison() }));
+    return 0;
+  });
+  expect(await main([...args(), "--packing-comparison", "skip-oversized"], deps)).toBe(0);
+  expect(deps.execute).toHaveBeenCalledWith(expect.arrayContaining(["--packing-comparison", "skip-oversized"]), expect.any(Object));
+});
+it("rejects unsupported packing strategies before downloading", async () => {
+  expect(await main([...args(), "--packing-comparison", "invented"], deps)).toBe(2);
+  expect(deps.fetchArtifacts).not.toHaveBeenCalled();
+});
+
+
+it.each([
+  undefined,
+  { ...packingComparison(), strategy: "other" },
+  { ...packingComparison(), control_reproduced: false },
+  { ...packingComparison(), control_reproduced: undefined },
+  { ...packingComparison(), regression: undefined },
+  { ...packingComparison(), regression: false },
+  { ...packingComparison(), lost_question_ids: [], regression: true },
+  { ...packingComparison(), gained_question_ids: "gain" },
+  { ...packingComparison(), lost_question_ids: [1] },
+  { ...packingComparison(), gained_question_ids: [""] },
+  { ...packingComparison(), stages: undefined },
+  { ...packingComparison(), stages: { ...packingComparison().stages, retrieval: { all_gold: -1, partial_gold: 1, no_gold: 0 } } },
+  { ...packingComparison(), stages: { ...packingComparison().stages, legacy_packed: { all_gold: 1.5, partial_gold: 1, no_gold: 0 } } },
+  { ...packingComparison(), stages: { ...packingComparison().stages, candidate_packed: { all_gold: 1, partial_gold: 1 } } },
+])("fails closed for malformed requested packing comparison %#", async (packing_comparison) => {
+  deps.execute = async () => { writeFileSync(output, JSON.stringify({ quality_state: "unchanged", comparison: { gained_question_ids: [], lost_question_ids: [] }, packing_comparison })); return 0; };
+  expect(await main([...args(), "--packing-comparison", "skip-oversized"], deps)).toBe(2);
+});
+it("preserves invalid2 reports when the requested packing comparison cannot run", async () => {
+  deps.execute = async () => { writeFileSync(output, JSON.stringify({ quality_state: "invalid" })); return 2; };
+  expect(await main([...args(), "--packing-comparison", "skip-oversized"], deps)).toBe(2);
+});

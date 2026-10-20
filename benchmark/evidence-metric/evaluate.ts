@@ -11,7 +11,7 @@ import type { BenchmarkQuery } from "../types.js";
 import type { Entry } from "../../src/types.js";
 import { getSemanticMaxDistance } from "../../src/embeddings.js";
 import { normalizeAsOf, withFrozenClock } from "./clock.js";
-import { CONFIG, canonical, compareRows, object, packEvidence, summarize, validateQueries, validateRows, validateVectors, type EvidenceRow, type FrozenVectors } from "./metric.js";
+import { CONFIG, canonical, assertControlReproduced, comparePackingRows, compareRows, object, packEvidence, summarize, validateQueries, validateRows, validateVectors, type EvidenceRow, type FrozenVectors } from "./metric.js";
 
 export interface EvaluationOptions {
   snapshot: string;
@@ -19,6 +19,7 @@ export interface EvaluationOptions {
   vectors: string;
   asOf: string;
   baseline?: string;
+  packingComparison?: "skip-oversized";
 }
 export interface Bindings {
   snapshot_sha256: string;
@@ -36,6 +37,7 @@ export interface EvidenceReport {
   quality_state: "not_measured" | "unchanged" | "improved" | "regressed";
   summary: ReturnType<typeof summarize>;
   rows: EvidenceRow[];
+  packing_comparison?: ReturnType<typeof comparePackingRows> & { strategy: "skip-oversized"; control_reproduced: true };
   comparison?: ReturnType<typeof compareRows> & { baseline_all_gold_rate: number; current_all_gold_rate: number; reproduced?: boolean };
 }
 export const LIMITATION = "Entry-ID presence in packed context is a proxy, not full content/span coverage. A truncated first block still counts as present; budget.truncated exposes this limitation.";
@@ -145,6 +147,8 @@ export function assertOutputSafe(output: string, inputs: string[]): void {
   }
 }
 export async function evaluate(options: EvaluationOptions): Promise<{ report: EvidenceReport; exitCode: 0 | 1 | 2 }> {
+  if (options.packingComparison !== undefined && options.packingComparison !== "skip-oversized") throw new Error("Unsupported packing comparison strategy");
+  if (options.packingComparison && !options.baseline) throw new Error("Packing comparison requires --baseline");
   const paths = [options.snapshot, options.queries, options.vectors, ...(options.baseline ? [options.baseline] : [])].map((p) => realpathSync(p));
   const inputHashes = paths.map(hashFile);
   const asOf = normalizeAsOf(options.asOf);
@@ -176,6 +180,7 @@ export async function evaluate(options: EvaluationOptions): Promise<{ report: Ev
         || result.queries.some((row) => row.search_mode !== "hybrid" || (row.actual_mode ?? row.search_mode) !== "hybrid")
         || (result.warnings?.length ?? 0) > 0) throw new Error("Invalid/degraded production hybrid evaluation");
       const expected = new Map(queries.map((q) => [q.id, q.expected_ids!]));
+      const candidateRows: EvidenceRow[] = [];
       const rows = result.queries.map((row) => {
         const gold = expected.get(row.query_id);
         if (!gold) throw new Error("Unexpected retrieval query ID");
@@ -184,19 +189,25 @@ export async function evaluate(options: EvaluationOptions): Promise<{ report: Ev
           if (!entry) throw new Error("Retrieved entry disappeared from snapshot");
           return entry;
         });
+        // Both policies receive this one retrieved Entry[] in its original order.
+        if (options.packingComparison) candidateRows.push(packEvidence(row.query_id, gold, entries, options.packingComparison));
         return packEvidence(row.query_id, gold, entries);
       });
       validateRows(rows);
-      return rows;
+      return { rows, candidateRows };
     });
-    const rows = await run();
+    const { rows, candidateRows } = await run();
     const report: EvidenceReport = { schema_version: 1, bindings, lineage: { ...source, ...(baseline ? { baseline_sha256: inputHashes[3] } : {}) }, metric_limitation: LIMITATION, quality_state: "not_measured", rows, summary: summarize(rows) };
+    if (options.packingComparison && baseline) {
+      assertControlReproduced(baseline.rows, rows);
+      report.packing_comparison = { strategy: options.packingComparison, control_reproduced: true, ...comparePackingRows(rows, candidateRows) };
+    }
     let exitCode: 0 | 1 | 2 = 2;
     if (baseline) {
       const comparison = compareRows(baseline.rows, rows);
       report.comparison = { ...comparison, baseline_all_gold_rate: baseline.summary.all_gold_rate, current_all_gold_rate: report.summary.all_gold_rate };
       if (comparison.regression) {
-        const repeated = await run();
+        const { rows: repeated } = await run();
         // Compare every deterministic row, including packed/retrieved order and truncation.
         if (canonical([...rows].sort((a, b) => a.query_id.localeCompare(b.query_id))) !== canonical([...repeated].sort((a, b) => a.query_id.localeCompare(b.query_id)))) throw new Error("Regression did not reproduce per query");
         report.comparison.reproduced = true;

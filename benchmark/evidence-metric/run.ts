@@ -5,19 +5,21 @@ import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { assertOutputSafe, evaluate, type EvaluationOptions } from "./evaluate.js";
 
-const USAGE = "Usage: npm run benchmark:evidence -- --snapshot PATH --queries PATH --vectors PATH --as-of ISO_TIMESTAMP --output PATH [--baseline PATH]";
+const USAGE = "Usage: npm run benchmark:evidence -- --snapshot PATH --queries PATH --vectors PATH --as-of ISO_TIMESTAMP --output PATH [--baseline PATH] [--packing-comparison skip-oversized]";
 function parseArgs(args: string[]): EvaluationOptions & { output: string } {
   const values: Record<string, string> = {};
   for (let i = 0; i < args.length; i += 2) {
     const key = args[i]; const value = args[i + 1];
-    if (!["--snapshot", "--queries", "--vectors", "--as-of", "--output", "--baseline"].includes(key)
+    if (!["--snapshot", "--queries", "--vectors", "--as-of", "--output", "--baseline", "--packing-comparison"].includes(key)
       || !value || value.startsWith("--") || values[key] !== undefined) throw new Error(USAGE);
     values[key] = value;
   }
   for (const key of ["--snapshot", "--queries", "--vectors", "--as-of", "--output"]) {
     if (!values[key]) throw new Error(USAGE);
   }
-  return { snapshot: resolve(values["--snapshot"]), queries: resolve(values["--queries"]), vectors: resolve(values["--vectors"]), asOf: values["--as-of"], output: resolve(values["--output"]), ...(values["--baseline"] ? { baseline: resolve(values["--baseline"]) } : {}) };
+  if (values["--packing-comparison"] !== undefined && values["--packing-comparison"] !== "skip-oversized") throw new Error(USAGE);
+  if (values["--packing-comparison"] && !values["--baseline"]) throw new Error("Packing comparison requires --baseline");
+  return { ...(values["--packing-comparison"] ? { packingComparison: "skip-oversized" as const } : {}), snapshot: resolve(values["--snapshot"]), queries: resolve(values["--queries"]), vectors: resolve(values["--vectors"]), asOf: values["--as-of"], output: resolve(values["--output"]), ...(values["--baseline"] ? { baseline: resolve(values["--baseline"]) } : {}) };
 }
 function writeAtomic(path: string, report: unknown): void {
   const temporary = join(dirname(path), `.evidence-report-${randomUUID()}.tmp`);

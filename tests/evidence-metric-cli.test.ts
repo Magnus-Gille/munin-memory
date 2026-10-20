@@ -200,3 +200,61 @@ describe("offline production retrieval and CLI contract", () => {
     expect(await main(args())).toBe(2);
   });
 });
+
+
+describe("paired packing comparison CLI", () => {
+  it("requires the explicit supported strategy and baseline before evaluating", async () => {
+    const production = vi.spyOn(runner, "runBenchmark");
+    const error = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    expect(await main([...args(), "--packing-comparison", "skip-oversized"])).toBe(2);
+    expect(error.mock.calls.flat().join(" ")).toContain("requires --baseline");
+    expect(await main([...args(), "--packing-comparison", "invented"])).toBe(2);
+    expect(production).not.toHaveBeenCalled();
+  });
+  it("requires every frozen control row and keeps candidate findings separate from exit policy", async () => {
+    const { report } = await evaluate(options());
+    const baseline = join(dir, "baseline.json"); writeFileSync(baseline, JSON.stringify(report));
+    const before = sha256(readFileSync(baseline));
+    const production = vi.spyOn(runner, "runBenchmark");
+    expect(await main([...args(baseline), "--packing-comparison", "skip-oversized"])).toBe(0);
+    expect(production).toHaveBeenCalledTimes(1);
+    const result = parsedReport();
+    expect(result.rows).toEqual(report.rows);
+    expect(result.quality_state).toBe("unchanged");
+    expect(result.packing_comparison).toMatchObject({ strategy: "skip-oversized", control_reproduced: true, gained_question_ids: [], lost_question_ids: [], stages: { retrieval: { all_gold: 1 }, legacy_packed: { all_gold: 1 }, candidate_packed: { all_gold: 1 } } });
+    expect(result.packing_comparison?.queries[0].candidate_packed_ids).toEqual([gold]);
+    expect(sha256(readFileSync(baseline))).toBe(before);
+    const altered = { ...report, rows: [packEvidence("q1", [gold], [])] }; altered.summary = summarize(altered.rows);
+    writeFileSync(baseline, JSON.stringify(altered));
+    const error = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    expect(await main([...args(baseline), "--packing-comparison", "skip-oversized"])).toBe(2);
+    expect(error.mock.calls.flat().join(" ")).toContain("control rows do not reproduce");
+    expect(parsedReport().quality_state).toBe("invalid");
+  });
+  it("rejects control budget drift even when aggregate coverage and IDs are identical", async () => {
+    const { report } = await evaluate(options());
+    report.rows[0].budget.estimated_tokens++;
+    const baseline = join(dir, "baseline.json"); writeFileSync(baseline, JSON.stringify(report));
+    const error = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    expect(await main([...args(baseline), "--packing-comparison", "skip-oversized"])).toBe(2);
+    expect(error.mock.calls.flat().join(" ")).toContain("control rows do not reproduce");
+    expect(parsedReport().quality_state).toBe("invalid");
+  });
+  it("records candidate gold losses without changing primary baseline status or exit0", async () => {
+    mutateDb("UPDATE entries SET content = 'needle ' || printf('%.*c', 40000, 'x')");
+    const { report } = await evaluate(options());
+    expect(report.rows[0].all_gold).toBe(true);
+    expect(report.rows[0].budget).toMatchObject({ estimated_tokens: 8192, truncated: true });
+    const baseline = join(dir, "baseline.json"); writeFileSync(baseline, JSON.stringify(report));
+    expect(await main([...args(baseline), "--packing-comparison", "skip-oversized"])).toBe(0);
+    expect(parsedReport()).toMatchObject({ quality_state: "unchanged", comparison: { regression: false }, packing_comparison: { regression: true, gained_question_ids: [], lost_question_ids: ["q1"], stages: { retrieval: { all_gold: 1 }, legacy_packed: { all_gold: 1 }, candidate_packed: { no_gold: 1 } } } });
+    expect(parsedReport().packing_comparison?.queries[0]).toMatchObject({ lost_ids: [gold], candidate_packed_ids: [], candidate_budget: { estimated_tokens: 0, included_entry_count: 0, dropped_entry_count: 1 } });
+  });
+  it("protects the baseline path with packing comparison enabled", async () => {
+    const { report } = await evaluate(options());
+    const baseline = join(dir, "baseline.json"); writeFileSync(baseline, JSON.stringify(report));
+    const bytes = readFileSync(baseline); output = baseline;
+    expect(await main([...args(baseline), "--packing-comparison", "skip-oversized"])).toBe(2);
+    expect(readFileSync(baseline).equals(bytes)).toBe(true);
+  });
+});
