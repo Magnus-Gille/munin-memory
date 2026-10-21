@@ -10,7 +10,7 @@ export interface SerializedMessageContext extends SerializedContext {
   selectedMessageIndices: SelectedEntryMessages[];
 }
 
-function renderMessages(entries: Entry[], boundaries: ReadonlyMap<string, MessageBoundaryEntry>, selected: ReadonlyMap<number, ReadonlySet<number>>) {
+export function renderMessages(entries: Entry[], boundaries: ReadonlyMap<string, MessageBoundaryEntry>, selected: ReadonlyMap<number, ReadonlySet<number>>) {
   const blocks: string[] = [];
   const orderedIds: string[] = [];
   const selectedRanges: EntrySourceRange[] = [];

@@ -6,7 +6,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { assertSafeParents, fetchSharedArtifacts, loadSharedContract, type VerificationReceipt } from "./shared-artifacts.js";
 
-const USAGE = "Usage: npm run benchmark:evidence:check -- --artifacts-dir DIR --output PATH [--packing-comparison skip-oversized] [--passage-comparison query-passages-v1 --gold-turns PATH] [--message-comparison query-message-neighbors-v1 --message-boundaries PATH]";
+const USAGE = "Usage: npm run benchmark:evidence:check -- --artifacts-dir DIR --output PATH [--packing-comparison skip-oversized] [--passage-comparison query-passages-v1 --gold-turns PATH] [--message-comparison query-message-neighbors-v1 --message-boundaries PATH] [--core-comparison query-message-cores-v1]";
 /** Reviewed against the pinned upstream dataset; updating labels requires a new reviewed digest. */
 const SHARED_GOLD_TURNS_SHA256 = "47dc2a2e8bdd1af0fb1b3d5aa39e68a4716548b8ad11d5587f06a7eac61a55db";
 /** Reviewed label-free boundary artifact; any edit requires a new reviewed pin. */
@@ -22,11 +22,11 @@ const execute: CheckDependencies["execute"] = (args, env) => new Promise((resolv
   child.once("error", reject);
   child.once("exit", (code) => resolveCode(code ?? 2));
 });
-function parseArgs(args: string[]): { artifactsDir: string; output: string; packingComparison?: "skip-oversized"; passageComparison?: "query-passages-v1"; goldTurns?: string; messageComparison?: "query-message-neighbors-v1"; messageBoundaries?: string } {
+function parseArgs(args: string[]): { artifactsDir: string; output: string; packingComparison?: "skip-oversized"; passageComparison?: "query-passages-v1"; goldTurns?: string; messageComparison?: "query-message-neighbors-v1"; messageBoundaries?: string; coreComparison?: "query-message-cores-v1" } {
   const values: Record<string, string> = {};
   for (let i = 0; i < args.length; i += 2) {
     const key = args[i]; const value = args[i + 1];
-    if (!["--artifacts-dir", "--output", "--packing-comparison", "--passage-comparison", "--gold-turns", "--message-comparison", "--message-boundaries"].includes(key) || !value || value.startsWith("--") || values[key] !== undefined) throw new Error(USAGE);
+    if (!["--artifacts-dir", "--output", "--packing-comparison", "--passage-comparison", "--gold-turns", "--message-comparison", "--message-boundaries", "--core-comparison"].includes(key) || !value || value.startsWith("--") || values[key] !== undefined) throw new Error(USAGE);
     values[key] = value;
   }
   if (!values["--artifacts-dir"] || !values["--output"]) throw new Error(USAGE);
@@ -36,7 +36,9 @@ function parseArgs(args: string[]): { artifactsDir: string; output: string; pack
   if (values["--message-comparison"] !== undefined && values["--message-comparison"] !== "query-message-neighbors-v1") throw new Error(USAGE);
   if (Boolean(values["--message-comparison"]) !== Boolean(values["--message-boundaries"])) throw new Error("Message comparison requires --message-comparison query-message-neighbors-v1 and --message-boundaries together");
   if (values["--message-comparison"] && (!values["--passage-comparison"] || !values["--gold-turns"])) throw new Error("Message comparison requires --passage-comparison query-passages-v1 and --gold-turns");
-  return { ...(values["--packing-comparison"] ? { packingComparison: "skip-oversized" as const } : {}), ...(values["--passage-comparison"] ? { passageComparison: "query-passages-v1" as const, goldTurns: resolve(values["--gold-turns"]) } : {}), ...(values["--message-comparison"] ? { messageComparison: "query-message-neighbors-v1" as const, messageBoundaries: resolve(values["--message-boundaries"]) } : {}), artifactsDir: resolve(values["--artifacts-dir"]), output: resolve(values["--output"]) };
+  if (values["--core-comparison"] !== undefined && values["--core-comparison"] !== "query-message-cores-v1") throw new Error(USAGE);
+  if (values["--core-comparison"] && !values["--message-comparison"]) throw new Error("Core comparison requires --message-comparison query-message-neighbors-v1, --message-boundaries, --passage-comparison query-passages-v1 and --gold-turns");
+  return { ...(values["--packing-comparison"] ? { packingComparison: "skip-oversized" as const } : {}), ...(values["--passage-comparison"] ? { passageComparison: "query-passages-v1" as const, goldTurns: resolve(values["--gold-turns"]) } : {}), ...(values["--message-comparison"] ? { messageComparison: "query-message-neighbors-v1" as const, messageBoundaries: resolve(values["--message-boundaries"]) } : {}), ...(values["--core-comparison"] ? { coreComparison: "query-message-cores-v1" as const } : {}), artifactsDir: resolve(values["--artifacts-dir"]), output: resolve(values["--output"]) };
 }
 function assertOutput(output: string, artifactsDir: string, metadataPaths: string[]): void {
   assertSafeParents(output);
@@ -112,7 +114,7 @@ function validPassageComparison(value: unknown): boolean {
       && (stage.covered_message_count as number) <= (coverage.annotated_message_count as number);
   });
 }
-type MessagePairName = "legacy" | "query-passages-v1";
+type MessagePairName = "legacy" | "query-passages-v1" | "query-message-neighbors-v1";
 function validStageCounts(value: unknown): boolean {
   const stage = record(value);
   return stage !== undefined && ["all_gold", "partial_gold", "no_gold"].every((key) => Number.isSafeInteger(stage[key]) && (stage[key] as number) >= 0);
@@ -334,10 +336,103 @@ function validMessageComparison(value: unknown, passageValue: unknown, controlRo
   const total = record(comparison.whole_message_conservation);
   return total !== undefined && total.selected_message_count === selectedCount && total.partial_message_count === 0;
 }
+/** Validate the new experiment against the established controls and sibling #391 output. */
+function validCoreComparison(value: unknown, passageValue: unknown, messageValue: unknown, controlRowsValue: unknown): boolean {
+  const comparison = record(value); const lineage = record(comparison?.lineage); const source = record(lineage?.source);
+  const message = record(messageValue); const messageLineage = record(message?.lineage); const messageSource = record(messageLineage?.source);
+  const passage = record(passageValue); const passageLineage = record(passage?.lineage); const passageSource = record(passageLineage?.source);
+  const sha = (item: unknown) => typeof item === "string" && /^[a-f0-9]{64}$/.test(item);
+  if (!comparison || comparison.strategy !== "query-message-cores-v1" || comparison.control_reproduced !== true
+    || comparison.coordinate_system !== "utf16_code_units" || typeof comparison.metric_limitation !== "string" || !comparison.metric_limitation.trim()
+    || !lineage || lineage.message_boundaries_sha256 !== SHARED_MESSAGE_BOUNDARIES_SHA256
+    || !sha(lineage.message_boundaries_source_sha256) || !sha(lineage.message_packing_source_sha256)
+    || !sha(lineage.message_comparison_source_sha256) || !sha(lineage.core_packing_source_sha256) || !sha(lineage.core_comparison_source_sha256)
+    || !source || !messageSource || !passageSource
+    || !["dataset_sha256", "snapshot_sha256"].every((key) => sha(source[key]) && source[key] === messageSource[key] && source[key] === passageSource[key])
+    || lineage.message_boundaries_sha256 !== messageLineage?.message_boundaries_sha256
+    || lineage.message_boundaries_source_sha256 !== messageLineage?.message_boundaries_source_sha256
+    || lineage.message_packing_source_sha256 !== messageLineage?.message_packing_source_sha256
+    || lineage.message_comparison_source_sha256 !== messageLineage?.message_comparison_source_sha256) return false;
+
+  // Reuse the unchanged strict validator for the legacy and passage pairs.
+  const oldShape = {
+    ...comparison, strategy: "query-message-neighbors-v1",
+    lineage: {
+      message_boundaries_sha256: lineage.message_boundaries_sha256,
+      message_boundaries_source_sha256: lineage.message_boundaries_source_sha256,
+      message_packing_source_sha256: lineage.message_packing_source_sha256,
+      message_comparison_source_sha256: lineage.message_comparison_source_sha256,
+      source,
+    },
+  };
+  if (!validMessageComparison(oldShape, passageValue, controlRowsValue)) return false;
+
+  const legacy = record(comparison.versus_legacy); const passages = record(comparison.versus_passages); const neighbors = record(comparison.versus_neighbors);
+  const oldPairs = [record(message?.versus_legacy), record(message?.versus_passages)];
+  if (!legacy || !passages || !neighbors || oldPairs.some((pair) => !pair) || !Array.isArray(message?.queries)) return false;
+  const legacyRows = legacy.queries as Record<string, unknown>[];
+  const neighborRows = neighbors.queries as Record<string, unknown>[] | undefined;
+  const oldPassageRows = (oldPairs[1]!.queries as Record<string, unknown>[] | undefined) ?? [];
+  const oldSelectedRows = message.queries.map(record);
+  if (!neighborRows || !validMessagePair(neighbors, "query-message-neighbors-v1", legacyRows.map((row) => row.query_id as string), new Map(legacyRows.map((row) => [row.query_id as string, record(row.annotated_messages)?.eligible === true])))
+    || JSON.stringify(neighborRows.map((row) => row.query_id)) !== JSON.stringify(legacyRows.map((row) => row.query_id))
+    || oldSelectedRows.some((row) => !row) || oldPassageRows.length !== legacyRows.length) return false;
+  const rowsById = new Map(neighborRows.map((row) => [row.query_id, row]));
+  const oldRowsById = new Map(oldPassageRows.map((row) => [row.query_id, row]));
+  const selectedById = new Map((oldSelectedRows as Record<string, unknown>[]).map((row) => [row.query_id, row]));
+  if (rowsById.size !== legacyRows.length || oldRowsById.size !== legacyRows.length || selectedById.size !== legacyRows.length) return false;
+  if (!Array.isArray(comparison.queries) || comparison.queries.length !== legacyRows.length) return false;
+  const coreQueryRows = comparison.queries.map(record);
+  if (coreQueryRows.some((row) => !row)) return false;
+  const coreSelectedById = new Map((coreQueryRows as Record<string, unknown>[]).map((row) => [row.query_id, row]));
+  if (coreSelectedById.size !== legacyRows.length) return false;
+  const pairs = [legacy, passages, neighbors];
+  for (const row of legacyRows) {
+    const id = row.query_id as string; const neighbor = rowsById.get(id); const old = oldRowsById.get(id);
+    const selected = selectedById.get(id); const coreSelected = coreSelectedById.get(id);
+    if (!neighbor || !old || !selected || !coreSelected) return false;
+    const category = row.category;
+    const neighborAnnotations = record(neighbor.annotated_messages);
+    if (pairs.some((pair) => {
+      const q = (pair.queries as Record<string, unknown>[]).find((item) => item.query_id === id);
+      const annotations = record(q?.annotated_messages);
+      return !q || q.category !== category || JSON.stringify(q.expected_ids) !== JSON.stringify(row.expected_ids)
+        || JSON.stringify(q.retrieved_ids) !== JSON.stringify(row.retrieved_ids)
+        || JSON.stringify(q.candidate_packed_ids) !== JSON.stringify(neighbor.candidate_packed_ids)
+        || JSON.stringify(q.candidate_ranges) !== JSON.stringify(coreSelected.candidate_ranges)
+        || JSON.stringify(q.candidate_budget) !== JSON.stringify(coreSelected.candidate_budget)
+        || !neighborAnnotations || !annotations
+        || ["eligible", "gold_turn_count", "no_positive_entry_count", "retrieval_covered_turns", "retrieval_all_turns", "candidate_covered_turns", "candidate_all_turns"]
+          .some((key) => JSON.stringify(annotations[key]) !== JSON.stringify(neighborAnnotations[key]));
+    })) return false;
+    // New-versus-neighbor references are exactly the candidate selected by sibling #391.
+    if (neighbor.category !== old.category || JSON.stringify(neighbor.expected_ids) !== JSON.stringify(old.expected_ids)
+      || JSON.stringify(neighbor.retrieved_ids) !== JSON.stringify(old.retrieved_ids)
+      || JSON.stringify(neighbor.reference_packed_stage) !== JSON.stringify(old.candidate_packed_stage)
+      || JSON.stringify(neighbor.reference_all_gold) !== JSON.stringify(old.candidate_all_gold)
+      || JSON.stringify(neighbor.reference_packed_ids) !== JSON.stringify(old.candidate_packed_ids)
+      || JSON.stringify(neighbor.reference_budget) !== JSON.stringify(old.candidate_budget)
+      || JSON.stringify(neighbor.reference_ranges) !== JSON.stringify(old.candidate_ranges)
+      || JSON.stringify(record(neighbor.annotated_messages)?.eligible) !== JSON.stringify(record(old.annotated_messages)?.eligible)
+      || JSON.stringify(record(neighbor.annotated_messages)?.gold_turn_count) !== JSON.stringify(record(old.annotated_messages)?.gold_turn_count)
+      || JSON.stringify(record(neighbor.annotated_messages)?.no_positive_entry_count) !== JSON.stringify(record(old.annotated_messages)?.no_positive_entry_count)
+      || JSON.stringify(record(neighbor.annotated_messages)?.retrieval_covered_turns) !== JSON.stringify(record(old.annotated_messages)?.retrieval_covered_turns)
+      || JSON.stringify(record(neighbor.annotated_messages)?.reference_covered_turns) !== JSON.stringify(record(old.annotated_messages)?.candidate_covered_turns)
+      || record(neighbor.annotated_messages)?.reference_all_turns !== record(old.annotated_messages)?.candidate_all_turns) return false;
+    // Core output metadata is validated against the core's three candidate rows, not #391's distinct candidate.
+    const selectedIndices = coreSelected.selected_message_indices as Array<Record<string, unknown>>;
+    const selectedEntryIds = selectedIndices.map((entry) => entry.entry_id);
+    if (!uniqueIds(selectedEntryIds) || JSON.stringify(selectedEntryIds) !== JSON.stringify(neighbor.candidate_packed_ids)) return false;
+    const oldSelectedIndices = selected.selected_message_indices as Array<Record<string, unknown>>;
+    const oldSelectedEntryIds = oldSelectedIndices.map((entry) => entry.entry_id);
+    if (!uniqueIds(oldSelectedEntryIds) || JSON.stringify(oldSelectedEntryIds) !== JSON.stringify(neighbor.reference_packed_ids)) return false;
+  }
+  return true;
+}
 /** Downloads only the reviewed shared inputs, then delegates to the offline evaluator. */
 export async function main(args: string[], dependencies: CheckDependencies = { loadContract: loadSharedContract, fetchArtifacts: fetchSharedArtifacts, execute }): Promise<0 | 1 | 2> {
   try {
-    const { artifactsDir, output, packingComparison, passageComparison, goldTurns, messageComparison, messageBoundaries } = parseArgs(args);
+    const { artifactsDir, output, packingComparison, passageComparison, goldTurns, messageComparison, messageBoundaries, coreComparison } = parseArgs(args);
     assertSafeParents(artifactsDir);
     const contract = await dependencies.loadContract();
     const metadataPaths = [...contract.metadataPaths, ...(goldTurns ? [goldTurns] : []), ...(messageBoundaries ? [messageBoundaries] : [])];
@@ -353,10 +448,10 @@ export async function main(args: string[], dependencies: CheckDependencies = { l
     assertOutput(receiptPath, artifactsDir, metadataPaths);
     writeFileSync(receiptPath, JSON.stringify({ schema_version: 1, ...receipt }, null, 2) + "\n", { flag: "wx", mode: 0o600 });
     const env = { ...process.env }; delete env.MUNIN_SEMANTIC_MAX_DISTANCE;
-    const status = await dependencies.execute(["--snapshot", join(artifactsDir, "snapshot.db"), "--queries", join(artifactsDir, "queries.jsonl"), "--vectors", join(artifactsDir, "query-vectors.json"), "--as-of", contract.asOf, "--baseline", contract.baseline, "--output", output, ...(packingComparison ? ["--packing-comparison", packingComparison] : []), ...(passageComparison ? ["--passage-comparison", passageComparison, "--gold-turns", goldTurns!] : []), ...(messageComparison ? ["--message-comparison", messageComparison, "--message-boundaries", messageBoundaries!] : [])], env);
+    const status = await dependencies.execute(["--snapshot", join(artifactsDir, "snapshot.db"), "--queries", join(artifactsDir, "queries.jsonl"), "--vectors", join(artifactsDir, "query-vectors.json"), "--as-of", contract.asOf, "--baseline", contract.baseline, "--output", output, ...(packingComparison ? ["--packing-comparison", packingComparison] : []), ...(passageComparison ? ["--passage-comparison", passageComparison, "--gold-turns", goldTurns!] : []), ...(messageComparison ? ["--message-comparison", messageComparison, "--message-boundaries", messageBoundaries!] : []), ...(coreComparison ? ["--core-comparison", coreComparison] : [])], env);
     process.stdout.write(`Verified artifact receipt: ${JSON.stringify(receipt)}\n`);
     try {
-      const report = JSON.parse(readFileSync(output, "utf8")) as { quality_state?: string; rows?: unknown; packing_comparison?: unknown; passage_comparison?: unknown; message_comparison?: unknown; comparison?: { gained_question_ids?: unknown; lost_question_ids?: unknown; reproduced?: boolean } };
+      const report = JSON.parse(readFileSync(output, "utf8")) as { quality_state?: string; rows?: unknown; packing_comparison?: unknown; passage_comparison?: unknown; message_comparison?: unknown; core_comparison?: unknown; comparison?: { gained_question_ids?: unknown; lost_question_ids?: unknown; reproduced?: boolean } };
       const gained = report.comparison?.gained_question_ids ?? []; const lost = report.comparison?.lost_question_ids ?? [];
       if (((status === 0 || status === 1) && (!Array.isArray(report.comparison?.gained_question_ids) || !Array.isArray(report.comparison?.lost_question_ids)))
         || !Array.isArray(gained) || !Array.isArray(lost) || [...gained, ...lost].some((id: unknown) => typeof id !== "string" || !id)
@@ -365,7 +460,8 @@ export async function main(args: string[], dependencies: CheckDependencies = { l
         || (status === 2 && report.quality_state !== "invalid")
         || ((status === 0 || status === 1) && packingComparison && !validPackingComparison(report.packing_comparison))
         || ((status === 0 || status === 1) && passageComparison && !validPassageComparison(report.passage_comparison))
-        || ((status === 0 || status === 1) && messageComparison && !validMessageComparison(report.message_comparison, report.passage_comparison, report.rows))) throw new Error("Evaluator report/status mismatch");
+        || ((status === 0 || status === 1) && messageComparison && !validMessageComparison(report.message_comparison, report.passage_comparison, report.rows))
+        || ((status === 0 || status === 1) && coreComparison && !validCoreComparison(report.core_comparison, report.passage_comparison, report.message_comparison, report.rows))) throw new Error("Evaluator report/status mismatch");
       process.stdout.write(`Evidence ${report.quality_state ?? "invalid"}: gained ${gained.length} [${gained.join(", ")}]; lost ${lost.length} [${lost.join(", ")}]\n`);
     } catch { process.stdout.write("Evidence invalid: evaluator report is missing, malformed or inconsistent\n"); return 2; }
     return status === 0 || status === 1 ? status : 2;
