@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, readFileSync, writeFileSync, rmSync, symlinkSync, linkSync, readdirSync, realpathSync } from "node:fs";
+import * as filesystem from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -9,6 +10,10 @@ import * as runner from "../benchmark/runner.js";
 import { evaluate, sha256, type EvidenceReport } from "../benchmark/evidence-metric/evaluate.js";
 import { main } from "../benchmark/evidence-metric/run.js";
 import { packEvidence, summarize } from "../benchmark/evidence-metric/metric.js";
+
+vi.mock("node:fs", async (importOriginal) => ({
+  ...await importOriginal<typeof import("node:fs")>(),
+}));
 
 let dir: string;
 let snapshot: string;
@@ -35,6 +40,18 @@ function writeQuery(value: unknown) {
   const v = JSON.parse(readFileSync(vectors, "utf8")) as Record<string, unknown>;
   v.query_set_sha256 = sha256(readFileSync(queries));
   writeFileSync(vectors, JSON.stringify(v));
+}
+function writeGoldTurns(turns?: { message_index: number; start: number; end: number }[]): string {
+  const db = new Database(snapshot, { readonly: true });
+  const content = (db.prepare("SELECT content FROM entries WHERE id = ?").get(gold) as { content: string }).content;
+  db.close();
+  const path = join(dir, "gold-turns.json");
+  writeFileSync(path, JSON.stringify({
+    schema_version: 1, coordinate_system: "utf16_code_units",
+    source: { dataset_sha256: "d".repeat(64), snapshot_sha256: sha256(readFileSync(snapshot)), queries_sha256: sha256(readFileSync(queries)) },
+    queries: [{ query_id: "q1", entries: [{ entry_id: gold, content_sha256: sha256(content), turns: turns ?? [{ message_index: 0, start: content.indexOf(": ") + 2, end: content.length }] }] }],
+  }));
+  return path;
 }
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "munin-evidence-fixture-"));
@@ -256,5 +273,103 @@ describe("paired packing comparison CLI", () => {
     const bytes = readFileSync(baseline); output = baseline;
     expect(await main([...args(baseline), "--packing-comparison", "skip-oversized"])).toBe(2);
     expect(readFileSync(baseline).equals(bytes)).toBe(true);
+  });
+});
+
+describe("paired passage comparison CLI", () => {
+  it("requires strategy, baseline and gold-turn artifact together before retrieval", async () => {
+    const production = vi.spyOn(runner, "runBenchmark");
+    const error = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    for (const extra of [
+      ["--passage-comparison", "query-passages-v1"],
+      ["--passage-comparison", "invented", "--gold-turns", "missing"],
+      ["--gold-turns", "missing"],
+      ["--passage-comparison", "query-passages-v1", "--gold-turns", "missing"],
+    ]) expect(await main([...args(), ...extra])).toBe(2);
+    expect(error.mock.calls.flat().join(" ")).toMatch(/baseline|gold-turns/i);
+    expect(production).not.toHaveBeenCalled();
+  });
+  it("reproduces the frozen control, reports actual source spans and preserves exit policy", async () => {
+    mutateDb("UPDATE entries SET content = 'user: ' || content");
+    const { report } = await evaluate(options());
+    const baseline = join(dir, "baseline.json"); writeFileSync(baseline, JSON.stringify(report));
+    const labels = writeGoldTurns();
+    const production = vi.spyOn(runner, "runBenchmark");
+    expect(await main([...args(baseline), "--passage-comparison", "query-passages-v1", "--gold-turns", labels])).toBe(0);
+    expect(production).toHaveBeenCalledTimes(1);
+    const result = parsedReport();
+    expect(result.rows).toEqual(report.rows);
+    expect(result).toMatchObject({ quality_state: "unchanged", passage_comparison: {
+      strategy: "query-passages-v1", control_reproduced: true, coordinate_system: "utf16_code_units", chunk_max_utf8_bytes: 2048,
+      lineage: { gold_turns_sha256: sha256(readFileSync(labels)), gold_turns_source_sha256: expect.stringMatching(/^[a-f0-9]{64}$/) },
+      annotated_message_coverage: { eligible_question_count: 1, excluded_question_ids: [], legacy_packed: { all_turn_count: 1 }, candidate_packed: { all_turn_count: 1 } },
+    } });
+    expect(result.passage_comparison?.queries[0].candidate_ranges).toEqual([{ entry_id: gold, start: 0, end: 34 }]);
+    expect(report.passage_comparison).toBeUndefined();
+    expect(Object.keys(report.lineage.source_sha256)).not.toContain("benchmark/evidence-metric/gold-turns.ts");
+    report.rows[0].budget.estimated_tokens++;
+    writeFileSync(baseline, JSON.stringify(report));
+    expect(await main([...args(baseline), "--passage-comparison", "query-passages-v1", "--gold-turns", labels])).toBe(2);
+    expect(parsedReport().quality_state).toBe("invalid");
+  });
+  it("records incomplete first-entry coverage and exclusions without changing the entry-ID metric", async () => {
+    mutateDb("UPDATE entries SET content = 'user: needle ' || printf('%.*c', 40000, 'x')");
+    const { report } = await evaluate(options());
+    const baseline = join(dir, "baseline.json"); writeFileSync(baseline, JSON.stringify(report));
+    const labels = writeGoldTurns();
+    const result = await evaluate({ ...options(), baseline, passageComparison: "query-passages-v1", goldTurns: labels });
+    expect(result.exitCode).toBe(0);
+    expect(result.report.rows).toEqual(report.rows);
+    expect(result.report.passage_comparison?.queries[0].annotated_messages).toMatchObject({ gold_turn_count: 1, legacy_covered_turns: [], candidate_covered_turns: [], legacy_all_turns: false, candidate_all_turns: false });
+    writeGoldTurns([]);
+    const excluded = await evaluate({ ...options(), baseline, passageComparison: "query-passages-v1", goldTurns: labels });
+    expect(excluded.report.passage_comparison?.annotated_message_coverage).toMatchObject({ eligible_question_count: 0, excluded_question_ids: ["q1"], candidate_packed: { all_turn_count: 0, all_turn_rate: null } });
+  });
+  it("validates expected annotations before retrieval, detects artifact mutation and protects output aliases", async () => {
+    mutateDb("UPDATE entries SET content = 'user: ' || content");
+    const { report } = await evaluate(options());
+    const baseline = join(dir, "baseline.json"); writeFileSync(baseline, JSON.stringify(report));
+    const labels = writeGoldTurns();
+    const bytes = readFileSync(labels);
+    const value = JSON.parse(bytes.toString("utf8")) as { queries: { entries: { content_sha256: string }[] }[] };
+    value.queries[0].entries[0].content_sha256 = "0".repeat(64);
+    writeFileSync(labels, JSON.stringify(value));
+    const production = vi.spyOn(runner, "runBenchmark");
+    await expect(evaluate({ ...options(), baseline, passageComparison: "query-passages-v1", goldTurns: labels })).rejects.toThrow(/content|hash/i);
+    expect(production).not.toHaveBeenCalled();
+    writeFileSync(labels, bytes);
+    const real = runner.runBenchmark;
+    production.mockRestore();
+    vi.spyOn(runner, "runBenchmark").mockImplementation(async (...params) => {
+      const result = await real(...params); writeFileSync(labels, readFileSync(labels, "utf8") + "\n"); return result;
+    });
+    await expect(evaluate({ ...options(), baseline, passageComparison: "query-passages-v1", goldTurns: labels })).rejects.toThrow(/input changed/);
+    writeFileSync(labels, bytes);
+    output = labels;
+    expect(await main([...args(baseline), "--passage-comparison", "query-passages-v1", "--gold-turns", labels])).toBe(2);
+    expect(readFileSync(labels).equals(bytes)).toBe(true);
+  });
+  it("detects optional annotation-module source mutation without changing source files", async () => {
+    mutateDb("UPDATE entries SET content = 'user: ' || content");
+    const { report } = await evaluate(options());
+    const baseline = join(dir, "baseline.json"); writeFileSync(baseline, JSON.stringify(report));
+    const labels = writeGoldTurns();
+    const altered = join(dir, "changed-source.ts"); writeFileSync(altered, "changed optional evaluator source");
+    let completedRetrieval = false;
+    let optionalSourceChecks = 0;
+    const originalOpen = filesystem.openSync;
+    vi.spyOn(filesystem, "openSync").mockImplementation((path, flags, mode) => {
+      if (String(path).endsWith("/benchmark/evidence-metric/gold-turns.ts")) {
+        optionalSourceChecks++;
+        return originalOpen(completedRetrieval ? altered : path, flags, mode);
+      }
+      return originalOpen(path, flags, mode);
+    });
+    const real = runner.runBenchmark;
+    vi.spyOn(runner, "runBenchmark").mockImplementation(async (...params) => {
+      const result = await real(...params); completedRetrieval = true; return result;
+    });
+    await expect(evaluate({ ...options(), baseline, passageComparison: "query-passages-v1", goldTurns: labels })).rejects.toThrow(/Optional gold-turn evaluator source changed/);
+    expect(optionalSourceChecks).toBe(2);
   });
 });

@@ -72,7 +72,8 @@
     "scorecard:publish": "tsx benchmark/scorecard/publish.ts",
     "benchmark:evidence": "tsx benchmark/evidence-metric/run.ts",
     "benchmark:evidence:prepare": "tsx benchmark/evidence-metric/prepare.ts",
-    "benchmark:evidence:check": "tsx benchmark/evidence-metric/check.ts"
+    "benchmark:evidence:check": "tsx benchmark/evidence-metric/check.ts",
+    "benchmark:evidence:gold-turns": "tsx benchmark/evidence-metric/gold-turns.ts"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.3.1",

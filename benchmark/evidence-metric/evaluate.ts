@@ -11,7 +11,8 @@ import type { BenchmarkQuery } from "../types.js";
 import type { Entry } from "../../src/types.js";
 import { getSemanticMaxDistance } from "../../src/embeddings.js";
 import { normalizeAsOf, withFrozenClock } from "./clock.js";
-import { CONFIG, canonical, assertControlReproduced, comparePackingRows, compareRows, object, packEvidence, summarize, validateQueries, validateRows, validateVectors, type EvidenceRow, type FrozenVectors } from "./metric.js";
+import { CONFIG, canonical, assertControlReproduced, comparePackingRows, comparePassageRows, compareRows, object, packEvidence, packPassageEvidence, summarize, validateQueries, validateRows, validateVectors, type EvidenceRow, type FrozenVectors, type PassageEvidenceRow } from "./metric.js";
+import { validateGoldTurns, type GoldTurnSourceBindings } from "./gold-turns.js";
 
 export interface EvaluationOptions {
   snapshot: string;
@@ -20,6 +21,8 @@ export interface EvaluationOptions {
   asOf: string;
   baseline?: string;
   packingComparison?: "skip-oversized";
+  passageComparison?: "query-passages-v1";
+  goldTurns?: string;
 }
 export interface Bindings {
   snapshot_sha256: string;
@@ -38,6 +41,11 @@ export interface EvidenceReport {
   summary: ReturnType<typeof summarize>;
   rows: EvidenceRow[];
   packing_comparison?: ReturnType<typeof comparePackingRows> & { strategy: "skip-oversized"; control_reproduced: true };
+  passage_comparison?: ReturnType<typeof comparePassageRows> & {
+    strategy: "query-passages-v1"; control_reproduced: true; coordinate_system: "utf16_code_units"; chunk_max_utf8_bytes: 2048;
+    metric_limitation: string;
+    lineage: { gold_turns_sha256: string; gold_turns_source_sha256: string; source: GoldTurnSourceBindings };
+  };
   comparison?: ReturnType<typeof compareRows> & { baseline_all_gold_rate: number; current_all_gold_rate: number; reproduced?: boolean };
 }
 export const LIMITATION = "Entry-ID presence in packed context is a proxy, not full content/span coverage. A truncated first block still counts as present; budget.truncated exposes this limitation.";
@@ -149,8 +157,14 @@ export function assertOutputSafe(output: string, inputs: string[]): void {
 export async function evaluate(options: EvaluationOptions): Promise<{ report: EvidenceReport; exitCode: 0 | 1 | 2 }> {
   if (options.packingComparison !== undefined && options.packingComparison !== "skip-oversized") throw new Error("Unsupported packing comparison strategy");
   if (options.packingComparison && !options.baseline) throw new Error("Packing comparison requires --baseline");
-  const paths = [options.snapshot, options.queries, options.vectors, ...(options.baseline ? [options.baseline] : [])].map((p) => realpathSync(p));
+  if (options.passageComparison !== undefined && options.passageComparison !== "query-passages-v1") throw new Error("Unsupported passage comparison strategy");
+  if (options.passageComparison && (!options.baseline || !options.goldTurns)) throw new Error("Passage comparison requires --baseline and --gold-turns");
+  if (options.goldTurns && !options.passageComparison) throw new Error("--gold-turns requires --passage-comparison query-passages-v1");
+  const paths = [options.snapshot, options.queries, options.vectors, ...(options.baseline ? [options.baseline] : []), ...(options.goldTurns ? [options.goldTurns] : [])].map((p) => realpathSync(p));
   const inputHashes = paths.map(hashFile);
+  // Optional lineage stays outside the frozen legacy SOURCE_FILES contract.
+  const goldTurnSourcePath = join(ROOT, "benchmark/evidence-metric/gold-turns.ts");
+  const goldTurnSourceHash = options.passageComparison ? hashFile(goldTurnSourcePath) : undefined;
   const asOf = normalizeAsOf(options.asOf);
   const queryBytes = readFileSync(paths[1]);
   const queries = validateQueries(queryBytes.toString("utf8").split("\n").filter((line) => line.trim() && !line.trim().startsWith("//")).map((line) => JSON.parse(line) as unknown));
@@ -164,6 +178,19 @@ export async function evaluate(options: EvaluationOptions): Promise<{ report: Ev
   const db = openSnapshot(paths[0]);
   try {
     validateSnapshot(db, queries, vectors);
+    const goldTurns = options.passageComparison ? (() => {
+      const artifact = JSON.parse(readFileSync(paths[4], "utf8")) as unknown;
+      const source = object(object(artifact).source);
+      // Label truth is inherited from the prepared upstream artifact; runtime
+      // validation pins that artifact to these exact query and snapshot bytes.
+      const expected = new Map([...new Set(queries.flatMap((q) => q.expected_ids!))].map((id) => {
+        const entry = db.prepare("SELECT content FROM entries WHERE id = ?").get(id) as { content: string };
+        return [id, entry] as const;
+      }));
+      return validateGoldTurns(artifact, queries, expected, {
+        dataset_sha256: source.dataset_sha256 as string, snapshot_sha256: inputHashes[0], queries_sha256: inputHashes[1],
+      });
+    })() : undefined;
     const byText = new Map(queries.map((q) => [q.query, Float32Array.from(vectors.vectors[q.id])]));
     const run = async () => withFrozenClock(asOf, async () => {
       const result = await runBenchmark(paths[0], queries, {
@@ -181,6 +208,8 @@ export async function evaluate(options: EvaluationOptions): Promise<{ report: Ev
         || (result.warnings?.length ?? 0) > 0) throw new Error("Invalid/degraded production hybrid evaluation");
       const expected = new Map(queries.map((q) => [q.id, q.expected_ids!]));
       const candidateRows: EvidenceRow[] = [];
+      const passageRows: PassageEvidenceRow[] = [];
+      const queryTexts = new Map(queries.map((q) => [q.id, q.query]));
       const rows = result.queries.map((row) => {
         const gold = expected.get(row.query_id);
         if (!gold) throw new Error("Unexpected retrieval query ID");
@@ -191,16 +220,26 @@ export async function evaluate(options: EvaluationOptions): Promise<{ report: Ev
         });
         // Both policies receive this one retrieved Entry[] in its original order.
         if (options.packingComparison) candidateRows.push(packEvidence(row.query_id, gold, entries, options.packingComparison));
+        if (options.passageComparison) passageRows.push(packPassageEvidence(row.query_id, queryTexts.get(row.query_id)!, gold, entries));
         return packEvidence(row.query_id, gold, entries);
       });
       validateRows(rows);
-      return { rows, candidateRows };
+      return { rows, candidateRows, passageRows };
     });
-    const { rows, candidateRows } = await run();
+    const { rows, candidateRows, passageRows } = await run();
     const report: EvidenceReport = { schema_version: 1, bindings, lineage: { ...source, ...(baseline ? { baseline_sha256: inputHashes[3] } : {}) }, metric_limitation: LIMITATION, quality_state: "not_measured", rows, summary: summarize(rows) };
     if (options.packingComparison && baseline) {
       assertControlReproduced(baseline.rows, rows);
       report.packing_comparison = { strategy: options.packingComparison, control_reproduced: true, ...comparePackingRows(rows, candidateRows) };
+    }
+    if (options.passageComparison && baseline && goldTurns) {
+      assertControlReproduced(baseline.rows, rows);
+      report.passage_comparison = {
+        strategy: options.passageComparison, control_reproduced: true, coordinate_system: "utf16_code_units", chunk_max_utf8_bytes: 2048,
+        metric_limitation: "Entry-ID presence is a diagnostic proxy. Message coverage requires complete original has_answer=true message content; it is neither answer accuracy nor exact answer-span coverage. Questions where at least one expected entry has no positive annotation are excluded from the all-turn denominator.",
+        lineage: { gold_turns_sha256: inputHashes[4], gold_turns_source_sha256: goldTurnSourceHash!, source: goldTurns.artifact.source },
+        ...comparePassageRows(rows, passageRows, goldTurns.queriesById),
+      };
     }
     let exitCode: 0 | 1 | 2 = 2;
     if (baseline) {
@@ -219,6 +258,7 @@ export async function evaluate(options: EvaluationOptions): Promise<{ report: Ev
     }
     checkSidecars(paths[0]);
     if (canonical(lineage()) !== canonical(source)) throw new Error("Evaluator source changed during the run");
+    if (goldTurnSourceHash !== undefined && hashFile(goldTurnSourcePath) !== goldTurnSourceHash) throw new Error("Optional gold-turn evaluator source changed during the run");
     return { report, exitCode };
   } finally {
     db.close();

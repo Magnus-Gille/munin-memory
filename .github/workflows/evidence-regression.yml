@@ -38,7 +38,9 @@ jobs:
           npm run benchmark:evidence:check -- \
             --artifacts-dir "$RUNNER_TEMP/evidence-inputs" \
             --output "$RUNNER_TEMP/evidence-results/report.json" \
-            --packing-comparison skip-oversized
+            --packing-comparison skip-oversized \
+            --passage-comparison query-passages-v1 \
+            --gold-turns benchmark/evidence-metric/comparisons/longmemeval-s-passages-20261020/gold-turns.json
       - name: Summarize the result
         if: always()
         run: |
@@ -54,6 +56,11 @@ jobs:
             const packing = result.packing_comparison;
             if (packing) {
               appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\nPacking experiment at **8,192 estimated tokens** (${packing.strategy}):\n\n| Stage | All gold | Some gold | No gold |\n| --- | ---: | ---: | ---: |\n${[['Retrieved top 10', packing.stages.retrieval], ['Legacy packing', packing.stages.legacy_packed], ['Candidate packing', packing.stages.candidate_packed]].map(([name, stage]) => `| ${name} | ${stage.all_gold} | ${stage.partial_gold} | ${stage.no_gold} |`).join('\n')}\n\nGained all-gold questions: ${packing.gained_question_ids.length}. Lost: ${packing.lost_question_ids.length}. Any loss: ${packing.regression}. The candidate is experimental; the default packing and reviewed baseline are unchanged. Full per-question gold-ID gains/losses are in the report.\n`);
+            }
+            const passage = result.passage_comparison;
+            if (passage) {
+              const coverage = passage.annotated_message_coverage;
+              appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\nPassage experiment at **8,192 estimated tokens** (${passage.strategy}):\n\n| Complete annotated-message coverage | Questions |\n| --- | ---: |\n| Retrieved top 10 | ${coverage.retrieval.all_turn_count}/${coverage.eligible_question_count} |\n| Legacy packing | ${coverage.legacy_packed.all_turn_count}/${coverage.eligible_question_count} |\n| Passage packing | ${coverage.candidate_packed.all_turn_count}/${coverage.eligible_question_count} |\n\nGained complete-coverage questions: ${coverage.gained_question_ids.length}. Lost: ${coverage.lost_question_ids.length}. Excluded without positive annotations in every expected session: ${coverage.excluded_question_ids.length}. Any loss: ${coverage.regression}.\n\nEntry-ID proxy: ${passage.entry_id_proxy.stages.legacy_packed.all_gold} → ${passage.entry_id_proxy.stages.candidate_packed.all_gold}; gained ${passage.entry_id_proxy.gained_question_ids.length}, lost ${passage.entry_id_proxy.lost_question_ids.length}.\n\nFull-message coverage is a conservative proxy, not reader answer accuracy. Experimental losses remain visible independently of the baseline gate. See the retained report for all selected source ranges and message gains/losses.\n`);
             }
           } else {
             appendFileSync(process.env.GITHUB_STEP_SUMMARY, 'Packed evidence: **invalid / no report**. See the failing setup or download step; this is not a successful comparison.\n');

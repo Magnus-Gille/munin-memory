@@ -5,12 +5,12 @@ import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { assertOutputSafe, evaluate, type EvaluationOptions } from "./evaluate.js";
 
-const USAGE = "Usage: npm run benchmark:evidence -- --snapshot PATH --queries PATH --vectors PATH --as-of ISO_TIMESTAMP --output PATH [--baseline PATH] [--packing-comparison skip-oversized]";
+const USAGE = "Usage: npm run benchmark:evidence -- --snapshot PATH --queries PATH --vectors PATH --as-of ISO_TIMESTAMP --output PATH [--baseline PATH] [--packing-comparison skip-oversized] [--passage-comparison query-passages-v1 --gold-turns PATH]";
 function parseArgs(args: string[]): EvaluationOptions & { output: string } {
   const values: Record<string, string> = {};
   for (let i = 0; i < args.length; i += 2) {
     const key = args[i]; const value = args[i + 1];
-    if (!["--snapshot", "--queries", "--vectors", "--as-of", "--output", "--baseline", "--packing-comparison"].includes(key)
+    if (!["--snapshot", "--queries", "--vectors", "--as-of", "--output", "--baseline", "--packing-comparison", "--passage-comparison", "--gold-turns"].includes(key)
       || !value || value.startsWith("--") || values[key] !== undefined) throw new Error(USAGE);
     values[key] = value;
   }
@@ -19,7 +19,10 @@ function parseArgs(args: string[]): EvaluationOptions & { output: string } {
   }
   if (values["--packing-comparison"] !== undefined && values["--packing-comparison"] !== "skip-oversized") throw new Error(USAGE);
   if (values["--packing-comparison"] && !values["--baseline"]) throw new Error("Packing comparison requires --baseline");
-  return { ...(values["--packing-comparison"] ? { packingComparison: "skip-oversized" as const } : {}), snapshot: resolve(values["--snapshot"]), queries: resolve(values["--queries"]), vectors: resolve(values["--vectors"]), asOf: values["--as-of"], output: resolve(values["--output"]), ...(values["--baseline"] ? { baseline: resolve(values["--baseline"]) } : {}) };
+  if (values["--passage-comparison"] !== undefined && values["--passage-comparison"] !== "query-passages-v1") throw new Error(USAGE);
+  if (values["--passage-comparison"] && (!values["--baseline"] || !values["--gold-turns"])) throw new Error("Passage comparison requires --baseline and --gold-turns");
+  if (values["--gold-turns"] && !values["--passage-comparison"]) throw new Error("--gold-turns requires --passage-comparison query-passages-v1");
+  return { ...(values["--packing-comparison"] ? { packingComparison: "skip-oversized" as const } : {}), ...(values["--passage-comparison"] ? { passageComparison: "query-passages-v1" as const, goldTurns: resolve(values["--gold-turns"]) } : {}), snapshot: resolve(values["--snapshot"]), queries: resolve(values["--queries"]), vectors: resolve(values["--vectors"]), asOf: values["--as-of"], output: resolve(values["--output"]), ...(values["--baseline"] ? { baseline: resolve(values["--baseline"]) } : {}) };
 }
 function writeAtomic(path: string, report: unknown): void {
   const temporary = join(dirname(path), `.evidence-report-${randomUUID()}.tmp`);
@@ -36,7 +39,7 @@ export async function main(args: string[]): Promise<0 | 1 | 2> {
   let safeOutput = false;
   try {
     options = parseArgs(args);
-    const inputs = [options.snapshot, options.queries, options.vectors, ...(options.baseline ? [options.baseline] : [])];
+    const inputs = [options.snapshot, options.queries, options.vectors, ...(options.baseline ? [options.baseline] : []), ...(options.goldTurns ? [options.goldTurns] : [])];
     assertOutputSafe(options.output, inputs);
     safeOutput = true;
     const result = await evaluate(options);
@@ -49,7 +52,7 @@ export async function main(args: string[]): Promise<0 | 1 | 2> {
     process.stderr.write(`Evidence evaluation invalid: ${message}\n`);
     if (safeOutput && options) {
       try {
-        assertOutputSafe(options.output, [options.snapshot, options.queries, options.vectors, ...(options.baseline ? [options.baseline] : [])]);
+        assertOutputSafe(options.output, [options.snapshot, options.queries, options.vectors, ...(options.baseline ? [options.baseline] : []), ...(options.goldTurns ? [options.goldTurns] : [])]);
         writeAtomic(options.output, { schema_version: 1, quality_state: "invalid", error: message });
       } catch {
         // Reporting failures preserve status 2; no fallback output may clobber an input.
