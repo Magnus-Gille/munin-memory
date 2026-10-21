@@ -6,6 +6,7 @@ import { sealManifest, validateManifest, packPair, prepareQualityManifest } from
 import { runPairedQuality } from "../benchmark/packing-quality/run.js";
 import { summarizePairs } from "../benchmark/packing-quality/summary.js";
 import type { QualityManifest, RunConfig, Transport } from "../benchmark/packing-quality/types.js";
+import { TransportFailure } from "../benchmark/packing-quality/types.js";
 import type { Entry } from "../src/types.js";
 import { canonical } from "../benchmark/evidence-metric/metric.js";
 import { hashFile, sha256 } from "../benchmark/evidence-metric/evaluate.js";
@@ -46,6 +47,15 @@ describe("durable runner", () => {
     const call: Transport = async (_opts, control) => { calls++; expect(JSON.parse(readFileSync(join(dir, `${control.call_id}.json`), "utf8"))).toMatchObject({ status: "pending" }); throw new Error("unknown network outcome"); };
     await expect(runPairedQuality({ manifest: manifest(), config: config(), checkpointDir: dir, transport: call })).rejects.toThrow(/unknown/i);
     await expect(runPairedQuality({ manifest: manifest(), config: config(), checkpointDir: dir, transport: call })).rejects.toThrow(/unknown|pending/i); expect(calls).toBe(1);
+  });
+  it("persists only validated primitive diagnostics from a typed transport failure", async () => {
+    const dir = join(scratch(), "calls");
+    const call = vi.fn<Transport>(async () => { throw new TransportFailure({ category: "secret-fixture-token", cli_code: "secret-fixture-token", retryable: "true", retry_after_seconds: 3601, exit_code: "1", message: "secret-fixture-token", payload: { token: "secret-fixture-token" } }); });
+    await expect(runPairedQuality({ manifest: manifest(), config: config(), checkpointDir: dir, transport: call })).rejects.toThrow(/unknown/i);
+    const raw = readFileSync(join(dir, "reader-000000-baseline.json"), "utf8");
+    expect(JSON.parse(raw)).toMatchObject({ status: "unknown", transport_diagnostic: { category: "unknown" } });
+    expect((JSON.parse(raw) as { transport_diagnostic: unknown }).transport_diagnostic).toEqual({ category: "unknown" }); expect(raw).not.toContain("secret-fixture-token");
+    await expect(runPairedQuality({ manifest: manifest(), config: config(), checkpointDir: dir, transport: call })).rejects.toThrow(/replay blocked/i); expect(call).toHaveBeenCalledOnce();
   });
   it("rejects config mismatch, symlink directories and tampered checkpoints", async () => {
     const base = scratch(); const dir = join(base, "calls"); await runPairedQuality({ manifest: manifest(), config: config(), checkpointDir: dir, transport, stage: "readers" });
@@ -105,6 +115,9 @@ describe("actual frozen snapshot preparation", () => {
     expect(JSON.parse(readFileSync(output, "utf8"))).toEqual(prepared);
     expect(prepared.queries[0]).not.toHaveProperty("expected_ids");
     await expect(prepareQualityManifest({ ...paths, expected: { ...expected, queries: "0".repeat(64) }, asOf: prepared.as_of, identity: "fixture", output: join(dir, "bad.json") })).rejects.toThrow(/hash mismatch/);
+    const reproduction = join(dir, "reproduction.json"); writeFileSync(reproduction, "not a parsed reproduction report");
+    await expect(prepareQualityManifest({ ...paths, expected, asOf: prepared.as_of, identity: "fixture", reproduction: { path: reproduction, sha256: "0".repeat(64) }, output: join(dir, "bad-reproduction.json") })).rejects.toThrow(/Reproduction report hash mismatch/);
+    expect(Object.fromEntries(Object.entries(paths).map(([key, path]) => [key, hashFile(path)]))).toEqual(expected);
     writeFileSync(sourceManifest, "tampered");
     await expect(runPairedQuality({ manifest: prepared, config: config(), checkpointDir: join(dir, "calls"), transport })).rejects.toThrow(/input hash mismatch/);
   });

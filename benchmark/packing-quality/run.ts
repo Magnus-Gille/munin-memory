@@ -10,6 +10,7 @@ import { hashFile, sha256 } from "../evidence-metric/evaluate.js";
 import { assertSafeParents } from "../evidence-metric/shared-artifacts.js";
 import { assertManifestFiles, regularFile, SOURCE_ROOT, validateManifest } from "./prepare.js";
 import { summarizePairs } from "./summary.js";
+import { sanitizeTransportFailureDiagnostic, TransportFailure } from "./types.js";
 import type { CallCheckpoint, ModelProfile, PairOutcome, QualityManifest, RunConfig, Stage, Transport, Variant, QualityResponse } from "./types.js";
 
 function validateConfig(config: RunConfig): void {
@@ -153,7 +154,7 @@ export async function runPairedQuality(options: RunOptions) {
         if (current?.status === "invalid" || current?.status === "malformed") throw error;
         if (pending) {
           const { checkpoint_sha256: _old, ...body } = pending; void _old;
-          const failed = sealCall({ ...body, status: "unknown", ...(observed ? { response: observed } : {}), error: "Transport/charge outcome unknown; manual reconciliation required", duration_ms: performance.now() - start });
+          const failed = sealCall({ ...body, status: "unknown", ...(observed ? { response: observed } : {}), ...(error instanceof TransportFailure ? { transport_diagnostic: sanitizeTransportFailureDiagnostic(error.diagnostic) } : {}), error: "Transport/charge outcome unknown; manual reconciliation required", duration_ms: performance.now() - start });
           durableJson(path, failed, true); calls.set(id, failed);
           throw new Error(`Unknown call ${id}; no automatic replay. ${error instanceof Error ? error.message : "Inference failed"}`);
         }

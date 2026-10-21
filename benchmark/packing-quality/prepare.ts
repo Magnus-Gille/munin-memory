@@ -91,9 +91,10 @@ export async function prepareQualityManifest(options: PrepareOptions): Promise<Q
   if (canonical(report.bindings.embedding) !== canonical({ model: embedding.model, identity: embedding.identity, dimensions: embedding.dimensions })) throw new Error("Frozen embedding lineage mismatch");
   let priorCoreRows: Map<string, Record<string, unknown>> | undefined;
   if (options.reproduction) {
-    const path = regularFile(options.reproduction.path); if (hashFile(path) !== options.reproduction.sha256) throw new Error("Reproduction report hash mismatch");
-    inputs.reproduction = { path, sha256: options.reproduction.sha256, bytes: lstatSync(path).size };
-    const prior = object(JSON.parse(readFileSync(path, "utf8")) as unknown);
+    const path = regularFile(options.reproduction.path); const buffer = readFileSync(path);
+    if (sha256(buffer) !== options.reproduction.sha256) throw new Error("Reproduction report hash mismatch");
+    inputs.reproduction = { path, sha256: options.reproduction.sha256, bytes: buffer.length };
+    const prior = object(JSON.parse(buffer.toString("utf8")) as unknown);
     if (canonical(prior.bindings) !== canonical(report.bindings) || canonical(prior.rows) !== canonical(report.rows)) throw new Error("Frozen retrieval/control reproduction mismatch");
     const oldSources = object(object(prior.lineage).source_sha256);
     if (canonical(oldSources) !== canonical(report.lineage.source_sha256)) throw new Error("Frozen retrieval source lineage mismatch");

@@ -36,11 +36,36 @@ export interface CallControl {
 }
 /** The caller owns endpoint/credentials. This harness never supplies or reads credentials. */
 export type Transport = (opts: OpenRouterCallOptions, control: CallControl) => Promise<QualityResponse>;
+const failureCategories = ["busy", "rate_limited", "upstream_error", "authentication", "timeout", "unknown"] as const;
+const failureCodes = ["tool_error", "authentication_error", "upstream_error", "rate_limited", "timeout"] as const;
+export interface TransportFailureDiagnostic {
+  category: typeof failureCategories[number]; cli_code?: typeof failureCodes[number];
+  retryable?: boolean; retry_after_seconds?: number; exit_code?: number;
+}
+/** Copy only content-free primitives; never preserve arbitrary CLI text or fields. */
+export function sanitizeTransportFailureDiagnostic(value: unknown): TransportFailureDiagnostic {
+  const input = value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  return {
+    category: failureCategories.includes(input.category as TransportFailureDiagnostic["category"]) ? input.category as TransportFailureDiagnostic["category"] : "unknown",
+    ...(failureCodes.includes(input.cli_code as NonNullable<TransportFailureDiagnostic["cli_code"]>) ? { cli_code: input.cli_code as NonNullable<TransportFailureDiagnostic["cli_code"]> } : {}),
+    ...(typeof input.retryable === "boolean" ? { retryable: input.retryable } : {}),
+    ...(typeof input.retry_after_seconds === "number" && Number.isSafeInteger(input.retry_after_seconds) && input.retry_after_seconds >= 0 && input.retry_after_seconds <= 3600 ? { retry_after_seconds: input.retry_after_seconds } : {}),
+    ...(typeof input.exit_code === "number" && Number.isSafeInteger(input.exit_code) && input.exit_code >= 1 && input.exit_code <= 255 ? { exit_code: input.exit_code } : {}),
+  };
+}
+/** A diagnostic cannot establish whether inference or charging occurred. */
+export class TransportFailure extends Error {
+  readonly diagnostic: Readonly<TransportFailureDiagnostic>;
+  constructor(diagnostic: unknown) {
+    super("Transport failed; outcome unknown, no automatic retry"); this.name = "TransportFailure";
+    this.diagnostic = Object.freeze(sanitizeTransportFailureDiagnostic(diagnostic));
+  }
+}
 export interface CallCheckpoint {
   schema_version: 1; binding_sha256: string; call_id: string; query_id: string; variant: Variant; stage: Stage;
   request_sha256: string; status: "pending" | "complete" | "invalid" | "malformed" | "unknown";
   reserved_usd: number | null; cost_usd: number | null; cost_basis: "self_hosted_assumption" | "provider_receipt" | "unreconciled_reservation";
   response?: QualityResponse; answer?: string; verdict?: JudgeVerdict; error?: string; finish_reason?: string | null;
-  truncated?: boolean; duration_ms?: number; checkpoint_sha256: string;
+  truncated?: boolean; duration_ms?: number; transport_diagnostic?: TransportFailureDiagnostic; checkpoint_sha256: string;
 }
 export interface PairOutcome { query_id: string; category: string; baseline: { correct: boolean; abstained: boolean } | null; core: { correct: boolean; abstained: boolean } | null }
