@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, mkdtempSync, openSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -169,8 +169,16 @@ describe("LongMemEval message-boundary artifact", () => {
 
       prepareMessageBoundariesCli(["--raw", rawPath, "--snapshot", snapshotPath, "--out", outPath], rawHash);
 
-      expect((statSync(outPath).mode & 0o777).toString(8)).toBe("600");
-      const saved = JSON.parse(readFileSync(outPath, "utf8")) as MessageBoundaryArtifact;
+      const { bytes: outputBytes, mode: outputMode } = (() => {
+        const outputFd = openSync(outPath, "r");
+        try {
+          return { bytes: readFileSync(outputFd), mode: fstatSync(outputFd).mode };
+        } finally {
+          closeSync(outputFd);
+        }
+      })();
+      expect((outputMode & 0o777).toString(8)).toBe("600");
+      const saved = JSON.parse(outputBytes.toString("utf8")) as MessageBoundaryArtifact;
       expect(saved.entries).toHaveLength(entries.size);
       expect(saved.source).toEqual({ dataset_sha256: rawHash, snapshot_sha256: snapshotHash });
       expect(readFileSync(rawPath)).toEqual(rawBytes);
@@ -180,7 +188,8 @@ describe("LongMemEval message-boundary artifact", () => {
       expect(existsSync(`${snapshotPath}-journal`)).toBe(false);
       expect(() => prepareMessageBoundariesCli(["--raw", rawPath, "--snapshot", snapshotPath, "--out", outPath], rawHash))
         .toThrow(/already exists/);
-      expect(hash(readFileSync(outPath))).toBe(hash(Buffer.from(`${JSON.stringify(saved)}\n`)));
+      expect(hash(outputBytes)).toBe(hash(Buffer.from(`${JSON.stringify(saved)}\n`)));
+      expect(readFileSync(outPath)).toEqual(outputBytes);
       const wrongPinOutput = join(directory, "wrong-pin.json");
       expect(() => prepareMessageBoundariesCli(["--raw", rawPath, "--snapshot", snapshotPath, "--out", wrongPinOutput], "c".repeat(64)))
         .toThrow(/pinned public source/);
