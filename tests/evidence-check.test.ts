@@ -296,6 +296,53 @@ it("forwards the pinned message experiment while its losses remain outside the p
   expect(deps.execute).toHaveBeenCalledWith(expect.arrayContaining(["--message-comparison", "query-message-neighbors-v1", "--message-boundaries", boundaries]), expect.any(Object));
 });
 
+it.each(["gain", "loss"] as const)("validates multi-gold %s IDs in expected order when retrieval order differs", async (direction) => {
+  const boundaries = writeReviewedMessageBoundaries(); const labels = writeReviewedGoldTurns();
+  const { passage, report } = messageComparison();
+  const expected = ["e1", "e2"]; const retrieved = ["e2", "e1"];
+  const fullRanges = retrieved.map((entry_id) => ({ entry_id, start: 0, end: 3 }));
+  const turns = expected.map((entry_id) => ({ entry_id, message_index: 0, start: 0, end: 3 }));
+  const referenceIds = direction === "loss" ? retrieved : [];
+  const candidateIds = direction === "gain" ? retrieved : [];
+  const referenceRanges = referenceIds.length ? fullRanges : [];
+  const candidateRanges = candidateIds.length ? fullRanges : [];
+  const budget = (included: number) => ({ ...messageBudget(included, 2 - included), candidate_entry_count: 2 });
+  for (const pair of [report.versus_legacy, report.versus_passages]) {
+    Object.assign(pair.entry_id_proxy, {
+      regression: direction === "loss", gained_question_ids: direction === "gain" ? ["q1"] : [], lost_question_ids: direction === "loss" ? ["q1"] : [], any_gold_loss_question_ids: direction === "loss" ? ["q1"] : [],
+      gained_id_count: direction === "gain" ? 2 : 0, lost_id_count: direction === "loss" ? 2 : 0,
+      stages: { retrieval: { all_gold: 1, partial_gold: 0, no_gold: 0 }, reference_packed: { all_gold: referenceIds.length ? 1 : 0, partial_gold: 0, no_gold: referenceIds.length ? 0 : 1 }, candidate_packed: { all_gold: candidateIds.length ? 1 : 0, partial_gold: 0, no_gold: candidateIds.length ? 0 : 1 } },
+    });
+    Object.assign(pair.annotated_message_coverage, {
+      annotated_message_count: 2, retrieval: { all_turn_count: 1, all_turn_rate: 1, covered_message_count: 2 },
+      reference_packed: { all_turn_count: referenceIds.length ? 1 : 0, all_turn_rate: referenceIds.length ? 1 : 0, covered_message_count: referenceIds.length },
+      candidate_packed: { all_turn_count: candidateIds.length ? 1 : 0, all_turn_rate: candidateIds.length ? 1 : 0, covered_message_count: candidateIds.length },
+      regression: direction === "loss", gained_question_ids: direction === "gain" ? ["q1"] : [], lost_question_ids: direction === "loss" ? ["q1"] : [], gained_message_count: direction === "gain" ? 2 : 0, lost_message_count: direction === "loss" ? 2 : 0,
+    });
+    Object.assign(pair.queries[0], {
+      expected_ids: expected, retrieved_ids: retrieved, reference_packed_ids: referenceIds, candidate_packed_ids: candidateIds,
+      reference_budget: budget(referenceIds.length), candidate_budget: budget(candidateIds.length), reference_ranges: referenceRanges, candidate_ranges: candidateRanges,
+      reference_packed_stage: referenceIds.length ? "all_gold" : "no_gold", candidate_packed_stage: candidateIds.length ? "all_gold" : "no_gold", reference_all_gold: referenceIds.length > 0, candidate_all_gold: candidateIds.length > 0,
+      gained_ids: direction === "gain" ? expected : [], lost_ids: direction === "loss" ? expected : [],
+      annotated_messages: { eligible: true, gold_turn_count: 2, no_positive_entry_count: 0, retrieval_covered_turns: turns, reference_covered_turns: referenceIds.length ? turns : [], candidate_covered_turns: candidateIds.length ? turns : [], retrieval_all_turns: true, reference_all_turns: referenceIds.length > 0, candidate_all_turns: candidateIds.length > 0, gained_turns: direction === "gain" ? turns : [], lost_turns: direction === "loss" ? turns : [] },
+    });
+  }
+  passage.queries = [{ query_id: "q1", expected_ids: expected, retrieved_ids: retrieved, candidate_packed_ids: referenceIds, candidate_budget: budget(referenceIds.length), candidate_ranges: referenceRanges }];
+  Object.assign(report.queries[0], { selected_message_indices: candidateIds.map((entry_id) => ({ entry_id, message_indices: [0] })), candidate_ranges: candidateRanges, candidate_budget: budget(candidateIds.length), whole_message_conservation: { selected_message_count: candidateIds.length, partial_message_count: 0 } });
+  report.whole_message_conservation.selected_message_count = candidateIds.length;
+  deps.execute = async () => {
+    writeFileSync(output, JSON.stringify({ quality_state: "unchanged", rows: [{ query_id: "q1", expected_ids: expected, retrieved_ids: retrieved, packed_ids: referenceIds, budget: budget(referenceIds.length) }], comparison: { gained_question_ids: [], lost_question_ids: [] }, passage_comparison: passage, message_comparison: report }));
+    return 0;
+  };
+  expect(await main([...args(), "--message-comparison", "query-message-neighbors-v1", "--message-boundaries", boundaries, "--passage-comparison", "query-passages-v1", "--gold-turns", labels], deps)).toBe(0);
+  for (const pair of [report.versus_legacy, report.versus_passages]) {
+    if (direction === "gain") pair.queries[0].gained_ids = retrieved;
+    else pair.queries[0].lost_ids = retrieved;
+  }
+  output = join(dir, "wrong-gold-delta-order.json");
+  expect(await main([...args(), "--message-comparison", "query-message-neighbors-v1", "--message-boundaries", boundaries, "--passage-comparison", "query-passages-v1", "--gold-turns", labels], deps)).toBe(2);
+});
+
 it("rechecks message-boundary bytes after async artifact retrieval", async () => {
   const boundaries = writeReviewedMessageBoundaries(); const labels = writeReviewedGoldTurns();
   deps.fetchArtifacts = vi.fn(async () => {

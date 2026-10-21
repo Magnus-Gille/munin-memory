@@ -209,8 +209,9 @@ function validMessagePair(value: unknown, reference: MessagePairName, queryIds: 
       || row.reference_packed_stage !== goldStage(row.expected_ids as string[], row.reference_packed_ids as string[])
       || row.candidate_packed_stage !== goldStage(row.expected_ids as string[], row.candidate_packed_ids as string[])
       || !Array.isArray(row.gained_ids) || !uniqueIds(row.gained_ids) || !Array.isArray(row.lost_ids) || !uniqueIds(row.lost_ids)
-      || JSON.stringify(row.gained_ids) !== JSON.stringify((row.candidate_packed_ids as string[]).filter((id) => !(row.reference_packed_ids as string[]).includes(id) && (row.expected_ids as string[]).includes(id)))
-      || JSON.stringify(row.lost_ids) !== JSON.stringify((row.reference_packed_ids as string[]).filter((id) => !(row.candidate_packed_ids as string[]).includes(id) && (row.expected_ids as string[]).includes(id)))) return false;
+      // Gold deltas preserve expected-ID order, independently of retrieval/display order.
+      || JSON.stringify(row.gained_ids) !== JSON.stringify((row.expected_ids as string[]).filter((id) => (row.candidate_packed_ids as string[]).includes(id) && !(row.reference_packed_ids as string[]).includes(id)))
+      || JSON.stringify(row.lost_ids) !== JSON.stringify((row.expected_ids as string[]).filter((id) => (row.reference_packed_ids as string[]).includes(id) && !(row.candidate_packed_ids as string[]).includes(id)))) return false;
     const annotated = record(row.annotated_messages);
     if (!annotated || typeof annotated.eligible !== "boolean" || eligibility.get(row.query_id as string) !== annotated.eligible
       || !Number.isSafeInteger(annotated.gold_turn_count) || (annotated.gold_turn_count as number) < 0
