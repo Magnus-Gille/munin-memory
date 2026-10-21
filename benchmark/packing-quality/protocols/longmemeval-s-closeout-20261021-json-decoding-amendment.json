@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "amendment_id": "longmemeval-s-closeout-20261021-json-decoding-v1",
+  "frozen_at": "2026-10-21",
+  "amends": {
+    "path": "benchmark/packing-quality/protocols/longmemeval-s-closeout-20261021.json",
+    "sha256": "11cf94c8e41e02c1bc07d5788b3a8a23df58473e08fc0865411bf60d53911b59"
+  },
+  "reason": "Before any new scoring, add a transport-level JSON decoding remedy for the confirmed PEG500 judge-decoding failure. This amendment records no score and makes no quality claim.",
+  "remedy": {
+    "scope": "judge calls only",
+    "transport": "existing M5 JSON stdin payload",
+    "response_format": {
+      "type": "json_schema",
+      "json_schema": {
+        "name": "munin_judge_verdict_v1",
+        "strict": true,
+        "schema": {
+          "type": "object",
+          "properties": {
+            "correct": {
+              "type": "boolean"
+            },
+            "score": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "reasoning": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "correct",
+            "score",
+            "reasoning"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "reader_calls": "No response_format; unchanged.",
+    "primary_reader_and_judge_prompts": "Unchanged.",
+    "response_validation_and_receipts": "Unchanged.",
+    "client_model_runtime_upgrade": false
+  },
+  "readiness_warmup": {
+    "required_before_new_scoring": true,
+    "purpose": "Synthetic transport readiness only; unscored and excluded from calibration, labels, and quality results.",
+    "route": "Same authenticated existing M5 private route used for scoring.",
+    "timeout_ms": 600000,
+    "max_attempts": 1,
+    "failure_policy": "Failure blocks new scoring; no automatic retry.",
+    "ledger": "Keep warmup receipt separate from scored calls.",
+    "request_format": "Use the judge-only strict JSON Schema request shape with synthetic verdict input."
+  },
+  "scored_evaluation": {
+    "dataset": "All 500 questions from frozen LongMemEval-S snapshot 20261018.",
+    "labels": "Original frozen labels unchanged.",
+    "retrieval_and_packing": "Same retrieval inputs and unchanged query-message-cores-v1 candidate/control packing at 8192 estimated tokens.",
+    "primary_reader_and_judge_prompts": "Unchanged.",
+    "route": "Same authenticated existing M5 private route.",
+    "judge_model": "gpt-oss-120b",
+    "temperature": 0,
+    "max_output_tokens": 1024,
+    "timeout_ms": 120000,
+    "minimum_start_interval_ms": 8000,
+    "failure_and_checkpoint_policy": "Retain all old attempts; do not overwrite, infer, or replay unresolved calls. Continue to stop on unknown outcomes without blind retries or fallback.",
+    "reader_model": "gemma4",
+    "actual_weight_revision": "Unknown unless a new receipt establishes it; do not infer it from the model alias."
+  },
+  "unchanged_gates": {
+    "source": "The referenced original frozen protocol.",
+    "calibration": "At least 90% agreement with 60 recorded nonpreference verdicts, at least 90% blind-duplicate consistency, all 6 deterministic controls, and no malformed, truncated, or incomplete calls.",
+    "promotion": [
+      "500 valid matched pairs.",
+      "At least 5 percentage points paired accuracy improvement with 95% confidence interval lower bound above 0.",
+      "No category with at least 30 cases loses more than 5 percentage points.",
+      "Calibration passes.",
+      "Independent held-out or representative real-agent evidence is available."
+    ],
+    "claim": "No quality claim follows from this protocol amendment or readiness warmup. Report results only after the original frozen gates are met; otherwise retain experimental status."
+  }
+}

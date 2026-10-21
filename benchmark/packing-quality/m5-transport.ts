@@ -4,6 +4,23 @@ import { performance } from "node:perf_hooks";
 import { sanitizeTransportFailureDiagnostic, TransportFailure, type QualityResponse, type Transport, type TransportFailureDiagnostic } from "./types.js";
 export type SpawnM5 = (command: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
 export interface M5TransportOptions { spawn?: SpawnM5; minimumStartIntervalMs?: number; now?: () => number; environment?: NodeJS.ProcessEnv }
+const JUDGE_VERDICT_RESPONSE_FORMAT = {
+  type: "json_schema",
+  json_schema: {
+    name: "munin_judge_verdict_v1",
+    strict: true,
+    schema: {
+      type: "object",
+      properties: {
+        correct: { type: "boolean" },
+        score: { type: "number", minimum: 0, maximum: 1 },
+        reasoning: { type: "string" },
+      },
+      required: ["correct", "score", "reasoning"],
+      additionalProperties: false,
+    },
+  },
+} as const;
 function failureDiagnostic(stdout: string, stderr: string, exitCode: unknown): TransportFailureDiagnostic {
   for (const output of [stdout, stderr]) {
     // The successful-response bound is unchanged; error JSON has its own smaller bound.
@@ -53,7 +70,7 @@ export function createM5Transport(config: M5TransportOptions = {}): Transport {
     // The unchanged rubric sends one system then one user message; reject other
     // role patterns rather than flattening or reordering the prompt.
     if (options.messages.length !== 2 || options.messages[0].role !== "system" || options.messages[1].role !== "user") throw new Error("M5 requires system then user messages");
-    const payload = JSON.stringify({ model: options.model, system: options.messages[0].content, prompt: options.messages[1].content, max_tokens: options.maxTokens, temperature: options.temperature, output_profile: "complete-within-budget", traffic_purpose: "evaluation" });
+    const payload = JSON.stringify({ model: options.model, system: options.messages[0].content, prompt: options.messages[1].content, max_tokens: options.maxTokens, temperature: options.temperature, output_profile: "complete-within-budget", traffic_purpose: "evaluation", ...(control.stage === "judge" ? { response_format: JUDGE_VERDICT_RESPONSE_FORMAT } : {}) });
     if (Buffer.byteLength(payload) > 262144) throw new Error("M5 request exceeded bounded size");
     const turn = starts.then(async () => { await wait(Math.ceil(Math.max(0, previousStart + interval - now())), control.signal); if (control.signal.aborted) throw new Error("M5 call aborted before dispatch"); });
     starts = turn.then(() => undefined, () => undefined); await turn;

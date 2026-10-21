@@ -13,7 +13,7 @@ import { normalizeAsOf } from "../evidence-metric/clock.js";
 import { assertSafeParents } from "../evidence-metric/shared-artifacts.js";
 import type { QualityManifest, PackedContext, FileBinding } from "./types.js";
 export const SOURCE_ROOT = fileURLToPath(new URL("../../", import.meta.url));
-const EXTRA_SOURCES = ["benchmark/answer-quality/core-packing.ts", "benchmark/answer-quality/message-packing.ts", "benchmark/evidence-metric/message-boundaries.ts", "benchmark/answer-quality/judge.ts", "benchmark/packing-quality/types.ts", "benchmark/packing-quality/prepare.ts", "benchmark/packing-quality/run.ts", "benchmark/packing-quality/summary.ts"];
+const EXTRA_SOURCES = ["benchmark/answer-quality/core-packing.ts", "benchmark/answer-quality/message-packing.ts", "benchmark/evidence-metric/message-boundaries.ts", "benchmark/answer-quality/judge.ts", "benchmark/packing-quality/types.ts", "benchmark/packing-quality/prepare.ts", "benchmark/packing-quality/run.ts", "benchmark/packing-quality/summary.ts", "benchmark/packing-quality/m5-transport.ts", "benchmark/packing-quality/protocols/longmemeval-s-closeout-20261021-json-decoding-amendment.json"];
 export function packPair(query: string, entries: Entry[], boundaries: ReadonlyMap<string, MessageBoundaryEntry>): { baseline: PackedContext; core: PackedContext } {
   const budget = { maxEstimatedTokens: 8192, estimator: CONFIG.estimator };
   const baseline = serializeContext(entries, "linear", { ...budget, overflowPolicy: "stop" });

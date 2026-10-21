@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, symlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { sealManifest, validateManifest, packPair, prepareQualityManifest } from "../benchmark/packing-quality/prepare.js";
+import { sealManifest, validateManifest, packPair, prepareQualityManifest, assertManifestFiles } from "../benchmark/packing-quality/prepare.js";
 import { runPairedQuality } from "../benchmark/packing-quality/run.js";
 import { summarizePairs } from "../benchmark/packing-quality/summary.js";
 import type { QualityManifest, RunConfig, Transport } from "../benchmark/packing-quality/types.js";
@@ -114,6 +114,14 @@ describe("actual frozen snapshot preparation", () => {
     expect(Object.fromEntries(Object.entries(paths).map(([key, path]) => [key, hashFile(path)]))).toEqual(expected);
     expect(JSON.parse(readFileSync(output, "utf8"))).toEqual(prepared);
     expect(prepared.queries[0]).not.toHaveProperty("expected_ids");
+    const transportSourcePath = "benchmark/packing-quality/m5-transport.ts";
+    const amendmentSourcePath = "benchmark/packing-quality/protocols/longmemeval-s-closeout-20261021-json-decoding-amendment.json";
+    for (const sourcePath of [transportSourcePath, amendmentSourcePath]) {
+      expect(prepared.source_sha256[sourcePath]).toBe(hashFile(join(process.cwd(), sourcePath)));
+    }
+    const { manifest_sha256: _manifestHash, ...preparedBody } = prepared; void _manifestHash;
+    const tamperedTransportPin = sealManifest({ ...preparedBody, source_sha256: { ...prepared.source_sha256, [transportSourcePath]: "0".repeat(64) } });
+    expect(() => assertManifestFiles(tamperedTransportPin)).toThrow(/source hash mismatch/);
     await expect(prepareQualityManifest({ ...paths, expected: { ...expected, queries: "0".repeat(64) }, asOf: prepared.as_of, identity: "fixture", output: join(dir, "bad.json") })).rejects.toThrow(/hash mismatch/);
     const reproduction = join(dir, "reproduction.json"); writeFileSync(reproduction, "not a parsed reproduction report");
     await expect(prepareQualityManifest({ ...paths, expected, asOf: prepared.as_of, identity: "fixture", reproduction: { path: reproduction, sha256: "0".repeat(64) }, output: join(dir, "bad-reproduction.json") })).rejects.toThrow(/Reproduction report hash mismatch/);

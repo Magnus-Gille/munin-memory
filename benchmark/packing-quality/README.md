@@ -30,11 +30,21 @@ model prompts, and reports agreement with the recorded judge rather than
 claiming human truth. Preferences are reported separately, with a frozen
 preference-aware sensitivity rubric. The original rubric remains unchanged.
 
-The protocol is fixed in
-`protocols/longmemeval-s-closeout-20261021.json`. Its 500 questions were already
-used for packing development: paired answer results are development-set
-evidence, not held-out generalization. Failed adoption criteria retain the
-experimental policy; no score alone authorizes runtime adoption.
+The original protocol remains frozen in
+protocols/longmemeval-s-closeout-20261021.json. The immutable
+protocols/longmemeval-s-closeout-20261021-json-decoding-amendment.json adds a
+judge-only strict JSON Schema response format for the confirmed PEG500 decoding
+issue. It leaves both prompts, reader requests, response handling, labels,
+packing, and gates unchanged. Before new scoring, the amendment requires one
+separate synthetic readiness call on the same authenticated M5 route, unscored
+and bounded to 600,000 ms; scored calls remain at 120,000 ms, 1,024 output
+tokens, and temperature 0. Prior attempts remain intact, and the amendment or
+warmup makes no quality claim.
+
+The original 500 questions were already used for packing development: paired
+answer results are development-set evidence, not held-out generalization.
+Failed adoption criteria retain the experimental policy; no score alone
+authorizes runtime adoption.
 
 Tests use injected fake transports and synthetic databases. Ordinary CI must
 never invoke a model, use a credential, update the baseline, or accept an

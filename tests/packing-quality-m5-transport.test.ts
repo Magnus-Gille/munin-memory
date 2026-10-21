@@ -43,6 +43,64 @@ describe("configured private M5 transport", () => {
     expect(response).toMatchObject({ model: "gemma4", provider: "m5-private-configured-gateway", id: "m5-feedback:feedback-1", truncated: false, usage: { prompt_tokens: 17, completion_tokens: 3 }, gateway_metadata: good() });
     expect(response.usage).not.toHaveProperty("cost");
   });
+  it("uses the exact strict JSON schema for judge calls and preserves response handling", async () => {
+    const verdict = '{"correct":true,"score":1,"reasoning":"The answer matches the reference."}';
+    const raw = { ...good(), text: verdict };
+    const f = fakeProcess(raw);
+    const response = await createM5Transport({ spawn: f.spawn, minimumStartIntervalMs: 0 })(
+      { ...options(), model: "gpt-oss-120b" },
+      { ...control(), call_id: "judge-000000-baseline", stage: "judge" },
+    );
+    expect(JSON.parse(f.inputs[0])).toEqual({
+      model: "gpt-oss-120b",
+      system: options().messages[0].content,
+      prompt: options().messages[1].content,
+      max_tokens: 1024,
+      temperature: 0,
+      output_profile: "complete-within-budget",
+      traffic_purpose: "evaluation",
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "munin_judge_verdict_v1",
+          strict: true,
+          schema: {
+            type: "object",
+            properties: {
+              correct: { type: "boolean" },
+              score: { type: "number", minimum: 0, maximum: 1 },
+              reasoning: { type: "string" },
+            },
+            required: ["correct", "score", "reasoning"],
+            additionalProperties: false,
+          },
+        },
+      },
+    });
+    expect(response.choices).toEqual([{ message: { content: verdict }, finish_reason: "stop" }]);
+    expect(response.usage).toEqual({ prompt_tokens: 17, completion_tokens: 3 });
+    expect(response.usage).not.toHaveProperty("reasoning_tokens");
+    expect(response).not.toHaveProperty("reasoning");
+    expect(response.gateway_metadata).toEqual(raw);
+  });
+  it("omits structured decoding for reader calls and leaves the reader response unchanged", async () => {
+    const raw = good();
+    const f = fakeProcess(raw);
+    const response = await createM5Transport({ spawn: f.spawn, minimumStartIntervalMs: 0 })(options(), control());
+    const payload = JSON.parse(f.inputs[0]) as Record<string, unknown>;
+    expect(payload).toEqual({
+      model: "gemma4",
+      system: options().messages[0].content,
+      prompt: options().messages[1].content,
+      max_tokens: 1024,
+      temperature: 0,
+      output_profile: "complete-within-budget",
+      traffic_purpose: "evaluation",
+    });
+    expect(payload).not.toHaveProperty("response_format");
+    expect(response.choices).toEqual([{ message: { content: "answer" }, finish_reason: "stop" }]);
+    expect(response.usage).toEqual({ prompt_tokens: 17, completion_tokens: 3 });
+  });
   it("rejects a paid route, credentials, unapproved model and reordered roles before spawning", async () => {
     const f = fakeProcess(); const call = createM5Transport({ spawn: f.spawn, minimumStartIntervalMs: 0 });
     await expect(call({ ...options(), apiKey: "synthetic-not-a-real-key" }, control())).rejects.toThrow(/credential/);
