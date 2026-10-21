@@ -40,7 +40,9 @@ jobs:
             --output "$RUNNER_TEMP/evidence-results/report.json" \
             --packing-comparison skip-oversized \
             --passage-comparison query-passages-v1 \
-            --gold-turns benchmark/evidence-metric/comparisons/longmemeval-s-passages-20261020/gold-turns.json
+            --gold-turns benchmark/evidence-metric/comparisons/longmemeval-s-passages-20261020/gold-turns.json \
+            --message-comparison query-message-neighbors-v1 \
+            --message-boundaries benchmark/evidence-metric/comparisons/longmemeval-s-message-neighbors-20261021/message-boundaries.json
       - name: Summarize the result
         if: always()
         run: |
@@ -61,6 +63,12 @@ jobs:
             if (passage) {
               const coverage = passage.annotated_message_coverage;
               appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\nPassage experiment at **8,192 estimated tokens** (${passage.strategy}):\n\n| Complete annotated-message coverage | Questions |\n| --- | ---: |\n| Retrieved top 10 | ${coverage.retrieval.all_turn_count}/${coverage.eligible_question_count} |\n| Legacy packing | ${coverage.legacy_packed.all_turn_count}/${coverage.eligible_question_count} |\n| Passage packing | ${coverage.candidate_packed.all_turn_count}/${coverage.eligible_question_count} |\n\nGained complete-coverage questions: ${coverage.gained_question_ids.length}. Lost: ${coverage.lost_question_ids.length}. Excluded without positive annotations in every expected session: ${coverage.excluded_question_ids.length}. Any loss: ${coverage.regression}.\n\nEntry-ID proxy: ${passage.entry_id_proxy.stages.legacy_packed.all_gold} → ${passage.entry_id_proxy.stages.candidate_packed.all_gold}; gained ${passage.entry_id_proxy.gained_question_ids.length}, lost ${passage.entry_id_proxy.lost_question_ids.length}.\n\nFull-message coverage is a conservative proxy, not reader answer accuracy. Experimental losses remain visible independently of the baseline gate. See the retained report for all selected source ranges and message gains/losses.\n`);
+            }
+            const messages = result.message_comparison;
+            if (messages) {
+              const baseline = messages.versus_legacy.annotated_message_coverage;
+              const passages = messages.versus_passages.annotated_message_coverage;
+              appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\nWhole-message + neighbor experiment at **8,192 estimated tokens** (${messages.strategy}):\n\n| Full annotated-message coverage | Questions |\n| --- | ---: |\n| Baseline | ${baseline.reference_packed.all_turn_count}/${baseline.eligible_question_count} |\n| Previous passage candidate | ${passages.reference_packed.all_turn_count}/${passages.eligible_question_count} |\n| Whole-message candidate | ${baseline.candidate_packed.all_turn_count}/${baseline.eligible_question_count} |\n\nGained/lost questions versus baseline: ${baseline.gained_question_ids.length}/${baseline.lost_question_ids.length}; versus passages: ${passages.gained_question_ids.length}/${passages.lost_question_ids.length}. Partially selected messages: ${messages.whole_message_conservation.partial_message_count}. Full paired/category/range evidence is in the report. Experimental losses are informational; reader accuracy is unmeasured.\n`);
             }
           } else {
             appendFileSync(process.env.GITHUB_STEP_SUMMARY, 'Packed evidence: **invalid / no report**. See the failing setup or download step; this is not a successful comparison.\n');

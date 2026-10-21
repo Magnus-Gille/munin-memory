@@ -7,6 +7,8 @@ import { RELEASE_TAG } from "../benchmark/evidence-metric/shared-artifacts.js";
 import type { GoldTurnArtifact } from "../benchmark/evidence-metric/gold-turns.js";
 const REVIEWED_GOLD_TURNS_SHA256 = "47dc2a2e8bdd1af0fb1b3d5aa39e68a4716548b8ad11d5587f06a7eac61a55db";
 const reviewedGoldTurns = readFileSync(new URL("../benchmark/evidence-metric/comparisons/longmemeval-s-passages-20261020/gold-turns.json", import.meta.url));
+const REVIEWED_MESSAGE_BOUNDARIES_SHA256 = "3868f7c9ab26eb79953caf139b42535e3895de91ef7cb033eabbf5bf17e3aa8f";
+const reviewedMessageBoundaries = readFileSync(new URL("../benchmark/evidence-metric/comparisons/longmemeval-s-message-neighbors-20261021/message-boundaries.json", import.meta.url));
 let dir: string;
 let deps: CheckDependencies;
 let output: string;
@@ -22,6 +24,7 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); rmSync(dir, { recursive: true, force: true }); });
 const args = () => ["--artifacts-dir", artifactDir, "--output", output];
 const writeReviewedGoldTurns = () => { const path = join(dir, "gold-turns.json"); writeFileSync(path, reviewedGoldTurns); return path; };
+const writeReviewedMessageBoundaries = () => { const path = join(dir, "message-boundaries.json"); writeFileSync(path, reviewedMessageBoundaries); return path; };
 it.each([0, 1, 2] as const)("preserves offline evaluator exit %i and supplies only fixed arguments", async (code) => {
   vi.stubEnv("MUNIN_SEMANTIC_MAX_DISTANCE", "0.001");
   deps.execute = vi.fn(async (_args, env) => { expect(env.MUNIN_SEMANTIC_MAX_DISTANCE).toBeUndefined(); writeFileSync(output, JSON.stringify({ quality_state: code === 1 ? "regressed" : code === 2 ? "invalid" : "improved", comparison: { gained_question_ids: ["g1"], lost_question_ids: code === 1 ? ["l1"] : [], reproduced: code === 1 } })); return code; });
@@ -184,4 +187,185 @@ it("rechecks reviewed annotations after an asynchronous download before evaluati
   expect(await main([...args(), "--passage-comparison", "query-passages-v1", "--gold-turns", labels], deps)).toBe(2);
   expect(deps.fetchArtifacts).toHaveBeenCalledOnce();
   expect(deps.execute).not.toHaveBeenCalled();
+});
+
+it("requires message comparison, boundaries, passage comparison and gold-turns as a complete option set", async () => {
+  const boundaries = join(dir, "message-boundaries.json"); writeFileSync(boundaries, "fixture");
+  const labels = writeReviewedGoldTurns();
+  for (const extra of [
+    ["--message-comparison", "query-message-neighbors-v1"],
+    ["--message-boundaries", boundaries],
+    ["--message-comparison", "other", "--message-boundaries", boundaries],
+    ["--message-comparison", "query-message-neighbors-v1", "--message-boundaries", boundaries],
+    ["--message-comparison", "query-message-neighbors-v1", "--message-boundaries", boundaries, "--passage-comparison", "query-passages-v1"],
+    ["--message-comparison", "query-message-neighbors-v1", "--message-boundaries", boundaries, "--gold-turns", labels],
+  ]) expect(await main([...args(), ...extra], deps)).toBe(2);
+  expect(deps.fetchArtifacts).not.toHaveBeenCalled();
+});
+
+it("protects the message-boundaries metadata path before fetching shared artifacts", async () => {
+  const boundaries = join(dir, "message-boundaries.json"); writeFileSync(boundaries, "preserve");
+  const labels = writeReviewedGoldTurns(); output = boundaries;
+  const error = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  expect(await main([...args(), "--message-comparison", "query-message-neighbors-v1", "--message-boundaries", boundaries, "--passage-comparison", "query-passages-v1", "--gold-turns", labels], deps)).toBe(2);
+  expect(readFileSync(boundaries, "utf8")).toBe("preserve");
+  expect(deps.fetchArtifacts).not.toHaveBeenCalled();
+  expect(error.mock.calls.flat().join(" ")).toMatch(/collides|fresh report/i);
+});
+
+it("rejects changed or emptied message-boundary metadata before fetching", async () => {
+  const boundaries = join(dir, "message-boundaries.json"); writeFileSync(boundaries, "unreviewed");
+  const labels = writeReviewedGoldTurns();
+  const error = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  expect(await main([...args(), "--message-comparison", "query-message-neighbors-v1", "--message-boundaries", boundaries, "--passage-comparison", "query-passages-v1", "--gold-turns", labels], deps)).toBe(2);
+  expect(deps.fetchArtifacts).not.toHaveBeenCalled();
+  expect(error.mock.calls.flat().join(" ")).toContain(REVIEWED_MESSAGE_BOUNDARIES_SHA256);
+  writeFileSync(boundaries, "");
+  expect(await main([...args(), "--message-comparison", "query-message-neighbors-v1", "--message-boundaries", boundaries, "--passage-comparison", "query-passages-v1", "--gold-turns", labels], deps)).toBe(2);
+  expect(deps.fetchArtifacts).not.toHaveBeenCalled();
+});
+
+function messageBudget(included: number, dropped: number) {
+  return { max_estimated_tokens: 8192, estimated_tokens: included ? 4 : 0, estimator: "utf8_bytes_div4_ceil_v1", truncated: dropped > 0, candidate_entry_count: 1, included_entry_count: included, dropped_entry_count: dropped };
+}
+function messagePair(reference_strategy: "legacy" | "query-passages-v1", referenceRanges: unknown[]) {
+  const stages = {
+    retrieval: { all_gold: 1, partial_gold: 0, no_gold: 0 },
+    reference_packed: { all_gold: 1, partial_gold: 0, no_gold: 0 },
+    candidate_packed: { all_gold: 0, partial_gold: 0, no_gold: 1 },
+  };
+  const coverage = {
+    metric: "full_original_annotated_message_coverage_v1", eligible_question_count: 1, eligible_question_ids: ["q1"], excluded_question_ids: [], annotated_message_count: 1,
+    retrieval: { all_turn_count: 1, all_turn_rate: 1, covered_message_count: 1 },
+    reference_packed: { all_turn_count: 1, all_turn_rate: 1, covered_message_count: 1 },
+    candidate_packed: { all_turn_count: 0, all_turn_rate: 0, covered_message_count: 0 },
+    regression: true, gained_question_ids: [], lost_question_ids: ["q1"], gained_message_count: 0, lost_message_count: 1,
+  };
+  const excluded_labels = { question_count: 0, annotated_message_count: 0, no_positive_entry_count: 0 };
+  const summary = {
+    query_count: 1,
+    entry_id_proxy: { regression: true, gained_question_ids: [], lost_question_ids: ["q1"], any_gold_loss_question_ids: ["q1"], gained_id_count: 0, lost_id_count: 1, stages },
+    annotated_message_coverage: coverage, excluded_labels,
+  };
+  return {
+    reference_strategy, ...summary, categories: { evidence: summary },
+    queries: [{
+      query_id: "q1", category: "evidence", expected_ids: ["e"], retrieved_ids: ["e"], reference_packed_ids: ["e"], candidate_packed_ids: [],
+      reference_budget: messageBudget(1, 0), candidate_budget: messageBudget(0, 1), reference_ranges: referenceRanges, candidate_ranges: [],
+      retrieval_stage: "all_gold", reference_packed_stage: "all_gold", candidate_packed_stage: "no_gold",
+      reference_all_gold: true, candidate_all_gold: false, gained_ids: [], lost_ids: ["e"],
+      annotated_messages: {
+        eligible: true, gold_turn_count: 1, no_positive_entry_count: 0,
+        retrieval_covered_turns: [{ entry_id: "e", message_index: 0 }], reference_covered_turns: [{ entry_id: "e", message_index: 0 }], candidate_covered_turns: [],
+        retrieval_all_turns: true, reference_all_turns: true, candidate_all_turns: false,
+        gained_turns: [], lost_turns: [{ entry_id: "e", message_index: 0 }],
+      },
+    }],
+  };
+}
+function messageComparison() {
+  const fullRange = [{ entry_id: "e", start: 0, end: 3 }];
+  const passage = passageComparison() as Record<string, unknown>;
+  passage.lineage = { ...passageComparison().lineage, source: { dataset_sha256: "c".repeat(64), snapshot_sha256: "d".repeat(64), queries_sha256: "e".repeat(64) } };
+  passage.queries = [{ query_id: "q1", expected_ids: ["e"], retrieved_ids: ["e"], candidate_packed_ids: ["e"], candidate_budget: messageBudget(1, 0), candidate_ranges: fullRange }];
+  const legacy = messagePair("legacy", fullRange);
+  const passages = messagePair("query-passages-v1", fullRange);
+  const report = {
+    strategy: "query-message-neighbors-v1", control_reproduced: true, coordinate_system: "utf16_code_units",
+    metric_limitation: "Full original annotated-message coverage is a conservative proxy.",
+    lineage: {
+      message_boundaries_sha256: REVIEWED_MESSAGE_BOUNDARIES_SHA256,
+      message_boundaries_source_sha256: "a".repeat(64), message_packing_source_sha256: "b".repeat(64), message_comparison_source_sha256: "f".repeat(64),
+      source: { dataset_sha256: "c".repeat(64), snapshot_sha256: "d".repeat(64) },
+    },
+    versus_legacy: legacy, versus_passages: passages,
+    queries: [{ query_id: "q1", selected_message_indices: [], candidate_ranges: [], candidate_budget: messageBudget(0, 1), whole_message_conservation: { selected_message_count: 0, partial_message_count: 0 } }],
+    whole_message_conservation: { selected_message_count: 0, partial_message_count: 0 },
+  };
+  return { passage, report };
+}
+
+it("forwards the pinned message experiment while its losses remain outside the primary exit policy", async () => {
+  const boundaries = writeReviewedMessageBoundaries(); const labels = writeReviewedGoldTurns();
+  const { passage, report } = messageComparison();
+  deps.execute = vi.fn(async () => {
+    writeFileSync(output, JSON.stringify({ quality_state: "unchanged", rows: [{ query_id: "q1", expected_ids: ["e"], retrieved_ids: ["e"], packed_ids: ["e"], budget: messageBudget(1, 0) }], comparison: { gained_question_ids: [], lost_question_ids: [] }, passage_comparison: passage, message_comparison: report }));
+    return 0;
+  });
+  expect(await main([...args(), "--message-comparison", "query-message-neighbors-v1", "--message-boundaries", boundaries, "--passage-comparison", "query-passages-v1", "--gold-turns", labels], deps)).toBe(0);
+  expect(deps.execute).toHaveBeenCalledWith(expect.arrayContaining(["--message-comparison", "query-message-neighbors-v1", "--message-boundaries", boundaries]), expect.any(Object));
+});
+
+it.each(["gain", "loss"] as const)("validates multi-gold %s IDs in expected order when retrieval order differs", async (direction) => {
+  const boundaries = writeReviewedMessageBoundaries(); const labels = writeReviewedGoldTurns();
+  const { passage, report } = messageComparison();
+  const expected = ["e1", "e2"]; const retrieved = ["e2", "e1"];
+  const fullRanges = retrieved.map((entry_id) => ({ entry_id, start: 0, end: 3 }));
+  const turns = expected.map((entry_id) => ({ entry_id, message_index: 0, start: 0, end: 3 }));
+  const referenceIds = direction === "loss" ? retrieved : [];
+  const candidateIds = direction === "gain" ? retrieved : [];
+  const referenceRanges = referenceIds.length ? fullRanges : [];
+  const candidateRanges = candidateIds.length ? fullRanges : [];
+  const budget = (included: number) => ({ ...messageBudget(included, 2 - included), candidate_entry_count: 2 });
+  for (const pair of [report.versus_legacy, report.versus_passages]) {
+    Object.assign(pair.entry_id_proxy, {
+      regression: direction === "loss", gained_question_ids: direction === "gain" ? ["q1"] : [], lost_question_ids: direction === "loss" ? ["q1"] : [], any_gold_loss_question_ids: direction === "loss" ? ["q1"] : [],
+      gained_id_count: direction === "gain" ? 2 : 0, lost_id_count: direction === "loss" ? 2 : 0,
+      stages: { retrieval: { all_gold: 1, partial_gold: 0, no_gold: 0 }, reference_packed: { all_gold: referenceIds.length ? 1 : 0, partial_gold: 0, no_gold: referenceIds.length ? 0 : 1 }, candidate_packed: { all_gold: candidateIds.length ? 1 : 0, partial_gold: 0, no_gold: candidateIds.length ? 0 : 1 } },
+    });
+    Object.assign(pair.annotated_message_coverage, {
+      annotated_message_count: 2, retrieval: { all_turn_count: 1, all_turn_rate: 1, covered_message_count: 2 },
+      reference_packed: { all_turn_count: referenceIds.length ? 1 : 0, all_turn_rate: referenceIds.length ? 1 : 0, covered_message_count: referenceIds.length },
+      candidate_packed: { all_turn_count: candidateIds.length ? 1 : 0, all_turn_rate: candidateIds.length ? 1 : 0, covered_message_count: candidateIds.length },
+      regression: direction === "loss", gained_question_ids: direction === "gain" ? ["q1"] : [], lost_question_ids: direction === "loss" ? ["q1"] : [], gained_message_count: direction === "gain" ? 2 : 0, lost_message_count: direction === "loss" ? 2 : 0,
+    });
+    Object.assign(pair.queries[0], {
+      expected_ids: expected, retrieved_ids: retrieved, reference_packed_ids: referenceIds, candidate_packed_ids: candidateIds,
+      reference_budget: budget(referenceIds.length), candidate_budget: budget(candidateIds.length), reference_ranges: referenceRanges, candidate_ranges: candidateRanges,
+      reference_packed_stage: referenceIds.length ? "all_gold" : "no_gold", candidate_packed_stage: candidateIds.length ? "all_gold" : "no_gold", reference_all_gold: referenceIds.length > 0, candidate_all_gold: candidateIds.length > 0,
+      gained_ids: direction === "gain" ? expected : [], lost_ids: direction === "loss" ? expected : [],
+      annotated_messages: { eligible: true, gold_turn_count: 2, no_positive_entry_count: 0, retrieval_covered_turns: turns, reference_covered_turns: referenceIds.length ? turns : [], candidate_covered_turns: candidateIds.length ? turns : [], retrieval_all_turns: true, reference_all_turns: referenceIds.length > 0, candidate_all_turns: candidateIds.length > 0, gained_turns: direction === "gain" ? turns : [], lost_turns: direction === "loss" ? turns : [] },
+    });
+  }
+  passage.queries = [{ query_id: "q1", expected_ids: expected, retrieved_ids: retrieved, candidate_packed_ids: referenceIds, candidate_budget: budget(referenceIds.length), candidate_ranges: referenceRanges }];
+  Object.assign(report.queries[0], { selected_message_indices: candidateIds.map((entry_id) => ({ entry_id, message_indices: [0] })), candidate_ranges: candidateRanges, candidate_budget: budget(candidateIds.length), whole_message_conservation: { selected_message_count: candidateIds.length, partial_message_count: 0 } });
+  report.whole_message_conservation.selected_message_count = candidateIds.length;
+  deps.execute = async () => {
+    writeFileSync(output, JSON.stringify({ quality_state: "unchanged", rows: [{ query_id: "q1", expected_ids: expected, retrieved_ids: retrieved, packed_ids: referenceIds, budget: budget(referenceIds.length) }], comparison: { gained_question_ids: [], lost_question_ids: [] }, passage_comparison: passage, message_comparison: report }));
+    return 0;
+  };
+  expect(await main([...args(), "--message-comparison", "query-message-neighbors-v1", "--message-boundaries", boundaries, "--passage-comparison", "query-passages-v1", "--gold-turns", labels], deps)).toBe(0);
+  for (const pair of [report.versus_legacy, report.versus_passages]) {
+    if (direction === "gain") pair.queries[0].gained_ids = retrieved;
+    else pair.queries[0].lost_ids = retrieved;
+  }
+  output = join(dir, "wrong-gold-delta-order.json");
+  expect(await main([...args(), "--message-comparison", "query-message-neighbors-v1", "--message-boundaries", boundaries, "--passage-comparison", "query-passages-v1", "--gold-turns", labels], deps)).toBe(2);
+});
+
+it("rechecks message-boundary bytes after async artifact retrieval", async () => {
+  const boundaries = writeReviewedMessageBoundaries(); const labels = writeReviewedGoldTurns();
+  deps.fetchArtifacts = vi.fn(async () => {
+    mkdirSync(artifactDir, { recursive: true }); for (const path of ["snapshot.db", "queries.jsonl", "query-vectors.json"]) writeFileSync(join(artifactDir, path), "fixture");
+    writeFileSync(boundaries, Buffer.concat([reviewedMessageBoundaries, Buffer.from("\n")]));
+    return { release_tag: RELEASE_TAG, source: "downloaded", files: [] };
+  });
+  expect(await main([...args(), "--message-comparison", "query-message-neighbors-v1", "--message-boundaries", boundaries, "--passage-comparison", "query-passages-v1", "--gold-turns", labels], deps)).toBe(2);
+  expect(deps.execute).not.toHaveBeenCalled();
+});
+
+it.each(["missing", "wrong strategy", "wrong report digest", "bad count", "partial message", "missing paired comparison"])("fails closed for malformed message comparison: %s", async (failure) => {
+  const boundaries = writeReviewedMessageBoundaries(); const labels = writeReviewedGoldTurns();
+  const { passage, report } = messageComparison();
+  const malformed = structuredClone(report);
+  if (failure === "wrong strategy") malformed.versus_passages.reference_strategy = "legacy";
+  if (failure === "wrong report digest") malformed.lineage.message_boundaries_sha256 = "0".repeat(64);
+  if (failure === "bad count") malformed.versus_legacy.annotated_message_coverage.candidate_packed.all_turn_count = 1;
+  if (failure === "partial message") malformed.whole_message_conservation.partial_message_count = 1;
+  deps.execute = async () => {
+    const withMissing = failure === "missing" || failure === "missing paired comparison" ? undefined : malformed;
+    writeFileSync(output, JSON.stringify({ quality_state: "unchanged", rows: [{ query_id: "q1", expected_ids: ["e"], retrieved_ids: ["e"], packed_ids: ["e"], budget: messageBudget(1, 0) }], comparison: { gained_question_ids: [], lost_question_ids: [] }, passage_comparison: failure === "missing paired comparison" ? undefined : passage, message_comparison: withMissing }));
+    return 0;
+  };
+  expect(await main([...args(), "--message-comparison", "query-message-neighbors-v1", "--message-boundaries", boundaries, "--passage-comparison", "query-passages-v1", "--gold-turns", labels], deps)).toBe(2);
 });

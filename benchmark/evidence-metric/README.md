@@ -335,3 +335,66 @@ summary exactly, with no gained or lost all-gold questions. Source and baseline
 artifacts passed independent review. Hosted CI verification remains pending. The
 workflow schedule becomes active after merge; the lane compares the pinned shared
 release and never regenerates or automatically updates this baseline.
+
+## Whole-message and neighboring-context comparison (#342)
+
+`query-message-neighbors-v1` is a separate experimental selector, fixed before
+its first 500-question measurement. It scores complete message text using unique
+normalized query-term overlap divided by the square root of unique message terms.
+Ties use retrieval rank then original message index. Each anchor includes its
+immediate previous and next message in the same entry, when present. Overlapping
+bundles share messages. A bundle is accepted only when the entire rendered
+context fits; an oversized bundle is skipped without truncation or a smaller
+fallback. Display preserves retrieval order and original message order. Original
+session headers, source-offset labels and all separators count toward the same
+8,192 UTF-8-byte-estimated-token limit used by the other policies.
+
+Message boundaries come from every original haystack message, independent of
+answer annotations. The committed compact sidecar covers all 23,854 corpus
+entries and 246,607 messages, with content hashes and UTF-16 tuples
+`[role_start, content_start, content_end]`. `prefix_end` includes the session
+header's trailing newline for a nonempty session and equals the first message's
+start. No parser guesses boundaries from role-like lines inside message text.
+The sidecar contains no message text or answer labels. Its source dataset and
+snapshot pins, exact corpus coverage, content hashes and tuple invariants are
+checked; the shared checker also pins its reviewed bytes before and after
+artifact download. Optional source-module hashes are recorded and rechecked.
+
+To replay all three policies in a clean checkout with shared frozen inputs:
+
+```sh
+npm run benchmark:evidence:check -- \
+  --artifacts-dir /absolute/fresh/evidence-inputs \
+  --output /absolute/existing/results/message-comparison.json \
+  --packing-comparison skip-oversized \
+  --passage-comparison query-passages-v1 \
+  --gold-turns benchmark/evidence-metric/comparisons/longmemeval-s-passages-20261020/gold-turns.json \
+  --message-comparison query-message-neighbors-v1 \
+  --message-boundaries benchmark/evidence-metric/comparisons/longmemeval-s-message-neighbors-20261021/message-boundaries.json
+```
+
+The offline `benchmark:evidence` command accepts the same two new flags alongside
+its explicit snapshot, queries, vectors, clock, baseline and passage flags.
+Prepare the boundary artifact independently from the pinned raw public dataset
+and detached snapshot (all three paths must be absolute; output must be new):
+
+```sh
+npm run benchmark:evidence:message-boundaries -- \
+  --raw /absolute/longmemeval_s_cleaned.json \
+  --snapshot /absolute/snapshot.db \
+  --out /absolute/existing/message-boundaries.json
+```
+
+The new `message_comparison` report keeps paired `versus_legacy` and
+`versus_passages` sections, category counts, gains/losses in individual full
+annotated messages, per-question budgets/ranges and selected message indices.
+The eligibility rule remains unchanged: all expected sessions must have a
+positive annotation for the complete-question metric. Excluded questions and
+labels remain explicit. The whole-message conservation diagnostic checks the
+selected ranges against source boundaries. Neither this metric nor entry-ID
+presence measures reader answer accuracy.
+
+Primary baseline rows, exit codes and regression policy remain unchanged.
+Experimental losses are reported even when the legacy baseline gate is green.
+The [measured comparison](comparisons/longmemeval-s-message-neighbors-20261021/README.md)
+records results against both controls; #342 remains open for further evidence.

@@ -73,7 +73,8 @@
     "benchmark:evidence": "tsx benchmark/evidence-metric/run.ts",
     "benchmark:evidence:prepare": "tsx benchmark/evidence-metric/prepare.ts",
     "benchmark:evidence:check": "tsx benchmark/evidence-metric/check.ts",
-    "benchmark:evidence:gold-turns": "tsx benchmark/evidence-metric/gold-turns.ts"
+    "benchmark:evidence:gold-turns": "tsx benchmark/evidence-metric/gold-turns.ts",
+    "benchmark:evidence:message-boundaries": "tsx benchmark/evidence-metric/message-boundaries.ts"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.3.1",
