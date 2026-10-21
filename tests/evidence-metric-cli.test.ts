@@ -53,6 +53,30 @@ function writeGoldTurns(turns?: { message_index: number; start: number; end: num
   }));
   return path;
 }
+function writeMessageFixture(messages: string[]) {
+  const prefix = "Session ID: fixture\nConversation:\n";
+  let content = prefix;
+  const tuples: [number, number, number][] = [];
+  for (const [index, message] of messages.entries()) {
+    if (index > 0) content += "\n";
+    const start = content.length; content += "user: "; const contentStart = content.length; content += message;
+    tuples.push([start, contentStart, content.length]);
+  }
+  const db = initDatabase(snapshot);
+  db.prepare("UPDATE entries SET content = ? WHERE id = ?").run(content, gold);
+  db.pragma("wal_checkpoint(TRUNCATE)"); db.pragma("journal_mode = DELETE"); db.close();
+  const labels = writeGoldTurns(tuples.map(([, start, end], message_index) => ({ message_index, start, end })));
+  const boundaries = join(dir, "message-boundaries.json");
+  writeFileSync(boundaries, JSON.stringify({
+    schema_version: 1, coordinate_system: "utf16_code_units",
+    source: { dataset_sha256: "d".repeat(64), snapshot_sha256: sha256(readFileSync(snapshot)) },
+    entries: [{ entry_id: gold, content_sha256: sha256(content), prefix_end: prefix.length, messages: tuples }],
+  }));
+  return { labels, boundaries, tuples };
+}
+function messageArgs(baseline: string, labels: string, boundaries: string) {
+  return [...args(baseline), "--passage-comparison", "query-passages-v1", "--gold-turns", labels, "--message-comparison", "query-message-neighbors-v1", "--message-boundaries", boundaries];
+}
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "munin-evidence-fixture-"));
   snapshot = join(dir, "snapshot.db"); queries = join(dir, "queries.jsonl"); vectors = join(dir, "vectors.json"); output = join(dir, "report.json");
@@ -371,5 +395,101 @@ describe("paired passage comparison CLI", () => {
     });
     await expect(evaluate({ ...options(), baseline, passageComparison: "query-passages-v1", goldTurns: labels })).rejects.toThrow(/Optional gold-turn evaluator source changed/);
     expect(optionalSourceChecks).toBe(2);
+  });
+});
+
+describe("paired complete-message comparison CLI", () => {
+  it("requires the exact explicit strategy and every companion flag before retrieval", async () => {
+    const production = vi.spyOn(runner, "runBenchmark");
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    for (const extra of [
+      ["--message-comparison", "query-message-neighbors-v1"],
+      ["--message-comparison", "invented", "--message-boundaries", "missing"],
+      ["--message-boundaries", "missing"],
+      ["--message-comparison", "query-message-neighbors-v1", "--message-boundaries", "missing", "--baseline", "missing"],
+      ["--message-comparison", "query-message-neighbors-v1", "--message-comparison", "query-message-neighbors-v1"],
+    ]) expect(await main([...args(), ...extra])).toBe(2);
+    expect(production).not.toHaveBeenCalled();
+  });
+  it("shares one retrieval across all policies and reproduces every legacy and390 report value", async () => {
+    const { labels, boundaries, tuples } = writeMessageFixture(["the needle answer", "neighbor"]);
+    const { report } = await evaluate(options());
+    const baseline = join(dir, "baseline.json"); writeFileSync(baseline, JSON.stringify(report));
+    const prior = await evaluate({ ...options(), baseline, passageComparison: "query-passages-v1", goldTurns: labels });
+    const production = vi.spyOn(runner, "runBenchmark");
+    expect(await main(messageArgs(baseline, labels, boundaries))).toBe(0);
+    expect(production).toHaveBeenCalledTimes(1);
+    const result = parsedReport();
+    expect(result.rows).toEqual(report.rows);
+    expect(result.passage_comparison).toEqual(prior.report.passage_comparison);
+    expect(result.message_comparison).toMatchObject({
+      strategy: "query-message-neighbors-v1", control_reproduced: true, coordinate_system: "utf16_code_units",
+      lineage: { message_boundaries_sha256: sha256(readFileSync(boundaries)), message_boundaries_source_sha256: expect.stringMatching(/^[a-f0-9]{64}$/), message_packing_source_sha256: expect.stringMatching(/^[a-f0-9]{64}$/), message_comparison_source_sha256: expect.stringMatching(/^[a-f0-9]{64}$/) },
+      versus_legacy: { reference_strategy: "legacy", annotated_message_coverage: { eligible_question_count: 1, annotated_message_count: 2, excluded_question_ids: [], candidate_packed: { all_turn_count: 1 } } },
+      versus_passages: { reference_strategy: "query-passages-v1", annotated_message_coverage: { eligible_question_count: 1, candidate_packed: { all_turn_count: 1 } } },
+      queries: [{ query_id: "q1", selected_message_indices: [{ entry_id: gold, message_indices: [0, 1] }], whole_message_conservation: { selected_message_count: 2, partial_message_count: 0 } }],
+      whole_message_conservation: { selected_message_count: 2, partial_message_count: 0 },
+    });
+    expect(result.message_comparison?.queries[0].candidate_ranges).toEqual([{ entry_id: gold, start: 0, end: tuples[0][0] }, { entry_id: gold, start: tuples[0][0], end: tuples[1][2] }]);
+    expect(Object.keys(result.lineage.source_sha256)).not.toContain("benchmark/answer-quality/message-packing.ts");
+  });
+  it("pairs message-level regressions vs390 and entry-ID losses without changing the primary exit", async () => {
+    const { labels, boundaries, tuples } = writeMessageFixture(["a".repeat(40000), "needle", "b".repeat(40000)]);
+    writeGoldTurns([{ message_index: 1, start: tuples[1][1], end: tuples[1][2] }]);
+    const { report } = await evaluate(options());
+    const baseline = join(dir, "baseline.json"); writeFileSync(baseline, JSON.stringify(report));
+    expect(await main(messageArgs(baseline, labels, boundaries))).toBe(0);
+    const result = parsedReport();
+    expect(result).toMatchObject({ quality_state: "unchanged", comparison: { regression: false }, message_comparison: {
+      versus_legacy: { entry_id_proxy: { regression: true, any_gold_loss_question_ids: ["q1"] } },
+      versus_passages: { entry_id_proxy: { regression: true }, annotated_message_coverage: { regression: true, lost_question_ids: ["q1"], lost_message_count: 1 }, queries: [{ annotated_messages: { reference_all_turns: true, candidate_all_turns: false, lost_turns: [{ entry_id: gold, message_index: 1, start: tuples[1][1], end: tuples[1][2] }] } }] },
+      queries: [{ selected_message_indices: [], candidate_ranges: [], candidate_budget: { estimated_tokens: 0, included_entry_count: 0 } }],
+    } });
+  });
+  it("rejects boundary corruption before retrieval, detects artifact mutation and protects aliases", async () => {
+    const { labels, boundaries } = writeMessageFixture(["needle"]);
+    const { report } = await evaluate(options());
+    const baseline = join(dir, "baseline.json"); writeFileSync(baseline, JSON.stringify(report));
+    const bytes = readFileSync(boundaries);
+    const value = JSON.parse(bytes.toString("utf8")) as { entries: { content_sha256: string }[] };
+    value.entries[0].content_sha256 = "0".repeat(64); writeFileSync(boundaries, JSON.stringify(value));
+    const production = vi.spyOn(runner, "runBenchmark");
+    const extra = { baseline, passageComparison: "query-passages-v1" as const, goldTurns: labels, messageComparison: "query-message-neighbors-v1" as const, messageBoundaries: boundaries };
+    await expect(evaluate({ ...options(), ...extra })).rejects.toThrow(/content|hash/i);
+    expect(production).not.toHaveBeenCalled();
+    writeFileSync(boundaries, bytes); production.mockRestore();
+    const real = runner.runBenchmark;
+    vi.spyOn(runner, "runBenchmark").mockImplementation(async (...params) => {
+      const result = await real(...params); writeFileSync(boundaries, readFileSync(boundaries, "utf8") + "\n"); return result;
+    });
+    await expect(evaluate({ ...options(), ...extra })).rejects.toThrow(/input changed/);
+    writeFileSync(boundaries, bytes);
+    for (const alias of [boundaries, join(dir, "boundary-symlink.json"), join(dir, "boundary-hardlink.json")]) {
+      if (alias.endsWith("symlink.json")) symlinkSync(boundaries, alias);
+      if (alias.endsWith("hardlink.json")) linkSync(boundaries, alias);
+      output = alias;
+      expect(await main(messageArgs(baseline, labels, boundaries))).toBe(2);
+      expect(readFileSync(boundaries).equals(bytes)).toBe(true);
+    }
+  });
+  it("hashes all optional message modules before and after retrieval", async () => {
+    const { labels, boundaries } = writeMessageFixture(["needle"]);
+    const { report } = await evaluate(options());
+    const baseline = join(dir, "baseline.json"); writeFileSync(baseline, JSON.stringify(report));
+    const altered = join(dir, "changed-source.ts"); writeFileSync(altered, "changed optional message evaluator source");
+    let completed = false; const checked = new Map<string, number>();
+    const originalOpen = filesystem.openSync;
+    vi.spyOn(filesystem, "openSync").mockImplementation((path, flags, mode) => {
+      const text = String(path);
+      if (["message-boundaries.ts", "message-packing.ts", "message-comparison.ts"].some((name) => text.endsWith(`/` + name))) {
+        checked.set(text, (checked.get(text) ?? 0) + 1);
+        return originalOpen(completed && text.endsWith("/message-comparison.ts") ? altered : path, flags, mode);
+      }
+      return originalOpen(path, flags, mode);
+    });
+    const real = runner.runBenchmark;
+    vi.spyOn(runner, "runBenchmark").mockImplementation(async (...params) => { const result = await real(...params); completed = true; return result; });
+    await expect(evaluate({ ...options(), baseline, passageComparison: "query-passages-v1", goldTurns: labels, messageComparison: "query-message-neighbors-v1", messageBoundaries: boundaries })).rejects.toThrow(/Optional message evaluator source changed/);
+    expect([...checked.values()]).toEqual([2, 2, 2]);
   });
 });

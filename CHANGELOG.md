@@ -10,6 +10,12 @@ changelog is the canonical record of what moved.
 
 ### Added
 
+- An opt-in whole-message packing experiment (#342) selects a query-matched
+  message together with its immediate neighbors under the unchanged 8,192
+  estimated-token budget. Label-free, hash-bound source boundaries preserve
+  complete messages, and paired reports compare the candidate with both the
+  frozen baseline and the prior passage experiment. Default packing is unchanged.
+
 - An opt-in query-based passage-packing experiment (#342) compares verbatim text
   slices with the frozen #341 control at the same 8,192 estimated-token budget.
   It reports paired gains and losses in entry-ID presence and complete annotated
