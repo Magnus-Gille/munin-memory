@@ -1,0 +1,439 @@
+{
+  "schema": "core-loss-analysis-v1",
+  "method": {
+    "frozen_source_revision": "6ec4d2ece9df9c28b101be81c04d9768a2e578c6",
+    "snapshot_sha256": "fe48b7a30433f23d487d05608cecd969734b45686a51e29f5f86ba328059036a",
+    "queries_sha256": "274f858907c521cca2663c17fbb8bc5f2e198096d129e717c4c26a65c18ff7f1",
+    "boundaries_sha256": "3868f7c9ab26eb79953caf139b42535e3895de91ef7cb033eabbf5bf17e3aa8f",
+    "budget_bytes": 32768,
+    "scope": "union of lost full-message coverage IDs vs 390/passages and 391/neighbors only",
+    "replay": "exact source serializeMessageCores replay; all affected selected indices and budgets matched report"
+  },
+  "counts": {
+    "vs390_loss_questions": 6,
+    "vs391_loss_questions": 7,
+    "additional_vs391_question_ids": [
+      "longmemeval-s-36b9f61e",
+      "longmemeval-s-3fdac837",
+      "longmemeval-s-8752c811",
+      "longmemeval-s-e47becba"
+    ],
+    "union_loss_questions": 10,
+    "union_lost_messages": 10,
+    "scope": "Counts below cover only questions that lose complete coverage; individual-message losses on other questions are additional.",
+    "vs390_lost_messages_in_complete_question_regressions": 6,
+    "vs390_lost_messages_across_all_500": 16,
+    "vs391_lost_messages_in_complete_question_regressions": 7,
+    "vs391_lost_messages_across_all_500": 11
+  },
+  "losses": [
+    {
+      "query_id": "longmemeval-s-078150f1",
+      "comparators": [
+        "390",
+        "391"
+      ],
+      "entry_id": "longmemeval:s:078150f1:answer_254d8b09_2",
+      "message_index": 1,
+      "retrieval_rank": 4,
+      "positive_anchor_score": 0.33113308926626095,
+      "positive_anchor_rank": 88,
+      "phase1": {
+        "result": "rejected_budget",
+        "current_bytes_before": 32714,
+        "candidate_bytes": 35437
+      },
+      "phase2": {
+        "attempted": true,
+        "results": [
+          {
+            "result": "rejected_budget",
+            "current_bytes_before": 32714,
+            "candidate_bytes": 35437
+          },
+          {
+            "result": "rejected_budget",
+            "current_bytes_before": 32714,
+            "candidate_bytes": 35437
+          }
+        ]
+      },
+      "alone_render_bytes": 2957,
+      "alone_fits_budget": true,
+      "adjacent_admitted_phase1_seed_indices": [
+        0,
+        2
+      ],
+      "adjacent_selected_core_absent": false,
+      "other_selected_message_indices_in_same_entry": [
+        0,
+        2,
+        4,
+        6,
+        8,
+        9,
+        10
+      ],
+      "loss_reasons": [
+        "whole_message_fits_alone_but_context_budget_was_already_spent",
+        "positive_anchor_rejected_in_phase1_despite_adjacent_core"
+      ]
+    },
+    {
+      "query_id": "longmemeval-s-1903aded",
+      "comparators": [
+        "390",
+        "391"
+      ],
+      "entry_id": "longmemeval:s:1903aded:answer_sharegpt_hA7AkP3_0",
+      "message_index": 1,
+      "retrieval_rank": 1,
+      "positive_anchor_score": 0,
+      "positive_anchor_rank": null,
+      "phase1": {
+        "result": "not_eligible_zero_score"
+      },
+      "phase2": {
+        "attempted": true,
+        "results": [
+          {
+            "result": "rejected_budget",
+            "current_bytes_before": 32753,
+            "candidate_bytes": 33209
+          }
+        ]
+      },
+      "alone_render_bytes": 681,
+      "alone_fits_budget": true,
+      "adjacent_admitted_phase1_seed_indices": [
+        0
+      ],
+      "adjacent_selected_core_absent": false,
+      "other_selected_message_indices_in_same_entry": [
+        0
+      ],
+      "loss_reasons": [
+        "whole_message_fits_alone_but_context_budget_was_already_spent"
+      ]
+    },
+    {
+      "query_id": "longmemeval-s-36b9f61e",
+      "comparators": [
+        "391"
+      ],
+      "entry_id": "longmemeval:s:36b9f61e:answer_ef74281f_3",
+      "message_index": 2,
+      "retrieval_rank": 2,
+      "positive_anchor_score": 0.43301270189221935,
+      "positive_anchor_rank": 45,
+      "phase1": {
+        "result": "rejected_budget",
+        "current_bytes_before": 32766,
+        "candidate_bytes": 33096
+      },
+      "phase2": {
+        "attempted": true,
+        "results": [
+          {
+            "result": "rejected_budget",
+            "current_bytes_before": 32766,
+            "candidate_bytes": 33096
+          },
+          {
+            "result": "rejected_budget",
+            "current_bytes_before": 32766,
+            "candidate_bytes": 33096
+          }
+        ]
+      },
+      "alone_render_bytes": 566,
+      "alone_fits_budget": true,
+      "adjacent_admitted_phase1_seed_indices": [
+        1,
+        3
+      ],
+      "adjacent_selected_core_absent": false,
+      "other_selected_message_indices_in_same_entry": [
+        1,
+        3,
+        6
+      ],
+      "loss_reasons": [
+        "whole_message_fits_alone_but_context_budget_was_already_spent",
+        "positive_anchor_rejected_in_phase1_despite_adjacent_core"
+      ]
+    },
+    {
+      "query_id": "longmemeval-s-3fdac837",
+      "comparators": [
+        "391"
+      ],
+      "entry_id": "longmemeval:s:3fdac837:answer_419d21d5_2",
+      "message_index": 2,
+      "retrieval_rank": 1,
+      "positive_anchor_score": 0.4588314677411235,
+      "positive_anchor_rank": 72,
+      "phase1": {
+        "result": "rejected_budget",
+        "current_bytes_before": 32662,
+        "candidate_bytes": 32792
+      },
+      "phase2": {
+        "attempted": true,
+        "results": [
+          {
+            "result": "rejected_budget",
+            "current_bytes_before": 32763,
+            "candidate_bytes": 32893
+          }
+        ]
+      },
+      "alone_render_bytes": 339,
+      "alone_fits_budget": true,
+      "adjacent_admitted_phase1_seed_indices": [
+        1
+      ],
+      "adjacent_selected_core_absent": false,
+      "other_selected_message_indices_in_same_entry": [
+        0,
+        1,
+        5,
+        6,
+        7,
+        8,
+        11
+      ],
+      "loss_reasons": [
+        "whole_message_fits_alone_but_context_budget_was_already_spent",
+        "positive_anchor_rejected_in_phase1_despite_adjacent_core"
+      ]
+    },
+    {
+      "query_id": "longmemeval-s-67e0d0f2",
+      "comparators": [
+        "390"
+      ],
+      "entry_id": "longmemeval:s:67e0d0f2:answer_3a5010af_2",
+      "message_index": 4,
+      "retrieval_rank": 2,
+      "positive_anchor_score": 0.45226701686664544,
+      "positive_anchor_rank": 49,
+      "phase1": {
+        "result": "rejected_budget",
+        "current_bytes_before": 32570,
+        "candidate_bytes": 32884
+      },
+      "phase2": {
+        "attempted": false,
+        "results": []
+      },
+      "alone_render_bytes": 500,
+      "alone_fits_budget": true,
+      "adjacent_admitted_phase1_seed_indices": [],
+      "adjacent_selected_core_absent": true,
+      "other_selected_message_indices_in_same_entry": [
+        0,
+        2,
+        10,
+        11
+      ],
+      "loss_reasons": [
+        "whole_message_fits_alone_but_context_budget_was_already_spent"
+      ]
+    },
+    {
+      "query_id": "longmemeval-s-75499fd8",
+      "comparators": [
+        "390",
+        "391"
+      ],
+      "entry_id": "longmemeval:s:75499fd8:answer_723bf11f",
+      "message_index": 8,
+      "retrieval_rank": 1,
+      "positive_anchor_score": 0,
+      "positive_anchor_rank": null,
+      "phase1": {
+        "result": "not_eligible_zero_score"
+      },
+      "phase2": {
+        "attempted": true,
+        "results": [
+          {
+            "result": "rejected_budget",
+            "current_bytes_before": 32753,
+            "candidate_bytes": 32906
+          },
+          {
+            "result": "rejected_budget",
+            "current_bytes_before": 32753,
+            "candidate_bytes": 32906
+          }
+        ]
+      },
+      "alone_render_bytes": 385,
+      "alone_fits_budget": true,
+      "adjacent_admitted_phase1_seed_indices": [
+        7,
+        9
+      ],
+      "adjacent_selected_core_absent": false,
+      "other_selected_message_indices_in_same_entry": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        7,
+        9,
+        10,
+        11
+      ],
+      "loss_reasons": [
+        "whole_message_fits_alone_but_context_budget_was_already_spent"
+      ]
+    },
+    {
+      "query_id": "longmemeval-s-8752c811",
+      "comparators": [
+        "391"
+      ],
+      "entry_id": "longmemeval:s:8752c811:answer_sharegpt_6pWK9yx_0",
+      "message_index": 1,
+      "retrieval_rank": 1,
+      "positive_anchor_score": 0.7317091157615132,
+      "positive_anchor_rank": 73,
+      "phase1": {
+        "result": "rejected_budget",
+        "current_bytes_before": 32730,
+        "candidate_bytes": 35300
+      },
+      "phase2": {
+        "attempted": true,
+        "results": [
+          {
+            "result": "rejected_budget",
+            "current_bytes_before": 32730,
+            "candidate_bytes": 35300
+          }
+        ]
+      },
+      "alone_render_bytes": 2795,
+      "alone_fits_budget": true,
+      "adjacent_admitted_phase1_seed_indices": [
+        0
+      ],
+      "adjacent_selected_core_absent": false,
+      "other_selected_message_indices_in_same_entry": [
+        0,
+        4,
+        5
+      ],
+      "loss_reasons": [
+        "whole_message_fits_alone_but_context_budget_was_already_spent",
+        "positive_anchor_rejected_in_phase1_despite_adjacent_core"
+      ]
+    },
+    {
+      "query_id": "longmemeval-s-a9f6b44c",
+      "comparators": [
+        "390"
+      ],
+      "entry_id": "longmemeval:s:a9f6b44c:answer_cc021f81_2",
+      "message_index": 0,
+      "retrieval_rank": 9,
+      "positive_anchor_score": 0.35355339059327373,
+      "positive_anchor_rank": 71,
+      "phase1": {
+        "result": "rejected_budget",
+        "current_bytes_before": 32669,
+        "candidate_bytes": 32874
+      },
+      "phase2": {
+        "attempted": false,
+        "results": []
+      },
+      "alone_render_bytes": 391,
+      "alone_fits_budget": true,
+      "adjacent_admitted_phase1_seed_indices": [],
+      "adjacent_selected_core_absent": true,
+      "other_selected_message_indices_in_same_entry": [
+        10
+      ],
+      "loss_reasons": [
+        "whole_message_fits_alone_but_context_budget_was_already_spent"
+      ]
+    },
+    {
+      "query_id": "longmemeval-s-c18a7dc8",
+      "comparators": [
+        "390"
+      ],
+      "entry_id": "longmemeval:s:c18a7dc8:answer_2e2085fa_2",
+      "message_index": 8,
+      "retrieval_rank": 9,
+      "positive_anchor_score": 0.13736056394868904,
+      "positive_anchor_rank": 77,
+      "phase1": {
+        "result": "rejected_budget",
+        "current_bytes_before": 32716,
+        "candidate_bytes": 33187
+      },
+      "phase2": {
+        "attempted": false,
+        "results": []
+      },
+      "alone_render_bytes": 657,
+      "alone_fits_budget": true,
+      "adjacent_admitted_phase1_seed_indices": [],
+      "adjacent_selected_core_absent": true,
+      "other_selected_message_indices_in_same_entry": [
+        4
+      ],
+      "loss_reasons": [
+        "whole_message_fits_alone_but_context_budget_was_already_spent"
+      ]
+    },
+    {
+      "query_id": "longmemeval-s-e47becba",
+      "comparators": [
+        "391"
+      ],
+      "entry_id": "longmemeval:s:e47becba:answer_280352e9",
+      "message_index": 5,
+      "retrieval_rank": 8,
+      "positive_anchor_score": 0.1363988678940947,
+      "positive_anchor_rank": 79,
+      "phase1": {
+        "result": "rejected_budget",
+        "current_bytes_before": 32631,
+        "candidate_bytes": 35372
+      },
+      "phase2": {
+        "attempted": true,
+        "results": [
+          {
+            "result": "rejected_budget",
+            "current_bytes_before": 32631,
+            "candidate_bytes": 35372
+          }
+        ]
+      },
+      "alone_render_bytes": 2948,
+      "alone_fits_budget": true,
+      "adjacent_admitted_phase1_seed_indices": [
+        4
+      ],
+      "adjacent_selected_core_absent": false,
+      "other_selected_message_indices_in_same_entry": [
+        3,
+        4,
+        11
+      ],
+      "loss_reasons": [
+        "whole_message_fits_alone_but_context_budget_was_already_spent",
+        "positive_anchor_rejected_in_phase1_despite_adjacent_core"
+      ]
+    }
+  ]
+}

@@ -130,6 +130,19 @@ has a separate, less strict denominator of 500.
 | longmemeval-s-078150f1 | New | 1 / 0 |
 | longmemeval-s-1903aded | New | 1 / 0 |
 
+The six question losses against #390 and seven against #391 span ten unique
+questions, each missing one annotated message that its reference retained.
+Their [diagnostic traces](remaining-losses.json) show eight positive-score cores
+rejected on budget and two zero-score messages excluded from the first pass.
+Seven were then proposed as neighbors, all rejected on budget; the other three
+had no admitted adjacent anchor. Every missing message fit on its own, including
+rendering overhead (339–2,957 bytes), and its entry still had other messages
+selected. Thus whole-message size alone does not explain these failures: the
+fixed score/admission order leaves too little room. This is a mechanical trace,
+not proof that a different ranking or reservation policy would improve answers.
+These ten messages belong to complete-question regressions; the full individual
+loss totals (16 versus #390, 11 versus #391) also include other questions.
+
 All gains and losses against each reference, including cases where complete-question
 coverage is unchanged but individual messages move, are retained in the artifacts.
 Improved aggregate coverage does not remove regressions or establish a safe default.
