@@ -398,3 +398,27 @@ Primary baseline rows, exit codes and regression policy remain unchanged.
 Experimental losses are reported even when the legacy baseline gate is green.
 The [measured comparison](comparisons/longmemeval-s-message-neighbors-20261021/README.md)
 records results against both controls; #342 remains open for further evidence.
+
+## Core-first whole-message comparison (#342)
+
+Add `--core-comparison query-message-cores-v1` to the complete command above
+(including its passage, gold, message and boundary flags) to compare a fourth
+policy. The offline command accepts the same flag with its explicit baseline.
+`core_comparison` reports `versus_legacy`, `versus_passages`, and
+`versus_neighbors`; the previous comparisons and baseline gate still run.
+
+The new rule keeps #391's message score and tie order. First it admits whole
+positive-score messages individually if the fully rendered context fits. Then
+it considers each admitted anchor's predecessor and successor, separately, in
+that order. Only the fixed set of first-pass anchors seeds expansion. No partial
+message, cascading expansion, or zero-overlap fallback is used; an all-zero
+query produces empty context. Headers, source markers and separators count.
+
+This isolates an admission/expansion-policy change, not every scoring problem
+found in the prior 29 regressions. Generic query terms, length dilution and
+paraphrases remain limitations. The rule was frozen before its first full
+measurement, after studying those regressions: it is a development-set iteration,
+not a held-out generalization claim. The complete-message metric remains a proxy
+and does not measure reader answer quality. Experimental losses do not change
+the baseline gate. See the [analysis and comparison](comparisons/longmemeval-s-message-cores-20261021/README.md)
+for every recovery and regression.

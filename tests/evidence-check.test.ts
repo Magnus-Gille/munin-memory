@@ -202,6 +202,16 @@ it("requires message comparison, boundaries, passage comparison and gold-turns a
   ]) expect(await main([...args(), ...extra], deps)).toBe(2);
   expect(deps.fetchArtifacts).not.toHaveBeenCalled();
 });
+it("requires the complete prior comparison option set for the frozen core experiment", async () => {
+  const boundaries = writeReviewedMessageBoundaries(); const labels = writeReviewedGoldTurns();
+  for (const extra of [
+    ["--core-comparison", "query-message-cores-v1"],
+    ["--core-comparison", "other"],
+    ["--message-comparison", "query-message-neighbors-v1", "--message-boundaries", boundaries, "--core-comparison", "query-message-cores-v1"],
+    ["--message-comparison", "query-message-neighbors-v1", "--message-boundaries", boundaries, "--gold-turns", labels, "--core-comparison", "query-message-cores-v1"],
+  ]) expect(await main([...args(), ...extra], deps)).toBe(2);
+  expect(deps.fetchArtifacts).not.toHaveBeenCalled();
+});
 
 it("protects the message-boundaries metadata path before fetching shared artifacts", async () => {
   const boundaries = join(dir, "message-boundaries.json"); writeFileSync(boundaries, "preserve");
@@ -284,6 +294,101 @@ function messageComparison() {
   };
   return { passage, report };
 }
+
+function coreComparison() {
+  const { passage, report: sibling } = messageComparison();
+  const report = structuredClone(sibling) as Record<string, any>;
+  report.strategy = "query-message-cores-v1";
+  report.lineage = { ...report.lineage, core_packing_source_sha256: "1".repeat(64), core_comparison_source_sha256: "2".repeat(64) };
+  const neighbors = structuredClone(report.versus_passages);
+  neighbors.reference_strategy = "query-message-neighbors-v1";
+  const summary = neighbors.queries[0].annotated_messages;
+  neighbors.entry_id_proxy = {
+    regression: false, gained_question_ids: [], lost_question_ids: [], any_gold_loss_question_ids: [], gained_id_count: 0, lost_id_count: 0,
+    stages: { retrieval: { all_gold: 1, partial_gold: 0, no_gold: 0 }, reference_packed: { all_gold: 0, partial_gold: 0, no_gold: 1 }, candidate_packed: { all_gold: 0, partial_gold: 0, no_gold: 1 } },
+  };
+  neighbors.annotated_message_coverage = {
+    metric: "full_original_annotated_message_coverage_v1", eligible_question_count: 1, eligible_question_ids: ["q1"], excluded_question_ids: [], annotated_message_count: 1,
+    retrieval: { all_turn_count: 1, all_turn_rate: 1, covered_message_count: 1 },
+    reference_packed: { all_turn_count: 0, all_turn_rate: 0, covered_message_count: 0 },
+    candidate_packed: { all_turn_count: 0, all_turn_rate: 0, covered_message_count: 0 },
+    regression: false, gained_question_ids: [], lost_question_ids: [], gained_message_count: 0, lost_message_count: 0,
+  };
+  neighbors.queries[0] = {
+    ...neighbors.queries[0], reference_packed_ids: [], reference_packed_stage: "no_gold", reference_all_gold: false,
+    reference_budget: messageBudget(0, 1), reference_ranges: [], gained_ids: [], lost_ids: [],
+    annotated_messages: { ...summary, reference_covered_turns: [], reference_all_turns: false, gained_turns: [], lost_turns: [] },
+  };
+  neighbors.categories = { evidence: { query_count: 1, entry_id_proxy: neighbors.entry_id_proxy, annotated_message_coverage: neighbors.annotated_message_coverage, excluded_labels: { question_count: 0, annotated_message_count: 0, no_positive_entry_count: 0 } } };
+  report.versus_neighbors = neighbors;
+  return { passage, sibling, report };
+}
+
+function coreComparisonWithDifferentCandidate() {
+  const fixture = coreComparison();
+  const selectedRanges = [{ entry_id: "e", start: 0, end: 3 }];
+  const selectedTurns = [{ entry_id: "e", message_index: 0 }];
+  const selectedBudget = messageBudget(1, 0);
+  for (const pair of [fixture.report.versus_legacy, fixture.report.versus_passages, fixture.report.versus_neighbors]) {
+    const row = pair.queries[0];
+    row.candidate_packed_ids = ["e"]; row.candidate_budget = selectedBudget; row.candidate_ranges = selectedRanges;
+    row.candidate_packed_stage = "all_gold"; row.candidate_all_gold = true;
+    row.gained_ids = row.reference_packed_ids.includes("e") ? [] : ["e"];
+    row.lost_ids = [];
+    const annotated = row.annotated_messages;
+    annotated.candidate_covered_turns = selectedTurns; annotated.candidate_all_turns = true;
+    annotated.gained_turns = annotated.reference_covered_turns.length ? [] : selectedTurns;
+    annotated.lost_turns = [];
+    pair.entry_id_proxy = {
+      regression: false, gained_question_ids: row.gained_ids.length ? ["q1"] : [], lost_question_ids: [],
+      any_gold_loss_question_ids: [], gained_id_count: row.gained_ids.length, lost_id_count: 0,
+      stages: { retrieval: { all_gold: 1, partial_gold: 0, no_gold: 0 }, reference_packed: { all_gold: row.reference_all_gold ? 1 : 0, partial_gold: 0, no_gold: row.reference_all_gold ? 0 : 1 }, candidate_packed: { all_gold: 1, partial_gold: 0, no_gold: 0 } },
+    };
+    pair.annotated_message_coverage = {
+      metric: "full_original_annotated_message_coverage_v1", eligible_question_count: 1, eligible_question_ids: ["q1"], excluded_question_ids: [], annotated_message_count: 1,
+      retrieval: { all_turn_count: 1, all_turn_rate: 1, covered_message_count: 1 },
+      reference_packed: { all_turn_count: annotated.reference_all_turns ? 1 : 0, all_turn_rate: annotated.reference_all_turns ? 1 : 0, covered_message_count: annotated.reference_covered_turns.length },
+      candidate_packed: { all_turn_count: 1, all_turn_rate: 1, covered_message_count: 1 },
+      regression: false, gained_question_ids: annotated.reference_all_turns ? [] : ["q1"], lost_question_ids: [],
+      gained_message_count: annotated.gained_turns.length, lost_message_count: 0,
+    };
+    const summary = { query_count: 1, entry_id_proxy: pair.entry_id_proxy, annotated_message_coverage: pair.annotated_message_coverage, excluded_labels: { question_count: 0, annotated_message_count: 0, no_positive_entry_count: 0 } };
+    pair.categories = { evidence: summary };
+  }
+  fixture.report.queries[0] = { query_id: "q1", selected_message_indices: [{ entry_id: "e", message_indices: [0] }], candidate_ranges: selectedRanges, candidate_budget: selectedBudget, whole_message_conservation: { selected_message_count: 1, partial_message_count: 0 } };
+  fixture.report.whole_message_conservation = { selected_message_count: 1, partial_message_count: 0 };
+  return fixture;
+}
+
+it("forwards the frozen core experiment and validates all three paired comparisons", async () => {
+  const boundaries = writeReviewedMessageBoundaries(); const labels = writeReviewedGoldTurns();
+  const { passage, sibling, report } = coreComparisonWithDifferentCandidate();
+  deps.execute = vi.fn(async () => {
+    writeFileSync(output, JSON.stringify({ quality_state: "unchanged", rows: [{ query_id: "q1", expected_ids: ["e"], retrieved_ids: ["e"], packed_ids: ["e"], budget: messageBudget(1, 0) }], comparison: { gained_question_ids: [], lost_question_ids: [] }, passage_comparison: passage, message_comparison: sibling, core_comparison: report }));
+    return 0;
+  });
+  const coreArgs = () => [...args(), "--message-comparison", "query-message-neighbors-v1", "--message-boundaries", boundaries, "--passage-comparison", "query-passages-v1", "--gold-turns", labels, "--core-comparison", "query-message-cores-v1"];
+  expect(await main(coreArgs(), deps)).toBe(0);
+  expect(deps.execute).toHaveBeenCalledWith(expect.arrayContaining(["--core-comparison", "query-message-cores-v1"]), expect.any(Object));
+
+  const badThirdPair = structuredClone(report);
+  badThirdPair.versus_neighbors.queries[0].reference_ranges = [{ entry_id: "e", start: 0, end: 2 }];
+  deps.execute = vi.fn(async () => { writeFileSync(output, JSON.stringify({ quality_state: "unchanged", rows: [{ query_id: "q1", expected_ids: ["e"], retrieved_ids: ["e"], packed_ids: ["e"], budget: messageBudget(1, 0) }], comparison: { gained_question_ids: [], lost_question_ids: [] }, passage_comparison: passage, message_comparison: sibling, core_comparison: badThirdPair })); return 0; });
+  output = join(dir, "tampered-third-pair.json");
+  expect(await main(coreArgs(), deps)).toBe(2);
+  expect(deps.execute).toHaveBeenCalledOnce();
+
+  output = join(dir, "missing-core-comparison.json");
+  deps.execute = vi.fn(async () => { writeFileSync(output, JSON.stringify({ quality_state: "unchanged", rows: [{ query_id: "q1", expected_ids: ["e"], retrieved_ids: ["e"], packed_ids: ["e"], budget: messageBudget(1, 0) }], comparison: { gained_question_ids: [], lost_question_ids: [] }, passage_comparison: passage, message_comparison: sibling })); return 0; });
+  expect(await main(coreArgs(), deps)).toBe(2);
+  expect(deps.execute).toHaveBeenCalledOnce();
+
+  output = join(dir, "bad-core-source-pin.json");
+  const badPin = structuredClone(report); badPin.lineage.core_packing_source_sha256 = "not-a-sha";
+  deps.execute = vi.fn(async () => { writeFileSync(output, JSON.stringify({ quality_state: "unchanged", rows: [{ query_id: "q1", expected_ids: ["e"], retrieved_ids: ["e"], packed_ids: ["e"], budget: messageBudget(1, 0) }], comparison: { gained_question_ids: [], lost_question_ids: [] }, passage_comparison: passage, message_comparison: sibling, core_comparison: badPin })); return 0; });
+  expect(await main(coreArgs(), deps)).toBe(2);
+  expect(deps.execute).toHaveBeenCalledOnce();
+});
 
 it("forwards the pinned message experiment while its losses remain outside the primary exit policy", async () => {
   const boundaries = writeReviewedMessageBoundaries(); const labels = writeReviewedGoldTurns();

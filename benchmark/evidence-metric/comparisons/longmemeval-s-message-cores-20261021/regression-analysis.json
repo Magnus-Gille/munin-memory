@@ -1,0 +1,2815 @@
+{
+  "analysis": "PR391 loss cohort replay and core-first comparison",
+  "cases": [
+    {
+      "admitted_neighbor_only_message_count": 12,
+      "admitted_neighbor_only_payload_bytes": 30774,
+      "all_gold_messages_whole_fit_as_single_anchor_at_rejection": false,
+      "budget_bytes": 32768,
+      "budget_headroom_bytes": 14,
+      "budget_rejected_bundle_count": 100,
+      "budget_rejected_bundle_payload_increment_bytes": 254593,
+      "candidate_context_bytes": 32754,
+      "candidate_estimated_tokens": 8189,
+      "category": "longmemeval/single-session-user",
+      "core_first": {
+        "candidate_all_annotated_turns": true,
+        "candidate_budget_headroom_bytes": 34,
+        "candidate_context_bytes": 32734,
+        "candidate_estimated_tokens": 8184,
+        "candidate_selected_message_count": 48,
+        "old_lost_gold_messages_recovered_by_core": [
+          {
+            "entry_id": "longmemeval:s:25e5aa4f:answer_986de8c3",
+            "message_index": 4
+          }
+        ],
+        "old_lost_gold_messages_recovered_by_core_count": 1,
+        "old_lost_gold_messages_still_missing": [],
+        "old_lost_gold_messages_still_missing_count": 0
+      },
+      "gold_lost_due_to_budget_rejection_count": 1,
+      "long_gold_messages_4k_plus": 0,
+      "long_gold_messages_8k_plus": 0,
+      "lost_gold_message_count": 1,
+      "lost_gold_messages": [
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 14,
+          "anchor_score": 0.5443310539518174,
+          "entry_id": "longmemeval:s:25e5aa4f:answer_986de8c3",
+          "entry_rank": 1,
+          "entry_utf8_bytes": 19805,
+          "gold_anchor_rejection": {
+            "added_message_count": 3,
+            "anchor_rank": 14,
+            "incremental_bundle_bytes": 6327,
+            "prior_rendered_bytes": 32754,
+            "rendered_bytes": 39081,
+            "single_anchor_bytes": 33142
+          },
+          "gold_message_index": 4,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 362,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            6936,
+            7298
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 12,
+          "message_unique_term_count": 54,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 79,
+          "prefix_utf8_bytes": 79,
+          "query_overlap_term_count": 4,
+          "selected_entry_elsewhere": true,
+          "selected_message_indices_in_entry": [
+            0,
+            1,
+            9,
+            10,
+            11
+          ]
+        }
+      ],
+      "query_id": "longmemeval-s-25e5aa4f",
+      "reference_estimated_tokens": 8171,
+      "retrieved_entry_count": 10,
+      "retrieved_entry_ranks": {
+        "longmemeval:s:25e5aa4f:18807892_4": 2,
+        "longmemeval:s:25e5aa4f:48f804a3": 7,
+        "longmemeval:s:25e5aa4f:8953c8c8_1": 4,
+        "longmemeval:s:25e5aa4f:a459d477": 10,
+        "longmemeval:s:25e5aa4f:answer_986de8c3": 1,
+        "longmemeval:s:25e5aa4f:sharegpt_6MPnc5F_9": 9,
+        "longmemeval:s:25e5aa4f:sharegpt_8cFNcVG_0": 3,
+        "longmemeval:s:25e5aa4f:sharegpt_SwdaeDm_15": 6,
+        "longmemeval:s:25e5aa4f:sharegpt_dvA1THi_0": 8,
+        "longmemeval:s:25e5aa4f:ultrachat_225537": 5
+      },
+      "selected_entry_count": 3,
+      "selected_message_count": 19,
+      "selected_message_payload_bytes": 32057
+    },
+    {
+      "admitted_neighbor_only_message_count": 15,
+      "admitted_neighbor_only_payload_bytes": 26651,
+      "all_gold_messages_whole_fit_as_single_anchor_at_rejection": true,
+      "budget_bytes": 32768,
+      "budget_headroom_bytes": 21,
+      "budget_rejected_bundle_count": 103,
+      "budget_rejected_bundle_payload_increment_bytes": 278911,
+      "candidate_context_bytes": 32747,
+      "candidate_estimated_tokens": 8187,
+      "category": "longmemeval/single-session-user",
+      "core_first": {
+        "candidate_all_annotated_turns": true,
+        "candidate_budget_headroom_bytes": 2,
+        "candidate_context_bytes": 32766,
+        "candidate_estimated_tokens": 8192,
+        "candidate_selected_message_count": 56,
+        "old_lost_gold_messages_recovered_by_core": [
+          {
+            "entry_id": "longmemeval:s:ccb36322:answer_f1fbb330",
+            "message_index": 2
+          }
+        ],
+        "old_lost_gold_messages_recovered_by_core_count": 1,
+        "old_lost_gold_messages_still_missing": [],
+        "old_lost_gold_messages_still_missing_count": 0
+      },
+      "gold_lost_due_to_budget_rejection_count": 1,
+      "long_gold_messages_4k_plus": 0,
+      "long_gold_messages_8k_plus": 0,
+      "lost_gold_message_count": 1,
+      "lost_gold_messages": [
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 13,
+          "anchor_score": 0.7559289460184544,
+          "entry_id": "longmemeval:s:ccb36322:answer_f1fbb330",
+          "entry_rank": 4,
+          "entry_utf8_bytes": 11279,
+          "gold_anchor_rejection": {
+            "added_message_count": 3,
+            "anchor_rank": 13,
+            "incremental_bundle_bytes": 5396,
+            "prior_rendered_bytes": 31311,
+            "rendered_bytes": 36707,
+            "single_anchor_bytes": 31693
+          },
+          "gold_message_index": 2,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 172,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            3097,
+            3269
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 10,
+          "message_unique_term_count": 28,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 79,
+          "prefix_utf8_bytes": 79,
+          "query_overlap_term_count": 4,
+          "selected_entry_elsewhere": false,
+          "selected_message_indices_in_entry": []
+        }
+      ],
+      "query_id": "longmemeval-s-ccb36322",
+      "reference_estimated_tokens": 8153,
+      "retrieved_entry_count": 10,
+      "retrieved_entry_ranks": {
+        "longmemeval:s:ccb36322:06d1a1a0": 1,
+        "longmemeval:s:ccb36322:06eccfec": 10,
+        "longmemeval:s:ccb36322:162ff451": 3,
+        "longmemeval:s:ccb36322:522dd987_4": 8,
+        "longmemeval:s:ccb36322:6d52ee93_1": 7,
+        "longmemeval:s:ccb36322:8b1019b8_1": 6,
+        "longmemeval:s:ccb36322:answer_f1fbb330": 4,
+        "longmemeval:s:ccb36322:bdcee74e_3": 2,
+        "longmemeval:s:ccb36322:c38b33ae": 9,
+        "longmemeval:s:ccb36322:facfdfe2": 5
+      },
+      "selected_entry_count": 5,
+      "selected_message_count": 25,
+      "selected_message_payload_bytes": 31683
+    },
+    {
+      "admitted_neighbor_only_message_count": 14,
+      "admitted_neighbor_only_payload_bytes": 29015,
+      "all_gold_messages_whole_fit_as_single_anchor_at_rejection": true,
+      "budget_bytes": 32768,
+      "budget_headroom_bytes": 75,
+      "budget_rejected_bundle_count": 87,
+      "budget_rejected_bundle_payload_increment_bytes": 255912,
+      "candidate_context_bytes": 32693,
+      "candidate_estimated_tokens": 8174,
+      "category": "longmemeval/single-session-user",
+      "core_first": {
+        "candidate_all_annotated_turns": true,
+        "candidate_budget_headroom_bytes": 48,
+        "candidate_context_bytes": 32720,
+        "candidate_estimated_tokens": 8180,
+        "candidate_selected_message_count": 55,
+        "old_lost_gold_messages_recovered_by_core": [
+          {
+            "entry_id": "longmemeval:s:c14c00dd:answer_304511ce",
+            "message_index": 4
+          }
+        ],
+        "old_lost_gold_messages_recovered_by_core_count": 1,
+        "old_lost_gold_messages_still_missing": [],
+        "old_lost_gold_messages_still_missing_count": 0
+      },
+      "gold_lost_due_to_budget_rejection_count": 1,
+      "long_gold_messages_4k_plus": 0,
+      "long_gold_messages_8k_plus": 0,
+      "lost_gold_message_count": 1,
+      "lost_gold_messages": [
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 13,
+          "anchor_score": 0.5144957554275265,
+          "entry_id": "longmemeval:s:c14c00dd:answer_304511ce",
+          "entry_rank": 1,
+          "entry_utf8_bytes": 13635,
+          "gold_anchor_rejection": {
+            "added_message_count": 3,
+            "anchor_rank": 13,
+            "incremental_bundle_bytes": 4603,
+            "prior_rendered_bytes": 29117,
+            "rendered_bytes": 33720,
+            "single_anchor_bytes": 29339
+          },
+          "gold_message_index": 4,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 196,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            4518,
+            4714
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 12,
+          "message_unique_term_count": 34,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 79,
+          "prefix_utf8_bytes": 79,
+          "query_overlap_term_count": 3,
+          "selected_entry_elsewhere": true,
+          "selected_message_indices_in_entry": [
+            0,
+            1
+          ]
+        }
+      ],
+      "query_id": "longmemeval-s-c14c00dd",
+      "reference_estimated_tokens": 8148,
+      "retrieved_entry_count": 10,
+      "retrieved_entry_ranks": {
+        "longmemeval:s:c14c00dd:097cefd0_2": 8,
+        "longmemeval:s:c14c00dd:35f052f9_1": 6,
+        "longmemeval:s:c14c00dd:5dac7cc2_1": 4,
+        "longmemeval:s:c14c00dd:7cd7c296_3": 5,
+        "longmemeval:s:c14c00dd:answer_304511ce": 1,
+        "longmemeval:s:c14c00dd:c77250d2": 2,
+        "longmemeval:s:c14c00dd:ffd66315_2": 7,
+        "longmemeval:s:c14c00dd:sharegpt_FfqJ2xI_0": 9,
+        "longmemeval:s:c14c00dd:sharegpt_gU0qvZu_0": 3,
+        "longmemeval:s:c14c00dd:ultrachat_456324": 10
+      },
+      "selected_entry_count": 5,
+      "selected_message_count": 25,
+      "selected_message_payload_bytes": 31633
+    },
+    {
+      "admitted_neighbor_only_message_count": 16,
+      "admitted_neighbor_only_payload_bytes": 25469,
+      "all_gold_messages_whole_fit_as_single_anchor_at_rejection": false,
+      "budget_bytes": 32768,
+      "budget_headroom_bytes": 69,
+      "budget_rejected_bundle_count": 83,
+      "budget_rejected_bundle_payload_increment_bytes": 270728,
+      "candidate_context_bytes": 32699,
+      "candidate_estimated_tokens": 8175,
+      "category": "longmemeval/multi-session",
+      "core_first": {
+        "candidate_all_annotated_turns": true,
+        "candidate_budget_headroom_bytes": 157,
+        "candidate_context_bytes": 32611,
+        "candidate_estimated_tokens": 8153,
+        "candidate_selected_message_count": 50,
+        "old_lost_gold_messages_recovered_by_core": [
+          {
+            "entry_id": "longmemeval:s:0a995998:answer_afa9873b_2",
+            "message_index": 10
+          }
+        ],
+        "old_lost_gold_messages_recovered_by_core_count": 1,
+        "old_lost_gold_messages_still_missing": [],
+        "old_lost_gold_messages_still_missing_count": 0
+      },
+      "gold_lost_due_to_budget_rejection_count": 1,
+      "long_gold_messages_4k_plus": 0,
+      "long_gold_messages_8k_plus": 0,
+      "lost_gold_message_count": 1,
+      "lost_gold_messages": [
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 36,
+          "anchor_score": 0.8006407690254357,
+          "entry_id": "longmemeval:s:0a995998:answer_afa9873b_2",
+          "entry_rank": 3,
+          "entry_utf8_bytes": 14447,
+          "gold_anchor_rejection": {
+            "added_message_count": 3,
+            "anchor_rank": 36,
+            "incremental_bundle_bytes": 4455,
+            "prior_rendered_bytes": 32699,
+            "rendered_bytes": 37154,
+            "single_anchor_bytes": 33149
+          },
+          "gold_message_index": 10,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 234,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            12271,
+            12505
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 12,
+          "message_unique_term_count": 39,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 81,
+          "prefix_utf8_bytes": 81,
+          "query_overlap_term_count": 5,
+          "selected_entry_elsewhere": false,
+          "selected_message_indices_in_entry": []
+        }
+      ],
+      "query_id": "longmemeval-s-0a995998",
+      "reference_estimated_tokens": 8127,
+      "retrieved_entry_count": 10,
+      "retrieved_entry_ranks": {
+        "longmemeval:s:0a995998:25091584_1": 8,
+        "longmemeval:s:0a995998:439f9ed8_3": 7,
+        "longmemeval:s:0a995998:85846900_2": 4,
+        "longmemeval:s:0a995998:afbd7193_2": 9,
+        "longmemeval:s:0a995998:answer_afa9873b_1": 1,
+        "longmemeval:s:0a995998:answer_afa9873b_2": 3,
+        "longmemeval:s:0a995998:answer_afa9873b_3": 2,
+        "longmemeval:s:0a995998:fa46a10e": 6,
+        "longmemeval:s:0a995998:sharegpt_U3S02iq_0": 10,
+        "longmemeval:s:0a995998:ultrachat_331531": 5
+      },
+      "selected_entry_count": 5,
+      "selected_message_count": 28,
+      "selected_message_payload_bytes": 31613
+    },
+    {
+      "admitted_neighbor_only_message_count": 12,
+      "admitted_neighbor_only_payload_bytes": 26262,
+      "all_gold_messages_whole_fit_as_single_anchor_at_rejection": true,
+      "budget_bytes": 32768,
+      "budget_headroom_bytes": 46,
+      "budget_rejected_bundle_count": 98,
+      "budget_rejected_bundle_payload_increment_bytes": 276830,
+      "candidate_context_bytes": 32722,
+      "candidate_estimated_tokens": 8181,
+      "category": "longmemeval/multi-session",
+      "core_first": {
+        "candidate_all_annotated_turns": true,
+        "candidate_budget_headroom_bytes": 13,
+        "candidate_context_bytes": 32755,
+        "candidate_estimated_tokens": 8189,
+        "candidate_selected_message_count": 61,
+        "old_lost_gold_messages_recovered_by_core": [
+          {
+            "entry_id": "longmemeval:s:60bf93ed:answer_e0956e0a_2",
+            "message_index": 0
+          }
+        ],
+        "old_lost_gold_messages_recovered_by_core_count": 1,
+        "old_lost_gold_messages_still_missing": [],
+        "old_lost_gold_messages_still_missing_count": 0
+      },
+      "gold_lost_due_to_budget_rejection_count": 1,
+      "long_gold_messages_4k_plus": 0,
+      "long_gold_messages_8k_plus": 0,
+      "lost_gold_message_count": 1,
+      "lost_gold_messages": [
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 9,
+          "anchor_score": 0.8846517369293828,
+          "entry_id": "longmemeval:s:60bf93ed:answer_e0956e0a_2",
+          "entry_rank": 2,
+          "entry_utf8_bytes": 11773,
+          "gold_anchor_rejection": {
+            "added_message_count": 2,
+            "anchor_rank": 9,
+            "incremental_bundle_bytes": 2076,
+            "prior_rendered_bytes": 32367,
+            "rendered_bytes": 34443,
+            "single_anchor_bytes": 32702
+          },
+          "gold_message_index": 0,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 312,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            81,
+            393
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 12,
+          "message_unique_term_count": 46,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 81,
+          "prefix_utf8_bytes": 81,
+          "query_overlap_term_count": 6,
+          "selected_entry_elsewhere": true,
+          "selected_message_indices_in_entry": [
+            3,
+            4,
+            5
+          ]
+        }
+      ],
+      "query_id": "longmemeval-s-60bf93ed",
+      "reference_estimated_tokens": 8141,
+      "retrieved_entry_count": 10,
+      "retrieved_entry_ranks": {
+        "longmemeval:s:60bf93ed:0e297c49": 4,
+        "longmemeval:s:60bf93ed:4fe27c66_4": 8,
+        "longmemeval:s:60bf93ed:619e96bc": 10,
+        "longmemeval:s:60bf93ed:6414f676_4": 7,
+        "longmemeval:s:60bf93ed:a200b713_2": 6,
+        "longmemeval:s:60bf93ed:answer_e0956e0a_1": 1,
+        "longmemeval:s:60bf93ed:answer_e0956e0a_2": 2,
+        "longmemeval:s:60bf93ed:e9590b7d": 5,
+        "longmemeval:s:60bf93ed:sharegpt_PEr0L5a_0": 9,
+        "longmemeval:s:60bf93ed:ultrachat_7648": 3
+      },
+      "selected_entry_count": 4,
+      "selected_message_count": 22,
+      "selected_message_payload_bytes": 31840
+    },
+    {
+      "admitted_neighbor_only_message_count": 18,
+      "admitted_neighbor_only_payload_bytes": 26752,
+      "all_gold_messages_whole_fit_as_single_anchor_at_rejection": false,
+      "budget_bytes": 32768,
+      "budget_headroom_bytes": 4,
+      "budget_rejected_bundle_count": 91,
+      "budget_rejected_bundle_payload_increment_bytes": 229369,
+      "candidate_context_bytes": 32764,
+      "candidate_estimated_tokens": 8191,
+      "category": "longmemeval/multi-session",
+      "core_first": {
+        "candidate_all_annotated_turns": false,
+        "candidate_budget_headroom_bytes": 47,
+        "candidate_context_bytes": 32721,
+        "candidate_estimated_tokens": 8181,
+        "candidate_selected_message_count": 52,
+        "old_lost_gold_messages_recovered_by_core": [
+          {
+            "entry_id": "longmemeval:s:a9f6b44c:answer_cc021f81_1",
+            "message_index": 0
+          },
+          {
+            "entry_id": "longmemeval:s:a9f6b44c:answer_cc021f81_1",
+            "message_index": 6
+          }
+        ],
+        "old_lost_gold_messages_recovered_by_core_count": 2,
+        "old_lost_gold_messages_still_missing": [
+          {
+            "entry_id": "longmemeval:s:a9f6b44c:answer_cc021f81_2",
+            "message_index": 0
+          }
+        ],
+        "old_lost_gold_messages_still_missing_count": 1
+      },
+      "gold_lost_due_to_budget_rejection_count": 3,
+      "long_gold_messages_4k_plus": 0,
+      "long_gold_messages_8k_plus": 0,
+      "lost_gold_message_count": 3,
+      "lost_gold_messages": [
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 71,
+          "anchor_score": 0.35355339059327373,
+          "entry_id": "longmemeval:s:a9f6b44c:answer_cc021f81_2",
+          "entry_rank": 9,
+          "entry_utf8_bytes": 12949,
+          "gold_anchor_rejection": {
+            "added_message_count": 2,
+            "anchor_rank": 71,
+            "incremental_bundle_bytes": 1396,
+            "prior_rendered_bytes": 32764,
+            "rendered_bytes": 34160,
+            "single_anchor_bytes": 33157
+          },
+          "gold_message_index": 0,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 182,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            81,
+            263
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 12,
+          "message_unique_term_count": 32,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 81,
+          "prefix_utf8_bytes": 81,
+          "query_overlap_term_count": 2,
+          "selected_entry_elsewhere": false,
+          "selected_message_indices_in_entry": []
+        },
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 12,
+          "anchor_score": 0.5494422557947561,
+          "entry_id": "longmemeval:s:a9f6b44c:answer_cc021f81_1",
+          "entry_rank": 2,
+          "entry_utf8_bytes": 7213,
+          "gold_anchor_rejection": {
+            "added_message_count": 2,
+            "anchor_rank": 12,
+            "incremental_bundle_bytes": 1331,
+            "prior_rendered_bytes": 31541,
+            "rendered_bytes": 32872,
+            "single_anchor_bytes": 32065
+          },
+          "gold_message_index": 0,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 313,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            81,
+            394
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 12,
+          "message_unique_term_count": 53,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 81,
+          "prefix_utf8_bytes": 81,
+          "query_overlap_term_count": 4,
+          "selected_entry_elsewhere": false,
+          "selected_message_indices_in_entry": []
+        },
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 37,
+          "anchor_score": 0.47140452079103173,
+          "entry_id": "longmemeval:s:a9f6b44c:answer_cc021f81_1",
+          "entry_rank": 2,
+          "entry_utf8_bytes": 7213,
+          "gold_anchor_rejection": {
+            "added_message_count": 3,
+            "anchor_rank": 37,
+            "incremental_bundle_bytes": 2141,
+            "prior_rendered_bytes": 32583,
+            "rendered_bytes": 34724,
+            "single_anchor_bytes": 33308
+          },
+          "gold_message_index": 6,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 511,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            2570,
+            3081
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 12,
+          "message_unique_term_count": 72,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 81,
+          "prefix_utf8_bytes": 81,
+          "query_overlap_term_count": 4,
+          "selected_entry_elsewhere": false,
+          "selected_message_indices_in_entry": []
+        }
+      ],
+      "query_id": "longmemeval-s-a9f6b44c",
+      "reference_estimated_tokens": 8019,
+      "retrieved_entry_count": 10,
+      "retrieved_entry_ranks": {
+        "longmemeval:s:a9f6b44c:35bc3132_2": 7,
+        "longmemeval:s:a9f6b44c:4e1059f9": 6,
+        "longmemeval:s:a9f6b44c:answer_cc021f81_1": 2,
+        "longmemeval:s:a9f6b44c:answer_cc021f81_2": 9,
+        "longmemeval:s:a9f6b44c:answer_cc021f81_3": 1,
+        "longmemeval:s:a9f6b44c:b7e36cc5_2": 10,
+        "longmemeval:s:a9f6b44c:d4912cd9": 5,
+        "longmemeval:s:a9f6b44c:ec8d10c7_2": 4,
+        "longmemeval:s:a9f6b44c:fdd0f680_1": 8,
+        "longmemeval:s:a9f6b44c:sharegpt_AqgYTct_0": 3
+      },
+      "selected_entry_count": 6,
+      "selected_message_count": 31,
+      "selected_message_payload_bytes": 31512
+    },
+    {
+      "admitted_neighbor_only_message_count": 10,
+      "admitted_neighbor_only_payload_bytes": 24752,
+      "all_gold_messages_whole_fit_as_single_anchor_at_rejection": true,
+      "budget_bytes": 32768,
+      "budget_headroom_bytes": 47,
+      "budget_rejected_bundle_count": 96,
+      "budget_rejected_bundle_payload_increment_bytes": 311201,
+      "candidate_context_bytes": 32721,
+      "candidate_estimated_tokens": 8181,
+      "category": "longmemeval/multi-session",
+      "core_first": {
+        "candidate_all_annotated_turns": true,
+        "candidate_budget_headroom_bytes": 45,
+        "candidate_context_bytes": 32723,
+        "candidate_estimated_tokens": 8181,
+        "candidate_selected_message_count": 38,
+        "old_lost_gold_messages_recovered_by_core": [
+          {
+            "entry_id": "longmemeval:s:5a7937c8:answer_4cef8a3c_1",
+            "message_index": 0
+          }
+        ],
+        "old_lost_gold_messages_recovered_by_core_count": 1,
+        "old_lost_gold_messages_still_missing": [],
+        "old_lost_gold_messages_still_missing_count": 0
+      },
+      "gold_lost_due_to_budget_rejection_count": 1,
+      "long_gold_messages_4k_plus": 0,
+      "long_gold_messages_8k_plus": 0,
+      "lost_gold_message_count": 1,
+      "lost_gold_messages": [
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 9,
+          "anchor_score": 0.4423258684646914,
+          "entry_id": "longmemeval:s:5a7937c8:answer_4cef8a3c_1",
+          "entry_rank": 2,
+          "entry_utf8_bytes": 12325,
+          "gold_anchor_rejection": {
+            "added_message_count": 2,
+            "anchor_rank": 9,
+            "incremental_bundle_bytes": 2580,
+            "prior_rendered_bytes": 32077,
+            "rendered_bytes": 34657,
+            "single_anchor_bytes": 32580
+          },
+          "gold_message_index": 0,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 292,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            81,
+            373
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 10,
+          "message_unique_term_count": 46,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 81,
+          "prefix_utf8_bytes": 81,
+          "query_overlap_term_count": 3,
+          "selected_entry_elsewhere": false,
+          "selected_message_indices_in_entry": []
+        }
+      ],
+      "query_id": "longmemeval-s-5a7937c8",
+      "reference_estimated_tokens": 8101,
+      "retrieved_entry_count": 10,
+      "retrieved_entry_ranks": {
+        "longmemeval:s:5a7937c8:3b38be11_2": 6,
+        "longmemeval:s:5a7937c8:40d799e8_2": 7,
+        "longmemeval:s:5a7937c8:55cc1ba3_1": 5,
+        "longmemeval:s:5a7937c8:63c9e87c": 9,
+        "longmemeval:s:5a7937c8:answer_4cef8a3c_1": 2,
+        "longmemeval:s:5a7937c8:answer_4cef8a3c_2": 1,
+        "longmemeval:s:5a7937c8:answer_4cef8a3c_3": 3,
+        "longmemeval:s:5a7937c8:b6bc5b09_2": 8,
+        "longmemeval:s:5a7937c8:sharegpt_1rIk8tS_17": 4,
+        "longmemeval:s:5a7937c8:ultrachat_432397": 10
+      },
+      "selected_entry_count": 3,
+      "selected_message_count": 20,
+      "selected_message_payload_bytes": 32054
+    },
+    {
+      "admitted_neighbor_only_message_count": 10,
+      "admitted_neighbor_only_payload_bytes": 29248,
+      "all_gold_messages_whole_fit_as_single_anchor_at_rejection": false,
+      "budget_bytes": 32768,
+      "budget_headroom_bytes": 61,
+      "budget_rejected_bundle_count": 96,
+      "budget_rejected_bundle_payload_increment_bytes": 348785,
+      "candidate_context_bytes": 32707,
+      "candidate_estimated_tokens": 8177,
+      "category": "longmemeval/multi-session",
+      "core_first": {
+        "candidate_all_annotated_turns": true,
+        "candidate_budget_headroom_bytes": 41,
+        "candidate_context_bytes": 32727,
+        "candidate_estimated_tokens": 8182,
+        "candidate_selected_message_count": 46,
+        "old_lost_gold_messages_recovered_by_core": [
+          {
+            "entry_id": "longmemeval:s:gpt4_372c3eed:answer_35c5419d_2",
+            "message_index": 0
+          }
+        ],
+        "old_lost_gold_messages_recovered_by_core_count": 1,
+        "old_lost_gold_messages_still_missing": [],
+        "old_lost_gold_messages_still_missing_count": 0
+      },
+      "gold_lost_due_to_budget_rejection_count": 1,
+      "long_gold_messages_4k_plus": 0,
+      "long_gold_messages_8k_plus": 0,
+      "lost_gold_message_count": 1,
+      "lost_gold_messages": [
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 10,
+          "anchor_score": 0.9630868246861536,
+          "entry_id": "longmemeval:s:gpt4_372c3eed:answer_35c5419d_2",
+          "entry_rank": 4,
+          "entry_utf8_bytes": 19694,
+          "gold_anchor_rejection": {
+            "added_message_count": 2,
+            "anchor_rank": 10,
+            "incremental_bundle_bytes": 3402,
+            "prior_rendered_bytes": 32186,
+            "rendered_bytes": 35588,
+            "single_anchor_bytes": 32969
+          },
+          "gold_message_index": 0,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 567,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            81,
+            648
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 12,
+          "message_unique_term_count": 69,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 81,
+          "prefix_utf8_bytes": 81,
+          "query_overlap_term_count": 8,
+          "selected_entry_elsewhere": false,
+          "selected_message_indices_in_entry": []
+        }
+      ],
+      "query_id": "longmemeval-s-gpt4_372c3eed",
+      "reference_estimated_tokens": 8148,
+      "retrieved_entry_count": 10,
+      "retrieved_entry_ranks": {
+        "longmemeval:s:gpt4_372c3eed:0d396995_1": 8,
+        "longmemeval:s:gpt4_372c3eed:402240fb_1": 10,
+        "longmemeval:s:gpt4_372c3eed:4d04b866": 5,
+        "longmemeval:s:gpt4_372c3eed:809cabca_4": 7,
+        "longmemeval:s:gpt4_372c3eed:answer_35c5419d_1": 2,
+        "longmemeval:s:gpt4_372c3eed:answer_35c5419d_2": 4,
+        "longmemeval:s:gpt4_372c3eed:answer_35c5419d_3": 1,
+        "longmemeval:s:gpt4_372c3eed:bc1f1051_5": 9,
+        "longmemeval:s:gpt4_372c3eed:sharegpt_6VqlSoL_25": 3,
+        "longmemeval:s:gpt4_372c3eed:sharegpt_KzDwaf1_247": 6
+      },
+      "selected_entry_count": 4,
+      "selected_message_count": 19,
+      "selected_message_payload_bytes": 31849
+    },
+    {
+      "admitted_neighbor_only_message_count": 12,
+      "admitted_neighbor_only_payload_bytes": 27736,
+      "all_gold_messages_whole_fit_as_single_anchor_at_rejection": false,
+      "budget_bytes": 32768,
+      "budget_headroom_bytes": 24,
+      "budget_rejected_bundle_count": 95,
+      "budget_rejected_bundle_payload_increment_bytes": 305580,
+      "candidate_context_bytes": 32744,
+      "candidate_estimated_tokens": 8186,
+      "category": "longmemeval/single-session-preference",
+      "core_first": {
+        "candidate_all_annotated_turns": true,
+        "candidate_budget_headroom_bytes": 81,
+        "candidate_context_bytes": 32687,
+        "candidate_estimated_tokens": 8172,
+        "candidate_selected_message_count": 47,
+        "old_lost_gold_messages_recovered_by_core": [
+          {
+            "entry_id": "longmemeval:s:06878be2:answer_555dfb94",
+            "message_index": 8
+          },
+          {
+            "entry_id": "longmemeval:s:06878be2:answer_555dfb94",
+            "message_index": 14
+          }
+        ],
+        "old_lost_gold_messages_recovered_by_core_count": 2,
+        "old_lost_gold_messages_still_missing": [],
+        "old_lost_gold_messages_still_missing_count": 0
+      },
+      "gold_lost_due_to_budget_rejection_count": 2,
+      "long_gold_messages_4k_plus": 0,
+      "long_gold_messages_8k_plus": 0,
+      "lost_gold_message_count": 2,
+      "lost_gold_messages": [
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 9,
+          "anchor_score": 0.7071067811865475,
+          "entry_id": "longmemeval:s:06878be2:answer_555dfb94",
+          "entry_rank": 1,
+          "entry_utf8_bytes": 19208,
+          "gold_anchor_rejection": {
+            "added_message_count": 2,
+            "anchor_rank": 9,
+            "incremental_bundle_bytes": 2937,
+            "prior_rendered_bytes": 32510,
+            "rendered_bytes": 35447,
+            "single_anchor_bytes": 32680
+          },
+          "gold_message_index": 8,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 168,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            9977,
+            10145
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 16,
+          "message_unique_term_count": 32,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 79,
+          "prefix_utf8_bytes": 79,
+          "query_overlap_term_count": 4,
+          "selected_entry_elsewhere": true,
+          "selected_message_indices_in_entry": [
+            0,
+            1,
+            3,
+            4,
+            5,
+            6,
+            7
+          ]
+        },
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 15,
+          "anchor_score": 0.5773502691896258,
+          "entry_id": "longmemeval:s:06878be2:answer_555dfb94",
+          "entry_rank": 1,
+          "entry_utf8_bytes": 19208,
+          "gold_anchor_rejection": {
+            "added_message_count": 3,
+            "anchor_rank": 15,
+            "incremental_bundle_bytes": 3563,
+            "prior_rendered_bytes": 32510,
+            "rendered_bytes": 36073,
+            "single_anchor_bytes": 32898
+          },
+          "gold_message_index": 14,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 360,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            17741,
+            18101
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 16,
+          "message_unique_term_count": 48,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 79,
+          "prefix_utf8_bytes": 79,
+          "query_overlap_term_count": 4,
+          "selected_entry_elsewhere": true,
+          "selected_message_indices_in_entry": [
+            0,
+            1,
+            3,
+            4,
+            5,
+            6,
+            7
+          ]
+        }
+      ],
+      "query_id": "longmemeval-s-06878be2",
+      "reference_estimated_tokens": 8038,
+      "retrieved_entry_count": 10,
+      "retrieved_entry_ranks": {
+        "longmemeval:s:06878be2:3e9fce53_1": 2,
+        "longmemeval:s:06878be2:465e7ef9": 9,
+        "longmemeval:s:06878be2:79d53fd0_2": 7,
+        "longmemeval:s:06878be2:8fcfbe43_2": 3,
+        "longmemeval:s:06878be2:9806001e": 10,
+        "longmemeval:s:06878be2:a6074da9_1": 4,
+        "longmemeval:s:06878be2:answer_555dfb94": 1,
+        "longmemeval:s:06878be2:ca929779_1": 5,
+        "longmemeval:s:06878be2:sharegpt_InRLwN7_0": 8,
+        "longmemeval:s:06878be2:sharegpt_cn3iUbp_7": 6
+      },
+      "selected_entry_count": 5,
+      "selected_message_count": 21,
+      "selected_message_payload_bytes": 31686
+    },
+    {
+      "admitted_neighbor_only_message_count": 12,
+      "admitted_neighbor_only_payload_bytes": 20741,
+      "all_gold_messages_whole_fit_as_single_anchor_at_rejection": true,
+      "budget_bytes": 32768,
+      "budget_headroom_bytes": 9,
+      "budget_rejected_bundle_count": 107,
+      "budget_rejected_bundle_payload_increment_bytes": 365767,
+      "candidate_context_bytes": 32759,
+      "candidate_estimated_tokens": 8190,
+      "category": "longmemeval/single-session-preference",
+      "core_first": {
+        "candidate_all_annotated_turns": true,
+        "candidate_budget_headroom_bytes": 22,
+        "candidate_context_bytes": 32746,
+        "candidate_estimated_tokens": 8187,
+        "candidate_selected_message_count": 56,
+        "old_lost_gold_messages_recovered_by_core": [
+          {
+            "entry_id": "longmemeval:s:afdc33df:answer_8549e5e0",
+            "message_index": 2
+          }
+        ],
+        "old_lost_gold_messages_recovered_by_core_count": 1,
+        "old_lost_gold_messages_still_missing": [],
+        "old_lost_gold_messages_still_missing_count": 0
+      },
+      "gold_lost_due_to_budget_rejection_count": 1,
+      "long_gold_messages_4k_plus": 0,
+      "long_gold_messages_8k_plus": 0,
+      "lost_gold_message_count": 1,
+      "lost_gold_messages": [
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 23,
+          "anchor_score": 0.7184212081070996,
+          "entry_id": "longmemeval:s:afdc33df:answer_8549e5e0",
+          "entry_rank": 1,
+          "entry_utf8_bytes": 20772,
+          "gold_anchor_rejection": {
+            "added_message_count": 2,
+            "anchor_rank": 23,
+            "incremental_bundle_bytes": 3106,
+            "prior_rendered_bytes": 31130,
+            "rendered_bytes": 34236,
+            "single_anchor_bytes": 31345
+          },
+          "gold_message_index": 2,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 214,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            2778,
+            2992
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 14,
+          "message_unique_term_count": 31,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 79,
+          "prefix_utf8_bytes": 79,
+          "query_overlap_term_count": 4,
+          "selected_entry_elsewhere": true,
+          "selected_message_indices_in_entry": [
+            0,
+            1,
+            4,
+            5,
+            6,
+            7,
+            8
+          ]
+        }
+      ],
+      "query_id": "longmemeval-s-afdc33df",
+      "reference_estimated_tokens": 8113,
+      "retrieved_entry_count": 10,
+      "retrieved_entry_ranks": {
+        "longmemeval:s:afdc33df:0b0bc8ae_2": 8,
+        "longmemeval:s:afdc33df:22f9f163_3": 3,
+        "longmemeval:s:afdc33df:96b6e5e8_2": 10,
+        "longmemeval:s:afdc33df:ad8d9f0f": 4,
+        "longmemeval:s:afdc33df:answer_8549e5e0": 1,
+        "longmemeval:s:afdc33df:b6558bfb": 2,
+        "longmemeval:s:afdc33df:ca929779_1": 9,
+        "longmemeval:s:afdc33df:d03b6a05_3": 6,
+        "longmemeval:s:afdc33df:d5128b51": 7,
+        "longmemeval:s:afdc33df:e58109ed_1": 5
+      },
+      "selected_entry_count": 4,
+      "selected_message_count": 24,
+      "selected_message_payload_bytes": 31863
+    },
+    {
+      "admitted_neighbor_only_message_count": 16,
+      "admitted_neighbor_only_payload_bytes": 25952,
+      "all_gold_messages_whole_fit_as_single_anchor_at_rejection": true,
+      "budget_bytes": 32768,
+      "budget_headroom_bytes": 43,
+      "budget_rejected_bundle_count": 104,
+      "budget_rejected_bundle_payload_increment_bytes": 309557,
+      "candidate_context_bytes": 32725,
+      "candidate_estimated_tokens": 8182,
+      "category": "longmemeval/single-session-preference",
+      "core_first": {
+        "candidate_all_annotated_turns": true,
+        "candidate_budget_headroom_bytes": 133,
+        "candidate_context_bytes": 32635,
+        "candidate_estimated_tokens": 8159,
+        "candidate_selected_message_count": 56,
+        "old_lost_gold_messages_recovered_by_core": [
+          {
+            "entry_id": "longmemeval:s:38146c39:answer_772472c8",
+            "message_index": 0
+          }
+        ],
+        "old_lost_gold_messages_recovered_by_core_count": 1,
+        "old_lost_gold_messages_still_missing": [],
+        "old_lost_gold_messages_still_missing_count": 0
+      },
+      "gold_lost_due_to_budget_rejection_count": 1,
+      "long_gold_messages_4k_plus": 0,
+      "long_gold_messages_8k_plus": 0,
+      "lost_gold_message_count": 1,
+      "lost_gold_messages": [
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 14,
+          "anchor_score": 0.6859943405700353,
+          "entry_id": "longmemeval:s:38146c39:answer_772472c8",
+          "entry_rank": 1,
+          "entry_utf8_bytes": 19559,
+          "gold_anchor_rejection": {
+            "added_message_count": 2,
+            "anchor_rank": 14,
+            "incremental_bundle_bytes": 2839,
+            "prior_rendered_bytes": 32133,
+            "rendered_bytes": 34972,
+            "single_anchor_bytes": 32560
+          },
+          "gold_message_index": 0,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 220,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            79,
+            299
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 16,
+          "message_unique_term_count": 34,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 79,
+          "prefix_utf8_bytes": 79,
+          "query_overlap_term_count": 4,
+          "selected_entry_elsewhere": false,
+          "selected_message_indices_in_entry": []
+        }
+      ],
+      "query_id": "longmemeval-s-38146c39",
+      "reference_estimated_tokens": 8086,
+      "retrieved_entry_count": 10,
+      "retrieved_entry_ranks": {
+        "longmemeval:s:38146c39:15ed03f0_1": 8,
+        "longmemeval:s:38146c39:286aa281_5": 9,
+        "longmemeval:s:38146c39:381b80a3": 2,
+        "longmemeval:s:38146c39:5263736d_1": 4,
+        "longmemeval:s:38146c39:5806662d_1": 7,
+        "longmemeval:s:38146c39:8064b6ca": 10,
+        "longmemeval:s:38146c39:87472dfd_3": 6,
+        "longmemeval:s:38146c39:87aaee77": 5,
+        "longmemeval:s:38146c39:909d57ca_2": 3,
+        "longmemeval:s:38146c39:answer_772472c8": 1
+      },
+      "selected_entry_count": 6,
+      "selected_message_count": 29,
+      "selected_message_payload_bytes": 31512
+    },
+    {
+      "admitted_neighbor_only_message_count": 18,
+      "admitted_neighbor_only_payload_bytes": 25471,
+      "all_gold_messages_whole_fit_as_single_anchor_at_rejection": true,
+      "budget_bytes": 32768,
+      "budget_headroom_bytes": 53,
+      "budget_rejected_bundle_count": 57,
+      "budget_rejected_bundle_payload_increment_bytes": 133499,
+      "candidate_context_bytes": 32715,
+      "candidate_estimated_tokens": 8179,
+      "category": "longmemeval/multi-session",
+      "core_first": {
+        "candidate_all_annotated_turns": true,
+        "candidate_budget_headroom_bytes": 40,
+        "candidate_context_bytes": 32728,
+        "candidate_estimated_tokens": 8182,
+        "candidate_selected_message_count": 48,
+        "old_lost_gold_messages_recovered_by_core": [
+          {
+            "entry_id": "longmemeval:s:2311e44b:answer_bf633415_1",
+            "message_index": 8
+          }
+        ],
+        "old_lost_gold_messages_recovered_by_core_count": 1,
+        "old_lost_gold_messages_still_missing": [],
+        "old_lost_gold_messages_still_missing_count": 0
+      },
+      "gold_lost_due_to_budget_rejection_count": 1,
+      "long_gold_messages_4k_plus": 0,
+      "long_gold_messages_8k_plus": 0,
+      "lost_gold_message_count": 1,
+      "lost_gold_messages": [
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 15,
+          "anchor_score": 0.7142857142857143,
+          "entry_id": "longmemeval:s:2311e44b:answer_bf633415_1",
+          "entry_rank": 2,
+          "entry_utf8_bytes": 13689,
+          "gold_anchor_rejection": {
+            "added_message_count": 3,
+            "anchor_rank": 15,
+            "incremental_bundle_bytes": 6409,
+            "prior_rendered_bytes": 31002,
+            "rendered_bytes": 37411,
+            "single_anchor_bytes": 31428
+          },
+          "gold_message_index": 8,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 398,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            10171,
+            10569
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 10,
+          "message_unique_term_count": 49,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 81,
+          "prefix_utf8_bytes": 81,
+          "query_overlap_term_count": 5,
+          "selected_entry_elsewhere": true,
+          "selected_message_indices_in_entry": [
+            0,
+            1,
+            2
+          ]
+        }
+      ],
+      "query_id": "longmemeval-s-2311e44b",
+      "reference_estimated_tokens": 8177,
+      "retrieved_entry_count": 10,
+      "retrieved_entry_ranks": {
+        "longmemeval:s:2311e44b:2714885f_1": 6,
+        "longmemeval:s:2311e44b:84fedd9f_2": 10,
+        "longmemeval:s:2311e44b:answer_bf633415_1": 2,
+        "longmemeval:s:2311e44b:answer_bf633415_2": 1,
+        "longmemeval:s:2311e44b:sharegpt_ELyN256_13": 5,
+        "longmemeval:s:2311e44b:sharegpt_HEWVvbe_0": 9,
+        "longmemeval:s:2311e44b:sharegpt_Y2Di7vX_0": 8,
+        "longmemeval:s:2311e44b:sharegpt_hi2xiJT_14": 7,
+        "longmemeval:s:2311e44b:sharegpt_i2urixu_0": 4,
+        "longmemeval:s:2311e44b:ultrachat_458191": 3
+      },
+      "selected_entry_count": 6,
+      "selected_message_count": 34,
+      "selected_message_payload_bytes": 31389
+    },
+    {
+      "admitted_neighbor_only_message_count": 14,
+      "admitted_neighbor_only_payload_bytes": 24462,
+      "all_gold_messages_whole_fit_as_single_anchor_at_rejection": true,
+      "budget_bytes": 32768,
+      "budget_headroom_bytes": 63,
+      "budget_rejected_bundle_count": 108,
+      "budget_rejected_bundle_payload_increment_bytes": 260467,
+      "candidate_context_bytes": 32705,
+      "candidate_estimated_tokens": 8177,
+      "category": "longmemeval/multi-session",
+      "core_first": {
+        "candidate_all_annotated_turns": true,
+        "candidate_budget_headroom_bytes": 24,
+        "candidate_context_bytes": 32744,
+        "candidate_estimated_tokens": 8186,
+        "candidate_selected_message_count": 57,
+        "old_lost_gold_messages_recovered_by_core": [
+          {
+            "entry_id": "longmemeval:s:d905b33f:answer_85a77c48_2",
+            "message_index": 2
+          }
+        ],
+        "old_lost_gold_messages_recovered_by_core_count": 1,
+        "old_lost_gold_messages_still_missing": [],
+        "old_lost_gold_messages_still_missing_count": 0
+      },
+      "gold_lost_due_to_budget_rejection_count": 1,
+      "long_gold_messages_4k_plus": 0,
+      "long_gold_messages_8k_plus": 0,
+      "lost_gold_message_count": 1,
+      "lost_gold_messages": [
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 10,
+          "anchor_score": 0.7442084075352507,
+          "entry_id": "longmemeval:s:d905b33f:answer_85a77c48_2",
+          "entry_rank": 1,
+          "entry_utf8_bytes": 12522,
+          "gold_anchor_rejection": {
+            "added_message_count": 3,
+            "anchor_rank": 10,
+            "incremental_bundle_bytes": 4360,
+            "prior_rendered_bytes": 31278,
+            "rendered_bytes": 35638,
+            "single_anchor_bytes": 31932
+          },
+          "gold_message_index": 2,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 440,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            2243,
+            2683
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 12,
+          "message_unique_term_count": 65,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 81,
+          "prefix_utf8_bytes": 81,
+          "query_overlap_term_count": 6,
+          "selected_entry_elsewhere": false,
+          "selected_message_indices_in_entry": []
+        }
+      ],
+      "query_id": "longmemeval-s-d905b33f",
+      "reference_estimated_tokens": 8152,
+      "retrieved_entry_count": 10,
+      "retrieved_entry_ranks": {
+        "longmemeval:s:d905b33f:2d364fb0": 7,
+        "longmemeval:s:d905b33f:3301f749_1": 5,
+        "longmemeval:s:d905b33f:368276ab_3": 4,
+        "longmemeval:s:d905b33f:549b442a_1": 8,
+        "longmemeval:s:d905b33f:6423d6a4_2": 6,
+        "longmemeval:s:d905b33f:7613d5ec_2": 3,
+        "longmemeval:s:d905b33f:answer_85a77c48_1": 2,
+        "longmemeval:s:d905b33f:answer_85a77c48_2": 1,
+        "longmemeval:s:d905b33f:dd4a0e15": 10,
+        "longmemeval:s:d905b33f:sharegpt_VNCxIuu_18": 9
+      },
+      "selected_entry_count": 5,
+      "selected_message_count": 27,
+      "selected_message_payload_bytes": 31582
+    },
+    {
+      "admitted_neighbor_only_message_count": 17,
+      "admitted_neighbor_only_payload_bytes": 27191,
+      "all_gold_messages_whole_fit_as_single_anchor_at_rejection": false,
+      "budget_bytes": 32768,
+      "budget_headroom_bytes": 117,
+      "budget_rejected_bundle_count": 95,
+      "budget_rejected_bundle_payload_increment_bytes": 262995,
+      "candidate_context_bytes": 32651,
+      "candidate_estimated_tokens": 8163,
+      "category": "longmemeval/multi-session",
+      "core_first": {
+        "candidate_all_annotated_turns": false,
+        "candidate_budget_headroom_bytes": 20,
+        "candidate_context_bytes": 32748,
+        "candidate_estimated_tokens": 8187,
+        "candidate_selected_message_count": 49,
+        "old_lost_gold_messages_recovered_by_core": [],
+        "old_lost_gold_messages_recovered_by_core_count": 0,
+        "old_lost_gold_messages_still_missing": [
+          {
+            "entry_id": "longmemeval:s:67e0d0f2:answer_3a5010af_2",
+            "message_index": 4
+          }
+        ],
+        "old_lost_gold_messages_still_missing_count": 1
+      },
+      "gold_lost_due_to_budget_rejection_count": 1,
+      "long_gold_messages_4k_plus": 0,
+      "long_gold_messages_8k_plus": 0,
+      "lost_gold_message_count": 1,
+      "lost_gold_messages": [
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 49,
+          "anchor_score": 0.45226701686664544,
+          "entry_id": "longmemeval:s:67e0d0f2:answer_3a5010af_2",
+          "entry_rank": 2,
+          "entry_utf8_bytes": 17807,
+          "gold_anchor_rejection": {
+            "added_message_count": 2,
+            "anchor_rank": 49,
+            "incremental_bundle_bytes": 3173,
+            "prior_rendered_bytes": 32617,
+            "rendered_bytes": 35790,
+            "single_anchor_bytes": 32906
+          },
+          "gold_message_index": 4,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 288,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            6712,
+            7000
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 12,
+          "message_unique_term_count": 44,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 81,
+          "prefix_utf8_bytes": 81,
+          "query_overlap_term_count": 3,
+          "selected_entry_elsewhere": true,
+          "selected_message_indices_in_entry": [
+            0,
+            1,
+            2,
+            3
+          ]
+        }
+      ],
+      "query_id": "longmemeval-s-67e0d0f2",
+      "reference_estimated_tokens": 8106,
+      "retrieved_entry_count": 10,
+      "retrieved_entry_ranks": {
+        "longmemeval:s:67e0d0f2:2252d3dd": 6,
+        "longmemeval:s:67e0d0f2:6868c94f": 4,
+        "longmemeval:s:67e0d0f2:98cd882c_1": 7,
+        "longmemeval:s:67e0d0f2:answer_3a5010af_1": 1,
+        "longmemeval:s:67e0d0f2:answer_3a5010af_2": 2,
+        "longmemeval:s:67e0d0f2:b192ae00_2": 5,
+        "longmemeval:s:67e0d0f2:sharegpt_GJpf1ou_0": 10,
+        "longmemeval:s:67e0d0f2:sharegpt_RziX6kj_0": 8,
+        "longmemeval:s:67e0d0f2:ultrachat_217333": 3,
+        "longmemeval:s:67e0d0f2:ultrachat_25863": 9
+      },
+      "selected_entry_count": 6,
+      "selected_message_count": 31,
+      "selected_message_payload_bytes": 31333
+    },
+    {
+      "admitted_neighbor_only_message_count": 17,
+      "admitted_neighbor_only_payload_bytes": 21884,
+      "all_gold_messages_whole_fit_as_single_anchor_at_rejection": false,
+      "budget_bytes": 32768,
+      "budget_headroom_bytes": 99,
+      "budget_rejected_bundle_count": 88,
+      "budget_rejected_bundle_payload_increment_bytes": 300542,
+      "candidate_context_bytes": 32669,
+      "candidate_estimated_tokens": 8168,
+      "category": "longmemeval/multi-session",
+      "core_first": {
+        "candidate_all_annotated_turns": false,
+        "candidate_budget_headroom_bytes": 52,
+        "candidate_context_bytes": 32716,
+        "candidate_estimated_tokens": 8179,
+        "candidate_selected_message_count": 37,
+        "old_lost_gold_messages_recovered_by_core": [
+          {
+            "entry_id": "longmemeval:s:c18a7dc8:answer_2e2085fa_1",
+            "message_index": 0
+          }
+        ],
+        "old_lost_gold_messages_recovered_by_core_count": 1,
+        "old_lost_gold_messages_still_missing": [
+          {
+            "entry_id": "longmemeval:s:c18a7dc8:answer_2e2085fa_2",
+            "message_index": 8
+          }
+        ],
+        "old_lost_gold_messages_still_missing_count": 1
+      },
+      "gold_lost_due_to_budget_rejection_count": 2,
+      "long_gold_messages_4k_plus": 0,
+      "long_gold_messages_8k_plus": 0,
+      "lost_gold_message_count": 2,
+      "lost_gold_messages": [
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 77,
+          "anchor_score": 0.13736056394868904,
+          "entry_id": "longmemeval:s:c18a7dc8:answer_2e2085fa_2",
+          "entry_rank": 9,
+          "entry_utf8_bytes": 16790,
+          "gold_anchor_rejection": {
+            "added_message_count": 3,
+            "anchor_rank": 77,
+            "incremental_bundle_bytes": 6369,
+            "prior_rendered_bytes": 32529,
+            "rendered_bytes": 38898,
+            "single_anchor_bytes": 33188
+          },
+          "gold_message_index": 8,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 443,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            13437,
+            13880
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 10,
+          "message_unique_term_count": 53,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 81,
+          "prefix_utf8_bytes": 81,
+          "query_overlap_term_count": 1,
+          "selected_entry_elsewhere": false,
+          "selected_message_indices_in_entry": []
+        },
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 34,
+          "anchor_score": 0.24433888871261045,
+          "entry_id": "longmemeval:s:c18a7dc8:answer_2e2085fa_1",
+          "entry_rank": 3,
+          "entry_utf8_bytes": 19971,
+          "gold_anchor_rejection": {
+            "added_message_count": 2,
+            "anchor_rank": 34,
+            "incremental_bundle_bytes": 3325,
+            "prior_rendered_bytes": 31988,
+            "rendered_bytes": 35313,
+            "single_anchor_bytes": 32737
+          },
+          "gold_message_index": 0,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 538,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            81,
+            619
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 12,
+          "message_unique_term_count": 67,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 81,
+          "prefix_utf8_bytes": 81,
+          "query_overlap_term_count": 2,
+          "selected_entry_elsewhere": false,
+          "selected_message_indices_in_entry": []
+        }
+      ],
+      "query_id": "longmemeval-s-c18a7dc8",
+      "reference_estimated_tokens": 8164,
+      "retrieved_entry_count": 10,
+      "retrieved_entry_ranks": {
+        "longmemeval:s:c18a7dc8:2d74df23_1": 6,
+        "longmemeval:s:c18a7dc8:5022812c": 2,
+        "longmemeval:s:c18a7dc8:9d5a389d": 1,
+        "longmemeval:s:c18a7dc8:answer_2e2085fa_1": 3,
+        "longmemeval:s:c18a7dc8:answer_2e2085fa_2": 9,
+        "longmemeval:s:c18a7dc8:f716720c_3": 8,
+        "longmemeval:s:c18a7dc8:fc6c3985": 4,
+        "longmemeval:s:c18a7dc8:sharegpt_Gebs6W5_12": 7,
+        "longmemeval:s:c18a7dc8:ultrachat_353377": 10,
+        "longmemeval:s:c18a7dc8:ultrachat_463016": 5
+      },
+      "selected_entry_count": 5,
+      "selected_message_count": 32,
+      "selected_message_payload_bytes": 31576
+    },
+    {
+      "admitted_neighbor_only_message_count": 15,
+      "admitted_neighbor_only_payload_bytes": 25737,
+      "all_gold_messages_whole_fit_as_single_anchor_at_rejection": false,
+      "budget_bytes": 32768,
+      "budget_headroom_bytes": 88,
+      "budget_rejected_bundle_count": 158,
+      "budget_rejected_bundle_payload_increment_bytes": 300349,
+      "candidate_context_bytes": 32680,
+      "candidate_estimated_tokens": 8170,
+      "category": "longmemeval/multi-session",
+      "core_first": {
+        "candidate_all_annotated_turns": true,
+        "candidate_budget_headroom_bytes": 11,
+        "candidate_context_bytes": 32757,
+        "candidate_estimated_tokens": 8190,
+        "candidate_selected_message_count": 84,
+        "old_lost_gold_messages_recovered_by_core": [
+          {
+            "entry_id": "longmemeval:s:37f165cf:answer_6b9b2b1e_2",
+            "message_index": 0
+          }
+        ],
+        "old_lost_gold_messages_recovered_by_core_count": 1,
+        "old_lost_gold_messages_still_missing": [],
+        "old_lost_gold_messages_still_missing_count": 0
+      },
+      "gold_lost_due_to_budget_rejection_count": 1,
+      "long_gold_messages_4k_plus": 0,
+      "long_gold_messages_8k_plus": 0,
+      "lost_gold_message_count": 1,
+      "lost_gold_messages": [
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 32,
+          "anchor_score": 0.6405126152203485,
+          "entry_id": "longmemeval:s:37f165cf:answer_6b9b2b1e_2",
+          "entry_rank": 2,
+          "entry_utf8_bytes": 13449,
+          "gold_anchor_rejection": {
+            "added_message_count": 1,
+            "anchor_rank": 32,
+            "incremental_bundle_bytes": 247,
+            "prior_rendered_bytes": 32680,
+            "rendered_bytes": 32927,
+            "single_anchor_bytes": 32927
+          },
+          "gold_message_index": 0,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 247,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            81,
+            328
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 10,
+          "message_unique_term_count": 39,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 81,
+          "prefix_utf8_bytes": 81,
+          "query_overlap_term_count": 4,
+          "selected_entry_elsewhere": true,
+          "selected_message_indices_in_entry": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ]
+        }
+      ],
+      "query_id": "longmemeval-s-37f165cf",
+      "reference_estimated_tokens": 8119,
+      "retrieved_entry_count": 10,
+      "retrieved_entry_ranks": {
+        "longmemeval:s:37f165cf:20b1b65f_2": 3,
+        "longmemeval:s:37f165cf:37b19c82": 9,
+        "longmemeval:s:37f165cf:395a2f92": 4,
+        "longmemeval:s:37f165cf:answer_6b9b2b1e_1": 1,
+        "longmemeval:s:37f165cf:answer_6b9b2b1e_2": 2,
+        "longmemeval:s:37f165cf:c0f6571a_2": 8,
+        "longmemeval:s:37f165cf:c85d1682_1": 10,
+        "longmemeval:s:37f165cf:cdcf791b_1": 5,
+        "longmemeval:s:37f165cf:sharegpt_2yaKUmC_0": 7,
+        "longmemeval:s:37f165cf:sharegpt_5m6qXKr_0": 6
+      },
+      "selected_entry_count": 7,
+      "selected_message_count": 26,
+      "selected_message_payload_bytes": 31244
+    },
+    {
+      "admitted_neighbor_only_message_count": 13,
+      "admitted_neighbor_only_payload_bytes": 24330,
+      "all_gold_messages_whole_fit_as_single_anchor_at_rejection": true,
+      "budget_bytes": 32768,
+      "budget_headroom_bytes": 151,
+      "budget_rejected_bundle_count": 99,
+      "budget_rejected_bundle_payload_increment_bytes": 309782,
+      "candidate_context_bytes": 32617,
+      "candidate_estimated_tokens": 8155,
+      "category": "longmemeval/temporal-reasoning",
+      "core_first": {
+        "candidate_all_annotated_turns": true,
+        "candidate_budget_headroom_bytes": 71,
+        "candidate_context_bytes": 32697,
+        "candidate_estimated_tokens": 8175,
+        "candidate_selected_message_count": 60,
+        "old_lost_gold_messages_recovered_by_core": [
+          {
+            "entry_id": "longmemeval:s:5e1b23de:answer_c18d480b_1",
+            "message_index": 6
+          }
+        ],
+        "old_lost_gold_messages_recovered_by_core_count": 1,
+        "old_lost_gold_messages_still_missing": [],
+        "old_lost_gold_messages_still_missing_count": 0
+      },
+      "gold_lost_due_to_budget_rejection_count": 1,
+      "long_gold_messages_4k_plus": 0,
+      "long_gold_messages_8k_plus": 0,
+      "lost_gold_message_count": 1,
+      "lost_gold_messages": [
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 7,
+          "anchor_score": 0.5393598899705937,
+          "entry_id": "longmemeval:s:5e1b23de:answer_c18d480b_1",
+          "entry_rank": 1,
+          "entry_utf8_bytes": 17024,
+          "gold_anchor_rejection": {
+            "added_message_count": 3,
+            "anchor_rank": 7,
+            "incremental_bundle_bytes": 7139,
+            "prior_rendered_bytes": 27527,
+            "rendered_bytes": 34666,
+            "single_anchor_bytes": 28164
+          },
+          "gold_message_index": 6,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 422,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            9744,
+            10166
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 10,
+          "message_unique_term_count": 55,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 81,
+          "prefix_utf8_bytes": 81,
+          "query_overlap_term_count": 4,
+          "selected_entry_elsewhere": false,
+          "selected_message_indices_in_entry": []
+        }
+      ],
+      "query_id": "longmemeval-s-5e1b23de",
+      "reference_estimated_tokens": 8137,
+      "retrieved_entry_count": 10,
+      "retrieved_entry_ranks": {
+        "longmemeval:s:5e1b23de:1380576d_1": 3,
+        "longmemeval:s:5e1b23de:1a5344e9_3": 5,
+        "longmemeval:s:5e1b23de:3d17c489_3": 7,
+        "longmemeval:s:5e1b23de:7ff028d8_2": 4,
+        "longmemeval:s:5e1b23de:809021de": 10,
+        "longmemeval:s:5e1b23de:a13abca5_2": 8,
+        "longmemeval:s:5e1b23de:answer_c18d480b_1": 1,
+        "longmemeval:s:5e1b23de:c28aed33": 2,
+        "longmemeval:s:5e1b23de:cdf75ca3_2": 9,
+        "longmemeval:s:5e1b23de:sharegpt_FYqt26U_0": 6
+      },
+      "selected_entry_count": 6,
+      "selected_message_count": 23,
+      "selected_message_payload_bytes": 31388
+    },
+    {
+      "admitted_neighbor_only_message_count": 19,
+      "admitted_neighbor_only_payload_bytes": 25935,
+      "all_gold_messages_whole_fit_as_single_anchor_at_rejection": false,
+      "budget_bytes": 32768,
+      "budget_headroom_bytes": 9,
+      "budget_rejected_bundle_count": 95,
+      "budget_rejected_bundle_payload_increment_bytes": 229735,
+      "candidate_context_bytes": 32759,
+      "candidate_estimated_tokens": 8190,
+      "category": "longmemeval/temporal-reasoning",
+      "core_first": {
+        "candidate_all_annotated_turns": true,
+        "candidate_budget_headroom_bytes": 6,
+        "candidate_context_bytes": 32762,
+        "candidate_estimated_tokens": 8191,
+        "candidate_selected_message_count": 45,
+        "old_lost_gold_messages_recovered_by_core": [
+          {
+            "entry_id": "longmemeval:s:gpt4_0b2f1d21:answer_c4e5d969_1",
+            "message_index": 0
+          }
+        ],
+        "old_lost_gold_messages_recovered_by_core_count": 1,
+        "old_lost_gold_messages_still_missing": [],
+        "old_lost_gold_messages_still_missing_count": 0
+      },
+      "gold_lost_due_to_budget_rejection_count": 1,
+      "long_gold_messages_4k_plus": 0,
+      "long_gold_messages_8k_plus": 0,
+      "lost_gold_message_count": 1,
+      "lost_gold_messages": [
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 22,
+          "anchor_score": 0.4423258684646914,
+          "entry_id": "longmemeval:s:gpt4_0b2f1d21:answer_c4e5d969_1",
+          "entry_rank": 2,
+          "entry_utf8_bytes": 14705,
+          "gold_anchor_rejection": {
+            "added_message_count": 1,
+            "anchor_rank": 22,
+            "incremental_bundle_bytes": 295,
+            "prior_rendered_bytes": 32759,
+            "rendered_bytes": 33054,
+            "single_anchor_bytes": 33054
+          },
+          "gold_message_index": 0,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 295,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            81,
+            376
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 12,
+          "message_unique_term_count": 46,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 81,
+          "prefix_utf8_bytes": 81,
+          "query_overlap_term_count": 3,
+          "selected_entry_elsewhere": true,
+          "selected_message_indices_in_entry": [
+            1,
+            2,
+            3
+          ]
+        }
+      ],
+      "query_id": "longmemeval-s-gpt4_0b2f1d21",
+      "reference_estimated_tokens": 8158,
+      "retrieved_entry_count": 10,
+      "retrieved_entry_ranks": {
+        "longmemeval:s:gpt4_0b2f1d21:1cafd864_3": 3,
+        "longmemeval:s:gpt4_0b2f1d21:answer_c4e5d969_1": 2,
+        "longmemeval:s:gpt4_0b2f1d21:answer_c4e5d969_2": 1,
+        "longmemeval:s:gpt4_0b2f1d21:c1e170f0_5": 7,
+        "longmemeval:s:gpt4_0b2f1d21:f31a0422_1": 10,
+        "longmemeval:s:gpt4_0b2f1d21:sharegpt_ME35OD8_167": 8,
+        "longmemeval:s:gpt4_0b2f1d21:sharegpt_XYtuANl_9": 6,
+        "longmemeval:s:gpt4_0b2f1d21:sharegpt_hDjMGr7_30": 9,
+        "longmemeval:s:gpt4_0b2f1d21:sharegpt_rhWNt54_19": 5,
+        "longmemeval:s:gpt4_0b2f1d21:ultrachat_196381": 4
+      },
+      "selected_entry_count": 6,
+      "selected_message_count": 32,
+      "selected_message_payload_bytes": 31389
+    },
+    {
+      "admitted_neighbor_only_message_count": 12,
+      "admitted_neighbor_only_payload_bytes": 29867,
+      "all_gold_messages_whole_fit_as_single_anchor_at_rejection": false,
+      "budget_bytes": 32768,
+      "budget_headroom_bytes": 3,
+      "budget_rejected_bundle_count": 102,
+      "budget_rejected_bundle_payload_increment_bytes": 280072,
+      "candidate_context_bytes": 32765,
+      "candidate_estimated_tokens": 8192,
+      "category": "longmemeval/temporal-reasoning",
+      "core_first": {
+        "candidate_all_annotated_turns": true,
+        "candidate_budget_headroom_bytes": 24,
+        "candidate_context_bytes": 32744,
+        "candidate_estimated_tokens": 8186,
+        "candidate_selected_message_count": 56,
+        "old_lost_gold_messages_recovered_by_core": [
+          {
+            "entry_id": "longmemeval:s:gpt4_93159ced:answer_e5131a1b_1",
+            "message_index": 2
+          }
+        ],
+        "old_lost_gold_messages_recovered_by_core_count": 1,
+        "old_lost_gold_messages_still_missing": [],
+        "old_lost_gold_messages_still_missing_count": 0
+      },
+      "gold_lost_due_to_budget_rejection_count": 1,
+      "long_gold_messages_4k_plus": 0,
+      "long_gold_messages_8k_plus": 0,
+      "lost_gold_message_count": 1,
+      "lost_gold_messages": [
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 9,
+          "anchor_score": 0.6401843996644799,
+          "entry_id": "longmemeval:s:gpt4_93159ced:answer_e5131a1b_1",
+          "entry_rank": 4,
+          "entry_utf8_bytes": 15764,
+          "gold_anchor_rejection": {
+            "added_message_count": 2,
+            "anchor_rank": 9,
+            "incremental_bundle_bytes": 2990,
+            "prior_rendered_bytes": 32765,
+            "rendered_bytes": 35755,
+            "single_anchor_bytes": 33153
+          },
+          "gold_message_index": 2,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 387,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            3423,
+            3810
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 12,
+          "message_unique_term_count": 61,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 81,
+          "prefix_utf8_bytes": 81,
+          "query_overlap_term_count": 5,
+          "selected_entry_elsewhere": true,
+          "selected_message_indices_in_entry": [
+            0,
+            1,
+            7,
+            8,
+            9
+          ]
+        }
+      ],
+      "query_id": "longmemeval-s-gpt4_93159ced",
+      "reference_estimated_tokens": 8145,
+      "retrieved_entry_count": 10,
+      "retrieved_entry_ranks": {
+        "longmemeval:s:gpt4_93159ced:43df393f": 9,
+        "longmemeval:s:gpt4_93159ced:460be54a": 8,
+        "longmemeval:s:gpt4_93159ced:answer_e5131a1b_1": 4,
+        "longmemeval:s:gpt4_93159ced:answer_e5131a1b_2": 1,
+        "longmemeval:s:gpt4_93159ced:deb12028_2": 6,
+        "longmemeval:s:gpt4_93159ced:sharegpt_2Tqbd3c_0": 10,
+        "longmemeval:s:gpt4_93159ced:sharegpt_9srz3L6_0": 3,
+        "longmemeval:s:gpt4_93159ced:sharegpt_A83arI9_383": 5,
+        "longmemeval:s:gpt4_93159ced:ultrachat_162445": 7,
+        "longmemeval:s:gpt4_93159ced:ultrachat_387032": 2
+      },
+      "selected_entry_count": 4,
+      "selected_message_count": 19,
+      "selected_message_payload_bytes": 31820
+    },
+    {
+      "admitted_neighbor_only_message_count": 15,
+      "admitted_neighbor_only_payload_bytes": 22955,
+      "all_gold_messages_whole_fit_as_single_anchor_at_rejection": false,
+      "budget_bytes": 32768,
+      "budget_headroom_bytes": 144,
+      "budget_rejected_bundle_count": 103,
+      "budget_rejected_bundle_payload_increment_bytes": 272014,
+      "candidate_context_bytes": 32624,
+      "candidate_estimated_tokens": 8156,
+      "category": "longmemeval/temporal-reasoning",
+      "core_first": {
+        "candidate_all_annotated_turns": true,
+        "candidate_budget_headroom_bytes": 4,
+        "candidate_context_bytes": 32764,
+        "candidate_estimated_tokens": 8191,
+        "candidate_selected_message_count": 39,
+        "old_lost_gold_messages_recovered_by_core": [
+          {
+            "entry_id": "longmemeval:s:gpt4_65aabe59:answer_30dfe889_1",
+            "message_index": 4
+          }
+        ],
+        "old_lost_gold_messages_recovered_by_core_count": 1,
+        "old_lost_gold_messages_still_missing": [],
+        "old_lost_gold_messages_still_missing_count": 0
+      },
+      "gold_lost_due_to_budget_rejection_count": 1,
+      "long_gold_messages_4k_plus": 0,
+      "long_gold_messages_8k_plus": 0,
+      "lost_gold_message_count": 1,
+      "lost_gold_messages": [
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 34,
+          "anchor_score": 0.408248290463863,
+          "entry_id": "longmemeval:s:gpt4_65aabe59:answer_30dfe889_1",
+          "entry_rank": 3,
+          "entry_utf8_bytes": 17456,
+          "gold_anchor_rejection": {
+            "added_message_count": 3,
+            "anchor_rank": 34,
+            "incremental_bundle_bytes": 5511,
+            "prior_rendered_bytes": 32624,
+            "rendered_bytes": 38135,
+            "single_anchor_bytes": 33022
+          },
+          "gold_message_index": 4,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 372,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            6202,
+            6574
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 12,
+          "message_unique_term_count": 54,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 81,
+          "prefix_utf8_bytes": 81,
+          "query_overlap_term_count": 3,
+          "selected_entry_elsewhere": true,
+          "selected_message_indices_in_entry": [
+            0,
+            1,
+            9,
+            10,
+            11
+          ]
+        }
+      ],
+      "query_id": "longmemeval-s-gpt4_65aabe59",
+      "reference_estimated_tokens": 8185,
+      "retrieved_entry_count": 10,
+      "retrieved_entry_ranks": {
+        "longmemeval:s:gpt4_65aabe59:6a7e3aec": 2,
+        "longmemeval:s:gpt4_65aabe59:78bcce6a": 9,
+        "longmemeval:s:gpt4_65aabe59:9b1a5fb0": 10,
+        "longmemeval:s:gpt4_65aabe59:answer_30dfe889_1": 3,
+        "longmemeval:s:gpt4_65aabe59:answer_30dfe889_2": 1,
+        "longmemeval:s:gpt4_65aabe59:sharegpt_E0YL5SX_275": 6,
+        "longmemeval:s:gpt4_65aabe59:ultrachat_190669": 4,
+        "longmemeval:s:gpt4_65aabe59:ultrachat_216833": 5,
+        "longmemeval:s:gpt4_65aabe59:ultrachat_386890": 7,
+        "longmemeval:s:gpt4_65aabe59:ultrachat_509625": 8
+      },
+      "selected_entry_count": 5,
+      "selected_message_count": 26,
+      "selected_message_payload_bytes": 31505
+    },
+    {
+      "admitted_neighbor_only_message_count": 13,
+      "admitted_neighbor_only_payload_bytes": 17297,
+      "all_gold_messages_whole_fit_as_single_anchor_at_rejection": true,
+      "budget_bytes": 32768,
+      "budget_headroom_bytes": 93,
+      "budget_rejected_bundle_count": 68,
+      "budget_rejected_bundle_payload_increment_bytes": 167513,
+      "candidate_context_bytes": 32675,
+      "candidate_estimated_tokens": 8169,
+      "category": "longmemeval/temporal-reasoning",
+      "core_first": {
+        "candidate_all_annotated_turns": true,
+        "candidate_budget_headroom_bytes": 7,
+        "candidate_context_bytes": 32761,
+        "candidate_estimated_tokens": 8191,
+        "candidate_selected_message_count": 37,
+        "old_lost_gold_messages_recovered_by_core": [
+          {
+            "entry_id": "longmemeval:s:gpt4_c27434e8:answer_d8e33f5c_1",
+            "message_index": 0
+          }
+        ],
+        "old_lost_gold_messages_recovered_by_core_count": 1,
+        "old_lost_gold_messages_still_missing": [],
+        "old_lost_gold_messages_still_missing_count": 0
+      },
+      "gold_lost_due_to_budget_rejection_count": 1,
+      "long_gold_messages_4k_plus": 0,
+      "long_gold_messages_8k_plus": 0,
+      "lost_gold_message_count": 1,
+      "lost_gold_messages": [
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 15,
+          "anchor_score": 0.5388159060803247,
+          "entry_id": "longmemeval:s:gpt4_c27434e8:answer_d8e33f5c_1",
+          "entry_rank": 2,
+          "entry_utf8_bytes": 14630,
+          "gold_anchor_rejection": {
+            "added_message_count": 2,
+            "anchor_rank": 15,
+            "incremental_bundle_bytes": 3327,
+            "prior_rendered_bytes": 32095,
+            "rendered_bytes": 35422,
+            "single_anchor_bytes": 32313
+          },
+          "gold_message_index": 0,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 195,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            81,
+            276
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 12,
+          "message_unique_term_count": 31,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 81,
+          "prefix_utf8_bytes": 81,
+          "query_overlap_term_count": 3,
+          "selected_entry_elsewhere": true,
+          "selected_message_indices_in_entry": [
+            2,
+            3,
+            4,
+            5,
+            6,
+            9,
+            10,
+            11
+          ]
+        }
+      ],
+      "query_id": "longmemeval-s-gpt4_c27434e8",
+      "reference_estimated_tokens": 8034,
+      "retrieved_entry_count": 10,
+      "retrieved_entry_ranks": {
+        "longmemeval:s:gpt4_c27434e8:4d578deb": 5,
+        "longmemeval:s:gpt4_c27434e8:5d1c7bf7": 7,
+        "longmemeval:s:gpt4_c27434e8:answer_d8e33f5c_1": 2,
+        "longmemeval:s:gpt4_c27434e8:answer_d8e33f5c_2": 1,
+        "longmemeval:s:gpt4_c27434e8:bec86aec": 10,
+        "longmemeval:s:gpt4_c27434e8:sharegpt_9XlbWvL_0": 3,
+        "longmemeval:s:gpt4_c27434e8:sharegpt_DVswHqE_0": 4,
+        "longmemeval:s:gpt4_c27434e8:sharegpt_ixhnAlG_0": 8,
+        "longmemeval:s:gpt4_c27434e8:ultrachat_262230": 9,
+        "longmemeval:s:gpt4_c27434e8:ultrachat_62905": 6
+      },
+      "selected_entry_count": 4,
+      "selected_message_count": 28,
+      "selected_message_payload_bytes": 31768
+    },
+    {
+      "admitted_neighbor_only_message_count": 15,
+      "admitted_neighbor_only_payload_bytes": 27925,
+      "all_gold_messages_whole_fit_as_single_anchor_at_rejection": true,
+      "budget_bytes": 32768,
+      "budget_headroom_bytes": 55,
+      "budget_rejected_bundle_count": 93,
+      "budget_rejected_bundle_payload_increment_bytes": 269263,
+      "candidate_context_bytes": 32713,
+      "candidate_estimated_tokens": 8179,
+      "category": "longmemeval/knowledge-update",
+      "core_first": {
+        "candidate_all_annotated_turns": true,
+        "candidate_budget_headroom_bytes": 8,
+        "candidate_context_bytes": 32760,
+        "candidate_estimated_tokens": 8190,
+        "candidate_selected_message_count": 50,
+        "old_lost_gold_messages_recovered_by_core": [
+          {
+            "entry_id": "longmemeval:s:cf22b7bf:answer_ae3a122b_1",
+            "message_index": 8
+          }
+        ],
+        "old_lost_gold_messages_recovered_by_core_count": 1,
+        "old_lost_gold_messages_still_missing": [],
+        "old_lost_gold_messages_still_missing_count": 0
+      },
+      "gold_lost_due_to_budget_rejection_count": 1,
+      "long_gold_messages_4k_plus": 0,
+      "long_gold_messages_8k_plus": 0,
+      "lost_gold_message_count": 1,
+      "lost_gold_messages": [
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 13,
+          "anchor_score": 0.7548294124240689,
+          "entry_id": "longmemeval:s:cf22b7bf:answer_ae3a122b_1",
+          "entry_rank": 2,
+          "entry_utf8_bytes": 15700,
+          "gold_anchor_rejection": {
+            "added_message_count": 3,
+            "anchor_rank": 13,
+            "incremental_bundle_bytes": 5526,
+            "prior_rendered_bytes": 31153,
+            "rendered_bytes": 36679,
+            "single_anchor_bytes": 32003
+          },
+          "gold_message_index": 8,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 634,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            12635,
+            13269
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 10,
+          "message_unique_term_count": 86,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 81,
+          "prefix_utf8_bytes": 81,
+          "query_overlap_term_count": 7,
+          "selected_entry_elsewhere": false,
+          "selected_message_indices_in_entry": []
+        }
+      ],
+      "query_id": "longmemeval-s-cf22b7bf",
+      "reference_estimated_tokens": 8119,
+      "retrieved_entry_count": 10,
+      "retrieved_entry_ranks": {
+        "longmemeval:s:cf22b7bf:36d5bbde_1": 4,
+        "longmemeval:s:cf22b7bf:457e26bf": 5,
+        "longmemeval:s:cf22b7bf:8064b6ca": 6,
+        "longmemeval:s:cf22b7bf:8ab0292c_1": 7,
+        "longmemeval:s:cf22b7bf:8b540c1b": 3,
+        "longmemeval:s:cf22b7bf:answer_ae3a122b_1": 2,
+        "longmemeval:s:cf22b7bf:answer_ae3a122b_2": 1,
+        "longmemeval:s:cf22b7bf:f906baa7_1": 8,
+        "longmemeval:s:cf22b7bf:ultrachat_266173": 10,
+        "longmemeval:s:cf22b7bf:ultrachat_536564": 9
+      },
+      "selected_entry_count": 7,
+      "selected_message_count": 26,
+      "selected_message_payload_bytes": 31261
+    },
+    {
+      "admitted_neighbor_only_message_count": 12,
+      "admitted_neighbor_only_payload_bytes": 27312,
+      "all_gold_messages_whole_fit_as_single_anchor_at_rejection": false,
+      "budget_bytes": 32768,
+      "budget_headroom_bytes": 109,
+      "budget_rejected_bundle_count": 67,
+      "budget_rejected_bundle_payload_increment_bytes": 170516,
+      "candidate_context_bytes": 32659,
+      "candidate_estimated_tokens": 8165,
+      "category": "longmemeval/knowledge-update",
+      "core_first": {
+        "candidate_all_annotated_turns": true,
+        "candidate_budget_headroom_bytes": 88,
+        "candidate_context_bytes": 32680,
+        "candidate_estimated_tokens": 8170,
+        "candidate_selected_message_count": 50,
+        "old_lost_gold_messages_recovered_by_core": [
+          {
+            "entry_id": "longmemeval:s:a2f3aa27:answer_5126c02d_2",
+            "message_index": 0
+          }
+        ],
+        "old_lost_gold_messages_recovered_by_core_count": 1,
+        "old_lost_gold_messages_still_missing": [],
+        "old_lost_gold_messages_still_missing_count": 0
+      },
+      "gold_lost_due_to_budget_rejection_count": 1,
+      "long_gold_messages_4k_plus": 0,
+      "long_gold_messages_8k_plus": 0,
+      "lost_gold_message_count": 1,
+      "lost_gold_messages": [
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 27,
+          "anchor_score": 0.41602514716892186,
+          "entry_id": "longmemeval:s:a2f3aa27:answer_5126c02d_2",
+          "entry_rank": 2,
+          "entry_utf8_bytes": 11208,
+          "gold_anchor_rejection": {
+            "added_message_count": 2,
+            "anchor_rank": 27,
+            "incremental_bundle_bytes": 2235,
+            "prior_rendered_bytes": 32659,
+            "rendered_bytes": 34894,
+            "single_anchor_bytes": 33202
+          },
+          "gold_message_index": 0,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 332,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            81,
+            413
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 10,
+          "message_unique_term_count": 52,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 81,
+          "prefix_utf8_bytes": 81,
+          "query_overlap_term_count": 3,
+          "selected_entry_elsewhere": false,
+          "selected_message_indices_in_entry": []
+        }
+      ],
+      "query_id": "longmemeval-s-a2f3aa27",
+      "reference_estimated_tokens": 8180,
+      "retrieved_entry_count": 10,
+      "retrieved_entry_ranks": {
+        "longmemeval:s:a2f3aa27:2fa50779_2": 3,
+        "longmemeval:s:a2f3aa27:39709ef6_2": 7,
+        "longmemeval:s:a2f3aa27:57bf4122_1": 10,
+        "longmemeval:s:a2f3aa27:answer_5126c02d_1": 1,
+        "longmemeval:s:a2f3aa27:answer_5126c02d_2": 2,
+        "longmemeval:s:a2f3aa27:b65f51fb_5": 4,
+        "longmemeval:s:a2f3aa27:sharegpt_FfqJ2xI_0": 9,
+        "longmemeval:s:a2f3aa27:sharegpt_HQMYIkt_0": 8,
+        "longmemeval:s:a2f3aa27:sharegpt_HXQNNyd_0": 5,
+        "longmemeval:s:a2f3aa27:sharegpt_gXXFrlm_0": 6
+      },
+      "selected_entry_count": 4,
+      "selected_message_count": 21,
+      "selected_message_payload_bytes": 31829
+    },
+    {
+      "admitted_neighbor_only_message_count": 17,
+      "admitted_neighbor_only_payload_bytes": 24126,
+      "all_gold_messages_whole_fit_as_single_anchor_at_rejection": true,
+      "budget_bytes": 32768,
+      "budget_headroom_bytes": 23,
+      "budget_rejected_bundle_count": 90,
+      "budget_rejected_bundle_payload_increment_bytes": 280350,
+      "candidate_context_bytes": 32745,
+      "candidate_estimated_tokens": 8187,
+      "category": "longmemeval/knowledge-update",
+      "core_first": {
+        "candidate_all_annotated_turns": true,
+        "candidate_budget_headroom_bytes": 0,
+        "candidate_context_bytes": 32768,
+        "candidate_estimated_tokens": 8192,
+        "candidate_selected_message_count": 50,
+        "old_lost_gold_messages_recovered_by_core": [
+          {
+            "entry_id": "longmemeval:s:9bbe84a2:answer_c6a0c6c2_2",
+            "message_index": 4
+          }
+        ],
+        "old_lost_gold_messages_recovered_by_core_count": 1,
+        "old_lost_gold_messages_still_missing": [],
+        "old_lost_gold_messages_still_missing_count": 0
+      },
+      "gold_lost_due_to_budget_rejection_count": 1,
+      "long_gold_messages_4k_plus": 0,
+      "long_gold_messages_8k_plus": 0,
+      "lost_gold_message_count": 1,
+      "lost_gold_messages": [
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 11,
+          "anchor_score": 0.5897678246195885,
+          "entry_id": "longmemeval:s:9bbe84a2:answer_c6a0c6c2_2",
+          "entry_rank": 3,
+          "entry_utf8_bytes": 13100,
+          "gold_anchor_rejection": {
+            "added_message_count": 2,
+            "anchor_rank": 11,
+            "incremental_bundle_bytes": 3425,
+            "prior_rendered_bytes": 30608,
+            "rendered_bytes": 34033,
+            "single_anchor_bytes": 30873
+          },
+          "gold_message_index": 4,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 264,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            5446,
+            5710
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 10,
+          "message_unique_term_count": 46,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 81,
+          "prefix_utf8_bytes": 81,
+          "query_overlap_term_count": 4,
+          "selected_entry_elsewhere": true,
+          "selected_message_indices_in_entry": [
+            0,
+            1,
+            2,
+            3,
+            7,
+            8,
+            9
+          ]
+        }
+      ],
+      "query_id": "longmemeval-s-9bbe84a2",
+      "reference_estimated_tokens": 8017,
+      "retrieved_entry_count": 10,
+      "retrieved_entry_ranks": {
+        "longmemeval:s:9bbe84a2:114c1fb7_6": 8,
+        "longmemeval:s:9bbe84a2:339f5034_2": 5,
+        "longmemeval:s:9bbe84a2:362aa011": 2,
+        "longmemeval:s:9bbe84a2:6b7605d1_2": 7,
+        "longmemeval:s:9bbe84a2:answer_c6a0c6c2_1": 1,
+        "longmemeval:s:9bbe84a2:answer_c6a0c6c2_2": 3,
+        "longmemeval:s:9bbe84a2:ef69c258": 9,
+        "longmemeval:s:9bbe84a2:sharegpt_JtVDTm4_0": 4,
+        "longmemeval:s:9bbe84a2:ultrachat_140677": 10,
+        "longmemeval:s:9bbe84a2:ultrachat_480170": 6
+      },
+      "selected_entry_count": 5,
+      "selected_message_count": 30,
+      "selected_message_payload_bytes": 31631
+    },
+    {
+      "admitted_neighbor_only_message_count": 13,
+      "admitted_neighbor_only_payload_bytes": 26782,
+      "all_gold_messages_whole_fit_as_single_anchor_at_rejection": false,
+      "budget_bytes": 32768,
+      "budget_headroom_bytes": 25,
+      "budget_rejected_bundle_count": 80,
+      "budget_rejected_bundle_payload_increment_bytes": 198025,
+      "candidate_context_bytes": 32743,
+      "candidate_estimated_tokens": 8186,
+      "category": "longmemeval/single-session-assistant",
+      "core_first": {
+        "candidate_all_annotated_turns": true,
+        "candidate_budget_headroom_bytes": 23,
+        "candidate_context_bytes": 32745,
+        "candidate_estimated_tokens": 8187,
+        "candidate_selected_message_count": 57,
+        "old_lost_gold_messages_recovered_by_core": [
+          {
+            "entry_id": "longmemeval:s:7e00a6cb:answer_ultrachat_370515",
+            "message_index": 1
+          }
+        ],
+        "old_lost_gold_messages_recovered_by_core_count": 1,
+        "old_lost_gold_messages_still_missing": [],
+        "old_lost_gold_messages_still_missing_count": 0
+      },
+      "gold_lost_due_to_budget_rejection_count": 1,
+      "long_gold_messages_4k_plus": 0,
+      "long_gold_messages_8k_plus": 0,
+      "lost_gold_message_count": 1,
+      "lost_gold_messages": [
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 15,
+          "anchor_score": 1.1785113019775793,
+          "entry_id": "longmemeval:s:7e00a6cb:answer_ultrachat_370515",
+          "entry_rank": 1,
+          "entry_utf8_bytes": 3479,
+          "gold_anchor_rejection": {
+            "added_message_count": 3,
+            "anchor_rank": 15,
+            "incremental_bundle_bytes": 1483,
+            "prior_rendered_bytes": 32409,
+            "rendered_bytes": 33892,
+            "single_anchor_bytes": 33717
+          },
+          "gold_message_index": 1,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 1083,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            148,
+            1231
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 6,
+          "message_unique_term_count": 72,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 87,
+          "prefix_utf8_bytes": 87,
+          "query_overlap_term_count": 10,
+          "selected_entry_elsewhere": false,
+          "selected_message_indices_in_entry": []
+        }
+      ],
+      "query_id": "longmemeval-s-7e00a6cb",
+      "reference_estimated_tokens": 7965,
+      "retrieved_entry_count": 10,
+      "retrieved_entry_ranks": {
+        "longmemeval:s:7e00a6cb:174cccbc": 10,
+        "longmemeval:s:7e00a6cb:24f78a31_2": 3,
+        "longmemeval:s:7e00a6cb:39358a85_3": 8,
+        "longmemeval:s:7e00a6cb:4dd1ba8d_2": 2,
+        "longmemeval:s:7e00a6cb:64c2b3c8": 7,
+        "longmemeval:s:7e00a6cb:9998814e_2": 5,
+        "longmemeval:s:7e00a6cb:answer_ultrachat_370515": 1,
+        "longmemeval:s:7e00a6cb:sharegpt_0dfpdJm_0": 4,
+        "longmemeval:s:7e00a6cb:sharegpt_u56nuOp_5": 6,
+        "longmemeval:s:7e00a6cb:ultrachat_178507": 9
+      },
+      "selected_entry_count": 5,
+      "selected_message_count": 23,
+      "selected_message_payload_bytes": 31683
+    },
+    {
+      "admitted_neighbor_only_message_count": 15,
+      "admitted_neighbor_only_payload_bytes": 26537,
+      "all_gold_messages_whole_fit_as_single_anchor_at_rejection": false,
+      "budget_bytes": 32768,
+      "budget_headroom_bytes": 5,
+      "budget_rejected_bundle_count": 83,
+      "budget_rejected_bundle_payload_increment_bytes": 230598,
+      "candidate_context_bytes": 32763,
+      "candidate_estimated_tokens": 8191,
+      "category": "longmemeval/single-session-assistant",
+      "core_first": {
+        "candidate_all_annotated_turns": true,
+        "candidate_budget_headroom_bytes": 21,
+        "candidate_context_bytes": 32747,
+        "candidate_estimated_tokens": 8187,
+        "candidate_selected_message_count": 59,
+        "old_lost_gold_messages_recovered_by_core": [
+          {
+            "entry_id": "longmemeval:s:58470ed2:answer_sharegpt_U4oCSfU_7",
+            "message_index": 0
+          }
+        ],
+        "old_lost_gold_messages_recovered_by_core_count": 1,
+        "old_lost_gold_messages_still_missing": [],
+        "old_lost_gold_messages_still_missing_count": 0
+      },
+      "gold_lost_due_to_budget_rejection_count": 1,
+      "long_gold_messages_4k_plus": 0,
+      "long_gold_messages_8k_plus": 0,
+      "lost_gold_message_count": 1,
+      "lost_gold_messages": [
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 10,
+          "anchor_score": 0.8845379626717031,
+          "entry_id": "longmemeval:s:58470ed2:answer_sharegpt_U4oCSfU_7",
+          "entry_rank": 1,
+          "entry_utf8_bytes": 5641,
+          "gold_anchor_rejection": {
+            "added_message_count": 1,
+            "anchor_rank": 10,
+            "incremental_bundle_bytes": 3957,
+            "prior_rendered_bytes": 30319,
+            "rendered_bytes": 34276,
+            "single_anchor_bytes": 34276
+          },
+          "gold_message_index": 0,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 3958,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            89,
+            4043
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 3,
+          "message_unique_term_count": 216,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 89,
+          "prefix_utf8_bytes": 89,
+          "query_overlap_term_count": 13,
+          "selected_entry_elsewhere": true,
+          "selected_message_indices_in_entry": [
+            1,
+            2
+          ]
+        }
+      ],
+      "query_id": "longmemeval-s-58470ed2",
+      "reference_estimated_tokens": 7972,
+      "retrieved_entry_count": 10,
+      "retrieved_entry_ranks": {
+        "longmemeval:s:58470ed2:2f2884ad_3": 2,
+        "longmemeval:s:58470ed2:answer_sharegpt_U4oCSfU_7": 1,
+        "longmemeval:s:58470ed2:b6018747_4": 3,
+        "longmemeval:s:58470ed2:ebd61d29_2": 8,
+        "longmemeval:s:58470ed2:ff49b5a5_3": 4,
+        "longmemeval:s:58470ed2:sharegpt_1EZ78Ms_0": 6,
+        "longmemeval:s:58470ed2:sharegpt_6QUDIXG_104": 10,
+        "longmemeval:s:58470ed2:sharegpt_ErOTMZ3_277": 7,
+        "longmemeval:s:58470ed2:sharegpt_siSd9ET_0": 9,
+        "longmemeval:s:58470ed2:ultrachat_478785": 5
+      },
+      "selected_entry_count": 6,
+      "selected_message_count": 26,
+      "selected_message_payload_bytes": 31418
+    },
+    {
+      "admitted_neighbor_only_message_count": 16,
+      "admitted_neighbor_only_payload_bytes": 28993,
+      "all_gold_messages_whole_fit_as_single_anchor_at_rejection": false,
+      "budget_bytes": 32768,
+      "budget_headroom_bytes": 1,
+      "budget_rejected_bundle_count": 104,
+      "budget_rejected_bundle_payload_increment_bytes": 248691,
+      "candidate_context_bytes": 32767,
+      "candidate_estimated_tokens": 8192,
+      "category": "longmemeval/single-session-assistant",
+      "core_first": {
+        "candidate_all_annotated_turns": true,
+        "candidate_budget_headroom_bytes": 11,
+        "candidate_context_bytes": 32757,
+        "candidate_estimated_tokens": 8190,
+        "candidate_selected_message_count": 75,
+        "old_lost_gold_messages_recovered_by_core": [
+          {
+            "entry_id": "longmemeval:s:1568498a:answer_sharegpt_d6JJiqH_76",
+            "message_index": 19
+          }
+        ],
+        "old_lost_gold_messages_recovered_by_core_count": 1,
+        "old_lost_gold_messages_still_missing": [],
+        "old_lost_gold_messages_still_missing_count": 0
+      },
+      "gold_lost_due_to_budget_rejection_count": 1,
+      "long_gold_messages_4k_plus": 0,
+      "long_gold_messages_8k_plus": 0,
+      "lost_gold_message_count": 1,
+      "lost_gold_messages": [
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 87,
+          "anchor_score": 0.4082482904638631,
+          "entry_id": "longmemeval:s:1568498a:answer_sharegpt_d6JJiqH_76",
+          "entry_rank": 1,
+          "entry_utf8_bytes": 3546,
+          "gold_anchor_rejection": {
+            "added_message_count": 3,
+            "anchor_rank": 87,
+            "incremental_bundle_bytes": 437,
+            "prior_rendered_bytes": 32767,
+            "rendered_bytes": 33204,
+            "single_anchor_bytes": 32829
+          },
+          "gold_message_index": 19,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 36,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            2669,
+            2705
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 24,
+          "message_unique_term_count": 6,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 90,
+          "prefix_utf8_bytes": 90,
+          "query_overlap_term_count": 1,
+          "selected_entry_elsewhere": true,
+          "selected_message_indices_in_entry": [
+            0,
+            1,
+            2,
+            14,
+            15,
+            16
+          ]
+        }
+      ],
+      "query_id": "longmemeval-s-1568498a",
+      "reference_estimated_tokens": 8091,
+      "retrieved_entry_count": 10,
+      "retrieved_entry_ranks": {
+        "longmemeval:s:1568498a:38de4c2a_1": 8,
+        "longmemeval:s:1568498a:6ad46850_2": 6,
+        "longmemeval:s:1568498a:70fed904": 2,
+        "longmemeval:s:1568498a:71e0db57": 4,
+        "longmemeval:s:1568498a:804a55d2_2": 5,
+        "longmemeval:s:1568498a:a05cd79f_1": 3,
+        "longmemeval:s:1568498a:answer_sharegpt_d6JJiqH_76": 1,
+        "longmemeval:s:1568498a:sharegpt_h87NLyS_49": 9,
+        "longmemeval:s:1568498a:sharegpt_trljpZ5_27": 10,
+        "longmemeval:s:1568498a:ultrachat_131295": 7
+      },
+      "selected_entry_count": 5,
+      "selected_message_count": 28,
+      "selected_message_payload_bytes": 31676
+    },
+    {
+      "admitted_neighbor_only_message_count": 13,
+      "admitted_neighbor_only_payload_bytes": 27354,
+      "all_gold_messages_whole_fit_as_single_anchor_at_rejection": true,
+      "budget_bytes": 32768,
+      "budget_headroom_bytes": 57,
+      "budget_rejected_bundle_count": 102,
+      "budget_rejected_bundle_payload_increment_bytes": 269358,
+      "candidate_context_bytes": 32711,
+      "candidate_estimated_tokens": 8178,
+      "category": "longmemeval/single-session-assistant",
+      "core_first": {
+        "candidate_all_annotated_turns": true,
+        "candidate_budget_headroom_bytes": 8,
+        "candidate_context_bytes": 32760,
+        "candidate_estimated_tokens": 8190,
+        "candidate_selected_message_count": 56,
+        "old_lost_gold_messages_recovered_by_core": [
+          {
+            "entry_id": "longmemeval:s:d596882b:answer_ultrachat_252214",
+            "message_index": 5
+          }
+        ],
+        "old_lost_gold_messages_recovered_by_core_count": 1,
+        "old_lost_gold_messages_still_missing": [],
+        "old_lost_gold_messages_still_missing_count": 0
+      },
+      "gold_lost_due_to_budget_rejection_count": 1,
+      "long_gold_messages_4k_plus": 0,
+      "long_gold_messages_8k_plus": 0,
+      "lost_gold_message_count": 1,
+      "lost_gold_messages": [
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 15,
+          "anchor_score": 1.3228756555322951,
+          "entry_id": "longmemeval:s:d596882b:answer_ultrachat_252214",
+          "entry_rank": 1,
+          "entry_utf8_bytes": 5413,
+          "gold_anchor_rejection": {
+            "added_message_count": 3,
+            "anchor_rank": 15,
+            "incremental_bundle_bytes": 1665,
+            "prior_rendered_bytes": 31123,
+            "rendered_bytes": 32788,
+            "single_anchor_bytes": 32411
+          },
+          "gold_message_index": 5,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 1062,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            2988,
+            4050
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 8,
+          "message_unique_term_count": 112,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 87,
+          "prefix_utf8_bytes": 87,
+          "query_overlap_term_count": 14,
+          "selected_entry_elsewhere": true,
+          "selected_message_indices_in_entry": [
+            6,
+            7
+          ]
+        }
+      ],
+      "query_id": "longmemeval-s-d596882b",
+      "reference_estimated_tokens": 8192,
+      "retrieved_entry_count": 10,
+      "retrieved_entry_ranks": {
+        "longmemeval:s:d596882b:087d2b0a_1": 10,
+        "longmemeval:s:d596882b:0dc2efcc_2": 5,
+        "longmemeval:s:d596882b:456807b7_1": 6,
+        "longmemeval:s:d596882b:71888aff_2": 3,
+        "longmemeval:s:d596882b:9f6bec4f": 8,
+        "longmemeval:s:d596882b:answer_ultrachat_252214": 1,
+        "longmemeval:s:d596882b:bef3abcd": 2,
+        "longmemeval:s:d596882b:c324a5bc_1": 4,
+        "longmemeval:s:d596882b:ultrachat_299672": 9,
+        "longmemeval:s:d596882b:ultrachat_306390": 7
+      },
+      "selected_entry_count": 7,
+      "selected_message_count": 23,
+      "selected_message_payload_bytes": 31250
+    },
+    {
+      "admitted_neighbor_only_message_count": 21,
+      "admitted_neighbor_only_payload_bytes": 25560,
+      "all_gold_messages_whole_fit_as_single_anchor_at_rejection": false,
+      "budget_bytes": 32768,
+      "budget_headroom_bytes": 0,
+      "budget_rejected_bundle_count": 80,
+      "budget_rejected_bundle_payload_increment_bytes": 172351,
+      "candidate_context_bytes": 32768,
+      "candidate_estimated_tokens": 8192,
+      "category": "longmemeval/single-session-assistant",
+      "core_first": {
+        "candidate_all_annotated_turns": true,
+        "candidate_budget_headroom_bytes": 11,
+        "candidate_context_bytes": 32757,
+        "candidate_estimated_tokens": 8190,
+        "candidate_selected_message_count": 59,
+        "old_lost_gold_messages_recovered_by_core": [
+          {
+            "entry_id": "longmemeval:s:4388e9dd:answer_sharegpt_qTi81nS_0",
+            "message_index": 0
+          }
+        ],
+        "old_lost_gold_messages_recovered_by_core_count": 1,
+        "old_lost_gold_messages_still_missing": [],
+        "old_lost_gold_messages_still_missing_count": 0
+      },
+      "gold_lost_due_to_budget_rejection_count": 1,
+      "long_gold_messages_4k_plus": 0,
+      "long_gold_messages_8k_plus": 0,
+      "lost_gold_message_count": 1,
+      "lost_gold_messages": [
+        {
+          "admitted_neighbor_bundles_touching_gold": 0,
+          "anchor_rank": 27,
+          "anchor_score": 0.753778361444409,
+          "entry_id": "longmemeval:s:4388e9dd:answer_sharegpt_qTi81nS_0",
+          "entry_rank": 1,
+          "entry_utf8_bytes": 4885,
+          "gold_anchor_rejection": {
+            "added_message_count": 2,
+            "anchor_rank": 27,
+            "incremental_bundle_bytes": 3033,
+            "prior_rendered_bytes": 32687,
+            "rendered_bytes": 35720,
+            "single_anchor_bytes": 34452
+          },
+          "gold_message_index": 0,
+          "gold_message_selected": false,
+          "gold_message_utf8_bytes": 1741,
+          "gold_message_utf8_bytes_with_header_overhead": null,
+          "gold_range_utf16": [
+            89,
+            1830
+          ],
+          "gold_turn_entry_is_retrieved": true,
+          "message_count_in_entry": 6,
+          "message_unique_term_count": 176,
+          "nearest_admitted_neighbors": [],
+          "prefix_utf16_units": 89,
+          "prefix_utf8_bytes": 89,
+          "query_overlap_term_count": 10,
+          "selected_entry_elsewhere": true,
+          "selected_message_indices_in_entry": [
+            2,
+            3,
+            4
+          ]
+        }
+      ],
+      "query_id": "longmemeval-s-4388e9dd",
+      "reference_estimated_tokens": 8078,
+      "retrieved_entry_count": 10,
+      "retrieved_entry_ranks": {
+        "longmemeval:s:4388e9dd:3197d998_7": 4,
+        "longmemeval:s:4388e9dd:9ff53e00_1": 10,
+        "longmemeval:s:4388e9dd:answer_sharegpt_qTi81nS_0": 1,
+        "longmemeval:s:4388e9dd:cfd21744_2": 2,
+        "longmemeval:s:4388e9dd:fc2d70fe_1": 8,
+        "longmemeval:s:4388e9dd:sharegpt_0Zvzz4F_0": 9,
+        "longmemeval:s:4388e9dd:sharegpt_2LrB18X_51": 7,
+        "longmemeval:s:4388e9dd:sharegpt_Tun3KJ4_0": 6,
+        "longmemeval:s:4388e9dd:sharegpt_UM2wLW9_0": 5,
+        "longmemeval:s:4388e9dd:ultrachat_412706": 3
+      },
+      "selected_entry_count": 8,
+      "selected_message_count": 41,
+      "selected_message_payload_bytes": 30995
+    }
+  ],
+  "metric": "full_original_annotated_message_coverage_v1",
+  "prior_391_loss_cohort_29": {
+    "new_losses": [
+      "longmemeval-s-75499fd8",
+      "longmemeval-s-078150f1",
+      "longmemeval-s-1903aded"
+    ],
+    "prior_count": 29,
+    "recovered": [
+      "longmemeval-s-25e5aa4f",
+      "longmemeval-s-ccb36322",
+      "longmemeval-s-c14c00dd",
+      "longmemeval-s-0a995998",
+      "longmemeval-s-60bf93ed",
+      "longmemeval-s-5a7937c8",
+      "longmemeval-s-gpt4_372c3eed",
+      "longmemeval-s-06878be2",
+      "longmemeval-s-afdc33df",
+      "longmemeval-s-38146c39",
+      "longmemeval-s-2311e44b",
+      "longmemeval-s-d905b33f",
+      "longmemeval-s-37f165cf",
+      "longmemeval-s-5e1b23de",
+      "longmemeval-s-gpt4_0b2f1d21",
+      "longmemeval-s-gpt4_93159ced",
+      "longmemeval-s-gpt4_65aabe59",
+      "longmemeval-s-gpt4_c27434e8",
+      "longmemeval-s-cf22b7bf",
+      "longmemeval-s-a2f3aa27",
+      "longmemeval-s-9bbe84a2",
+      "longmemeval-s-7e00a6cb",
+      "longmemeval-s-58470ed2",
+      "longmemeval-s-1568498a",
+      "longmemeval-s-d596882b",
+      "longmemeval-s-4388e9dd"
+    ],
+    "still_lost": [
+      "longmemeval-s-a9f6b44c",
+      "longmemeval-s-67e0d0f2",
+      "longmemeval-s-c18a7dc8"
+    ]
+  },
+  "prior_391_totals": {
+    "admitted_neighbor_only_messages": 422,
+    "admitted_neighbor_only_payload_bytes": 753070,
+    "budget_rejected_bundle_count": 2732,
+    "budget_rejected_bundle_payload_increment_bytes": 7563353,
+    "categories": {
+      "longmemeval/knowledge-update": 3,
+      "longmemeval/multi-session": 10,
+      "longmemeval/single-session-assistant": 5,
+      "longmemeval/single-session-preference": 3,
+      "longmemeval/single-session-user": 3,
+      "longmemeval/temporal-reasoning": 5
+    },
+    "long_lost_messages_4k_plus": 0,
+    "long_lost_messages_8k_plus": 0,
+    "lost_gold_message_count": 33,
+    "lost_messages_selected_entry_elsewhere": 18,
+    "lost_messages_whole_fit_single_anchor_on_rejection": 16,
+    "lost_messages_with_budget_rejection_at_their_own_anchor": 33,
+    "regression_question_count": 29
+  },
+  "prior_mechanism": {
+    "admission": "whole rendered state must fit; failed bundle is rolled back",
+    "anchor_score": "unique query-term overlap / sqrt(max(1, unique message terms))",
+    "bundle": "anchor plus immediate predecessor/successor"
+  },
+  "prior_policy_control": {
+    "reference_pair": "versus_passages",
+    "report_section": "message_comparison",
+    "report_sha256": "822d839ebce4056695d4b607d0772fe94bae623c2050515688f22d43e244d50a",
+    "strategy": "query-message-neighbors-v1"
+  },
+  "reproducibility": {
+    "db_mode": "mode=ro,immutable=1; PRAGMA query_only=ON",
+    "input_hashes_unchanged_after_run": true,
+    "input_sha256": {
+      "boundaries": "3868f7c9ab26eb79953caf139b42535e3895de91ef7cb033eabbf5bf17e3aa8f",
+      "candidate_report": "822d839ebce4056695d4b607d0772fe94bae623c2050515688f22d43e244d50a",
+      "gold": "47dc2a2e8bdd1af0fb1b3d5aa39e68a4716548b8ad11d5587f06a7eac61a55db",
+      "message_comparison_source": "8ca015359d760ed3e61309bcd19f255fd97a92c710cab0ad37d75029872874d2",
+      "message_packing_source": "bd3a40ca47bc503e61f17738036083ed324ef5bc6fc4f9df7cad069ac69970c9",
+      "prior_report": "822d839ebce4056695d4b607d0772fe94bae623c2050515688f22d43e244d50a",
+      "queries": "274f858907c521cca2663c17fbb8bc5f2e198096d129e717c4c26a65c18ff7f1",
+      "snapshot": "fe48b7a30433f23d487d05608cecd969734b45686a51e29f5f86ba328059036a"
+    },
+    "prior_report_replay_assertions": "candidate ordered IDs, UTF-16 ranges, estimated tokens; all 29 lost IDs"
+  },
+  "schema_version": 1
+}

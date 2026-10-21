@@ -10,6 +10,12 @@ changelog is the canonical record of what moved.
 
 ### Added
 
+- A core-first whole-message experiment (#342) tests optional neighbor expansion
+  after admitting query-matched messages at the same 8,192 estimated tokens.
+  It retains paired comparisons against the frozen baseline, passage packing
+  and mandatory-neighbor packing, including the prior 29-question regression
+  cohort. Selection stays label-free; default packing is unchanged.
+
 - An opt-in whole-message packing experiment (#342) selects a query-matched
   message together with its immediate neighbors under the unchanged 8,192
   estimated-token budget. Label-free, hash-bound source boundaries preserve

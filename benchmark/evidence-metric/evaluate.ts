@@ -15,6 +15,7 @@ import { CONFIG, canonical, assertControlReproduced, comparePackingRows, compare
 import { validateGoldTurns, type GoldTurnSourceBindings } from "./gold-turns.js";
 import { validateMessageBoundaries, type MessageBoundarySourceBindings } from "./message-boundaries.js";
 import { compareMessageRows, packMessageEvidence, type MessageEvidenceRow } from "./message-comparison.js";
+import { compareCoreRows, packCoreEvidence } from "./core-comparison.js";
 
 export interface EvaluationOptions {
   snapshot: string;
@@ -27,6 +28,7 @@ export interface EvaluationOptions {
   goldTurns?: string;
   messageComparison?: "query-message-neighbors-v1";
   messageBoundaries?: string;
+  coreComparison?: "query-message-cores-v1";
 }
 export interface Bindings {
   snapshot_sha256: string;
@@ -54,6 +56,11 @@ export interface EvidenceReport {
     strategy: "query-message-neighbors-v1"; control_reproduced: true; coordinate_system: "utf16_code_units";
     metric_limitation: string;
     lineage: { message_boundaries_sha256: string; message_boundaries_source_sha256: string; message_packing_source_sha256: string; message_comparison_source_sha256: string; source: MessageBoundarySourceBindings };
+  };
+  core_comparison?: ReturnType<typeof compareCoreRows> & {
+    strategy: "query-message-cores-v1"; control_reproduced: true; coordinate_system: "utf16_code_units";
+    metric_limitation: string;
+    lineage: { message_boundaries_sha256: string; message_boundaries_source_sha256: string; message_packing_source_sha256: string; message_comparison_source_sha256: string; core_packing_source_sha256: string; core_comparison_source_sha256: string; source: MessageBoundarySourceBindings };
   };
   comparison?: ReturnType<typeof compareRows> & { baseline_all_gold_rate: number; current_all_gold_rate: number; reproduced?: boolean };
 }
@@ -172,6 +179,8 @@ export async function evaluate(options: EvaluationOptions): Promise<{ report: Ev
   if (options.messageComparison !== undefined && options.messageComparison !== "query-message-neighbors-v1") throw new Error("Unsupported message comparison strategy");
   if (options.messageComparison && (!options.messageBoundaries || !options.baseline || options.passageComparison !== "query-passages-v1" || !options.goldTurns)) throw new Error("Message comparison requires --message-boundaries, --baseline, --passage-comparison query-passages-v1 and --gold-turns");
   if (options.messageBoundaries && !options.messageComparison) throw new Error("--message-boundaries requires --message-comparison query-message-neighbors-v1");
+  if (options.coreComparison !== undefined && options.coreComparison !== "query-message-cores-v1") throw new Error("Unsupported core comparison strategy");
+  if (options.coreComparison && (!options.baseline || options.passageComparison !== "query-passages-v1" || !options.goldTurns || options.messageComparison !== "query-message-neighbors-v1" || !options.messageBoundaries)) throw new Error("Core comparison requires --baseline, --passage-comparison query-passages-v1, --gold-turns, --message-comparison query-message-neighbors-v1 and --message-boundaries");
   const paths = [options.snapshot, options.queries, options.vectors, ...(options.baseline ? [options.baseline] : []), ...(options.goldTurns ? [options.goldTurns] : []), ...(options.messageBoundaries ? [options.messageBoundaries] : [])].map((p) => realpathSync(p));
   const inputHashes = paths.map(hashFile);
   // Optional lineage stays outside the frozen legacy SOURCE_FILES contract.
@@ -179,6 +188,8 @@ export async function evaluate(options: EvaluationOptions): Promise<{ report: Ev
   const goldTurnSourceHash = options.passageComparison ? hashFile(goldTurnSourcePath) : undefined;
   const messageSourcePaths = ["benchmark/evidence-metric/message-boundaries.ts", "benchmark/answer-quality/message-packing.ts", "benchmark/evidence-metric/message-comparison.ts"].map((path) => join(ROOT, path));
   const messageSourceHashes = options.messageComparison ? messageSourcePaths.map(hashFile) : undefined;
+  const coreSourcePaths = ["benchmark/answer-quality/core-packing.ts", "benchmark/evidence-metric/core-comparison.ts"].map((path) => join(ROOT, path));
+  const coreSourceHashes = options.coreComparison ? coreSourcePaths.map(hashFile) : undefined;
   const asOf = normalizeAsOf(options.asOf);
   const queryBytes = readFileSync(paths[1]);
   const queries = validateQueries(queryBytes.toString("utf8").split("\n").filter((line) => line.trim() && !line.trim().startsWith("//")).map((line) => JSON.parse(line) as unknown));
@@ -229,6 +240,7 @@ export async function evaluate(options: EvaluationOptions): Promise<{ report: Ev
       const candidateRows: EvidenceRow[] = [];
       const passageRows: PassageEvidenceRow[] = [];
       const messageRows: MessageEvidenceRow[] = [];
+      const coreRows: MessageEvidenceRow[] = [];
       const queryTexts = new Map(queries.map((q) => [q.id, q.query]));
       const rows = result.queries.map((row) => {
         const gold = expected.get(row.query_id);
@@ -242,12 +254,13 @@ export async function evaluate(options: EvaluationOptions): Promise<{ report: Ev
         if (options.packingComparison) candidateRows.push(packEvidence(row.query_id, gold, entries, options.packingComparison));
         if (options.passageComparison) passageRows.push(packPassageEvidence(row.query_id, queryTexts.get(row.query_id)!, gold, entries));
         if (options.messageComparison && messageBoundaries) messageRows.push(packMessageEvidence(row.query_id, queryTexts.get(row.query_id)!, gold, entries, messageBoundaries.entriesById));
+        if (options.coreComparison && messageBoundaries) coreRows.push(packCoreEvidence(row.query_id, queryTexts.get(row.query_id)!, gold, entries, messageBoundaries.entriesById));
         return packEvidence(row.query_id, gold, entries);
       });
       validateRows(rows);
-      return { rows, candidateRows, passageRows, messageRows };
+      return { rows, candidateRows, passageRows, messageRows, coreRows };
     });
-    const { rows, candidateRows, passageRows, messageRows } = await run();
+    const { rows, candidateRows, passageRows, messageRows, coreRows } = await run();
     const report: EvidenceReport = { schema_version: 1, bindings, lineage: { ...source, ...(baseline ? { baseline_sha256: inputHashes[3] } : {}) }, metric_limitation: LIMITATION, quality_state: "not_measured", rows, summary: summarize(rows) };
     if (options.packingComparison && baseline) {
       assertControlReproduced(baseline.rows, rows);
@@ -271,6 +284,15 @@ export async function evaluate(options: EvaluationOptions): Promise<{ report: Ev
         ...compareMessageRows(rows, passageRows, messageRows, goldTurns.queriesById, queries),
       };
     }
+    if (options.coreComparison && baseline && goldTurns && messageBoundaries && messageSourceHashes && coreSourceHashes) {
+      assertControlReproduced(baseline.rows, rows);
+      report.core_comparison = {
+        strategy: options.coreComparison, control_reproduced: true, coordinate_system: "utf16_code_units",
+        metric_limitation: "Coverage requires complete original has_answer=true message content. It is neither reader accuracy nor exact answer-span coverage. Questions with any expected entry lacking a positive annotation are excluded only from all-message question rates; message gains and losses include every annotation.",
+        lineage: { message_boundaries_sha256: inputHashes[5], message_boundaries_source_sha256: messageSourceHashes[0], message_packing_source_sha256: messageSourceHashes[1], message_comparison_source_sha256: messageSourceHashes[2], core_packing_source_sha256: coreSourceHashes[0], core_comparison_source_sha256: coreSourceHashes[1], source: messageBoundaries.artifact.source },
+        ...compareCoreRows(rows, passageRows, messageRows, coreRows, goldTurns.queriesById, queries),
+      };
+    }
     let exitCode: 0 | 1 | 2 = 2;
     if (baseline) {
       const comparison = compareRows(baseline.rows, rows);
@@ -290,6 +312,7 @@ export async function evaluate(options: EvaluationOptions): Promise<{ report: Ev
     if (canonical(lineage()) !== canonical(source)) throw new Error("Evaluator source changed during the run");
     if (goldTurnSourceHash !== undefined && hashFile(goldTurnSourcePath) !== goldTurnSourceHash) throw new Error("Optional gold-turn evaluator source changed during the run");
     if (messageSourceHashes && messageSourcePaths.some((path, index) => hashFile(path) !== messageSourceHashes[index])) throw new Error("Optional message evaluator source changed during the run");
+    if (coreSourceHashes && coreSourcePaths.some((path, index) => hashFile(path) !== coreSourceHashes[index])) throw new Error("Optional core evaluator source changed during the run");
     return { report, exitCode };
   } finally {
     db.close();

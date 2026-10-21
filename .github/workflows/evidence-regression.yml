@@ -42,7 +42,8 @@ jobs:
             --passage-comparison query-passages-v1 \
             --gold-turns benchmark/evidence-metric/comparisons/longmemeval-s-passages-20261020/gold-turns.json \
             --message-comparison query-message-neighbors-v1 \
-            --message-boundaries benchmark/evidence-metric/comparisons/longmemeval-s-message-neighbors-20261021/message-boundaries.json
+            --message-boundaries benchmark/evidence-metric/comparisons/longmemeval-s-message-neighbors-20261021/message-boundaries.json \
+            --core-comparison query-message-cores-v1
       - name: Summarize the result
         if: always()
         run: |
@@ -69,6 +70,15 @@ jobs:
               const baseline = messages.versus_legacy.annotated_message_coverage;
               const passages = messages.versus_passages.annotated_message_coverage;
               appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\nWhole-message + neighbor experiment at **8,192 estimated tokens** (${messages.strategy}):\n\n| Full annotated-message coverage | Questions |\n| --- | ---: |\n| Baseline | ${baseline.reference_packed.all_turn_count}/${baseline.eligible_question_count} |\n| Previous passage candidate | ${passages.reference_packed.all_turn_count}/${passages.eligible_question_count} |\n| Whole-message candidate | ${baseline.candidate_packed.all_turn_count}/${baseline.eligible_question_count} |\n\nGained/lost questions versus baseline: ${baseline.gained_question_ids.length}/${baseline.lost_question_ids.length}; versus passages: ${passages.gained_question_ids.length}/${passages.lost_question_ids.length}. Partially selected messages: ${messages.whole_message_conservation.partial_message_count}. Full paired/category/range evidence is in the report. Experimental losses are informational; reader accuracy is unmeasured.\n`);
+            }
+            const cores = result.core_comparison;
+            if (cores) {
+              const pairs = [['#341 baseline', cores.versus_legacy], ['#390 passages', cores.versus_passages], ['#391 neighbors', cores.versus_neighbors]];
+              const rows = pairs.map(([name, pair]) => {
+                const c = pair.annotated_message_coverage;
+                return `| ${name} | ${c.reference_packed.all_turn_count}/${c.eligible_question_count} | ${c.candidate_packed.all_turn_count}/${c.eligible_question_count} | ${c.gained_question_ids.length} / ${c.lost_question_ids.length} |`;
+              });
+              appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\nCore-first experiment at **8,192 estimated tokens** (${cores.strategy}):\n\n| Reference | Reference complete | Candidate complete | Gained / lost questions |\n| --- | ---: | ---: | ---: |\n${rows.join('\n')}\n\nPartial messages: ${cores.whole_message_conservation.partial_message_count}. Rule frozen before measurement; regression-led development-set iteration, not held-out generalization or reader accuracy. Experimental losses remain visible and informational.\n`);
             }
           } else {
             appendFileSync(process.env.GITHUB_STEP_SUMMARY, 'Packed evidence: **invalid / no report**. See the failing setup or download step; this is not a successful comparison.\n');
