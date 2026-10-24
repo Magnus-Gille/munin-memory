@@ -1152,9 +1152,19 @@ async function main() {
 
 // How long shutdown waits for in-flight HTTP requests to finish before it
 // force-closes their sockets. Bounded so a stuck request cannot block a deploy
-// restart indefinitely; systemd's default stop timeout is 90 s, so this leaves
-// ample room for stopping the workers and closing the DB afterwards.
+// restart indefinitely.
+//
+// Worst case total = SHUTDOWN_DRAIN_TIMEOUT_MS + SHUTDOWN_WORKER_STOP_TIMEOUT_MS
+// = 30 s plus DB close, which stays well under systemd's default 90 s stop
+// timeout (after which SIGKILL would cut shutdown short).
 export const SHUTDOWN_DRAIN_TIMEOUT_MS = 10_000;
+
+// How long shutdown waits, in total, for both worker stops. A stop awaits its
+// in-flight batch, and a consolidation batch can sit in an LLM fetch that has no
+// timeout of its own, so the wait must be bounded here. On expiry the still-pending
+// stop(s) are logged, the exit code becomes 1, and shutdown proceeds to close
+// the DB (the in-flight batch is then abandoned and dies with the process).
+export const SHUTDOWN_WORKER_STOP_TIMEOUT_MS = 20_000;
 
 export interface ShutdownDeps {
   /** HTTP transport only; undefined for stdio. */
@@ -1167,6 +1177,8 @@ export interface ShutdownDeps {
   /** Exit code to use when every step succeeds (1 on the fatal startup path). */
   exitCode?: number;
   drainTimeoutMs?: number;
+  /** Combined bound for both worker stops. */
+  workerStopTimeoutMs?: number;
 }
 
 /**
@@ -1188,16 +1200,36 @@ export async function runGracefulShutdown(deps: ShutdownDeps): Promise<void> {
     }
   }
 
-  const stops = await Promise.allSettled([deps.stopEmbeddingWorker(), deps.stopConsolidationWorker()]);
-  const names = ["embedding", "consolidation"];
-  stops.forEach((result, i) => {
-    if (result.status === "rejected") {
-      // A worker stop can reject (in-flight DB/write/embedding errors). Don't let
-      // that skip the other worker or the DB close.
-      log(`Error stopping ${names[i]} worker during shutdown:`, result.reason);
-      exitCode = 1;
-    }
-  });
+  const stopTimeoutMs = deps.workerStopTimeoutMs ?? SHUTDOWN_WORKER_STOP_TIMEOUT_MS;
+  const stopNames = ["embedding", "consolidation"];
+  const settled = [false, false];
+  const stopResults = [deps.stopEmbeddingWorker, deps.stopConsolidationWorker].map((stop, i) =>
+    // Run each stop in its own async wrapper so a synchronous throw is also
+    // reported as a rejection of that worker only.
+    (async () => stop())().then(
+      () => { settled[i] = true; },
+      (err: unknown) => {
+        settled[i] = true;
+        // A worker stop can reject (in-flight DB/write/embedding errors). Don't let
+        // that skip the other worker or the DB close.
+        log(`Error stopping ${stopNames[i]} worker during shutdown:`, err);
+        exitCode = 1;
+      },
+    ),
+  );
+  let stopTimer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = await Promise.race([
+    Promise.all(stopResults).then(() => false),
+    new Promise<boolean>((resolve) => {
+      stopTimer = setTimeout(() => resolve(true), stopTimeoutMs);
+    }),
+  ]);
+  clearTimeout(stopTimer);
+  if (timedOut) {
+    const pending = stopNames.filter((_, i) => !settled[i]).join(", ");
+    log(`Worker stop still pending after ${stopTimeoutMs} ms (${pending}); closing the database anyway`);
+    exitCode = 1;
+  }
 
   try {
     deps.closeDatabase();

@@ -20,7 +20,13 @@ import {
   _setWorkerDb,
   _resetHealthState,
 } from "../src/consolidation.js";
-import { createHttpServer, runGracefulShutdown, type ShutdownDeps } from "../src/index.js";
+import {
+  createHttpServer,
+  runGracefulShutdown,
+  SHUTDOWN_DRAIN_TIMEOUT_MS,
+  SHUTDOWN_WORKER_STOP_TIMEOUT_MS,
+  type ShutdownDeps,
+} from "../src/index.js";
 import { createTestStorage } from "./helpers/test-storage.js";
 
 const STORAGE = createTestStorage("graceful-shutdown");
@@ -83,6 +89,10 @@ function makeDeps(overrides: Partial<ShutdownDeps> = {}): ShutdownDeps & { event
 }
 
 describe("runGracefulShutdown ordering and independence (#413)", () => {
+  it("keeps the worst-case shutdown below systemd's 90 s stop timeout", () => {
+    expect(SHUTDOWN_DRAIN_TIMEOUT_MS + SHUTDOWN_WORKER_STOP_TIMEOUT_MS).toBeLessThan(90_000);
+  });
+
   it("stops the consolidation worker even when the embedding stop rejects", async () => {
     const deps = makeDeps({
       stopEmbeddingWorker: async () => {
@@ -125,6 +135,38 @@ describe("runGracefulShutdown ordering and independence (#413)", () => {
     await runGracefulShutdown(deps);
 
     expect(deps.events).toEqual(["stop-embedding", "stop-consolidation", "close-db", "exit:0"]);
+  });
+
+  it("stops waiting for a never-settling worker stop, reports it, and still closes the database", async () => {
+    const logs: string[] = [];
+    const deps = makeDeps({
+      stopConsolidationWorker: () => new Promise<void>(() => {}), // hangs, like an LLM fetch with no timeout
+      workerStopTimeoutMs: 20,
+      log: (message) => { logs.push(message); },
+    });
+
+    await runGracefulShutdown(deps);
+
+    expect(deps.events).toEqual(["stop-embedding", "close-db", "exit:1"]);
+    expect(logs.some((m) => m.includes("consolidation") && m.includes("20 ms"))).toBe(true);
+    expect(logs.some((m) => m.includes("embedding") && m.includes("still pending"))).toBe(false);
+  });
+
+  it("bounds shutdown by the worker-stop timeout under fake timers", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const deps = makeDeps({
+      stopEmbeddingWorker: () => new Promise<void>(() => {}),
+      stopConsolidationWorker: () => new Promise<void>(() => {}),
+    });
+
+    const shutdown = runGracefulShutdown(deps);
+    await vi.advanceTimersByTimeAsync(SHUTDOWN_WORKER_STOP_TIMEOUT_MS - 1);
+    expect(deps.events).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    await shutdown;
+
+    expect(deps.events).toEqual(["close-db", "exit:1"]);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("keeps a non-zero initial exit code (fatal startup path)", async () => {
@@ -356,6 +398,56 @@ describe("consolidation worker stop (#413)", () => {
       globalThis.fetch = originalFetch;
       warnSpy.mockRestore();
       logSpy.mockRestore();
+    }
+  });
+
+  it("resets timer and state, and shutdown still closes the database, when the in-flight batch rejects", async () => {
+    for (let i = 0; i < _consolidationConfig.minLogs; i++) {
+      appendLog(db, "projects/shutdown-reject", `Log ${i}`, []);
+    }
+    const gate = deferred<Response>();
+    const entered = deferred();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      if (String(url).endsWith("/key")) {
+        return { ok: true, status: 200, text: async () => "" } as unknown as Response;
+      }
+      entered.resolve();
+      return gate.promise;
+    }) as typeof fetch;
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // Fixture-injected failure: the batch's per-namespace failure report throws,
+    // which escapes processConsolidationBatch and rejects the in-flight promise.
+    errorSpy.mockImplementation((message: unknown) => {
+      if (typeof message === "string" && message.startsWith("Consolidation failed for")) {
+        throw new Error("fixture injected batch failure");
+      }
+    });
+    try {
+      _setApiKey("fake-key");
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      startConsolidationWorker(db);
+      await vi.advanceTimersByTimeAsync(_consolidationConfig.intervalMs);
+      await entered.promise;
+
+      const logs: string[] = [];
+      const deps = makeDeps({
+        stopConsolidationWorker,
+        log: (message) => { logs.push(message); },
+      });
+      const shutdown = runGracefulShutdown(deps);
+      gate.reject(new Error("provider unreachable"));
+      await shutdown;
+
+      expect(logs.some((m) => m.includes("consolidation worker"))).toBe(true);
+      expect(deps.events).toEqual(["stop-embedding", "close-db", "exit:1"]);
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(_consolidationConfig.intervalMs * 10);
+      expect(vi.getTimerCount()).toBe(0);
+      await expect(stopConsolidationWorker()).resolves.toBeUndefined();
+    } finally {
+      globalThis.fetch = originalFetch;
+      warnSpy.mockRestore();
     }
   });
 });
