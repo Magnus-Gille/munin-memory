@@ -513,7 +513,7 @@ describe("admin CLI — oauth-clients", () => {
     insertOAuthMapping(db, "client-rm", "alice");
     insertToken(db, "token-1", "client-rm", "alice");
 
-    expect(removeOAuthClient(db, "client-rm")).toBe(true);
+    expect(removeOAuthClient(db, "client-rm").removed).toBe(true);
     expect(listOAuthClients(db, "alice")).toHaveLength(0);
 
     // Token should be revoked
@@ -523,7 +523,7 @@ describe("admin CLI — oauth-clients", () => {
   });
 
   it("removeOAuthClient returns false for non-existent", () => {
-    expect(removeOAuthClient(db, "nonexistent")).toBe(false);
+    expect(removeOAuthClient(db, "nonexistent").removed).toBe(false);
   });
 
   it("clearOAuthClients removes all mappings for principal", () => {
@@ -535,7 +535,7 @@ describe("admin CLI — oauth-clients", () => {
     insertOAuthMapping(db, "c2", "alice");
     insertOAuthMapping(db, "c3", "alice");
 
-    expect(clearOAuthClients(db, "alice")).toBe(3);
+    expect(clearOAuthClients(db, "alice").mappingsRemoved).toBe(3);
     expect(listOAuthClients(db, "alice")).toHaveLength(0);
   });
 

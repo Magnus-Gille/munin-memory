@@ -68,6 +68,43 @@ changelog is the canonical record of what moved.
   3.1.9 and ip-address 10.7.4. The `overrides` floors are raised so the lockfile
   cannot fall back. `npm audit` reports no advisories. The previously tracked
   Hono and Sharp advisories no longer apply to the resolved versions.
+
+- **OAuth consent identity binding (#411).** The resolved consent identity is now
+  bound per request (`res.locals.consentIdentity`) instead of through a shared
+  provider field. Previously two concurrent `POST /authorize` requests from
+  different principals could cross: one pending authorization received the other
+  principal's identity and the other was left unbound. Approval re-resolved the
+  identity so there was no escalation, but the GET/POST-time binding of the
+  consent TOCTOU defence was not reliable. `setLastResolvedIdentity` is removed.
+
+- **OAuth token lifecycle (#408).** Revoking an OAuth access or refresh token via
+  the revocation endpoint now revokes the whole access/refresh pair, so a client
+  "disconnect" no longer leaves a 30-day refresh token (or a live access token)
+  behind. Refresh rotation now revokes the previous access token. A refresh
+  request may only narrow the originally granted scopes; requesting scopes outside
+  the grant is rejected with `invalid_scope` instead of being issued. Expected
+  grant failures (unknown, replayed, expired or foreign refresh tokens and
+  authorization codes, redirect mismatch) now return HTTP 400 `invalid_grant`
+  instead of HTTP 500 `server_error`. A rejected refresh request no longer
+  consumes the refresh token.
+
+- **OAuth admin revocation (#407).** `oauth-clients clear <principal>` now revokes
+  every OAuth access and refresh token bound to the principal and invalidates its
+  unredeemed authorization codes, even when the principal-client mapping belongs to
+  another principal (shared public `client_id`). `oauth-clients remove <client>` now
+  also invalidates the client's approved-but-unredeemed authorization codes, and
+  code and refresh-token exchange fail closed with `invalid_grant` when the client
+  is no longer registered. `clearOAuthClients` returns
+  `{ mappingsRemoved, tokensRevoked, codesInvalidated }`; the `clear` text output
+  reports all three counts and its `--json` output adds `tokensRevoked` and
+  `codesInvalidated` (`removed` still counts mappings). Clearing a principal no
+  longer revokes other principals' tokens on a client it happened to own.
+  `removeOAuthClient` likewise returns `{ removed, mappingsRemoved, tokensRevoked,
+  codesInvalidated }`, and `oauth-clients remove` prints those counts in text and
+  `--json`. Authorization-code and refresh-token exchange and both admin commands
+  now run as IMMEDIATE transactions (code claim, validation and token issuance are
+  one transaction), so an admin revocation from the separate CLI process can no
+  longer land between a code being claimed and its tokens being issued.
 - Keep offsite backup and snapshot Heimdall bearer tokens out of curl arguments,
   and reject tokens containing CR/LF before sending a panel update.
 - **OAuth consent proxy and identity gates.** Public issuers now require an exact
