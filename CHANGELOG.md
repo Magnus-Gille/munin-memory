@@ -63,6 +63,20 @@ changelog is the canonical record of what moved.
 
 ### Security
 
+- Credential-shaped values in stored metadata and retrieval telemetry are now
+  handled like credentials in `content` (#409). `memory_write` (including
+  `patch.tags_add`), `memory_log` and `memory_update_status` scan namespace, key and
+  tags with the same secret patterns and reject with the same
+  `validation_error` contract (`Tag|Key|Namespace appears to contain a secret or
+  credential (matched pattern: ...)`), never echoing the value; the scan runs
+  before format validation so malformed secret-shaped values are not echoed
+  either. `memory_query` and `memory_retrieval_feedback` mask secret matches as
+  `[REDACTED]` (deterministic, from the shared pattern list) before persisting
+  `retrieval_events.query_text` / `retrieval_feedback.query_text`, and pagination
+  snapshots store masked query, namespace and tag filters; searching and cursor
+  resumption still use the caller's original text. Historical rows are not
+  rewritten; scrubbing existing `retrieval_events.query_text` is a separate
+  operator decision.
 - Keep offsite backup and snapshot Heimdall bearer tokens out of curl arguments,
   and reject tokens containing CR/LF before sending a panel update.
 - **OAuth consent proxy and identity gates.** Public issuers now require an exact

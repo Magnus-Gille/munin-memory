@@ -142,12 +142,12 @@ export const WRITE_NAMESPACE_PATTERN = WRITE_NAMESPACE_RE.source;
 export const KEY_PATTERN = KEY_RE.source;
 export const TAG_PATTERN = TAG_RE.source;
 
-export function scanForSecrets(content: string): SecurityResult {
+export function scanForSecrets(content: string, subject = "Content"): SecurityResult {
   for (const { pattern, label } of SECRET_PATTERNS) {
     if (pattern.test(content)) {
       return {
         valid: false,
-        error: `Content appears to contain a secret or credential (matched pattern: ${label}). Secrets should never be stored in memory. Remove the sensitive content and try again.`,
+        error: `${subject} appears to contain a secret or credential (matched pattern: ${label}). Secrets should never be stored in memory. Remove the sensitive content and try again.`,
       };
     }
   }
@@ -155,8 +155,39 @@ export function scanForSecrets(content: string): SecurityResult {
 }
 
 /**
+ * Scan stored metadata (namespace, key, tags) with the same {@link SECRET_PATTERNS}
+ * and the same rejection contract as {@link scanForSecrets} on `content`.
+ * The error names only the field and the matched pattern label, never the value.
+ * Runs before format validation so a malformed secret-shaped value is rejected as
+ * a secret instead of being echoed back by a "invalid tag/key/namespace" message.
+ * Non-string values are ignored here; the format validators reject them.
+ */
+export function scanMetadataForSecrets(fields: {
+  namespace?: unknown;
+  key?: unknown;
+  tags?: unknown;
+}): SecurityResult {
+  const candidates: Array<[string, unknown]> = [
+    ["Namespace", fields.namespace],
+    ["Key", fields.key],
+  ];
+  if (Array.isArray(fields.tags)) {
+    for (const tag of fields.tags) candidates.push(["Tag", tag]);
+  }
+  for (const [subject, value] of candidates) {
+    if (typeof value !== "string") continue;
+    const check = scanForSecrets(value, subject);
+    if (!check.valid) return check;
+  }
+  return { valid: true };
+}
+
+/**
  * Replace all secret-pattern matches in `message` with "[REDACTED]".
- * Used to sanitize error strings before storing or exposing them.
+ * Used to sanitize error strings before storing or exposing them, and to mask
+ * query text before it is persisted to retrieval telemetry (#409). The masking
+ * is deterministic: the same input always yields the same output, only the
+ * matched span is replaced, and it automatically follows {@link SECRET_PATTERNS}.
  * Unlike {@link scanForSecrets} (which rejects on first match), this
  * applies every pattern as a global replacement so multi-secret strings
  * are fully scrubbed.
@@ -337,16 +368,19 @@ export function validateTags(tags: unknown): SecurityResult {
     return { valid: true };
   }
   if (!Array.isArray(tags)) {
-    return { valid: false, error: `Tags must be a JSON array of strings (e.g. ["decision", "active"]), got ${typeof tags}: ${JSON.stringify(tags)}` };
+    return { valid: false, error: redactSecrets(`Tags must be a JSON array of strings (e.g. ["decision", "active"]), got ${typeof tags}: ${JSON.stringify(tags)}`) };
   }
   if (tags.length > MAX_TAGS) {
     return { valid: false, error: `Too many tags (max ${MAX_TAGS}, got ${tags.length}).` };
   }
+  // Tags are persisted verbatim, so they get the same credential scan as content.
+  const secretCheck = scanMetadataForSecrets({ tags });
+  if (!secretCheck.valid) return secretCheck;
   for (const tag of tags) {
     if (typeof tag !== "string" || !TAG_RE.test(tag)) {
       return {
         valid: false,
-        error: `Invalid tag "${tag}". Each tag must start with alphanumeric, then alphanumeric/underscore/hyphen/colon only.`,
+        error: `Invalid tag "${redactSecrets(String(tag))}". Each tag must start with alphanumeric, then alphanumeric/underscore/hyphen/colon only.`,
       };
     }
   }
@@ -361,6 +395,7 @@ export function validateWriteInput(
   maxContentSize: number,
 ): SecurityResult {
   const checks = [
+    scanMetadataForSecrets({ namespace, key }),
     validateWriteNamespace(namespace),
     validateKey(key),
     validateContent(content, maxContentSize),
@@ -380,6 +415,7 @@ export function validateLogInput(
   maxContentSize: number,
 ): SecurityResult {
   const checks = [
+    scanMetadataForSecrets({ namespace }),
     validateWriteNamespace(namespace),
     validateContent(content, maxContentSize),
     validateTags(tags),

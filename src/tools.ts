@@ -132,6 +132,8 @@ import {
   validateTags,
   injectionWarning,
   scanForSecrets,
+  scanMetadataForSecrets,
+  redactSecrets,
   scanForInjection,
   isNamespaceDeleteAllowed,
   NAMESPACE_PATTERN,
@@ -453,6 +455,26 @@ function buildQueryRequestShape(
   };
 }
 
+/**
+ * Mask credential-shaped text in the user-supplied search fields of a request
+ * shape (query, namespace filter, tag filters) before it is persisted in
+ * `query_snapshots` or fingerprinted (#409). Masking is deterministic
+ * ({@link redactSecrets}); the in-memory shape used to serve the request is not
+ * touched. Tags are masked before normalisation so ordering stays stable.
+ */
+function maskQueryRequestShape(shape: QueryRequestShape): QueryRequestShape {
+  return {
+    ...shape,
+    query: shape.query === null ? null : redactSecrets(shape.query),
+    namespace: shape.namespace === null ? null : redactSecrets(shape.namespace),
+    tags: normalizeQueryTags(shape.tags.map((tag) => redactSecrets(tag))),
+  };
+}
+
+function maskQueryResponseMeta(meta: QueryResponseMeta): QueryResponseMeta {
+  return meta.query === undefined ? meta : { ...meta, query: redactSecrets(meta.query) };
+}
+
 function fingerprintJson(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
@@ -563,12 +585,16 @@ function queryResumeOverridesMatch(
   normalizedUntil?: string,
 ): boolean {
   const filterOnlyShape = storedShape.requested_mode === "filter" && storedShape.query === null;
-  if (hasOwnQueryArg(queryArgs, "query") && ((queryArgs.query || null) !== storedShape.query)) return false;
-  if (hasOwnQueryArg(queryArgs, "namespace") && (queryArgs.namespace ?? null) !== storedShape.namespace) return false;
+  // The stored shape holds masked text (see maskQueryRequestShape), so compare
+  // against the identically masked live arguments.
+  const maskedQuery = typeof queryArgs.query === "string" ? redactSecrets(queryArgs.query) : queryArgs.query;
+  const maskedNamespace = typeof queryArgs.namespace === "string" ? redactSecrets(queryArgs.namespace) : queryArgs.namespace;
+  if (hasOwnQueryArg(queryArgs, "query") && ((maskedQuery || null) !== storedShape.query)) return false;
+  if (hasOwnQueryArg(queryArgs, "namespace") && (maskedNamespace ?? null) !== storedShape.namespace) return false;
   if (hasOwnQueryArg(queryArgs, "entry_type") && (queryArgs.entry_type ?? null) !== storedShape.entry_type) return false;
   if (
     hasOwnQueryArg(queryArgs, "tags")
-    && JSON.stringify(normalizeQueryTags(queryArgs.tags)) !== JSON.stringify(storedShape.tags)
+    && JSON.stringify(normalizeQueryTags(queryArgs.tags?.map((tag) => redactSecrets(tag)))) !== JSON.stringify(storedShape.tags)
   ) {
     return false;
   }
@@ -10460,7 +10486,12 @@ export function registerTools(
               } =
                 args as unknown as WriteParams & { patch?: PatchParams };
 
-              // Validate namespace and key (always required)
+              // Validate namespace and key (always required). Credential-shaped
+              // metadata is rejected first so format errors never echo it (#409).
+              const writeMetadataSecretCheck = scanMetadataForSecrets({ namespace, key });
+              if (!writeMetadataSecretCheck.valid) {
+                return errResult("write", "validation_error", writeMetadataSecretCheck.error!);
+              }
               const nsCheck = validateWriteNamespace(namespace);
               if (!nsCheck.valid) {
                 return errResult("write", "validation_error", nsCheck.error!);
@@ -11617,7 +11648,7 @@ export function registerTools(
                   requireLexicalMatch,
                   serialization,
                 });
-                const requestFingerprint = fingerprintJson(requestShape);
+                const requestFingerprint = fingerprintJson(maskQueryRequestShape(requestShape));
                 // Must have at least one filter to avoid returning everything
                 if (!namespace && (!tags || tags.length === 0) && !since && !until && !entry_type) {
                   return errResult("query", "validation_error", "Provide either a 'query' string for search, or at least one filter (namespace, tags, entry_type, since, until) to browse.");
@@ -11689,8 +11720,8 @@ export function registerTools(
                       principalId: ctx.principalId,
                       accessFingerprint: accessBinding,
                       requestFingerprint,
-                      requestShape: JSON.stringify(requestShape),
-                      responseMeta: JSON.stringify(responseMeta),
+                      requestShape: JSON.stringify(maskQueryRequestShape(requestShape)),
+                      responseMeta: JSON.stringify(maskQueryResponseMeta(responseMeta)),
                       resultIds: JSON.stringify(resultIds),
                       resultMatchMeta: "{}",
                       cursorSecret,
@@ -11735,7 +11766,7 @@ export function registerTools(
                 requireLexicalMatch,
                 serialization,
               });
-              const requestFingerprint = fingerprintJson(requestShape);
+              const requestFingerprint = fingerprintJson(maskQueryRequestShape(requestShape));
               const queryParams: QueryParams = {
                 query: queryText,
                 namespace,
@@ -12122,8 +12153,8 @@ export function registerTools(
                     principalId: ctx.principalId,
                     accessFingerprint: accessBinding,
                     requestFingerprint,
-                    requestShape: JSON.stringify(requestShape),
-                    responseMeta: JSON.stringify(responseMeta),
+                    requestShape: JSON.stringify(maskQueryRequestShape(requestShape)),
+                    responseMeta: JSON.stringify(maskQueryResponseMeta(responseMeta)),
                     resultIds: JSON.stringify(resultIds),
                     resultMatchMeta: JSON.stringify(storedMatchMeta),
                     cursorSecret,
