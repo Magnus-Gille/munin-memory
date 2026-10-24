@@ -63,6 +63,17 @@ changelog is the canonical record of what moved.
 
 ### Security
 
+- **OAuth admin revocation (#407).** `oauth-clients clear <principal>` now revokes
+  every OAuth access and refresh token bound to the principal and invalidates its
+  unredeemed authorization codes, even when the principal-client mapping belongs to
+  another principal (shared public `client_id`). `oauth-clients remove <client>` now
+  also invalidates the client's approved-but-unredeemed authorization codes, and
+  code and refresh-token exchange fail closed with `invalid_grant` when the client
+  is no longer registered. `clearOAuthClients` returns
+  `{ mappingsRemoved, tokensRevoked, codesInvalidated }`; the `clear` text output
+  reports all three counts and its `--json` output adds `tokensRevoked` and
+  `codesInvalidated` (`removed` still counts mappings). Clearing a principal no
+  longer revokes other principals' tokens on a client it happened to own.
 - Keep offsite backup and snapshot Heimdall bearer tokens out of curl arguments,
   and reject tokens containing CR/LF before sending a panel update.
 - **OAuth consent proxy and identity gates.** Public issuers now require an exact

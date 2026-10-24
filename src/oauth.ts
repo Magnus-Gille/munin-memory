@@ -25,7 +25,10 @@ import type {
   OAuthTokenRevocationRequest,
   OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
-import { InvalidTokenError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
+import {
+  InvalidGrantError,
+  InvalidTokenError,
+} from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import { nowUTC } from "./db.js";
 import { renderConsentPage } from "./consent.js";
 import type { AuthMethod, TransportType } from "./types.js";
@@ -418,6 +421,9 @@ export class MuninOAuthProvider implements OAuthServerProvider {
     redirectUri?: string,
     resource?: URL,
   ): Promise<OAuthTokens> {
+    // Fail closed if the client has been removed since the code was issued.
+    this.assertClientRegistered(client.client_id);
+
     const codeHash = hashOpaqueValue(authorizationCode);
 
     // Atomically claim the code: UPDATE ... WHERE used = 0, check changes === 1
@@ -459,12 +465,23 @@ export class MuninOAuthProvider implements OAuthServerProvider {
     return this.issueTokenPair(client.client_id, scopes, resourceStr, row.principal_id ?? undefined);
   }
 
+  private assertClientRegistered(clientId: string): void {
+    const row = this.db
+      .prepare("SELECT 1 AS present FROM oauth_clients WHERE client_id = ?")
+      .get(clientId);
+    if (!row) {
+      throw new InvalidGrantError("Client is no longer registered");
+    }
+  }
+
   async exchangeRefreshToken(
     client: OAuthClientInformationFull,
     refreshToken: string,
     scopes?: string[],
     resource?: URL,
   ): Promise<OAuthTokens> {
+    this.assertClientRegistered(client.client_id);
+
     const refreshTokenHash = hashOpaqueValue(refreshToken);
 
     // Atomically claim the refresh token: UPDATE WHERE revoked = 0, check changes === 1

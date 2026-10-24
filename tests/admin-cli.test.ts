@@ -1004,9 +1004,13 @@ describe("clearOAuthClients", () => {
   let db: Database.Database;
   beforeEach(() => { db = makeDb(); });
 
-  it("returns 0 when principal has no clients", () => {
+  it("returns zero counts when principal has no clients", () => {
     addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
-    expect(clearOAuthClients(db, "alice")).toBe(0);
+    expect(clearOAuthClients(db, "alice")).toEqual({
+      mappingsRemoved: 0,
+      tokensRevoked: 0,
+      codesInvalidated: 0,
+    });
   });
 
   it("removes all client mappings for a principal", () => {
@@ -1015,7 +1019,7 @@ describe("clearOAuthClients", () => {
     insertOAuthClientMapping(db, "c2", "alice");
     insertOAuthClientMapping(db, "c3", "alice");
 
-    expect(clearOAuthClients(db, "alice")).toBe(3);
+    expect(clearOAuthClients(db, "alice").mappingsRemoved).toBe(3);
     expect(listOAuthClients(db, "alice")).toHaveLength(0);
   });
 

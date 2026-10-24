@@ -535,7 +535,7 @@ describe("admin CLI — oauth-clients", () => {
     insertOAuthMapping(db, "c2", "alice");
     insertOAuthMapping(db, "c3", "alice");
 
-    expect(clearOAuthClients(db, "alice")).toBe(3);
+    expect(clearOAuthClients(db, "alice").mappingsRemoved).toBe(3);
     expect(listOAuthClients(db, "alice")).toHaveLength(0);
   });
 
