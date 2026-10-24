@@ -8,6 +8,8 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-10-24
+
 ### Added
 
 - A core-first whole-message experiment (#342) tests optional neighbor expansion
@@ -1690,7 +1692,9 @@ Initial public release (commit `c40c127`). Core MCP tool surface
 `memory_list`, `memory_delete`), SQLite + FTS5 storage, Bearer token auth,
 stdio transport, and the first HTTP transport for Raspberry Pi deployment.
 
-[Unreleased]: https://github.com/Magnus-Gille/munin-memory/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/Magnus-Gille/munin-memory/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/Magnus-Gille/munin-memory/compare/v0.6.1...v0.7.0
+[0.6.1]: https://github.com/Magnus-Gille/munin-memory/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/Magnus-Gille/munin-memory/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/Magnus-Gille/munin-memory/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/Magnus-Gille/munin-memory/compare/v0.3.4...v0.4.0
