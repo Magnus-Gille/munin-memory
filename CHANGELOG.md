@@ -84,8 +84,13 @@ changelog is the canonical record of what moved.
   either. `memory_query` and `memory_retrieval_feedback` mask secret matches as
   `[REDACTED]` (deterministic, from the shared pattern list) before persisting
   `retrieval_events.query_text` / `retrieval_feedback.query_text`, and pagination
-  snapshots store masked query, namespace and tag filters; searching and cursor
-  resumption still use the caller's original text. Historical rows are not
+  snapshots store masked query, namespace and tag filters. Searching uses the
+  caller's original text; cursor resume compares secret-shaped arguments by a
+  keyed digest (HMAC-SHA256 under the snapshot's cursor secret), so a different
+  secret is never accepted as a continuation, and `memory_query` responses echo
+  the masked `query` on every page. Namespace and key format errors redact
+  credential-shaped values, and `memory_update_status` rejects a secret-bearing
+  namespace before any format error. Historical rows are not
   rewritten; scrubbing existing `retrieval_events.query_text` is a separate
   operator decision.
 - Keep offsite backup and snapshot Heimdall bearer tokens out of curl arguments,

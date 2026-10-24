@@ -308,7 +308,7 @@ export function validateNamespace(namespace: string): SecurityResult {
     }
     return {
       valid: false,
-      error: `Invalid namespace "${namespace}". Must match pattern: starts with alphanumeric, then alphanumeric/underscore/hyphen/slash only.${detail}`,
+      error: redactSecrets(`Invalid namespace "${namespace}". Must match pattern: starts with alphanumeric, then alphanumeric/underscore/hyphen/slash only.${detail}`),
     };
   }
   return { valid: true };
@@ -338,10 +338,11 @@ export function validateWriteNamespace(namespace: string): SecurityResult {
     const hint = trimmed.length > 0 && !trimmed.includes("//") ? ` Did you mean "${trimmed}"?` : "";
     return {
       valid: false,
-      error:
+      error: redactSecrets(
         `Invalid namespace "${namespace}". Namespace segments cannot be empty, so a ` +
         `trailing or doubled slash is not allowed as a write target — it would create a ` +
         `second namespace separate from the one you meant.${hint}`,
+      ),
     };
   }
   return { valid: true };
@@ -367,7 +368,7 @@ export function validateKey(key: string): SecurityResult {
   if (!KEY_RE.test(key)) {
     return {
       valid: false,
-      error: `Invalid key "${key}". Must match pattern: starts with alphanumeric, then alphanumeric/underscore/hyphen only.`,
+      error: redactSecrets(`Invalid key "${key}". Must match pattern: starts with alphanumeric, then alphanumeric/underscore/hyphen only.`),
     };
   }
   return { valid: true };

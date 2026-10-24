@@ -134,14 +134,107 @@ describe("secret scanning of stored metadata (#409)", () => {
   });
 });
 
+describe("query cursor resume with secret-bearing arguments (#409)", () => {
+  const CURSOR_MISMATCH = "Query cursor does not match the supplied query arguments.";
+
+  function seed(namespaceFor: (i: number) => string, tags: string[]): void {
+    for (let index = 0; index < 15; index += 1) {
+      writeState(db, namespaceFor(index), "status", `ghp ${"X".repeat(36)} REDACTED resume ${index}`, tags);
+    }
+  }
+
+  it("rejects a different secret-shaped query on resume but accepts the identical one", async () => {
+    seed((i) => `projects/resume-${i}`, ["active"]);
+    const first = await call("memory_query", { query: FIXTURE_TOKEN, search_mode: "lexical", limit: 10 });
+    expect(first.has_more).toBe(true);
+
+    const other = await call("memory_query", { cursor: first.next_cursor, query: FIXTURE_TOKEN_2 });
+    expect(other.ok).toBe(false);
+    expect(other.message).toBe(CURSOR_MISMATCH);
+
+    // A literal masked placeholder is not the original query either.
+    const placeholder = await call("memory_query", { cursor: first.next_cursor, query: "[REDACTED]" });
+    expect(placeholder.ok).toBe(false);
+    expect(placeholder.message).toBe(CURSOR_MISMATCH);
+
+    const same = await call("memory_query", { cursor: first.next_cursor, query: FIXTURE_TOKEN });
+    expect(same.ok).toBe(true);
+    expect(same.returned).toBeGreaterThan(0);
+  });
+
+  it("does not let a literal placeholder query cursor accept a secret query", async () => {
+    seed((i) => `projects/placeholder-${i}`, ["active"]);
+    const first = await call("memory_query", { query: "[REDACTED]", search_mode: "lexical", limit: 10 });
+    expect(first.has_more).toBe(true);
+    const secret = await call("memory_query", { cursor: first.next_cursor, query: FIXTURE_TOKEN });
+    expect(secret.ok).toBe(false);
+    expect(secret.message).toBe(CURSOR_MISMATCH);
+    expect((await call("memory_query", { cursor: first.next_cursor, query: "[REDACTED]" })).ok).toBe(true);
+  });
+
+  it("rejects a different secret-shaped tag filter on resume", async () => {
+    seed((i) => `projects/tagged-${i}`, [FIXTURE_TOKEN_2]);
+    const first = await call("memory_query", { tags: [FIXTURE_TOKEN_2], namespace: "projects/", limit: 10 });
+    expect(first.ok).toBe(true);
+    expect(first.has_more).toBe(true);
+    const stored = db.prepare("SELECT request_shape FROM query_snapshots").get() as { request_shape: string };
+    expect(stored.request_shape).not.toContain(FIXTURE_TOKEN_2);
+
+    const other = await call("memory_query", { cursor: first.next_cursor, tags: [FIXTURE_TOKEN_3] });
+    expect(other.ok).toBe(false);
+    expect(other.message).toBe(CURSOR_MISMATCH);
+    const same = await call("memory_query", { cursor: first.next_cursor, tags: [FIXTURE_TOKEN_2] });
+    expect(same.ok).toBe(true);
+  });
+
+  it("rejects a different secret-shaped namespace filter on resume", async () => {
+    seed((i) => `projects/${FIXTURE_TOKEN_2}/n${i}`, ["active"]);
+    const first = await call("memory_query", { namespace: `projects/${FIXTURE_TOKEN_2}`, limit: 10 });
+    expect(first.ok).toBe(true);
+    expect(first.has_more).toBe(true);
+    const stored = db.prepare("SELECT request_shape FROM query_snapshots").get() as { request_shape: string };
+    expect(stored.request_shape).not.toContain(FIXTURE_TOKEN_2);
+
+    const other = await call("memory_query", { cursor: first.next_cursor, namespace: `projects/${FIXTURE_TOKEN_3}` });
+    expect(other.ok).toBe(false);
+    expect(other.message).toBe(CURSOR_MISMATCH);
+    const same = await call("memory_query", { cursor: first.next_cursor, namespace: `projects/${FIXTURE_TOKEN_2}` });
+    expect(same.ok).toBe(true);
+  });
+});
+
+describe("format errors never echo credential-shaped namespaces or keys (#409)", () => {
+  it("memory_update_status rejects a malformed secret-bearing namespace as a secret", async () => {
+    const result = await call("memory_update_status", { namespace: `projects/${FIXTURE_TOKEN}.invalid`, phase: "Planning" });
+    expectSecretRejection(result);
+  });
+
+  it("memory_write and memory_log reject a malformed secret-bearing namespace as a secret", async () => {
+    expectSecretRejection(await call("memory_write", { namespace: `testing/${FIXTURE_TOKEN}.invalid`, key: "k", content: "x" }));
+    expectSecretRejection(await call("memory_log", { namespace: `testing/${FIXTURE_TOKEN}.invalid`, content: "x" }));
+  });
+
+  it("read-side validation errors redact credential-shaped namespaces and keys", async () => {
+    for (const [tool, args] of [
+      ["memory_read", { namespace: `projects/${FIXTURE_TOKEN}.invalid`, key: "k" }],
+      ["memory_read", { namespace: "projects/ok", key: `${FIXTURE_TOKEN}.invalid` }],
+      ["memory_list", { namespace: `projects/${FIXTURE_TOKEN}.invalid` }],
+    ] as const) {
+      const result = await call(tool, args);
+      expect(result.ok).toBe(false);
+      expect(JSON.stringify(result)).not.toContain(FIXTURE_TOKEN);
+    }
+  });
+});
+
 describe("secret masking in retrieval telemetry (#409)", () => {
   it("memory_query persists a masked query_text but still searches with the original", async () => {
     writeState(db, "projects/telemetry", "status", `needle ghp ${"X".repeat(36)}`, ["active"]);
     const result = await call("memory_query", { query: FIXTURE_TOKEN, search_mode: "lexical" });
     expect(result.ok).toBe(true);
-    // Searching used the original text: the in-memory response still echoes it
-    // and the lexical match on the tokenised secret is found.
-    expect(result.query).toBe(FIXTURE_TOKEN);
+    // Searching used the original text (the lexical match on the tokenised
+    // secret is found), but the response never echoes the secret back.
+    expect(result.query).toBe("[REDACTED]");
     expect(result.results.length).toBeGreaterThan(0);
 
     const rows = db.prepare("SELECT query_text FROM retrieval_events WHERE tool_name = 'memory_query'").all() as Array<{ query_text: string }>;
@@ -185,6 +278,9 @@ describe("secret masking in retrieval telemetry (#409)", () => {
     const second = await call("memory_query", { cursor: first.next_cursor, query: FIXTURE_TOKEN });
     expect(second.ok).toBe(true);
     expect(second.returned).toBeGreaterThan(0);
+    // Consistent, masked echo on every page.
+    expect(first.query).toBe("[REDACTED]");
+    expect(second.query).toBe(first.query);
     const events = db.prepare("SELECT query_text FROM retrieval_events WHERE tool_name = 'memory_query'").all() as Array<{ query_text: string }>;
     expect(events.length).toBeGreaterThanOrEqual(2);
     for (const event of events) expect(event.query_text).toBe("[REDACTED]");
