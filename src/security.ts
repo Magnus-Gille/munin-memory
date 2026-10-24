@@ -1,6 +1,9 @@
 import type { SecurityResult } from "./types.js";
 import { resolveOwnerAliases } from "./owner-config.js";
 
+const PRIVATE_KEY_BEGIN = /-----BEGIN\s+(?:[A-Z0-9]+\s+){0,3}PRIVATE\s+KEY(?:\s+BLOCK)?-----/;
+const PRIVATE_KEY_END = /-----END\s+(?:[A-Z0-9]+\s+){0,3}PRIVATE\s+KEY(?:\s+BLOCK)?-----/;
+
 /**
  * Credential formats rejected before storage.
  *
@@ -24,9 +27,33 @@ const SECRET_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /gho_[a-zA-Z0-9]{36,}/, label: "GitHub OAuth token" },
   { pattern: /github_pat_[a-zA-Z0-9_]{22,}/, label: "GitHub fine-grained PAT" },
   { pattern: /Bearer\s+[a-zA-Z0-9\-._~+/]{20,}=*/, label: "Bearer token" },
-  { pattern: /-----BEGIN\s+(RSA\s+)?PRIVATE\s+KEY-----/, label: "Private key" },
+  // Lowercase/mixed-case bearer (#410): an Authorization header line is
+  // unambiguous; elsewhere require a digit in the token so prose such as
+  // "bearer authentication-middleware-handler" is not rejected as a secret.
+  { pattern: /authorization\s*:\s*bearer\s+[a-zA-Z0-9\-._~+/]{20,}=*/i, label: "Bearer token" },
+  // The token either contains a digit, or is a >=20-char hyphen-free run that is
+  // not continued by a further token char (so "bearer abc...xyz-handler" stays prose).
+  {
+    pattern: /\bbearer\s+(?:(?=[a-zA-Z0-9\-._~+/]*\d)[a-zA-Z0-9\-._~+/]{20,}|[a-zA-Z0-9._~+/]{20,}(?![a-zA-Z0-9\-._~+/]))=*/i,
+    label: "Bearer token",
+  },
+  // Any "-----BEGIN [ALGO ]PRIVATE KEY[ BLOCK]-----" marker: RSA, EC, DSA, OPENSSH,
+  // ENCRYPTED, PGP ... Up to three qualifier words keeps the scan linear. Detection
+  // needs only the marker; redactSecrets additionally masks the key body through the
+  // matching END marker (see PRIVATE_KEY_END).
+  { pattern: PRIVATE_KEY_BEGIN, label: "Private key" },
   { pattern: /-----BEGIN\s+CERTIFICATE-----/, label: "Certificate" },
   { pattern: /AKIA[0-9A-Z]{16}/, label: "AWS access key" },
+  // Credential formats added for #410. Each needs a distinctive prefix plus a
+  // minimum-length body so prose mentioning the prefix alone is not flagged; the
+  // lookbehinds stop mid-word hits (e.g. "task_live_...").
+  { pattern: /eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{10,}/, label: "JSON Web Token" },
+  { pattern: /xox[a-z]-[A-Za-z0-9-]{10,}/, label: "Slack token" },
+  { pattern: /xapp-\d-[A-Za-z0-9-]{10,}/, label: "Slack token" },
+  { pattern: /glpat-[A-Za-z0-9_-]{20,}/, label: "GitLab personal access token" },
+  { pattern: /(?<![A-Za-z0-9])[sr]k_live_[A-Za-z0-9]{16,}/, label: "Stripe live key" },
+  { pattern: /(?<![A-Za-z0-9])npm_[A-Za-z0-9]{36,}/, label: "npm access token" },
+  { pattern: /ya29\.[A-Za-z0-9_-]{20,}/, label: "Google OAuth access token" },
   { pattern: /password\s*[:=]\s*['"][^'"]{8,}['"]/i, label: "Inline password" },
   { pattern: /secret\s*[:=]\s*['"][^'"]{8,}['"]/i, label: "Inline secret" },
 ];
@@ -142,12 +169,12 @@ export const WRITE_NAMESPACE_PATTERN = WRITE_NAMESPACE_RE.source;
 export const KEY_PATTERN = KEY_RE.source;
 export const TAG_PATTERN = TAG_RE.source;
 
-export function scanForSecrets(content: string): SecurityResult {
+export function scanForSecrets(content: string, subject = "Content"): SecurityResult {
   for (const { pattern, label } of SECRET_PATTERNS) {
     if (pattern.test(content)) {
       return {
         valid: false,
-        error: `Content appears to contain a secret or credential (matched pattern: ${label}). Secrets should never be stored in memory. Remove the sensitive content and try again.`,
+        error: `${subject} appears to contain a secret or credential (matched pattern: ${label}). Secrets should never be stored in memory. Remove the sensitive content and try again.`,
       };
     }
   }
@@ -155,14 +182,69 @@ export function scanForSecrets(content: string): SecurityResult {
 }
 
 /**
+ * Scan stored metadata (namespace, key, tags) with the same {@link SECRET_PATTERNS}
+ * and the same rejection contract as {@link scanForSecrets} on `content`.
+ * The error names only the field and the matched pattern label, never the value.
+ * Runs before format validation so a malformed secret-shaped value is rejected as
+ * a secret instead of being echoed back by a "invalid tag/key/namespace" message.
+ * Non-string values are ignored here; the format validators reject them.
+ */
+export function scanMetadataForSecrets(fields: {
+  namespace?: unknown;
+  key?: unknown;
+  tags?: unknown;
+}): SecurityResult {
+  const candidates: Array<[string, unknown]> = [
+    ["Namespace", fields.namespace],
+    ["Key", fields.key],
+  ];
+  if (Array.isArray(fields.tags)) {
+    for (const tag of fields.tags) candidates.push(["Tag", tag]);
+  }
+  for (const [subject, value] of candidates) {
+    if (typeof value !== "string") continue;
+    const check = scanForSecrets(value, subject);
+    if (!check.valid) return check;
+  }
+  return { valid: true };
+}
+
+/**
+ * Mask each private-key PEM block, BEGIN marker through the matching END marker
+ * (no length cap). An unterminated block is masked to the end of the string:
+ * over-redaction is acceptable for error/telemetry text, leaking key material is
+ * not. Linear: the scan resumes after each END marker and stops at a missing one.
+ */
+function maskPrivateKeyBlocks(message: string): string {
+  const begin = new RegExp(PRIVATE_KEY_BEGIN.source, "g");
+  const end = new RegExp(PRIVATE_KEY_END.source, "g");
+  let out = "";
+  let cursor = 0;
+  for (;;) {
+    begin.lastIndex = cursor;
+    const b = begin.exec(message);
+    if (!b) break;
+    out += message.slice(cursor, b.index) + "[REDACTED]";
+    end.lastIndex = b.index + b[0].length;
+    const e = end.exec(message);
+    if (!e) return out;
+    cursor = e.index + e[0].length;
+  }
+  return out + message.slice(cursor);
+}
+
+/**
  * Replace all secret-pattern matches in `message` with "[REDACTED]".
- * Used to sanitize error strings before storing or exposing them.
+ * Used to sanitize error strings before storing or exposing them, and to mask
+ * query text before it is persisted to retrieval telemetry (#409). The masking
+ * is deterministic: the same input always yields the same output, only the
+ * matched span is replaced, and it automatically follows {@link SECRET_PATTERNS}.
  * Unlike {@link scanForSecrets} (which rejects on first match), this
  * applies every pattern as a global replacement so multi-secret strings
  * are fully scrubbed.
  */
 export function redactSecrets(message: string): string {
-  let result = message;
+  let result = maskPrivateKeyBlocks(message);
   for (const { pattern } of SECRET_PATTERNS) {
     // Build a global-flagged copy so replaceAll behaviour works regardless
     // of whether the pattern already has the /g flag.
@@ -254,7 +336,7 @@ export function validateNamespace(namespace: string): SecurityResult {
     }
     return {
       valid: false,
-      error: `Invalid namespace "${namespace}". Must match pattern: starts with alphanumeric, then alphanumeric/underscore/hyphen/slash only.${detail}`,
+      error: redactSecrets(`Invalid namespace "${namespace}". Must match pattern: starts with alphanumeric, then alphanumeric/underscore/hyphen/slash only.${detail}`),
     };
   }
   return { valid: true };
@@ -284,10 +366,11 @@ export function validateWriteNamespace(namespace: string): SecurityResult {
     const hint = trimmed.length > 0 && !trimmed.includes("//") ? ` Did you mean "${trimmed}"?` : "";
     return {
       valid: false,
-      error:
+      error: redactSecrets(
         `Invalid namespace "${namespace}". Namespace segments cannot be empty, so a ` +
         `trailing or doubled slash is not allowed as a write target — it would create a ` +
         `second namespace separate from the one you meant.${hint}`,
+      ),
     };
   }
   return { valid: true };
@@ -313,7 +396,7 @@ export function validateKey(key: string): SecurityResult {
   if (!KEY_RE.test(key)) {
     return {
       valid: false,
-      error: `Invalid key "${key}". Must match pattern: starts with alphanumeric, then alphanumeric/underscore/hyphen only.`,
+      error: redactSecrets(`Invalid key "${key}". Must match pattern: starts with alphanumeric, then alphanumeric/underscore/hyphen only.`),
     };
   }
   return { valid: true };
@@ -337,16 +420,19 @@ export function validateTags(tags: unknown): SecurityResult {
     return { valid: true };
   }
   if (!Array.isArray(tags)) {
-    return { valid: false, error: `Tags must be a JSON array of strings (e.g. ["decision", "active"]), got ${typeof tags}: ${JSON.stringify(tags)}` };
+    return { valid: false, error: redactSecrets(`Tags must be a JSON array of strings (e.g. ["decision", "active"]), got ${typeof tags}: ${JSON.stringify(tags)}`) };
   }
   if (tags.length > MAX_TAGS) {
     return { valid: false, error: `Too many tags (max ${MAX_TAGS}, got ${tags.length}).` };
   }
+  // Tags are persisted verbatim, so they get the same credential scan as content.
+  const secretCheck = scanMetadataForSecrets({ tags });
+  if (!secretCheck.valid) return secretCheck;
   for (const tag of tags) {
     if (typeof tag !== "string" || !TAG_RE.test(tag)) {
       return {
         valid: false,
-        error: `Invalid tag "${tag}". Each tag must start with alphanumeric, then alphanumeric/underscore/hyphen/colon only.`,
+        error: `Invalid tag "${redactSecrets(String(tag))}". Each tag must start with alphanumeric, then alphanumeric/underscore/hyphen/colon only.`,
       };
     }
   }
@@ -361,6 +447,7 @@ export function validateWriteInput(
   maxContentSize: number,
 ): SecurityResult {
   const checks = [
+    scanMetadataForSecrets({ namespace, key }),
     validateWriteNamespace(namespace),
     validateKey(key),
     validateContent(content, maxContentSize),
@@ -380,6 +467,7 @@ export function validateLogInput(
   maxContentSize: number,
 ): SecurityResult {
   const checks = [
+    scanMetadataForSecrets({ namespace }),
     validateWriteNamespace(namespace),
     validateContent(content, maxContentSize),
     validateTags(tags),

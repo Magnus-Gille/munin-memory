@@ -34,7 +34,7 @@ import { hasQueryProbeLimit, withQueryProbeLimit } from "./internal/query-probe.
 import { CANONICAL_TRACKED_NEXT_STEP_FINGERPRINT_PREFIX } from "./commitment-status.js";
 import { runMigrations } from "./migrations.js";
 import { resolveKnob } from "./profiles.js";
-import { scanForSecrets, validateWriteNamespace } from "./security.js";
+import { redactSecrets, scanForSecrets, validateWriteNamespace } from "./security.js";
 import {
   CLASSIFICATION_LEVELS,
   compareClassificationLevels,
@@ -3636,7 +3636,8 @@ export function logRetrievalEvent(
         input.sessionId,
         now,
         input.toolName,
-        input.queryText ?? null,
+        // Telemetry must not retain credentials pasted as queries (#409).
+        typeof input.queryText === "string" ? redactSecrets(input.queryText) : null,
         input.requestedMode ?? null,
         input.actualMode ?? null,
         JSON.stringify(input.resultIds),
@@ -4184,7 +4185,8 @@ export function logRetrievalFeedback(
       eventId,
       input.sessionId,
       input.feedbackType,
-      input.queryText ?? null,
+      // Same masking as retrieval_events.query_text (#409).
+      typeof input.queryText === "string" ? redactSecrets(input.queryText) : null,
       input.expectedNamespace ?? null,
       input.expectedKey ?? null,
       input.expectedEntryId ?? null,

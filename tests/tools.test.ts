@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
 import Database from "better-sqlite3";
 import { unlinkSync, existsSync } from "node:fs";
+import { generateKeyPairSync } from "node:crypto";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
   appendLog,
@@ -425,6 +426,23 @@ describe("memory_write", () => {
     });
     const result = parseToolResponse(raw) as { error: string };
     expect(result.error).toBe("validation_error");
+  });
+
+  it("rejects a generated EC private key PEM in content without echoing it (#410)", async () => {
+    const pem = generateKeyPairSync("ec", { namedCurve: "prime256v1" })
+      .privateKey.export({ format: "pem", type: "sec1" })
+      .toString();
+    const raw = await callTool("memory_write", {
+      namespace: "projects/test",
+      key: "ec-key",
+      content: pem,
+    });
+    const result = parseToolResponse(raw) as { error: string; message: string };
+    expect(result.error).toBe("validation_error");
+    expect(result.message).toContain("Private key");
+    expect(result.message).not.toContain("BEGIN EC PRIVATE KEY");
+    const stored = db.prepare("SELECT COUNT(*) AS n FROM entries WHERE key = ?").get("ec-key") as { n: number };
+    expect(stored.n).toBe(0);
   });
 
   it("accepts and normalizes valid_until", async () => {

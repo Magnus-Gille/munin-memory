@@ -63,6 +63,96 @@ changelog is the canonical record of what moved.
 
 ### Security
 
+- `memory_write` (patches and full overwrites) and `memory_update_status`
+  (including `validate_only` previews) now check the existing entry against the
+  caller's classification ceiling, using the same predicate as `memory_read`,
+  before merging, previewing, or changing its classification (#406). Previously
+  a principal with write access but a lower ceiling could lower a hidden entry's
+  classification with a tag-only patch, overwrite and declassify it with a full
+  write, learn its revision from a CAS or `create_if_absent` conflict, or see
+  protected status content in a preview. Such calls are now denied as hidden
+  targets (`access_denied` for agents, `{"found": false}` otherwise,
+  `classification_error` for owners) and modify nothing. The check is repeated
+  inside the write transaction, so a concurrent classification raise from
+  another connection cannot be overwritten. Callers whose ceiling covers the
+  entry are unaffected.
+
+- Production dependencies are lifted past four advisories (#236): body-parser
+  2.4.0 (GHSA-27r3-jxmh-p828), zod 4.6.7 (GHSA-mrhx-c7xc-m3w5), fast-uri
+  3.1.9 and ip-address 10.7.4. The `overrides` floors are raised so the lockfile
+  cannot fall back. `npm audit` reports no advisories. The previously tracked
+  Hono and Sharp advisories no longer apply to the resolved versions.
+
+- **OAuth consent identity binding (#411).** The resolved consent identity is now
+  bound per request (`res.locals.consentIdentity`) instead of through a shared
+  provider field. Previously two concurrent `POST /authorize` requests from
+  different principals could cross: one pending authorization received the other
+  principal's identity and the other was left unbound. Approval re-resolved the
+  identity so there was no escalation, but the GET/POST-time binding of the
+  consent TOCTOU defence was not reliable. `setLastResolvedIdentity` is removed.
+
+- **OAuth token lifecycle (#408).** Revoking an OAuth access or refresh token via
+  the revocation endpoint now revokes the whole access/refresh pair, so a client
+  "disconnect" no longer leaves a 30-day refresh token (or a live access token)
+  behind. Refresh rotation now revokes the previous access token. A refresh
+  request may only narrow the originally granted scopes; requesting scopes outside
+  the grant is rejected with `invalid_scope` instead of being issued. Expected
+  grant failures (unknown, replayed, expired or foreign refresh tokens and
+  authorization codes, redirect mismatch) now return HTTP 400 `invalid_grant`
+  instead of HTTP 500 `server_error`. A rejected refresh request no longer
+  consumes the refresh token.
+
+- **OAuth admin revocation (#407).** `oauth-clients clear <principal>` now revokes
+  every OAuth access and refresh token bound to the principal and invalidates its
+  unredeemed authorization codes, even when the principal-client mapping belongs to
+  another principal (shared public `client_id`). `oauth-clients remove <client>` now
+  also invalidates the client's approved-but-unredeemed authorization codes, and
+  code and refresh-token exchange fail closed with `invalid_grant` when the client
+  is no longer registered. `clearOAuthClients` returns
+  `{ mappingsRemoved, tokensRevoked, codesInvalidated }`; the `clear` text output
+  reports all three counts and its `--json` output adds `tokensRevoked` and
+  `codesInvalidated` (`removed` still counts mappings). Clearing a principal no
+  longer revokes other principals' tokens on a client it happened to own.
+  `removeOAuthClient` likewise returns `{ removed, mappingsRemoved, tokensRevoked,
+  codesInvalidated }`, and `oauth-clients remove` prints those counts in text and
+  `--json`. Authorization-code and refresh-token exchange and both admin commands
+  now run as IMMEDIATE transactions (code claim, validation and token issuance are
+  one transaction), so an admin revocation from the separate CLI process can no
+  longer land between a code being claimed and its tokens being issued.
+
+- The secret scan now also rejects credential formats it previously let through
+  (#410): private-key PEM blocks of any algorithm (`EC`, `DSA`, `OPENSSH`,
+  `ENCRYPTED`, ... not just `RSA`/plain), JSON Web Tokens, Slack tokens
+  (`xox?-`, `xapp-`), GitLab PATs (`glpat-`), Stripe live/restricted keys
+  (`sk_live_`, `rk_live_`), npm tokens (`npm_`), Google OAuth access tokens
+  (`ya29.`) and lowercase `bearer <token>`. All patterns require a minimum body
+  length so prose such as "sk_live" in docs or a short `npm_install` tag is not
+  flagged. `redactSecrets` (error and telemetry masking) uses the same list and
+  now also masks the key material of a PEM private-key block, not just its
+  `BEGIN` line.
+
+- Credential-shaped values in stored metadata and retrieval telemetry are now
+  handled like credentials in `content` (#409). `memory_write` (including
+  `patch.tags_add`), `memory_log` and `memory_update_status` scan namespace, key and
+  tags with the same secret patterns and reject with the same
+  `validation_error` contract (`Tag|Key|Namespace appears to contain a secret or
+  credential (matched pattern: ...)`), never echoing the value; the scan runs
+  before format validation so malformed secret-shaped values are not echoed
+  either. `memory_query` and `memory_retrieval_feedback` mask secret matches as
+  `[REDACTED]` (deterministic, from the shared pattern list) before persisting
+  `retrieval_events.query_text` / `retrieval_feedback.query_text`, and pagination
+  snapshots store masked query, namespace and tag filters. Searching uses the
+  caller's original text; cursor resume compares secret-shaped arguments by a
+  keyed digest (HMAC-SHA256 under a random per-process key that is never
+  persisted), so a different secret is never accepted as a continuation. After a
+  restart, or for snapshots created before this change, a secret-bearing
+  argument cannot be verified and the client is told to resume with the cursor
+  only. `memory_query` responses echo the masked `query` on every page, and `memory_read_batch` failure items mask
+  credential-shaped namespace/key values. Namespace and key format errors redact
+  credential-shaped values, and `memory_update_status` rejects a secret-bearing
+  namespace before any format error. Historical rows are not
+  rewritten; scrubbing existing `retrieval_events.query_text` is a separate
+  operator decision.
 - Keep offsite backup and snapshot Heimdall bearer tokens out of curl arguments,
   and reject tokens containing CR/LF before sending a panel update.
 - **OAuth consent proxy and identity gates.** Public issuers now require an exact
@@ -76,6 +166,31 @@ changelog is the canonical record of what moved.
   bodies or arbitrary request headers in diagnostics.
 
 ### Fixed
+
+- Graceful shutdown (#413) now drains in-flight HTTP requests before closing the
+  database: it stops accepting connections, closes idle keep-alive sockets, waits
+  up to 10 s for active requests, then force-closes any that remain. Previously
+  `SIGTERM` closed the DB and exited immediately, cutting requests off on deploy
+  restarts. The embedding and consolidation workers are now stopped
+  independently, so a rejecting embedding stop (for example an in-flight batch
+  whose failure-status write throws) no longer skips the consolidation stop. The
+  worker-stop phase is bounded to 20 s in total (a stuck in-flight LLM call is
+  abandoned), keeping a restart under systemd's 90 s stop timeout; the exit code
+  is 1 if any step failed or timed out. Both workers also no longer re-arm a
+  timer after stop, and their timers are `unref`'d.
+
+- The HTTP server now keeps idle connections for 95 s instead of Node's 5 s
+  default, longer than cloudflared's 90 s origin pool (#404). A proxy reusing a
+  socket Node was closing got a connection reset, which failed Claude's OAuth
+  client registration (`POST /register`) and caused intermittent origin 502s.
+
+- Migration 32 (#412) restricts the `entries_au` FTS trigger to
+  `AFTER UPDATE OF content, namespace, key, tags, rowid`. Embedding-worker
+  writes to `embedding_status` and other non-indexed columns no longer delete and
+  re-insert the FTS row or re-run `munin_split_tokens` over the full content.
+  Trigger body and code-health exclusion logic are unchanged and the FTS index
+  is not rebuilt. Rollback is a new forward migration recreating the trigger
+  without the `OF` list.
 
 - Benchmark corpus generation now rebuilds vectors with missing or stale immutable
   identities, records the active identity, and rejects model-binding changes.

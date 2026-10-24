@@ -132,6 +132,8 @@ import {
   validateTags,
   injectionWarning,
   scanForSecrets,
+  scanMetadataForSecrets,
+  redactSecrets,
   scanForInjection,
   isNamespaceDeleteAllowed,
   NAMESPACE_PATTERN,
@@ -238,6 +240,7 @@ import type {
   ClassificationLevel,
   CommitmentStatus,
   IntakeResult,
+  SecurityResult,
 } from "./types.js";
 
 // In-memory delete token store (debate resolution #9)
@@ -284,6 +287,20 @@ type QueryRequestShape = {
   explain: boolean;
   require_lexical_match: boolean;
   serialization: "linear" | "boundary";
+  /**
+   * Keyed digests (HMAC-SHA256 under a process-held key that is never persisted) of the ORIGINAL
+   * query / namespace / tags, present only for fields whose persisted value was
+   * masked by {@link maskQueryRequestShape}. They let cursor resume tell two
+   * different secret-shaped arguments apart without persisting either (#409).
+   */
+  original_digests?: { query?: string; namespace?: string; tags?: string };
+  /**
+   * Identifies the process-held key that produced `original_digests` (a truncated
+   * SHA-256 of the key; not reversible). Absent on snapshots created before the
+   * digests existed. A different id means the key was lost (restart), so the
+   * digests can no longer be verified.
+   */
+  digest_key_id?: string;
 };
 
 type StoredQueryResultMeta = {
@@ -453,6 +470,93 @@ function buildQueryRequestShape(
   };
 }
 
+/**
+ * Mask credential-shaped text in the user-supplied search fields of a request
+ * shape (query, namespace filter, tag filters) before it is persisted in
+ * `query_snapshots` or fingerprinted (#409). Masking is deterministic
+ * ({@link redactSecrets}); the in-memory shape used to serve the request is not
+ * touched. Tags are masked before normalisation so ordering stays stable.
+ */
+function maskQueryRequestShape(shape: QueryRequestShape): QueryRequestShape {
+  return {
+    ...shape,
+    query: shape.query === null ? null : redactSecrets(shape.query),
+    namespace: shape.namespace === null ? null : redactSecrets(shape.namespace),
+    tags: normalizeQueryTags(shape.tags.map((tag) => redactSecrets(tag))),
+  };
+}
+
+/**
+ * Process-held key for the resume digests. It is random per process and NEVER
+ * persisted, so a database reader cannot test guesses against stored digests
+ * offline. Consequence: after a restart earlier digests are unverifiable, and
+ * resume must use the cursor alone (snapshot TTL is minutes).
+ */
+let queryDigestKey = randomBytes(32);
+
+/** Test hook: simulate a process restart by replacing the digest key. */
+export function _rotateQueryDigestKeyForTesting(): void {
+  queryDigestKey = randomBytes(32);
+}
+
+function currentQueryDigestKeyId(): string {
+  return createHash("sha256").update(queryDigestKey).digest("hex").slice(0, 16);
+}
+
+function queryArgumentDigest(cursorSecret: string, field: "query" | "namespace" | "tags", value: string): string {
+  return createHmac("sha256", queryDigestKey).update(`${field}\0${cursorSecret}\0${value}`).digest("base64url");
+}
+
+/**
+ * Persisted form of a request shape: masked text plus keyed digests of the
+ * originals for each masked field (see {@link QueryRequestShape.original_digests}).
+ */
+function buildStoredQueryRequestShape(shape: QueryRequestShape, cursorSecret: string): QueryRequestShape {
+  const masked = maskQueryRequestShape(shape);
+  const digests: NonNullable<QueryRequestShape["original_digests"]> = {};
+  if (shape.query !== null && masked.query !== shape.query) {
+    digests.query = queryArgumentDigest(cursorSecret, "query", shape.query);
+  }
+  if (shape.namespace !== null && masked.namespace !== shape.namespace) {
+    digests.namespace = queryArgumentDigest(cursorSecret, "namespace", shape.namespace);
+  }
+  if (JSON.stringify(masked.tags) !== JSON.stringify(shape.tags)) {
+    digests.tags = queryArgumentDigest(cursorSecret, "tags", JSON.stringify(shape.tags));
+  }
+  return { ...masked, ...(Object.keys(digests).length > 0 ? { original_digests: digests } : {}), digest_key_id: currentQueryDigestKeyId() };
+}
+
+type ResumeFieldMatch = "match" | "mismatch" | "unverifiable";
+
+/**
+ * Does a live argument equal the persisted (masked) value? When the live value
+ * contains a secret it must also match the keyed digest of the original, so two
+ * different secrets that mask identically are never interchangeable. If the
+ * snapshot has no digest key id (created before digests existed) or the key has
+ * rotated (restart), a secret-bearing argument cannot be verified: "unverifiable".
+ */
+function maskedArgumentMatches(
+  live: string | null,
+  storedMasked: string | null,
+  storedDigest: string | undefined,
+  digestOf: (value: string) => string,
+  keyState: "current" | "stale" | "legacy",
+  maskLive: (value: string) => string = redactSecrets,
+): ResumeFieldMatch {
+  if (live === null) return storedMasked === null && storedDigest === undefined ? "match" : "mismatch";
+  const masked = maskLive(live);
+  if (masked !== storedMasked) return "mismatch";
+  if (masked === live) return storedDigest === undefined ? "match" : "mismatch";
+  if (keyState === "legacy") return "unverifiable";
+  if (storedDigest === undefined) return "mismatch";
+  if (keyState === "stale") return "unverifiable";
+  return storedDigest === digestOf(live) ? "match" : "mismatch";
+}
+
+function maskQueryResponseMeta(meta: QueryResponseMeta): QueryResponseMeta {
+  return meta.query === undefined ? meta : { ...meta, query: redactSecrets(meta.query) };
+}
+
 function fingerprintJson(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
@@ -552,30 +656,69 @@ function constantTimeEqualBase64Url(a: string, b: string): boolean {
   return left.length === right.length && timingSafeEqual(left, right);
 }
 
+/** Credential-shaped namespaces are rejected before any format error can quote them (#409). */
+function validateNamespaceRejectingSecrets(namespace: string): SecurityResult {
+  const secretCheck = scanMetadataForSecrets({ namespace });
+  return secretCheck.valid ? validateNamespace(namespace) : secretCheck;
+}
+
+/** Mask a caller-supplied identifier before echoing it in an error item. */
+function maskEchoedIdentifier(value: unknown): unknown {
+  if (typeof value === "string") return redactSecrets(value);
+  return value === undefined ? value : redactSecrets(JSON.stringify(value));
+}
+
 function hasOwnQueryArg<T extends object>(args: T, key: keyof T): boolean {
   return Object.prototype.hasOwnProperty.call(args, key);
+}
+
+function queryResumeMismatchMessage(result: ResumeFieldMatch): string | null {
+  if (result === "mismatch") return "Query cursor does not match the supplied query arguments.";
+  if (result === "unverifiable") {
+    return "A secret-bearing query argument cannot be verified against this cursor's snapshot (it predates the server's current key, e.g. after a restart). Resume with the cursor only: omit the query, namespace and tags arguments that contain a secret.";
+  }
+  return null;
 }
 
 function queryResumeOverridesMatch(
   queryArgs: QueryParams,
   storedShape: QueryRequestShape,
+  cursorSecret: string,
   normalizedSince?: string,
   normalizedUntil?: string,
-): boolean {
+): ResumeFieldMatch {
   const filterOnlyShape = storedShape.requested_mode === "filter" && storedShape.query === null;
-  if (hasOwnQueryArg(queryArgs, "query") && ((queryArgs.query || null) !== storedShape.query)) return false;
-  if (hasOwnQueryArg(queryArgs, "namespace") && (queryArgs.namespace ?? null) !== storedShape.namespace) return false;
-  if (hasOwnQueryArg(queryArgs, "entry_type") && (queryArgs.entry_type ?? null) !== storedShape.entry_type) return false;
-  if (
-    hasOwnQueryArg(queryArgs, "tags")
-    && JSON.stringify(normalizeQueryTags(queryArgs.tags)) !== JSON.stringify(storedShape.tags)
-  ) {
-    return false;
+  // The stored shape holds masked text plus keyed digests of masked originals
+  // (see buildStoredQueryRequestShape), so secret-shaped arguments compare by digest.
+  const digests = storedShape.original_digests ?? {};
+  const keyState = storedShape.digest_key_id === undefined
+    ? "legacy"
+    : storedShape.digest_key_id === currentQueryDigestKeyId() ? "current" : "stale";
+  const fieldResults: ResumeFieldMatch[] = [];
+  if (hasOwnQueryArg(queryArgs, "query")) {
+    fieldResults.push(maskedArgumentMatches(queryArgs.query || null, storedShape.query, digests.query, (v) => queryArgumentDigest(cursorSecret, "query", v), keyState));
   }
-  if (hasOwnQueryArg(queryArgs, "since") && (normalizedSince ?? null) !== storedShape.since) return false;
-  if (hasOwnQueryArg(queryArgs, "until") && (normalizedUntil ?? null) !== storedShape.until) return false;
+  if (hasOwnQueryArg(queryArgs, "namespace")) {
+    fieldResults.push(maskedArgumentMatches(queryArgs.namespace ?? null, storedShape.namespace, digests.namespace, (v) => queryArgumentDigest(cursorSecret, "namespace", v), keyState));
+  }
+  if (hasOwnQueryArg(queryArgs, "tags")) {
+    fieldResults.push(maskedArgumentMatches(
+      JSON.stringify(normalizeQueryTags(queryArgs.tags)),
+      JSON.stringify(storedShape.tags),
+      digests.tags,
+      (v) => queryArgumentDigest(cursorSecret, "tags", v),
+      keyState,
+      // Mask each tag before normalising, exactly as maskQueryRequestShape does.
+      () => JSON.stringify(normalizeQueryTags(queryArgs.tags?.map((tag) => redactSecrets(tag)))),
+    ));
+  }
+  if (fieldResults.includes("mismatch")) return "mismatch";
+  const unverifiable = fieldResults.includes("unverifiable");
+  if (hasOwnQueryArg(queryArgs, "entry_type") && (queryArgs.entry_type ?? null) !== storedShape.entry_type) return "mismatch";
+  if (hasOwnQueryArg(queryArgs, "since") && (normalizedSince ?? null) !== storedShape.since) return "mismatch";
+  if (hasOwnQueryArg(queryArgs, "until") && (normalizedUntil ?? null) !== storedShape.until) return "mismatch";
   if (!filterOnlyShape && hasOwnQueryArg(queryArgs, "search_mode") && queryArgs.search_mode !== storedShape.requested_mode) {
-    return false;
+    return "mismatch";
   }
   if (
     !filterOnlyShape
@@ -583,13 +726,13 @@ function queryResumeOverridesMatch(
     hasOwnQueryArg(queryArgs, "search_recency_weight")
     && queryArgs.search_recency_weight !== storedShape.search_recency_weight
   ) {
-    return false;
+    return "mismatch";
   }
   if (hasOwnQueryArg(queryArgs, "include_expired") && (queryArgs.include_expired === true) !== storedShape.include_expired) {
-    return false;
+    return "mismatch";
   }
   if (!filterOnlyShape && hasOwnQueryArg(queryArgs, "explain") && (queryArgs.explain === true) !== storedShape.explain) {
-    return false;
+    return "mismatch";
   }
   if (
     !filterOnlyShape
@@ -597,12 +740,12 @@ function queryResumeOverridesMatch(
     hasOwnQueryArg(queryArgs, "require_lexical_match")
     && (queryArgs.require_lexical_match === true) !== storedShape.require_lexical_match
   ) {
-    return false;
+    return "mismatch";
   }
   if (!filterOnlyShape && hasOwnQueryArg(queryArgs, "serialization") && queryArgs.serialization !== storedShape.serialization) {
-    return false;
+    return "mismatch";
   }
-  return true;
+  return unverifiable ? "unverifiable" : "match";
 }
 
 function buildStoredQueryMatchMeta(
@@ -7882,6 +8025,10 @@ function withWriteReceipt(
   if (typeof suppliedKey !== "string" || !WRITE_REPLAY_UUID_PATTERN.test(suppliedKey)) {
     return errResult(action, "validation_error", "idempotency_key must be a UUID.");
   }
+  // Reject credential-shaped identifiers before any receipt lookup, so replaying a
+  // receipt stored before #409 cannot echo them back (same contract as the handlers).
+  const metadataSecretCheck = scanMetadataForSecrets({ namespace: args.namespace, key: args.key, tags: args.tags });
+  if (!metadataSecretCheck.valid) return errResult(action, "validation_error", metadataSecretCheck.error!);
   const namespace = args.namespace;
   if (typeof namespace !== "string" || !validateWriteNamespace(namespace).valid) return handle();
   if (!canWrite(ctx, namespace)) return accessDeniedResponse(db, ctx, action);
@@ -7983,6 +8130,64 @@ function accessDeniedErrorResponse(
 ) {
   recordAccessDenied(db, ctx.principalId, `memory_${action}`);
   return errResult(action, "access_denied", message);
+}
+
+/**
+ * #406: an existing entry that memory_read would redact for this caller (the
+ * same enforceClassification ceiling) must not be reused as the source of a
+ * patch, a status merge, or a status preview, nor have its classification
+ * changed. Returns the denial response to send, or null when the caller may
+ * read the entry. Owners get a classification_error carrying the same
+ * guidance memory_read gives; other principals get the hidden-target denial
+ * (access_denied for agents, found:false otherwise). Call BEFORE merging, previewing, or resolving classification.
+ * `dryRun` skips the access-denied telemetry write so previews stay read-only.
+ */
+function denyIfExistingEntryHidden(
+  db: Database.Database,
+  ctx: AccessContext,
+  existing: { id: string; namespace: string; classification: ClassificationLevel } | null | undefined,
+  action: string,
+  dryRun = false,
+) {
+  if (!existing) return null;
+  const enforcement = enforceClassification(ctx, {
+    id: existing.id,
+    namespace: existing.namespace,
+    classification: existing.classification,
+  });
+  if (enforcement.allowed) return null;
+  if (ctx.principalType === "owner") {
+    // The owner is told why (as memory_read's redaction does), via the
+    // established classification_error contract, instead of a bare denial.
+    return errResult(action, "classification_error", String(enforcement.response.redaction_reason), {
+      namespace: existing.namespace,
+    });
+  }
+  return dryRun ? buildAccessDeniedResult(ctx, action) : accessDeniedResponse(db, ctx, action);
+}
+
+/**
+ * #406: run `write` only if the entry it targets is still readable at the
+ * caller's ceiling, with the re-read, the check and the write in ONE immediate
+ * transaction. The early denyIfExistingEntryHidden calls keep denials ahead of
+ * every other error, but they read outside any write lock, so another
+ * connection (the admin CLI, a second process) could raise the entry's
+ * classification before the write and have it declassified anyway. The write
+ * helpers' own transactions nest as savepoints inside this one.
+ */
+function writeUnlessExistingHidden<T>(
+  db: Database.Database,
+  ctx: AccessContext,
+  namespace: string,
+  key: string,
+  action: string,
+  write: () => T,
+): { denied: ReturnType<typeof errResult> } | { value: T } {
+  return db.transaction((): { denied: ReturnType<typeof errResult> } | { value: T } => {
+    const denied = denyIfExistingEntryHidden(db, ctx, readState(db, namespace, key), action);
+    if (denied) return { denied };
+    return { value: write() };
+  }).immediate();
 }
 
 interface StateCorrectionPreparation {
@@ -10460,7 +10665,12 @@ export function registerTools(
               } =
                 args as unknown as WriteParams & { patch?: PatchParams };
 
-              // Validate namespace and key (always required)
+              // Validate namespace and key (always required). Credential-shaped
+              // metadata is rejected first so format errors never echo it (#409).
+              const writeMetadataSecretCheck = scanMetadataForSecrets({ namespace, key });
+              if (!writeMetadataSecretCheck.valid) {
+                return errResult("write", "validation_error", writeMetadataSecretCheck.error!);
+              }
               const nsCheck = validateWriteNamespace(namespace);
               if (!nsCheck.valid) {
                 return errResult("write", "validation_error", nsCheck.error!);
@@ -10553,6 +10763,10 @@ export function registerTools(
                 // Pre-flight: reject patches that would create Librarian-orphaned entries
                 {
                   const existing = readState(db, namespace, key);
+                  // #406: a patch reuses the existing content, so the existing
+                  // entry must be readable at the caller's ceiling first.
+                  const hiddenDenial = denyIfExistingEntryHidden(db, ctx, existing, "write");
+                  if (hiddenDenial) return hiddenDenial;
                   const existingTags = existing ? parseTags(existing.tags) : [];
                   const basePatchTags = classification !== undefined
                     ? stripClassificationTags(existingTags)
@@ -10572,7 +10786,7 @@ export function registerTools(
 
                 let patchResult;
                 try {
-                  patchResult = patchState(
+                  const guardedPatch = writeUnlessExistingHidden(db, ctx, namespace, key, "write", () => patchState(
                     db,
                     namespace,
                     key,
@@ -10583,7 +10797,9 @@ export function registerTools(
                       classification,
                       classificationOverride: classification_override,
                     },
-                  );
+                  ));
+                  if ("denied" in guardedPatch) return guardedPatch.denied;
+                  patchResult = guardedPatch.value;
                 } catch (error) {
                   const message = getPublicValidationMessage(error);
                   if (message === undefined) throw error;
@@ -10650,6 +10866,12 @@ export function registerTools(
 
               const isTrackedStatus = key === "status" && isTrackedNamespace(namespace, resolveTrackedPatterns(db, ctx));
               const existing = readState(db, namespace, key);
+              // #406: a full write replaces an existing entry and reuses its
+              // lifecycle tags, classification and revision (CAS/create-only
+              // conflicts echo current_updated_at). Authorize it at the
+              // caller's ceiling before any of that is used or returned.
+              const hiddenOverwriteDenial = denyIfExistingEntryHidden(db, ctx, existing, "write");
+              if (hiddenOverwriteDenial) return hiddenOverwriteDenial;
               // #167: memory_write is a documented migration path for tracked
               // status entries, so apply the same parameter-markup guard here —
               // otherwise leaked `</parameter>` markup in `content` could swallow
@@ -10745,7 +10967,7 @@ export function registerTools(
                   ?? (correctionTarget && correctionTarget.valid_from > implicitCorrectionNow
                     ? correctionTarget.valid_from
                     : implicitCorrectionNow);
-                result = supersedes
+                const guardedWrite = writeUnlessExistingHidden(db, ctx, namespace, key, "write", () => supersedes
                   ? supersedeState(
                       db,
                       namespace,
@@ -10777,7 +10999,9 @@ export function registerTools(
                         classificationOverride: classification_override,
                         createIfAbsent: create_if_absent === true,
                       },
-                    );
+                    ));
+                if ("denied" in guardedWrite) return guardedWrite.denied;
+                result = guardedWrite.value;
               } catch (error) {
                 const message = getPublicValidationMessage(error);
                 if (message === undefined) throw error;
@@ -10875,7 +11099,7 @@ export function registerTools(
               if (validateOnlyError) {
                 return errResult("update_status", "validation_error", validateOnlyError);
               }
-              const nsCheck = validateNamespace(namespace);
+              const nsCheck = validateNamespaceRejectingSecrets(namespace);
               if (!nsCheck.valid) {
                 return errResult("update_status", "validation_error", nsCheck.error!);
               }
@@ -10932,6 +11156,13 @@ export function registerTools(
               }
 
               const existing = readState(db, namespace, "status");
+              // #406: the status merge and preview reuse the existing content,
+              // so authorize it against the caller's ceiling before anything
+              // derived from it (errors, merge, preview) can be returned.
+              const hiddenStatusDenial = denyIfExistingEntryHidden(
+                db, ctx, existing, "update_status", validate_only === true,
+              );
+              if (hiddenStatusDenial) return hiddenStatusDenial;
               const existingParsed = existing ? parseEntry(existing) : null;
               const existingStructured = existingParsed ? parseStructuredStatus(existingParsed.content) : undefined;
               const duplicateExtraTitles = existingStructured
@@ -11109,7 +11340,7 @@ export function registerTools(
 
               let result;
               try {
-                result = writeState(
+                const guardedStatus = writeUnlessExistingHidden(db, ctx, namespace, "status", "update_status", () => writeState(
                   db,
                   namespace,
                   "status",
@@ -11122,7 +11353,9 @@ export function registerTools(
                     classification,
                     classificationOverride: classification_override,
                   },
-                );
+                ));
+                if ("denied" in guardedStatus) return guardedStatus.denied;
+                result = guardedStatus.value;
               } catch (error) {
                 const message = getPublicValidationMessage(error);
                 if (message === undefined) throw error;
@@ -11310,11 +11543,12 @@ export function registerTools(
               }
 
               const results = reads.map(({ namespace: ns, key: k }) => {
+                // Failure items echo the caller's identifiers; mask credential-shaped values (#409).
                 const nsCheck = validateNamespace(ns);
-                if (!nsCheck.valid) return { found: false, namespace: ns, key: k, error: nsCheck.error };
+                if (!nsCheck.valid) return { found: false, namespace: maskEchoedIdentifier(ns), key: maskEchoedIdentifier(k), error: nsCheck.error };
                 const keyCheck = validateKey(k);
-                if (!keyCheck.valid) return { found: false, namespace: ns, key: k, error: keyCheck.error };
-                if (!canRead(ctx, ns)) return { found: false, namespace: ns, key: k };
+                if (!keyCheck.valid) return { found: false, namespace: maskEchoedIdentifier(ns), key: maskEchoedIdentifier(k), error: keyCheck.error };
+                if (!canRead(ctx, ns)) return { found: false, namespace: maskEchoedIdentifier(ns), key: maskEchoedIdentifier(k) };
 
                 const entry = readState(db, ns, k);
                 if (entry) {
@@ -11340,7 +11574,7 @@ export function registerTools(
                   }
                   return result;
                 }
-                return { found: false, namespace: ns, key: k };
+                return { found: false, namespace: maskEchoedIdentifier(ns), key: maskEchoedIdentifier(k) };
               });
 
               return okResult("read_batch", { results });
@@ -11545,7 +11779,8 @@ export function registerTools(
                     expired_filtered_count: responseMeta.retrieval.expired_filtered_count + page.expiredFilteredCount,
                   },
                 };
-                if (responseMeta.query !== undefined) response.query = responseMeta.query;
+                // Never echo a credential-shaped query back; same masked value on every page (#409).
+                if (responseMeta.query !== undefined) response.query = redactSecrets(responseMeta.query);
                 if (responseMeta.namespace_scope !== undefined) response.namespace_scope = responseMeta.namespace_scope;
                 if (responseMeta.search_mode_actual !== undefined) response.search_mode_actual = responseMeta.search_mode_actual;
                 if (responseMeta.search_meta !== undefined) response.search_meta = responseMeta.search_meta;
@@ -11587,8 +11822,11 @@ export function registerTools(
                   return errResult("query", "validation_error", "Query cursor is out of range.");
                 }
 
-                if (!queryResumeOverridesMatch(queryArgs, storedShape, since, until)) {
-                  return errResult("query", "validation_error", "Query cursor does not match the supplied query arguments.");
+                const resumeMismatch = queryResumeMismatchMessage(
+                  queryResumeOverridesMatch(queryArgs, storedShape, snapshot.cursorSecret, since, until),
+                );
+                if (resumeMismatch) {
+                  return errResult("query", "validation_error", resumeMismatch);
                 }
 
                 return respondFromSnapshot(
@@ -11617,7 +11855,7 @@ export function registerTools(
                   requireLexicalMatch,
                   serialization,
                 });
-                const requestFingerprint = fingerprintJson(requestShape);
+                const requestFingerprint = fingerprintJson(maskQueryRequestShape(requestShape));
                 // Must have at least one filter to avoid returning everything
                 if (!namespace && (!tags || tags.length === 0) && !since && !until && !entry_type) {
                   return errResult("query", "validation_error", "Provide either a 'query' string for search, or at least one filter (namespace, tags, entry_type, since, until) to browse.");
@@ -11689,8 +11927,8 @@ export function registerTools(
                       principalId: ctx.principalId,
                       accessFingerprint: accessBinding,
                       requestFingerprint,
-                      requestShape: JSON.stringify(requestShape),
-                      responseMeta: JSON.stringify(responseMeta),
+                      requestShape: JSON.stringify(buildStoredQueryRequestShape(requestShape, cursorSecret)),
+                      responseMeta: JSON.stringify(maskQueryResponseMeta(responseMeta)),
                       resultIds: JSON.stringify(resultIds),
                       resultMatchMeta: "{}",
                       cursorSecret,
@@ -11735,7 +11973,7 @@ export function registerTools(
                 requireLexicalMatch,
                 serialization,
               });
-              const requestFingerprint = fingerprintJson(requestShape);
+              const requestFingerprint = fingerprintJson(maskQueryRequestShape(requestShape));
               const queryParams: QueryParams = {
                 query: queryText,
                 namespace,
@@ -12122,8 +12360,8 @@ export function registerTools(
                     principalId: ctx.principalId,
                     accessFingerprint: accessBinding,
                     requestFingerprint,
-                    requestShape: JSON.stringify(requestShape),
-                    responseMeta: JSON.stringify(responseMeta),
+                    requestShape: JSON.stringify(buildStoredQueryRequestShape(requestShape, cursorSecret)),
+                    responseMeta: JSON.stringify(maskQueryResponseMeta(responseMeta)),
                     resultIds: JSON.stringify(resultIds),
                     resultMatchMeta: JSON.stringify(storedMatchMeta),
                     cursorSecret,

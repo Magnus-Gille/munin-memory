@@ -25,7 +25,11 @@ import type {
   OAuthTokenRevocationRequest,
   OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
-import { InvalidTokenError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
+import {
+  InvalidGrantError,
+  InvalidScopeError,
+  InvalidTokenError,
+} from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import { nowUTC } from "./db.js";
 import { renderConsentPage } from "./consent.js";
 import type { AuthMethod, TransportType } from "./types.js";
@@ -204,6 +208,12 @@ function matchesBearerToken(token: string, expected: Buffer | undefined): boolea
   return tokenBuf.length === expected.length && timingSafeEqual(tokenBuf, expected);
 }
 
+/** Identity resolved by the consent middleware and carried on `res.locals.consentIdentity`. */
+interface ConsentIdentityBinding {
+  email: string;
+  principalId: string | null;
+}
+
 // --- OAuth Provider ---
 
 export class MuninOAuthProvider implements OAuthServerProvider {
@@ -213,7 +223,6 @@ export class MuninOAuthProvider implements OAuthServerProvider {
   private readonly consumerApiKeyBuf: Buffer | undefined;
   private readonly clientSecretWrapKey: Buffer | undefined;
   private readonly pendingAuths = new Map<string, PendingAuth>();
-  private lastResolvedIdentity: { email: string; principalId: string | null } | undefined;
 
   constructor(
     private db: Database.Database,
@@ -248,12 +257,15 @@ export class MuninOAuthProvider implements OAuthServerProvider {
       expiresAt: Math.floor(Date.now() / 1000) + AUTH_CODE_TTL,
     };
 
-    // If identity was resolved before authorize (set via setLastResolvedIdentity),
-    // bind it to the pending auth
-    if (this.lastResolvedIdentity) {
-      pending.resolvedPrincipalId = this.lastResolvedIdentity.principalId ?? undefined;
-      pending.resolvedEmail = this.lastResolvedIdentity.email;
-      this.lastResolvedIdentity = undefined;
+    // Bind the identity the consent middleware resolved for THIS request. It
+    // travels on res.locals (per request), never through provider state: the SDK
+    // handler parses the body asynchronously before calling authorize(), so shared
+    // state would let concurrent requests from different principals cross.
+    const identity = (res.locals as { consentIdentity?: ConsentIdentityBinding } | undefined)
+      ?.consentIdentity;
+    if (identity) {
+      pending.resolvedPrincipalId = identity.principalId ?? undefined;
+      pending.resolvedEmail = identity.email;
     }
 
     this.pendingAuths.set(nonce, pending);
@@ -268,14 +280,6 @@ export class MuninOAuthProvider implements OAuthServerProvider {
     res.setHeader("Content-Type", "text/html");
     res.setHeader("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'");
     res.send(html);
-  }
-
-  /**
-   * Set the resolved identity for the next authorize() call.
-   * Called by the consent middleware before the SDK's authorize handler.
-   */
-  setLastResolvedIdentity(identity: { email: string; principalId: string | null } | undefined): void {
-    this.lastResolvedIdentity = identity;
   }
 
   /**
@@ -406,7 +410,7 @@ export class MuninOAuthProvider implements OAuthServerProvider {
       .get(codeHash) as { code_challenge: string } | undefined;
 
     if (!row) {
-      throw new Error("Invalid or expired authorization code");
+      throw new InvalidGrantError("Invalid or expired authorization code");
     }
     return row.code_challenge;
   }
@@ -420,43 +424,72 @@ export class MuninOAuthProvider implements OAuthServerProvider {
   ): Promise<OAuthTokens> {
     const codeHash = hashOpaqueValue(authorizationCode);
 
-    // Atomically claim the code: UPDATE ... WHERE used = 0, check changes === 1
-    const claimed = this.db
-      .prepare("UPDATE oauth_auth_codes SET used = 1 WHERE code = ? AND used = 0")
-      .run(codeHash);
+    // Claim, validate and issue in ONE immediate transaction. The admin CLI
+    // runs in a separate process on the same database file; taking the write
+    // lock up front means a concurrent clear/remove either completes first
+    // (the code is invalidated or the client is gone) or waits until the
+    // issued pair is committed and revokes it, never observing a claimed code
+    // with no tokens yet.
+    //
+    // Validation failures must still burn the code (single use), so they are
+    // returned and thrown after commit; only infrastructure errors roll back.
+    const txn = this.db.transaction((): OAuthTokens | InvalidGrantError => {
+      // Fail closed if the client has been removed since the code was issued.
+      this.assertClientRegistered(client.client_id);
 
-    if (claimed.changes !== 1) {
-      throw new Error("Invalid or expired authorization code");
+      // Atomically claim the code: UPDATE ... WHERE used = 0, check changes === 1
+      const claimed = this.db
+        .prepare("UPDATE oauth_auth_codes SET used = 1 WHERE code = ? AND used = 0")
+        .run(codeHash);
+
+      if (claimed.changes !== 1) {
+        return new InvalidGrantError("Invalid or expired authorization code");
+      }
+
+      // Now read the code data (already marked used, safe from replay)
+      const row = this.db
+        .prepare("SELECT * FROM oauth_auth_codes WHERE code = ?")
+        .get(codeHash) as OAuthAuthCodeRow | undefined;
+
+      if (!row) {
+        return new InvalidGrantError("Invalid or expired authorization code");
+      }
+
+      if (row.client_id !== client.client_id) {
+        return new InvalidGrantError("Authorization code was not issued to this client");
+      }
+
+      const nowSecs = Math.floor(Date.now() / 1000);
+      if (row.expires_at < nowSecs) {
+        return new InvalidGrantError("Authorization code has expired");
+      }
+
+      // RFC 6749 Section 4.1.3: if redirect_uri was included in the authorization
+      // request, it MUST be identical in the token request
+      if (redirectUri && row.redirect_uri && redirectUri !== row.redirect_uri) {
+        return new InvalidGrantError("redirect_uri does not match the authorization request");
+      }
+
+      const scopes: string[] = JSON.parse(row.scopes);
+      const resourceStr = resource?.toString() ?? row.resource ?? undefined;
+
+      return this.issueTokenPair(client.client_id, scopes, resourceStr, row.principal_id ?? undefined);
+    });
+
+    const result = txn.immediate();
+    if (result instanceof InvalidGrantError) {
+      throw result;
     }
+    return result;
+  }
 
-    // Now read the code data (already marked used, safe from replay)
+  private assertClientRegistered(clientId: string): void {
     const row = this.db
-      .prepare("SELECT * FROM oauth_auth_codes WHERE code = ?")
-      .get(codeHash) as OAuthAuthCodeRow | undefined;
-
+      .prepare("SELECT 1 AS present FROM oauth_clients WHERE client_id = ?")
+      .get(clientId);
     if (!row) {
-      throw new Error("Invalid or expired authorization code");
+      throw new InvalidGrantError("Client is no longer registered");
     }
-
-    if (row.client_id !== client.client_id) {
-      throw new Error("Authorization code was not issued to this client");
-    }
-
-    const nowSecs = Math.floor(Date.now() / 1000);
-    if (row.expires_at < nowSecs) {
-      throw new Error("Authorization code has expired");
-    }
-
-    // RFC 6749 Section 4.1.3: if redirect_uri was included in the authorization
-    // request, it MUST be identical in the token request
-    if (redirectUri && row.redirect_uri && redirectUri !== row.redirect_uri) {
-      throw new Error("redirect_uri does not match the authorization request");
-    }
-
-    const scopes: string[] = JSON.parse(row.scopes);
-    const resourceStr = resource?.toString() ?? row.resource ?? undefined;
-
-    return this.issueTokenPair(client.client_id, scopes, resourceStr, row.principal_id ?? undefined);
   }
 
   async exchangeRefreshToken(
@@ -467,39 +500,66 @@ export class MuninOAuthProvider implements OAuthServerProvider {
   ): Promise<OAuthTokens> {
     const refreshTokenHash = hashOpaqueValue(refreshToken);
 
-    // Atomically claim the refresh token: UPDATE WHERE revoked = 0, check changes === 1
-    const claimed = this.db
-      .prepare(
-        "UPDATE oauth_tokens SET revoked = 1 WHERE token = ? AND token_type = 'refresh' AND revoked = 0",
-      )
-      .run(refreshTokenHash);
+    // Validate, consume and rotate atomically: a rejected request (wrong client,
+    // expired token, scope escalation) rolls back and leaves the token usable.
+    // IMMEDIATE so it serializes with the admin CLI's revocation (separate process).
+    const txn = this.db.transaction((): OAuthTokens => {
+      this.assertClientRegistered(client.client_id);
 
-    if (claimed.changes !== 1) {
-      throw new Error("Invalid refresh token");
-    }
+      const row = this.db
+        .prepare(
+          "SELECT * FROM oauth_tokens WHERE token = ? AND token_type = 'refresh' AND revoked = 0",
+        )
+        .get(refreshTokenHash) as OAuthTokenRow | undefined;
 
-    // Now read the token data (already revoked, safe from replay)
-    const row = this.db
-      .prepare("SELECT * FROM oauth_tokens WHERE token = ?")
-      .get(refreshTokenHash) as OAuthTokenRow | undefined;
+      if (!row) {
+        throw new InvalidGrantError("Invalid refresh token");
+      }
 
-    if (!row) {
-      throw new Error("Invalid refresh token");
-    }
+      if (row.client_id !== client.client_id) {
+        throw new InvalidGrantError("Refresh token was not issued to this client");
+      }
 
-    if (row.client_id !== client.client_id) {
-      throw new Error("Refresh token was not issued to this client");
-    }
+      const nowSecs = Math.floor(Date.now() / 1000);
+      if (row.expires_at < nowSecs) {
+        throw new InvalidGrantError("Refresh token has expired");
+      }
 
-    const nowSecs = Math.floor(Date.now() / 1000);
-    if (row.expires_at < nowSecs) {
-      throw new Error("Refresh token has expired");
-    }
+      // RFC 6749 Section 6: requested scopes must not exceed the original grant.
+      const grantedScopes: string[] = JSON.parse(row.scopes);
+      let tokenScopes = grantedScopes;
+      if (scopes && scopes.length > 0) {
+        const granted = new Set(grantedScopes);
+        if (!scopes.every((scope) => granted.has(scope))) {
+          throw new InvalidScopeError(
+            "Requested scope exceeds the scope granted to the refresh token",
+          );
+        }
+        tokenScopes = [...new Set(scopes)];
+      }
 
-    const tokenScopes: string[] = scopes ?? JSON.parse(row.scopes);
-    const resourceStr = resource?.toString() ?? row.resource ?? undefined;
+      // Atomically claim the refresh token (single use).
+      const claimed = this.db
+        .prepare(
+          "UPDATE oauth_tokens SET revoked = 1 WHERE token = ? AND token_type = 'refresh' AND revoked = 0",
+        )
+        .run(refreshTokenHash);
+      if (claimed.changes !== 1) {
+        throw new InvalidGrantError("Invalid refresh token");
+      }
 
-    return this.issueTokenPair(client.client_id, tokenScopes, resourceStr, row.principal_id ?? undefined);
+      // Rotation retires the access token(s) issued alongside the consumed refresh token.
+      this.db
+        .prepare(
+          "UPDATE oauth_tokens SET revoked = 1 WHERE refresh_token_ref = ? AND token_type = 'access' AND revoked = 0",
+        )
+        .run(refreshTokenHash);
+
+      const resourceStr = resource?.toString() ?? row.resource ?? undefined;
+      return this.issueTokenPair(client.client_id, tokenScopes, resourceStr, row.principal_id ?? undefined);
+    });
+
+    return txn.immediate();
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
@@ -667,12 +727,28 @@ export class MuninOAuthProvider implements OAuthServerProvider {
     request: OAuthTokenRevocationRequest,
   ): Promise<void> {
     const tokenHash = hashOpaqueValue(request.token);
-    // Revoke the token if it belongs to this client
-    this.db
-      .prepare(
-        "UPDATE oauth_tokens SET revoked = 1 WHERE token = ? AND client_id = ?",
-      )
-      .run(tokenHash, client.client_id);
+
+    // Revoke the token if it belongs to this client, together with the other half
+    // of its access/refresh pair (RFC 7009 section 2.1: revoking a refresh token
+    // SHOULD also invalidate its access tokens; the reverse keeps a client-side
+    // "disconnect" from leaving a 30-day refresh token alive).
+    const txn = this.db.transaction(() => {
+      const row = this.db
+        .prepare("SELECT token, refresh_token_ref FROM oauth_tokens WHERE token = ? AND client_id = ?")
+        .get(tokenHash, client.client_id) as
+        | { token: string; refresh_token_ref: string | null }
+        | undefined;
+      if (!row) return;
+
+      const refreshHash = row.refresh_token_ref ?? row.token;
+      this.db
+        .prepare(
+          `UPDATE oauth_tokens SET revoked = 1
+           WHERE client_id = ? AND (token = ? OR refresh_token_ref = ?)`,
+        )
+        .run(client.client_id, refreshHash, refreshHash);
+    });
+    txn();
   }
 
   /**

@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { generateKeyPairSync } from "node:crypto";
 import {
   scanForSecrets,
   redactSecrets,
@@ -166,6 +167,180 @@ describe("redactSecrets", () => {
     const afterRedact = redactSecrets(afterLiteral);
     expect(afterRedact).not.toContain(key);
     expect(afterRedact.match(/\[REDACTED\]/g)?.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+// Fixtures are built by concatenation so no literal secret-shaped string
+// appears in source (secret scanners / push protection).
+const SECRET_FORMAT_FIXTURES: Array<{ name: string; label: string; value: string }> = [
+  {
+    name: "EC private key PEM",
+    label: "Private key",
+    value: "-----BEGIN EC PRIVATE KEY-----\nMHcCAQEE\n-----END EC PRIVATE KEY-----",
+  },
+  {
+    name: "OPENSSH private key PEM",
+    label: "Private key",
+    value: "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaA\n-----END OPENSSH PRIVATE KEY-----",
+  },
+  {
+    name: "DSA private key PEM",
+    label: "Private key",
+    value: "-----BEGIN DSA PRIVATE KEY-----\nMIIBuw\n-----END DSA PRIVATE KEY-----",
+  },
+  {
+    name: "ENCRYPTED private key PEM",
+    label: "Private key",
+    value: "-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIIFHD\n-----END ENCRYPTED PRIVATE KEY-----",
+  },
+  {
+    name: "JWT",
+    label: "JSON Web Token",
+    value: "eyJhbGciOiJIUzI1NiJ9." + "eyJzdWIiOiJ4In0" + "." + "Q".repeat(43),
+  },
+  { name: "Slack bot token", label: "Slack token", value: "xoxb-" + "1".repeat(12) + "-" + "a".repeat(24) },
+  { name: "Slack cookie token (xoxc)", label: "Slack token", value: "xoxc-" + "4".repeat(12) + "-" + "d".repeat(24) },
+  { name: "Slack cookie-d token (xoxd)", label: "Slack token", value: "xoxd-" + "e".repeat(30) },
+  { name: "Slack user token", label: "Slack token", value: "xoxp-" + "2".repeat(12) + "-" + "b".repeat(24) },
+  { name: "Slack app token", label: "Slack token", value: "xapp-1-" + "A".repeat(10) + "-" + "3".repeat(12) + "-" + "c".repeat(20) },
+  { name: "GitLab PAT", label: "GitLab personal access token", value: "glpat-" + "b".repeat(20) },
+  { name: "Stripe live secret key", label: "Stripe live key", value: "sk_" + "live_" + "c".repeat(24) },
+  { name: "Stripe live restricted key", label: "Stripe live key", value: "rk_" + "live_" + "c".repeat(24) },
+  { name: "npm token", label: "npm access token", value: "npm_" + "d".repeat(36) },
+  { name: "Google OAuth access token", label: "Google OAuth access token", value: "ya29." + "e".repeat(60) },
+  { name: "lowercase bearer", label: "Bearer token", value: "authorization: bearer " + "f".repeat(40) },
+  { name: "standalone lowercase bearer, letters-only token", label: "Bearer token", value: "use bearer " + "abcdefgh".repeat(3) + " here" },
+  { name: "standalone lowercase bearer with digits", label: "Bearer token", value: "use bearer " + "f9".repeat(20) + " here" },
+];
+
+describe("scanForSecrets: additional credential formats (#410)", () => {
+  for (const { name, label, value } of SECRET_FORMAT_FIXTURES) {
+    it(`rejects ${name} and names the pattern without echoing the value`, () => {
+      const result = scanForSecrets(`note: ${value} end`);
+      expect(result.valid).toBe(false);
+      expect(result.error).toContain(label);
+      expect(result.error).not.toContain(value);
+    });
+
+    it(`redactSecrets fully masks ${name}`, () => {
+      const redacted = redactSecrets(`before ${value} after`);
+      expect(redacted).toContain("[REDACTED]");
+      expect(scanForSecrets(redacted).valid).toBe(true);
+      // No distinctive body fragment survives.
+      const body = value.replace(/-----[A-Z ]+-----/g, "").trim();
+      for (const part of body.split(/[\s.\-_:]+/).filter((p) => p.length >= 6 && p !== "authorization")) {
+        expect(redacted).not.toContain(part);
+      }
+    });
+  }
+
+  it("rejects a real generated EC private key (SEC1 PEM) without printing it", () => {
+    const pem = generateKeyPairSync("ec", { namedCurve: "prime256v1" })
+      .privateKey.export({ format: "pem", type: "sec1" })
+      .toString();
+    expect(pem).toContain("BEGIN EC PRIVATE KEY");
+    const result = scanForSecrets(pem);
+    expect(result.valid).toBe(false);
+    expect(redactSecrets(pem)).not.toContain("BEGIN EC PRIVATE KEY");
+  });
+
+  it("rejects real generated PKCS8 and encrypted PKCS8 private keys", () => {
+    const { privateKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+    const pkcs8 = privateKey.export({ format: "pem", type: "pkcs8" }).toString();
+    const encrypted = privateKey
+      .export({ format: "pem", type: "pkcs8", cipher: "aes-256-cbc", passphrase: "x".repeat(12) })
+      .toString();
+    expect(scanForSecrets(pkcs8).valid).toBe(false);
+    expect(scanForSecrets(encrypted).valid).toBe(false);
+  });
+
+  it("does not flag ordinary prose or short look-alikes (negative controls)", () => {
+    const benign = [
+      // bearer in prose / short tokens
+      "The bearer of this note should call back tomorrow",
+      "bearer tokens are rejected by the security module",
+      "Authorization: bearer abc",
+      // hyphenated identifiers after a standalone "bearer" are prose, not tokens
+      "the bearer authentication-middleware-handler wraps every route",
+      "we pass a bearer token-handling-middleware-for-routes",
+      // letters-only run followed by a hyphen continuation is a hyphenated word
+      "the bearer abcdefghijklmnopqrstuvwx-handler is documented",
+      // PEM-ish text that is not a private key
+      "-----BEGIN PUBLIC KEY----- is a public key header",
+      "Private keys start with a BEGIN PRIVATE marker, never store them",
+      // JWT
+      "JWTs start with eyJ and have three segments",
+      "eyJ",
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0",
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.",
+      // Slack
+      "xoxb tokens are issued by Slack",
+      "xoxb-short",
+      "see https://example.com/xoxp-docs",
+      // GitLab
+      "glpat- is the GitLab PAT prefix",
+      "glpat-short",
+      // Stripe
+      "Stripe keys look like sk_live in the docs",
+      "sk_live_",
+      "sk_live_short",
+      "task_live_" + "c".repeat(24),
+      "sk_test_" + "c".repeat(24),
+      // npm
+      "run npm_install before the build",
+      "npm_" + "d".repeat(10),
+      "tag: npm_config_registry",
+      "xnpm_" + "d".repeat(36),
+      // Google
+      "ya29 is the prefix of Google OAuth tokens",
+      "ya29.short",
+      "ya29." + "e".repeat(10),
+    ];
+    for (const text of benign) {
+      expect(scanForSecrets(text), text).toEqual({ valid: true });
+      expect(redactSecrets(text), text).toBe(text);
+    }
+  });
+
+  it("masks every format when several appear in one string", () => {
+    const text = SECRET_FORMAT_FIXTURES.map((f) => f.value).join(" | ");
+    const redacted = redactSecrets(text);
+    expect(scanForSecrets(redacted).valid).toBe(true);
+    expect((redacted.match(/\[REDACTED\]/g) ?? []).length).toBeGreaterThanOrEqual(10);
+  });
+
+  it("masks a private-key body longer than any fixed scan window, and an unterminated one", () => {
+    const body = "QUJD".repeat(2_500); // 10,000 base64 chars, no END marker within 8192
+    const end = "-----END EC PRIVATE KEY-----";
+    const terminated = redactSecrets(`pre -----BEGIN EC PRIVATE KEY-----\n${body}\n${end} post`);
+    expect(terminated).toBe("pre [REDACTED] post");
+    const unterminated = redactSecrets(`pre -----BEGIN OPENSSH PRIVATE KEY-----\n${body}\ntrailing`);
+    expect(unterminated).toBe("pre [REDACTED]");
+    // Several blocks in one string are each masked and text between them survives.
+    const two = redactSecrets(
+      `a -----BEGIN PRIVATE KEY-----\n${body}\n-----END PRIVATE KEY----- b -----BEGIN RSA PRIVATE KEY-----\n${body}\n-----END RSA PRIVATE KEY----- c`,
+    );
+    expect(two).toBe("a [REDACTED] b [REDACTED] c");
+  });
+
+  // The adversarial inputs are large; a catastrophic-backtracking regression would
+  // blow past this generous explicit timeout (normal runtime is milliseconds)
+  // without making the test depend on wall-clock load.
+  it("stays linear on adversarial near-miss input", { timeout: 60_000 }, () => {
+    const inputs = [
+      "-----BEGIN " + "A ".repeat(50_000),
+      "eyJ" + "a".repeat(100_000),
+      "eyJ" + "a".repeat(50_000) + ".eyJ" + "a".repeat(50_000),
+      "bearer " + "a ".repeat(50_000),
+      "xoxb-" + "-".repeat(100_000),
+      "-----BEGIN PRIVATE KEY-----".repeat(5_000),
+      "bearer " + "a".repeat(100_000) + "-",
+    ];
+    for (const input of inputs) {
+      scanForSecrets(input);
+      redactSecrets(input);
+    }
+    expect(inputs.length).toBeGreaterThan(0);
   });
 });
 

@@ -438,10 +438,12 @@ describe("memory_update_status — access enforcement", () => {
         classification: "client-confidential",
       });
 
-      // The existing orphan-prevention gate deliberately refuses a mutation
-      // that is already above the connection ceiling. Let that pre-flight see
-      // the previously authorized ceiling, then lower the effective ceiling at
-      // the response boundary to isolate the response's unified read gate.
+      // The existing-entry ceiling checks (#406: the early one and the one
+      // inside the write transaction) and the orphan-prevention gate
+      // deliberately refuse a mutation that is already above the connection
+      // ceiling. Let those three pre-write reads see the previously
+      // authorized ceiling, then lower the effective ceiling at the response
+      // boundary to isolate the response's unified read gate.
       let maxClassificationChecks = 0;
       const classifiedEditor: AccessContext = {
         principalId: "editor:classified",
@@ -452,7 +454,7 @@ describe("memory_update_status — access enforcement", () => {
         transportType: "dpa_covered",
         get maxClassification() {
           maxClassificationChecks += 1;
-          return maxClassificationChecks === 1 ? "client-confidential" : "internal";
+          return maxClassificationChecks <= 3 ? "client-confidential" : "internal";
         },
       };
       const classifiedCall = makeServer(db, classifiedEditor);
