@@ -119,6 +119,41 @@ changelog is the canonical record of what moved.
   now run as IMMEDIATE transactions (code claim, validation and token issuance are
   one transaction), so an admin revocation from the separate CLI process can no
   longer land between a code being claimed and its tokens being issued.
+
+- The secret scan now also rejects credential formats it previously let through
+  (#410): private-key PEM blocks of any algorithm (`EC`, `DSA`, `OPENSSH`,
+  `ENCRYPTED`, ... not just `RSA`/plain), JSON Web Tokens, Slack tokens
+  (`xox?-`, `xapp-`), GitLab PATs (`glpat-`), Stripe live/restricted keys
+  (`sk_live_`, `rk_live_`), npm tokens (`npm_`), Google OAuth access tokens
+  (`ya29.`) and lowercase `bearer <token>`. All patterns require a minimum body
+  length so prose such as "sk_live" in docs or a short `npm_install` tag is not
+  flagged. `redactSecrets` (error and telemetry masking) uses the same list and
+  now also masks the key material of a PEM private-key block, not just its
+  `BEGIN` line.
+
+- Credential-shaped values in stored metadata and retrieval telemetry are now
+  handled like credentials in `content` (#409). `memory_write` (including
+  `patch.tags_add`), `memory_log` and `memory_update_status` scan namespace, key and
+  tags with the same secret patterns and reject with the same
+  `validation_error` contract (`Tag|Key|Namespace appears to contain a secret or
+  credential (matched pattern: ...)`), never echoing the value; the scan runs
+  before format validation so malformed secret-shaped values are not echoed
+  either. `memory_query` and `memory_retrieval_feedback` mask secret matches as
+  `[REDACTED]` (deterministic, from the shared pattern list) before persisting
+  `retrieval_events.query_text` / `retrieval_feedback.query_text`, and pagination
+  snapshots store masked query, namespace and tag filters. Searching uses the
+  caller's original text; cursor resume compares secret-shaped arguments by a
+  keyed digest (HMAC-SHA256 under a random per-process key that is never
+  persisted), so a different secret is never accepted as a continuation. After a
+  restart, or for snapshots created before this change, a secret-bearing
+  argument cannot be verified and the client is told to resume with the cursor
+  only. `memory_query` responses also `memory_query` responses echo
+  the masked `query` on every page, and `memory_read_batch` failure items mask
+  credential-shaped namespace/key values. Namespace and key format errors redact
+  credential-shaped values, and `memory_update_status` rejects a secret-bearing
+  namespace before any format error. Historical rows are not
+  rewritten; scrubbing existing `retrieval_events.query_text` is a separate
+  operator decision.
 - Keep offsite backup and snapshot Heimdall bearer tokens out of curl arguments,
   and reject tokens containing CR/LF before sending a panel update.
 - **OAuth consent proxy and identity gates.** Public issuers now require an exact
