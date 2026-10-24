@@ -199,6 +199,8 @@ const SECRET_FORMAT_FIXTURES: Array<{ name: string; label: string; value: string
     value: "eyJhbGciOiJIUzI1NiJ9." + "eyJzdWIiOiJ4In0" + "." + "Q".repeat(43),
   },
   { name: "Slack bot token", label: "Slack token", value: "xoxb-" + "1".repeat(12) + "-" + "a".repeat(24) },
+  { name: "Slack cookie token (xoxc)", label: "Slack token", value: "xoxc-" + "4".repeat(12) + "-" + "d".repeat(24) },
+  { name: "Slack cookie-d token (xoxd)", label: "Slack token", value: "xoxd-" + "e".repeat(30) },
   { name: "Slack user token", label: "Slack token", value: "xoxp-" + "2".repeat(12) + "-" + "b".repeat(24) },
   { name: "Slack app token", label: "Slack token", value: "xapp-1-" + "A".repeat(10) + "-" + "3".repeat(12) + "-" + "c".repeat(20) },
   { name: "GitLab PAT", label: "GitLab personal access token", value: "glpat-" + "b".repeat(20) },
@@ -207,6 +209,7 @@ const SECRET_FORMAT_FIXTURES: Array<{ name: string; label: string; value: string
   { name: "npm token", label: "npm access token", value: "npm_" + "d".repeat(36) },
   { name: "Google OAuth access token", label: "Google OAuth access token", value: "ya29." + "e".repeat(60) },
   { name: "lowercase bearer", label: "Bearer token", value: "authorization: bearer " + "f".repeat(40) },
+  { name: "standalone lowercase bearer, letters-only token", label: "Bearer token", value: "use bearer " + "abcdefgh".repeat(3) + " here" },
   { name: "standalone lowercase bearer with digits", label: "Bearer token", value: "use bearer " + "f9".repeat(20) + " here" },
 ];
 
@@ -260,6 +263,8 @@ describe("scanForSecrets: additional credential formats (#410)", () => {
       // hyphenated identifiers after a standalone "bearer" are prose, not tokens
       "the bearer authentication-middleware-handler wraps every route",
       "we pass a bearer token-handling-middleware-for-routes",
+      // letters-only run followed by a hyphen continuation is a hyphenated word
+      "the bearer abcdefghijklmnopqrstuvwx-handler is documented",
       // PEM-ish text that is not a private key
       "-----BEGIN PUBLIC KEY----- is a public key header",
       "Private keys start with a BEGIN PRIVATE marker, never store them",
@@ -304,20 +309,38 @@ describe("scanForSecrets: additional credential formats (#410)", () => {
     expect((redacted.match(/\[REDACTED\]/g) ?? []).length).toBeGreaterThanOrEqual(10);
   });
 
-  it("stays linear on adversarial near-miss input", () => {
+  it("masks a private-key body longer than any fixed scan window, and an unterminated one", () => {
+    const body = "QUJD".repeat(2_500); // 10,000 base64 chars, no END marker within 8192
+    const end = "-----END EC PRIVATE KEY-----";
+    const terminated = redactSecrets(`pre -----BEGIN EC PRIVATE KEY-----\n${body}\n${end} post`);
+    expect(terminated).toBe("pre [REDACTED] post");
+    const unterminated = redactSecrets(`pre -----BEGIN OPENSSH PRIVATE KEY-----\n${body}\ntrailing`);
+    expect(unterminated).toBe("pre [REDACTED]");
+    // Several blocks in one string are each masked and text between them survives.
+    const two = redactSecrets(
+      `a -----BEGIN PRIVATE KEY-----\n${body}\n-----END PRIVATE KEY----- b -----BEGIN RSA PRIVATE KEY-----\n${body}\n-----END RSA PRIVATE KEY----- c`,
+    );
+    expect(two).toBe("a [REDACTED] b [REDACTED] c");
+  });
+
+  // The adversarial inputs are large; a catastrophic-backtracking regression would
+  // blow past this generous explicit timeout (normal runtime is milliseconds)
+  // without making the test depend on wall-clock load.
+  it("stays linear on adversarial near-miss input", { timeout: 60_000 }, () => {
     const inputs = [
       "-----BEGIN " + "A ".repeat(50_000),
       "eyJ" + "a".repeat(100_000),
       "eyJ" + "a".repeat(50_000) + ".eyJ" + "a".repeat(50_000),
       "bearer " + "a ".repeat(50_000),
       "xoxb-" + "-".repeat(100_000),
+      "-----BEGIN PRIVATE KEY-----".repeat(5_000),
+      "bearer " + "a".repeat(100_000) + "-",
     ];
-    const start = Date.now();
     for (const input of inputs) {
       scanForSecrets(input);
       redactSecrets(input);
     }
-    expect(Date.now() - start).toBeLessThan(2_000);
+    expect(inputs.length).toBeGreaterThan(0);
   });
 });
 

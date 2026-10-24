@@ -1,6 +1,9 @@
 import type { SecurityResult } from "./types.js";
 import { resolveOwnerAliases } from "./owner-config.js";
 
+const PRIVATE_KEY_BEGIN = /-----BEGIN\s+(?:[A-Z0-9]+\s+){0,3}PRIVATE\s+KEY(?:\s+BLOCK)?-----/;
+const PRIVATE_KEY_END = /-----END\s+(?:[A-Z0-9]+\s+){0,3}PRIVATE\s+KEY(?:\s+BLOCK)?-----/;
+
 /**
  * Credential formats rejected before storage.
  *
@@ -28,23 +31,24 @@ const SECRET_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   // unambiguous; elsewhere require a digit in the token so prose such as
   // "bearer authentication-middleware-handler" is not rejected as a secret.
   { pattern: /authorization\s*:\s*bearer\s+[a-zA-Z0-9\-._~+/]{20,}=*/i, label: "Bearer token" },
-  { pattern: /\bbearer\s+(?=[a-zA-Z0-9\-._~+/]*\d)[a-zA-Z0-9\-._~+/]{20,}=*/i, label: "Bearer token" },
-  // Any "-----BEGIN [ALGO ]PRIVATE KEY[ BLOCK]-----" marker: RSA, EC, DSA, OPENSSH,
-  // ENCRYPTED, PGP ... Up to three qualifier words keeps the scan linear. The optional
-  // tail (bounded base64/PEM-header body up to the matching END marker) makes
-  // redactSecrets mask the key material, not just the BEGIN line; detection needs
-  // only the marker.
+  // The token either contains a digit, or is a >=20-char hyphen-free run that is
+  // not continued by a further token char (so "bearer abc...xyz-handler" stays prose).
   {
-    pattern: /-----BEGIN\s+(?:[A-Z0-9]+\s+){0,3}PRIVATE\s+KEY(?:\s+BLOCK)?-----(?:[A-Za-z0-9+/=:,.\s-]{0,8192}?-----END\s+(?:[A-Z0-9]+\s+){0,3}PRIVATE\s+KEY(?:\s+BLOCK)?-----)?/,
-    label: "Private key",
+    pattern: /\bbearer\s+(?:(?=[a-zA-Z0-9\-._~+/]*\d)[a-zA-Z0-9\-._~+/]{20,}|[a-zA-Z0-9._~+/]{20,}(?![a-zA-Z0-9\-._~+/]))=*/i,
+    label: "Bearer token",
   },
+  // Any "-----BEGIN [ALGO ]PRIVATE KEY[ BLOCK]-----" marker: RSA, EC, DSA, OPENSSH,
+  // ENCRYPTED, PGP ... Up to three qualifier words keeps the scan linear. Detection
+  // needs only the marker; redactSecrets additionally masks the key body through the
+  // matching END marker (see PRIVATE_KEY_END).
+  { pattern: PRIVATE_KEY_BEGIN, label: "Private key" },
   { pattern: /-----BEGIN\s+CERTIFICATE-----/, label: "Certificate" },
   { pattern: /AKIA[0-9A-Z]{16}/, label: "AWS access key" },
   // Credential formats added for #410. Each needs a distinctive prefix plus a
   // minimum-length body so prose mentioning the prefix alone is not flagged; the
   // lookbehinds stop mid-word hits (e.g. "task_live_...").
   { pattern: /eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{10,}/, label: "JSON Web Token" },
-  { pattern: /xox[abeoprs]-[A-Za-z0-9-]{10,}/, label: "Slack token" },
+  { pattern: /xox[a-z]-[A-Za-z0-9-]{10,}/, label: "Slack token" },
   { pattern: /xapp-\d-[A-Za-z0-9-]{10,}/, label: "Slack token" },
   { pattern: /glpat-[A-Za-z0-9_-]{20,}/, label: "GitLab personal access token" },
   { pattern: /(?<![A-Za-z0-9])[sr]k_live_[A-Za-z0-9]{16,}/, label: "Stripe live key" },
@@ -206,6 +210,30 @@ export function scanMetadataForSecrets(fields: {
 }
 
 /**
+ * Mask each private-key PEM block, BEGIN marker through the matching END marker
+ * (no length cap). An unterminated block is masked to the end of the string:
+ * over-redaction is acceptable for error/telemetry text, leaking key material is
+ * not. Linear: the scan resumes after each END marker and stops at a missing one.
+ */
+function maskPrivateKeyBlocks(message: string): string {
+  const begin = new RegExp(PRIVATE_KEY_BEGIN.source, "g");
+  const end = new RegExp(PRIVATE_KEY_END.source, "g");
+  let out = "";
+  let cursor = 0;
+  for (;;) {
+    begin.lastIndex = cursor;
+    const b = begin.exec(message);
+    if (!b) break;
+    out += message.slice(cursor, b.index) + "[REDACTED]";
+    end.lastIndex = b.index + b[0].length;
+    const e = end.exec(message);
+    if (!e) return out;
+    cursor = e.index + e[0].length;
+  }
+  return out + message.slice(cursor);
+}
+
+/**
  * Replace all secret-pattern matches in `message` with "[REDACTED]".
  * Used to sanitize error strings before storing or exposing them, and to mask
  * query text before it is persisted to retrieval telemetry (#409). The masking
@@ -216,7 +244,7 @@ export function scanMetadataForSecrets(fields: {
  * are fully scrubbed.
  */
 export function redactSecrets(message: string): string {
-  let result = message;
+  let result = maskPrivateKeyBlocks(message);
   for (const { pattern } of SECRET_PATTERNS) {
     // Build a global-flagged copy so replaceAll behaviour works regardless
     // of whether the pattern already has the /g flag.
