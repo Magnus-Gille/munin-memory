@@ -78,8 +78,8 @@ changelog is the canonical record of what moved.
 ### Fixed
 
 - Migration 32 (#412) restricts the `entries_au` FTS trigger to
-  `AFTER UPDATE OF content, namespace, key, tags`. Embedding-worker writes to
-  `embedding_status` and other non-indexed columns no longer delete and
+  `AFTER UPDATE OF content, namespace, key, tags, rowid`. Embedding-worker
+  writes to `embedding_status` and other non-indexed columns no longer delete and
   re-insert the FTS row or re-run `munin_split_tokens` over the full content.
   Trigger body and code-health exclusion logic are unchanged and the FTS index
   is not rebuilt. Rollback is a new forward migration recreating the trigger

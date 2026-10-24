@@ -1656,7 +1656,7 @@ describe("migration v32 — entries_au fires only for indexed columns (#412)", (
     const fresh = openRawDb();
     runMigrations(fresh);
     expect(getSchemaVersion(fresh)).toBe(32);
-    expect(triggerSql(fresh)).toMatch(/AFTER UPDATE OF content, namespace, key, tags ON entries\b/);
+    expect(triggerSql(fresh)).toMatch(/AFTER UPDATE OF content, namespace, key, tags, rowid ON entries\b/);
     fresh.close();
     cleanupTestDb();
 
@@ -1664,7 +1664,7 @@ describe("migration v32 — entries_au fires only for indexed columns (#412)", (
     applyMigrationsThrough(upgraded, 31);
     expect(triggerSql(upgraded)).not.toMatch(/UPDATE OF/);
     runMigrations(upgraded);
-    expect(triggerSql(upgraded)).toMatch(/AFTER UPDATE OF content, namespace, key, tags ON entries\b/);
+    expect(triggerSql(upgraded)).toMatch(/AFTER UPDATE OF content, namespace, key, tags, rowid ON entries\b/);
     upgraded.close();
   });
 
@@ -1675,7 +1675,7 @@ describe("migration v32 — entries_au fires only for indexed columns (#412)", (
     runMigrations(db);
     const after = triggerSql(db);
     expect(before).toContain("code-health:evidence-v1");
-    expect(after.replace(" OF content, namespace, key, tags", "")).toBe(before);
+    expect(after.replace(" OF content, namespace, key, tags, rowid", "")).toBe(before);
     db.close();
   });
 
@@ -1741,6 +1741,23 @@ describe("migration v32 — entries_au fires only for indexed columns (#412)", (
     db.prepare("UPDATE entries SET tags = '[]' WHERE id = 'e1'").run();
     expect(matchIds(db, "newcontent")).toEqual(["e1"]);
 
+    expect(() => db.exec("INSERT INTO entries_fts(entries_fts) VALUES('integrity-check')")).not.toThrow();
+    db.close();
+  });
+
+  it("keeps FTS bound to the row when entries.rowid itself changes", () => {
+    const db = openRawDb();
+    runMigrations(db);
+    const oldRowid = insertEntry(db, "e1", "projects/fts412", "note", "rowidterm");
+    const newRowid = oldRowid + 1000;
+    expect(matchIds(db, "rowidterm")).toEqual(["e1"]);
+
+    db.prepare("UPDATE entries SET rowid = ? WHERE id = 'e1'").run(newRowid);
+
+    expect(matchIds(db, "rowidterm")).toEqual(["e1"]);
+    expect(
+      db.prepare("SELECT rowid FROM entries_fts WHERE entries_fts MATCH 'rowidterm'").all(),
+    ).toEqual([{ rowid: newRowid }]);
     expect(() => db.exec("INSERT INTO entries_fts(entries_fts) VALUES('integrity-check')")).not.toThrow();
     db.close();
   });

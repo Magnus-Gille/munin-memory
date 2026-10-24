@@ -1428,13 +1428,14 @@ export const migrations: Migration[] = [
       // worker's embedding_status writes — deleted and re-inserted the FTS row
       // and re-ran munin_split_tokens() over the full content. Restrict it to
       // the columns the entries_fts table indexes (content, namespace, key,
-      // tags; the code-health WHEN logic reads only tags). Body and exclusion
-      // logic are unchanged from v28, and the FTS index stays valid, so no
-      // rebuild is needed. DROP IF EXISTS + CREATE keeps this idempotent.
+      // tags; the code-health WHEN logic reads only tags) plus rowid, which
+      // keys the external-content FTS rows. Body and exclusion logic are
+      // unchanged from v28, and the FTS index stays valid, so no rebuild is
+      // needed. DROP IF EXISTS + CREATE keeps this idempotent.
       db.exec(`
         DROP TRIGGER IF EXISTS entries_au;
 
-        CREATE TRIGGER entries_au AFTER UPDATE OF content, namespace, key, tags ON entries
+        CREATE TRIGGER entries_au AFTER UPDATE OF content, namespace, key, tags, rowid ON entries
         BEGIN
           INSERT INTO entries_fts(entries_fts, rowid, content, namespace, key, tags)
           SELECT 'delete', old.rowid, old.content || ' ' || munin_split_tokens(old.content), old.namespace, old.key, old.tags
