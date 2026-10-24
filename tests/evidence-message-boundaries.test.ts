@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, fstatSync, mkdtempSync, openSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -63,7 +63,9 @@ function hash(bytes: Buffer): string {
 }
 
 function tempDir(): string {
-  return mkdtempSync(join(tmpdir(), "munin-message-boundaries-"));
+  // The output-path guard rejects any symlinked ancestor, so fixtures must live under the real
+  // tmpdir (macOS TMPDIR and /tmp resolve through /var and /tmp symlinks).
+  return mkdtempSync(join(realpathSync(tmpdir()), "munin-message-boundaries-"));
 }
 
 function writeSnapshot(path: string, entries: Map<string, { content: string }>): void {
@@ -239,6 +241,26 @@ describe("LongMemEval message-boundary artifact", () => {
         .toThrow(/SQLite sidecar/);
       expect(hash(readFileSync(rawPath))).toBe(rawHash);
       expect(hash(readFileSync(snapshotPath))).toBe(snapshotHash);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an output path whose parent is a user-created symlink", () => {
+    const directory = tempDir();
+    try {
+      const rawPath = join(directory, "raw.json");
+      const snapshotPath = join(directory, "snapshot.db");
+      const raw = [fixtureQuestion()];
+      writeFileSync(rawPath, JSON.stringify(raw));
+      writeSnapshot(snapshotPath, snapshotEntries(raw));
+      const realOut = join(directory, "real-out");
+      const linkOut = join(directory, "link-out");
+      mkdirSync(realOut);
+      symlinkSync(realOut, linkOut);
+      expect(() => prepareMessageBoundariesCli(["--raw", rawPath, "--snapshot", snapshotPath, "--out", join(linkOut, "out.json")], hash(readFileSync(rawPath))))
+        .toThrow("Output path cannot use symlink parents");
+      expect(existsSync(join(realOut, "out.json"))).toBe(false);
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }

@@ -1,12 +1,15 @@
 import { createHash } from "node:crypto";
 import Database from "better-sqlite3";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, lstatSync, readlinkSync, statSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync, lstatSync, readlinkSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { flattenSession, makeSyntheticEntryId } from "../benchmark/adapters/longmemeval/build.js";
 import { prepareGoldTurns, prepareGoldTurnsCli, validateGoldTurns, type GoldTurnSourceBindings } from "../benchmark/evidence-metric/gold-turns.js";
 
+// The output-path guard rejects any symlinked ancestor, so fixtures must live under the real tmpdir
+// (macOS TMPDIR and /tmp resolve through /var and /tmp symlinks).
+const realTmpdir = () => realpathSync(tmpdir());
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
 const shaBytes = (value: Buffer) => createHash("sha256").update(value).digest("hex");
 const query = { id: "longmemeval-s-q1", expected_ids: [makeSyntheticEntryId("s", "q1", "session_1")] };
@@ -65,7 +68,7 @@ describe("LongMemEval gold-turn artifact", () => {
   });
 
   it("creates an exclusive artifact from real files without mutating the snapshot", () => {
-    const dir = mkdtempSync(join(tmpdir(), "munin-gold-turns-"));
+    const dir = mkdtempSync(join(realTmpdir(), "munin-gold-turns-"));
     try {
       const rawPath = join(dir, "raw.json"); const queryPath = join(dir, "queries.jsonl"); const snapshotPath = join(dir, "snapshot.db"); const outputPath = join(dir, "gold.json");
       const rawItem = [{ ...raw[0]!, answer_session_ids: ["session_1"] }];
@@ -86,7 +89,7 @@ describe("LongMemEval gold-turn artifact", () => {
   });
 
   it.each(["existing file", "dangling symlink"])("refuses an output collision (%s) without altering sources or targets", (collision) => {
-    const dir = mkdtempSync(join(tmpdir(), "munin-gold-collision-"));
+    const dir = mkdtempSync(join(realTmpdir(), "munin-gold-collision-"));
     try {
       const rawPath = join(dir, "raw.json"); const queryPath = join(dir, "queries.jsonl"); const snapshotPath = join(dir, "snapshot.db"); const outputPath = join(dir, "gold.json");
       writeFileSync(rawPath, JSON.stringify(raw)); writeFileSync(queryPath, `${JSON.stringify(query)}\n`);
@@ -111,8 +114,24 @@ describe("LongMemEval gold-turn artifact", () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
+  it("rejects an output path whose parent is a user-created symlink", () => {
+    const dir = mkdtempSync(join(realTmpdir(), "munin-gold-symlink-parent-"));
+    try {
+      const rawPath = join(dir, "raw.json"); const queryPath = join(dir, "queries.jsonl"); const snapshotPath = join(dir, "snapshot.db");
+      writeFileSync(rawPath, JSON.stringify(raw)); writeFileSync(queryPath, `${JSON.stringify(query)}\n`);
+      const db = new Database(snapshotPath);
+      db.exec("CREATE TABLE entries (id TEXT PRIMARY KEY, content TEXT NOT NULL)");
+      db.prepare("INSERT INTO entries (id, content) VALUES (?, ?)").run(query.expected_ids[0], content);
+      db.close();
+      const realOut = join(dir, "real-out"); const linkOut = join(dir, "link-out");
+      mkdirSync(realOut); symlinkSync(realOut, linkOut);
+      expect(() => prepareGoldTurnsCli(["--raw", rawPath, "--queries", queryPath, "--snapshot", snapshotPath, "--out", join(linkOut, "gold.json")], shaBytes(readFileSync(rawPath)))).toThrow("Output path cannot use symlink parents");
+      expect(existsSync(join(realOut, "gold.json"))).toBe(false);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
   it("refuses snapshots with sidecars before opening SQLite", () => {
-    const dir = mkdtempSync(join(tmpdir(), "munin-gold-sidecar-"));
+    const dir = mkdtempSync(join(realTmpdir(), "munin-gold-sidecar-"));
     try {
       const rawPath = join(dir, "raw.json"); const queryPath = join(dir, "queries.jsonl"); const snapshotPath = join(dir, "snapshot.db"); const outputPath = join(dir, "gold.json");
       writeFileSync(rawPath, "[]"); writeFileSync(queryPath, "{}\n"); writeFileSync(snapshotPath, "snapshot"); writeFileSync(`${snapshotPath}-wal`, "keep");
