@@ -24,9 +24,32 @@ const SECRET_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /gho_[a-zA-Z0-9]{36,}/, label: "GitHub OAuth token" },
   { pattern: /github_pat_[a-zA-Z0-9_]{22,}/, label: "GitHub fine-grained PAT" },
   { pattern: /Bearer\s+[a-zA-Z0-9\-._~+/]{20,}=*/, label: "Bearer token" },
-  { pattern: /-----BEGIN\s+(RSA\s+)?PRIVATE\s+KEY-----/, label: "Private key" },
+  // Lowercase/mixed-case bearer (#410): an Authorization header line is
+  // unambiguous; elsewhere require a digit in the token so prose such as
+  // "bearer authentication-middleware-handler" is not rejected as a secret.
+  { pattern: /authorization\s*:\s*bearer\s+[a-zA-Z0-9\-._~+/]{20,}=*/i, label: "Bearer token" },
+  { pattern: /\bbearer\s+(?=[a-zA-Z0-9\-._~+/]*\d)[a-zA-Z0-9\-._~+/]{20,}=*/i, label: "Bearer token" },
+  // Any "-----BEGIN [ALGO ]PRIVATE KEY[ BLOCK]-----" marker: RSA, EC, DSA, OPENSSH,
+  // ENCRYPTED, PGP ... Up to three qualifier words keeps the scan linear. The optional
+  // tail (bounded base64/PEM-header body up to the matching END marker) makes
+  // redactSecrets mask the key material, not just the BEGIN line; detection needs
+  // only the marker.
+  {
+    pattern: /-----BEGIN\s+(?:[A-Z0-9]+\s+){0,3}PRIVATE\s+KEY(?:\s+BLOCK)?-----(?:[A-Za-z0-9+/=:,.\s-]{0,8192}?-----END\s+(?:[A-Z0-9]+\s+){0,3}PRIVATE\s+KEY(?:\s+BLOCK)?-----)?/,
+    label: "Private key",
+  },
   { pattern: /-----BEGIN\s+CERTIFICATE-----/, label: "Certificate" },
   { pattern: /AKIA[0-9A-Z]{16}/, label: "AWS access key" },
+  // Credential formats added for #410. Each needs a distinctive prefix plus a
+  // minimum-length body so prose mentioning the prefix alone is not flagged; the
+  // lookbehinds stop mid-word hits (e.g. "task_live_...").
+  { pattern: /eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{10,}/, label: "JSON Web Token" },
+  { pattern: /xox[abeoprs]-[A-Za-z0-9-]{10,}/, label: "Slack token" },
+  { pattern: /xapp-\d-[A-Za-z0-9-]{10,}/, label: "Slack token" },
+  { pattern: /glpat-[A-Za-z0-9_-]{20,}/, label: "GitLab personal access token" },
+  { pattern: /(?<![A-Za-z0-9])[sr]k_live_[A-Za-z0-9]{16,}/, label: "Stripe live key" },
+  { pattern: /(?<![A-Za-z0-9])npm_[A-Za-z0-9]{36,}/, label: "npm access token" },
+  { pattern: /ya29\.[A-Za-z0-9_-]{20,}/, label: "Google OAuth access token" },
   { pattern: /password\s*[:=]\s*['"][^'"]{8,}['"]/i, label: "Inline password" },
   { pattern: /secret\s*[:=]\s*['"][^'"]{8,}['"]/i, label: "Inline secret" },
 ];

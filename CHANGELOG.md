@@ -63,6 +63,17 @@ changelog is the canonical record of what moved.
 
 ### Security
 
+- The secret scan now also rejects credential formats it previously let through
+  (#410): private-key PEM blocks of any algorithm (`EC`, `DSA`, `OPENSSH`,
+  `ENCRYPTED`, ... not just `RSA`/plain), JSON Web Tokens, Slack tokens
+  (`xox?-`, `xapp-`), GitLab PATs (`glpat-`), Stripe live/restricted keys
+  (`sk_live_`, `rk_live_`), npm tokens (`npm_`), Google OAuth access tokens
+  (`ya29.`) and lowercase `bearer <token>`. All patterns require a minimum body
+  length so prose such as "sk_live" in docs or a short `npm_install` tag is not
+  flagged. `redactSecrets` (error and telemetry masking) uses the same list and
+  now also masks the key material of a PEM private-key block, not just its
+  `BEGIN` line.
+
 - Credential-shaped values in stored metadata and retrieval telemetry are now
   handled like credentials in `content` (#409). `memory_write` (including
   `patch.tags_add`), `memory_log` and `memory_update_status` scan namespace, key and
