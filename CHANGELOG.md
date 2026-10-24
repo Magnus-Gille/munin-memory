@@ -63,6 +63,11 @@ changelog is the canonical record of what moved.
 
 ### Security
 
+- Production dependencies are lifted past four advisories (#236): body-parser
+  2.4.0 (GHSA-27r3-jxmh-p828), zod 4.6.7 (GHSA-mrhx-c7xc-m3w5), fast-uri
+  3.1.9 and ip-address 10.7.4. The `overrides` floors are raised so the lockfile
+  cannot fall back. `npm audit` reports no advisories. The previously tracked
+  Hono and Sharp advisories no longer apply to the resolved versions.
 - Keep offsite backup and snapshot Heimdall bearer tokens out of curl arguments,
   and reject tokens containing CR/LF before sending a panel update.
 - **OAuth consent proxy and identity gates.** Public issuers now require an exact
