@@ -18,7 +18,8 @@ changelog is the canonical record of what moved.
   patch, overwrite and declassify it with a full write, learn its revision from a
   CAS or `create_if_absent` conflict, or see protected status content in a preview. Such calls are now denied
   as hidden targets (`access_denied` for agents, `{"found": false}` otherwise,
-  `classification_error` for owners) and modify nothing. Callers whose ceiling
+  `classification_error` for owners) and modify nothing. The check is repeated inside the write transaction, so a
+  concurrent classification raise from another connection cannot be overwritten. Callers whose ceiling
   covers the entry are unaffected.
 
 ### Added

@@ -8019,6 +8019,30 @@ function denyIfExistingEntryHidden(
   return dryRun ? buildAccessDeniedResult(ctx, action) : accessDeniedResponse(db, ctx, action);
 }
 
+/**
+ * #406: run `write` only if the entry it targets is still readable at the
+ * caller's ceiling, with the re-read, the check and the write in ONE immediate
+ * transaction. The early denyIfExistingEntryHidden calls keep denials ahead of
+ * every other error, but they read outside any write lock, so another
+ * connection (the admin CLI, a second process) could raise the entry's
+ * classification before the write and have it declassified anyway. The write
+ * helpers' own transactions nest as savepoints inside this one.
+ */
+function writeUnlessExistingHidden<T>(
+  db: Database.Database,
+  ctx: AccessContext,
+  namespace: string,
+  key: string,
+  action: string,
+  write: () => T,
+): { denied: ReturnType<typeof errResult> } | { value: T } {
+  return db.transaction((): { denied: ReturnType<typeof errResult> } | { value: T } => {
+    const denied = denyIfExistingEntryHidden(db, ctx, readState(db, namespace, key), action);
+    if (denied) return { denied };
+    return { value: write() };
+  }).immediate();
+}
+
 interface StateCorrectionPreparation {
   target: Entry | null;
   validFrom?: string;
@@ -10610,7 +10634,7 @@ export function registerTools(
 
                 let patchResult;
                 try {
-                  patchResult = patchState(
+                  const guardedPatch = writeUnlessExistingHidden(db, ctx, namespace, key, "write", () => patchState(
                     db,
                     namespace,
                     key,
@@ -10621,7 +10645,9 @@ export function registerTools(
                       classification,
                       classificationOverride: classification_override,
                     },
-                  );
+                  ));
+                  if ("denied" in guardedPatch) return guardedPatch.denied;
+                  patchResult = guardedPatch.value;
                 } catch (error) {
                   const message = getPublicValidationMessage(error);
                   if (message === undefined) throw error;
@@ -10789,7 +10815,7 @@ export function registerTools(
                   ?? (correctionTarget && correctionTarget.valid_from > implicitCorrectionNow
                     ? correctionTarget.valid_from
                     : implicitCorrectionNow);
-                result = supersedes
+                const guardedWrite = writeUnlessExistingHidden(db, ctx, namespace, key, "write", () => supersedes
                   ? supersedeState(
                       db,
                       namespace,
@@ -10821,7 +10847,9 @@ export function registerTools(
                         classificationOverride: classification_override,
                         createIfAbsent: create_if_absent === true,
                       },
-                    );
+                    ));
+                if ("denied" in guardedWrite) return guardedWrite.denied;
+                result = guardedWrite.value;
               } catch (error) {
                 const message = getPublicValidationMessage(error);
                 if (message === undefined) throw error;
@@ -10892,7 +10920,6 @@ export function registerTools(
           }
 
           case "memory_update_status": {
-            // eslint-disable-next-line complexity -- one handler validates the status fields, authorizes the existing status, and executes both the validate-only and mutation paths.
             const handleMemoryUpdateStatus = () => {
               const unknownArgumentError = rejectUnknownArguments(args, [
                 "namespace", "phase", "current_work", "blockers", "next_steps", "notes",
@@ -11161,7 +11188,7 @@ export function registerTools(
 
               let result;
               try {
-                result = writeState(
+                const guardedStatus = writeUnlessExistingHidden(db, ctx, namespace, "status", "update_status", () => writeState(
                   db,
                   namespace,
                   "status",
@@ -11174,7 +11201,9 @@ export function registerTools(
                     classification,
                     classificationOverride: classification_override,
                   },
-                );
+                ));
+                if ("denied" in guardedStatus) return guardedStatus.denied;
+                result = guardedStatus.value;
               } catch (error) {
                 const message = getPublicValidationMessage(error);
                 if (message === undefined) throw error;
