@@ -8,20 +8,6 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
-### Security
-
-- `memory_write` (patches and full overwrites) and `memory_update_status`
-  (including `validate_only` previews) now check the existing entry against the caller's classification
-  ceiling, using the same predicate as `memory_read`, before merging, previewing,
-  or changing its classification (#406). Previously a principal with write access
-  but a lower ceiling could lower a hidden entry's classification with a tag-only
-  patch, overwrite and declassify it with a full write, learn its revision from a
-  CAS or `create_if_absent` conflict, or see protected status content in a preview. Such calls are now denied
-  as hidden targets (`access_denied` for agents, `{"found": false}` otherwise,
-  `classification_error` for owners) and modify nothing. The check is repeated inside the write transaction, so a
-  concurrent classification raise from another connection cannot be overwritten. Callers whose ceiling
-  covers the entry are unaffected.
-
 ### Added
 
 - A core-first whole-message experiment (#342) tests optional neighbor expansion
@@ -76,6 +62,20 @@ changelog is the canonical record of what moved.
   after merge. The lane never updates the baseline.
 
 ### Security
+
+- `memory_write` (patches and full overwrites) and `memory_update_status`
+  (including `validate_only` previews) now check the existing entry against the
+  caller's classification ceiling, using the same predicate as `memory_read`,
+  before merging, previewing, or changing its classification (#406). Previously
+  a principal with write access but a lower ceiling could lower a hidden entry's
+  classification with a tag-only patch, overwrite and declassify it with a full
+  write, learn its revision from a CAS or `create_if_absent` conflict, or see
+  protected status content in a preview. Such calls are now denied as hidden
+  targets (`access_denied` for agents, `{"found": false}` otherwise,
+  `classification_error` for owners) and modify nothing. The check is repeated
+  inside the write transaction, so a concurrent classification raise from
+  another connection cannot be overwritten. Callers whose ceiling covers the
+  entry are unaffected.
 
 - Production dependencies are lifted past four advisories (#236): body-parser
   2.4.0 (GHSA-27r3-jxmh-p828), zod 4.6.7 (GHSA-mrhx-c7xc-m3w5), fast-uri
@@ -147,8 +147,7 @@ changelog is the canonical record of what moved.
   persisted), so a different secret is never accepted as a continuation. After a
   restart, or for snapshots created before this change, a secret-bearing
   argument cannot be verified and the client is told to resume with the cursor
-  only. `memory_query` responses also `memory_query` responses echo
-  the masked `query` on every page, and `memory_read_batch` failure items mask
+  only. `memory_query` responses echo the masked `query` on every page, and `memory_read_batch` failure items mask
   credential-shaped namespace/key values. Namespace and key format errors redact
   credential-shaped values, and `memory_update_status` rejects a secret-bearing
   namespace before any format error. Historical rows are not
