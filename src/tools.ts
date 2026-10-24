@@ -7985,6 +7985,64 @@ function accessDeniedErrorResponse(
   return errResult(action, "access_denied", message);
 }
 
+/**
+ * #406: an existing entry that memory_read would redact for this caller (the
+ * same enforceClassification ceiling) must not be reused as the source of a
+ * patch, a status merge, or a status preview, nor have its classification
+ * changed. Returns the denial response to send, or null when the caller may
+ * read the entry. Owners get a classification_error carrying the same
+ * guidance memory_read gives; other principals get the hidden-target denial
+ * (access_denied for agents, found:false otherwise). Call BEFORE merging, previewing, or resolving classification.
+ * `dryRun` skips the access-denied telemetry write so previews stay read-only.
+ */
+function denyIfExistingEntryHidden(
+  db: Database.Database,
+  ctx: AccessContext,
+  existing: { id: string; namespace: string; classification: ClassificationLevel } | null | undefined,
+  action: string,
+  dryRun = false,
+) {
+  if (!existing) return null;
+  const enforcement = enforceClassification(ctx, {
+    id: existing.id,
+    namespace: existing.namespace,
+    classification: existing.classification,
+  });
+  if (enforcement.allowed) return null;
+  if (ctx.principalType === "owner") {
+    // The owner is told why (as memory_read's redaction does), via the
+    // established classification_error contract, instead of a bare denial.
+    return errResult(action, "classification_error", String(enforcement.response.redaction_reason), {
+      namespace: existing.namespace,
+    });
+  }
+  return dryRun ? buildAccessDeniedResult(ctx, action) : accessDeniedResponse(db, ctx, action);
+}
+
+/**
+ * #406: run `write` only if the entry it targets is still readable at the
+ * caller's ceiling, with the re-read, the check and the write in ONE immediate
+ * transaction. The early denyIfExistingEntryHidden calls keep denials ahead of
+ * every other error, but they read outside any write lock, so another
+ * connection (the admin CLI, a second process) could raise the entry's
+ * classification before the write and have it declassified anyway. The write
+ * helpers' own transactions nest as savepoints inside this one.
+ */
+function writeUnlessExistingHidden<T>(
+  db: Database.Database,
+  ctx: AccessContext,
+  namespace: string,
+  key: string,
+  action: string,
+  write: () => T,
+): { denied: ReturnType<typeof errResult> } | { value: T } {
+  return db.transaction((): { denied: ReturnType<typeof errResult> } | { value: T } => {
+    const denied = denyIfExistingEntryHidden(db, ctx, readState(db, namespace, key), action);
+    if (denied) return { denied };
+    return { value: write() };
+  }).immediate();
+}
+
 interface StateCorrectionPreparation {
   target: Entry | null;
   validFrom?: string;
@@ -10553,6 +10611,10 @@ export function registerTools(
                 // Pre-flight: reject patches that would create Librarian-orphaned entries
                 {
                   const existing = readState(db, namespace, key);
+                  // #406: a patch reuses the existing content, so the existing
+                  // entry must be readable at the caller's ceiling first.
+                  const hiddenDenial = denyIfExistingEntryHidden(db, ctx, existing, "write");
+                  if (hiddenDenial) return hiddenDenial;
                   const existingTags = existing ? parseTags(existing.tags) : [];
                   const basePatchTags = classification !== undefined
                     ? stripClassificationTags(existingTags)
@@ -10572,7 +10634,7 @@ export function registerTools(
 
                 let patchResult;
                 try {
-                  patchResult = patchState(
+                  const guardedPatch = writeUnlessExistingHidden(db, ctx, namespace, key, "write", () => patchState(
                     db,
                     namespace,
                     key,
@@ -10583,7 +10645,9 @@ export function registerTools(
                       classification,
                       classificationOverride: classification_override,
                     },
-                  );
+                  ));
+                  if ("denied" in guardedPatch) return guardedPatch.denied;
+                  patchResult = guardedPatch.value;
                 } catch (error) {
                   const message = getPublicValidationMessage(error);
                   if (message === undefined) throw error;
@@ -10650,6 +10714,12 @@ export function registerTools(
 
               const isTrackedStatus = key === "status" && isTrackedNamespace(namespace, resolveTrackedPatterns(db, ctx));
               const existing = readState(db, namespace, key);
+              // #406: a full write replaces an existing entry and reuses its
+              // lifecycle tags, classification and revision (CAS/create-only
+              // conflicts echo current_updated_at). Authorize it at the
+              // caller's ceiling before any of that is used or returned.
+              const hiddenOverwriteDenial = denyIfExistingEntryHidden(db, ctx, existing, "write");
+              if (hiddenOverwriteDenial) return hiddenOverwriteDenial;
               // #167: memory_write is a documented migration path for tracked
               // status entries, so apply the same parameter-markup guard here —
               // otherwise leaked `</parameter>` markup in `content` could swallow
@@ -10745,7 +10815,7 @@ export function registerTools(
                   ?? (correctionTarget && correctionTarget.valid_from > implicitCorrectionNow
                     ? correctionTarget.valid_from
                     : implicitCorrectionNow);
-                result = supersedes
+                const guardedWrite = writeUnlessExistingHidden(db, ctx, namespace, key, "write", () => supersedes
                   ? supersedeState(
                       db,
                       namespace,
@@ -10777,7 +10847,9 @@ export function registerTools(
                         classificationOverride: classification_override,
                         createIfAbsent: create_if_absent === true,
                       },
-                    );
+                    ));
+                if ("denied" in guardedWrite) return guardedWrite.denied;
+                result = guardedWrite.value;
               } catch (error) {
                 const message = getPublicValidationMessage(error);
                 if (message === undefined) throw error;
@@ -10932,6 +11004,13 @@ export function registerTools(
               }
 
               const existing = readState(db, namespace, "status");
+              // #406: the status merge and preview reuse the existing content,
+              // so authorize it against the caller's ceiling before anything
+              // derived from it (errors, merge, preview) can be returned.
+              const hiddenStatusDenial = denyIfExistingEntryHidden(
+                db, ctx, existing, "update_status", validate_only === true,
+              );
+              if (hiddenStatusDenial) return hiddenStatusDenial;
               const existingParsed = existing ? parseEntry(existing) : null;
               const existingStructured = existingParsed ? parseStructuredStatus(existingParsed.content) : undefined;
               const duplicateExtraTitles = existingStructured
@@ -11109,7 +11188,7 @@ export function registerTools(
 
               let result;
               try {
-                result = writeState(
+                const guardedStatus = writeUnlessExistingHidden(db, ctx, namespace, "status", "update_status", () => writeState(
                   db,
                   namespace,
                   "status",
@@ -11122,7 +11201,9 @@ export function registerTools(
                     classification,
                     classificationOverride: classification_override,
                   },
-                );
+                ));
+                if ("denied" in guardedStatus) return guardedStatus.denied;
+                result = guardedStatus.value;
               } catch (error) {
                 const message = getPublicValidationMessage(error);
                 if (message === undefined) throw error;
