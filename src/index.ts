@@ -191,6 +191,7 @@ export interface ConsentIdentity {
 
 let cleanupTimerId: ReturnType<typeof setInterval> | undefined;
 let activeDb: Database.Database | undefined;
+let activeHttpServer: HttpServer | undefined;
 
 export interface MaintenancePruneTimerOptions {
   intervalMs?: number;
@@ -1067,6 +1068,7 @@ async function startHttp(database: Database.Database) {
   });
 
   const httpServer = createHttpServer(app);
+  activeHttpServer = httpServer;
 
   cleanupTimerId = startMaintenancePruneTimer(database, {
     additionalCleanup: () => oauthProvider.cleanupExpired(),
@@ -1146,24 +1148,147 @@ async function main() {
   }
 }
 
-// Graceful shutdown
-async function shutdown() {
+// --- Graceful shutdown ---
+
+// How long shutdown waits for in-flight HTTP requests to finish before it
+// force-closes their sockets. Bounded so a stuck request cannot block a deploy
+// restart indefinitely.
+//
+// Worst case total = SHUTDOWN_DRAIN_TIMEOUT_MS + SHUTDOWN_WORKER_STOP_TIMEOUT_MS
+// = 30 s plus DB close, which stays well under systemd's default 90 s stop
+// timeout (after which SIGKILL would cut shutdown short).
+export const SHUTDOWN_DRAIN_TIMEOUT_MS = 10_000;
+
+// How long shutdown waits, in total, for both worker stops. A stop awaits its
+// in-flight batch, and a consolidation batch can sit in an LLM fetch that has no
+// timeout of its own, so the wait must be bounded here. On expiry the still-pending
+// stop(s) are logged, the exit code becomes 1, and shutdown proceeds to close
+// the DB (the in-flight batch is then abandoned and dies with the process).
+export const SHUTDOWN_WORKER_STOP_TIMEOUT_MS = 20_000;
+
+export interface ShutdownDeps {
+  /** HTTP transport only; undefined for stdio. */
+  httpServer?: HttpServer;
+  stopEmbeddingWorker: () => Promise<void>;
+  stopConsolidationWorker: () => Promise<void>;
+  closeDatabase: () => void;
+  exit: (code: number) => void;
+  log?: (message: string, err?: unknown) => void;
+  /** Exit code to use when every step succeeds (1 on the fatal startup path). */
+  exitCode?: number;
+  drainTimeoutMs?: number;
+  /** Combined bound for both worker stops. */
+  workerStopTimeoutMs?: number;
+}
+
+/**
+ * Stop accepting connections, drain in-flight HTTP requests (bounded), stop both
+ * background workers independently, close the database, then exit. Order matters:
+ * requests may still write to the DB, so it closes only after they have drained,
+ * and a failing worker stop must not prevent the other stop or the DB close.
+ */
+export async function runGracefulShutdown(deps: ShutdownDeps): Promise<void> {
+  const log = deps.log ?? ((message: string, err?: unknown) => console.error(message, err ?? ""));
+  let exitCode = deps.exitCode ?? 0;
+
+  if (deps.httpServer) {
+    try {
+      await drainHttpServer(deps.httpServer, deps.drainTimeoutMs ?? SHUTDOWN_DRAIN_TIMEOUT_MS, log);
+    } catch (err) {
+      log("Error closing HTTP server during shutdown:", err);
+      exitCode = 1;
+    }
+  }
+
+  const stopTimeoutMs = deps.workerStopTimeoutMs ?? SHUTDOWN_WORKER_STOP_TIMEOUT_MS;
+  const stopNames = ["embedding", "consolidation"];
+  const settled = [false, false];
+  const stopResults = [deps.stopEmbeddingWorker, deps.stopConsolidationWorker].map((stop, i) =>
+    // Run each stop in its own async wrapper so a synchronous throw is also
+    // reported as a rejection of that worker only.
+    (async () => stop())().then(
+      () => { settled[i] = true; },
+      (err: unknown) => {
+        settled[i] = true;
+        // A worker stop can reject (in-flight DB/write/embedding errors). Don't let
+        // that skip the other worker or the DB close.
+        log(`Error stopping ${stopNames[i]} worker during shutdown:`, err);
+        exitCode = 1;
+      },
+    ),
+  );
+  let stopTimer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = await Promise.race([
+    Promise.all(stopResults).then(() => false),
+    new Promise<boolean>((resolve) => {
+      stopTimer = setTimeout(() => resolve(true), stopTimeoutMs);
+    }),
+  ]);
+  clearTimeout(stopTimer);
+  if (timedOut) {
+    const pending = stopNames.filter((_, i) => !settled[i]).join(", ");
+    log(`Worker stop still pending after ${stopTimeoutMs} ms (${pending}); closing the database anyway`);
+    exitCode = 1;
+  }
+
+  try {
+    deps.closeDatabase();
+  } catch (err) {
+    log("Error closing database during shutdown:", err);
+    exitCode = 1;
+  }
+  deps.exit(exitCode);
+}
+
+function drainHttpServer(
+  httpServer: HttpServer,
+  timeoutMs: number,
+  log: (message: string, err?: unknown) => void,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let sweep: ReturnType<typeof setInterval> | undefined;
+    const finish = (err?: Error | null) => {
+      clearTimeout(timer);
+      clearInterval(sweep);
+      // Closing a server that never started listening is not a shutdown failure.
+      if (err && (err as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING") reject(err);
+      else resolve();
+    };
+
+    // Stop accepting new connections; the callback fires once every open
+    // connection has ended.
+    httpServer.close(finish);
+    httpServer.closeIdleConnections();
+    // Defensive: a keep-alive connection that goes idle when its last response
+    // finishes must not hold close() open for the whole keep-alive window.
+    sweep = setInterval(() => httpServer.closeIdleConnections(), 100);
+    timer = setTimeout(() => {
+      log(`HTTP requests still in flight after ${timeoutMs} ms; closing their connections`);
+      httpServer.closeAllConnections();
+    }, timeoutMs);
+  });
+}
+
+let shutdownStarted = false;
+
+function shutdown(exitCode = 0): Promise<void> {
+  if (shutdownStarted) return Promise.resolve();
+  shutdownStarted = true;
   stopMaintenancePruneTimer(cleanupTimerId);
   cleanupTimerId = undefined;
-  let exitCode = 0;
-  try {
-    await stopEmbeddingWorker();
-    await stopConsolidationWorker();
-  } catch (err) {
-    // A worker stop can reject (in-flight DB/write/embedding errors). Don't let
-    // that drop the rest of shutdown — the finally still closes the DB and exits.
-    console.error("Error stopping workers during shutdown:", err);
-    exitCode = 1;
-  } finally {
-    activeDb?.close();
-    activeDb = undefined;
-    process.exit(exitCode);
-  }
+  return runGracefulShutdown({
+    httpServer: activeHttpServer,
+    stopEmbeddingWorker,
+    stopConsolidationWorker,
+    closeDatabase: () => {
+      const database = activeDb;
+      activeDb = undefined;
+      database?.close();
+    },
+    exit: (code) => process.exit(code),
+    exitCode,
+  });
 }
 
 const isMainModule =
@@ -1176,12 +1301,6 @@ if (isMainModule) {
 
   main().catch(async (err) => {
     console.error("Fatal error:", err);
-    stopMaintenancePruneTimer(cleanupTimerId);
-    cleanupTimerId = undefined;
-    await stopEmbeddingWorker();
-    await stopConsolidationWorker();
-    activeDb?.close();
-    activeDb = undefined;
-    process.exit(1);
+    await shutdown(1);
   });
 }

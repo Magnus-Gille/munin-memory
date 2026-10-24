@@ -330,15 +330,23 @@ export function startConsolidationWorker(db: Database.Database): void {
 }
 
 export async function stopConsolidationWorker(): Promise<void> {
+  // Detach the DB first so the in-flight batch's .finally cannot re-arm the
+  // timer after stop (the batch captured its own db handle when it started).
+  workerDb = null;
   if (workerTimer !== null) {
     clearTimeout(workerTimer);
     workerTimer = null;
   }
-  if (workerInflightPromise) {
-    await workerInflightPromise;
+  try {
+    // A rejecting in-flight batch must not skip the state reset below.
+    if (workerInflightPromise) await workerInflightPromise;
+  } finally {
     workerInflightPromise = null;
+    if (workerTimer !== null) {
+      clearTimeout(workerTimer);
+      workerTimer = null;
+    }
   }
-  workerDb = null;
 }
 
 export function isConsolidationAvailable(): boolean {
@@ -383,12 +391,15 @@ export function resetConsolidationCircuitBreaker(): void {
 function scheduleNextRun(): void {
   if (!workerDb) return;
   workerTimer = setTimeout(() => {
+    workerTimer = null;
     if (!workerDb || workerProcessing) return;
     workerInflightPromise = processConsolidationBatch().finally(() => {
       workerInflightPromise = null;
       if (workerDb) scheduleNextRun();
     });
   }, config.intervalMs);
+  // Never keep the process alive just for the next run; the transport does that.
+  workerTimer.unref();
 }
 
 // Half-open delay: after the circuit breaker trips, allow one probe attempt

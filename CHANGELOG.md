@@ -82,6 +82,18 @@ changelog is the canonical record of what moved.
 
 ### Fixed
 
+- Graceful shutdown (#413) now drains in-flight HTTP requests before closing the
+  database: it stops accepting connections, closes idle keep-alive sockets, waits
+  up to 10 s for active requests, then force-closes any that remain. Previously
+  `SIGTERM` closed the DB and exited immediately, cutting requests off on deploy
+  restarts. The embedding and consolidation workers are now stopped
+  independently, so a rejecting embedding stop (for example an in-flight batch
+  whose failure-status write throws) no longer skips the consolidation stop. The
+  worker-stop phase is bounded to 20 s in total (a stuck in-flight LLM call is
+  abandoned), keeping a restart under systemd's 90 s stop timeout; the exit code
+  is 1 if any step failed or timed out. Both workers also no longer re-arm a
+  timer after stop, and their timers are `unref`'d.
+
 - The HTTP server now keeps idle connections for 95 s instead of Node's 5 s
   default, longer than cloudflared's 90 s origin pool (#404). A proxy reusing a
   socket Node was closing got a connection reset, which failed Claude's OAuth

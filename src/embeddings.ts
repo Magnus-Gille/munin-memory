@@ -393,21 +393,31 @@ export function startEmbeddingWorker(db: Database.Database): void {
 }
 
 export async function stopEmbeddingWorker(): Promise<void> {
+  // Detach the DB first: the in-flight batch's .finally re-arms the timer only
+  // while workerDb is set, so nulling it before we await keeps a stopped worker
+  // from scheduling a timer that nothing would ever clear.
+  workerDb = null;
   if (workerTimer !== null) {
     clearTimeout(workerTimer);
     workerTimer = null;
   }
-  // Await in-flight batch
-  if (workerInflightPromise) {
-    await workerInflightPromise;
+  try {
+    // Await in-flight batch. It may reject (e.g. a failed status write); the
+    // state reset below must still run so the caller sees a fully stopped worker.
+    if (workerInflightPromise) await workerInflightPromise;
+  } finally {
     workerInflightPromise = null;
+    if (workerTimer !== null) {
+      clearTimeout(workerTimer);
+      workerTimer = null;
+    }
   }
-  workerDb = null;
 }
 
 function scheduleNextBatch(): void {
   if (!workerDb) return;
   workerTimer = setTimeout(() => {
+    workerTimer = null;
     if (!workerDb || workerProcessing) return;
     workerInflightPromise = processBatch().finally(() => {
       workerInflightPromise = null;
@@ -416,6 +426,8 @@ function scheduleNextBatch(): void {
       }
     });
   }, config.batchDelayMs);
+  // Never keep the process alive just for the next batch; the transport does that.
+  workerTimer.unref();
 }
 
 async function processBatch(): Promise<void> {
