@@ -29,6 +29,10 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
       - run: npm ci
+        env:
+          # onnxruntime-node (via @huggingface/transformers) otherwise downloads
+          # unused CUDA binaries from nuget.org on linux/x64 (#414).
+          ONNXRUNTIME_NODE_INSTALL: skip
       - run: npm run build
       # Downloads the current default BGE and profile MiniLM weights once per
       # dtype, then starts fresh processes with local_files_only=true to prove
@@ -65,6 +69,10 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
       - run: npm ci
+        env:
+          # onnxruntime-node (via @huggingface/transformers) otherwise downloads
+          # unused CUDA binaries from nuget.org on linux/x64 (#414).
+          ONNXRUNTIME_NODE_INSTALL: skip
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run typecheck:tools

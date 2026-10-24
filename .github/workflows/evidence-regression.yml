@@ -32,6 +32,10 @@ jobs:
       # No dependency or data cache: every run demonstrates a cold checkout
       # can obtain the exact frozen inputs without local state or model calls.
       - run: npm ci
+        env:
+          # onnxruntime-node (via @huggingface/transformers) otherwise downloads
+          # unused CUDA binaries from nuget.org on linux/x64 (#414).
+          ONNXRUNTIME_NODE_INSTALL: skip
       - name: Compare all 500 questions against the reviewed baseline
         run: |
           mkdir -p "$RUNNER_TEMP/evidence-results"
