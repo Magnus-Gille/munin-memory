@@ -93,6 +93,12 @@ changelog is the canonical record of what moved.
   reports all three counts and its `--json` output adds `tokensRevoked` and
   `codesInvalidated` (`removed` still counts mappings). Clearing a principal no
   longer revokes other principals' tokens on a client it happened to own.
+  `removeOAuthClient` likewise returns `{ removed, mappingsRemoved, tokensRevoked,
+  codesInvalidated }`, and `oauth-clients remove` prints those counts in text and
+  `--json`. Authorization-code and refresh-token exchange and both admin commands
+  now run as IMMEDIATE transactions (code claim, validation and token issuance are
+  one transaction), so an admin revocation from the separate CLI process can no
+  longer land between a code being claimed and its tokens being issued.
 - Keep offsite backup and snapshot Heimdall bearer tokens out of curl arguments,
   and reject tokens containing CR/LF before sending a panel update.
 - **OAuth consent proxy and identity gates.** Public issuers now require an exact

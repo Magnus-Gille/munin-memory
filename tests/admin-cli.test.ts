@@ -943,14 +943,14 @@ describe("removeOAuthClient", () => {
   beforeEach(() => { db = makeDb(); });
 
   it("returns false for nonexistent client", () => {
-    expect(removeOAuthClient(db, "nonexistent-client")).toBe(false);
+    expect(removeOAuthClient(db, "nonexistent-client").removed).toBe(false);
   });
 
   it("removes existing mapping and returns true", () => {
     addPrincipal(db, { principalId: "alice", principalType: "family", rules: [] });
     insertOAuthClientMapping(db, "client-to-remove", "alice");
 
-    expect(removeOAuthClient(db, "client-to-remove")).toBe(true);
+    expect(removeOAuthClient(db, "client-to-remove").removed).toBe(true);
 
     const remaining = listOAuthClients(db, "alice");
     expect(remaining).toHaveLength(0);

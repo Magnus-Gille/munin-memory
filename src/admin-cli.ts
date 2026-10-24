@@ -1435,11 +1435,19 @@ export function listOAuthClients(
   }));
 }
 
+export interface RemoveOAuthClientResult {
+  /** True when a mapping, token, or authorization code was actually affected. */
+  removed: boolean;
+  mappingsRemoved: number;
+  tokensRevoked: number;
+  codesInvalidated: number;
+}
+
 export function removeOAuthClient(
   db: Database.Database,
   oauthClientId: string,
-): boolean {
-  const txn = db.transaction(() => {
+): RemoveOAuthClientResult {
+  const txn = db.transaction((): RemoveOAuthClientResult => {
     // Revoke all tokens for this client
     const tokens = db
       .prepare(
@@ -1455,24 +1463,30 @@ export function removeOAuthClient(
       )
       .run(oauthClientId);
 
-    const result = db
+    const mappings = db
       .prepare("DELETE FROM principal_oauth_clients WHERE oauth_client_id = ?")
       .run(oauthClientId);
 
-    const changed = result.changes > 0 || tokens.changes > 0 || codes.changes > 0;
-    if (changed) {
+    const removed = mappings.changes > 0 || tokens.changes > 0 || codes.changes > 0;
+    if (removed) {
       auditLog(
         db,
         "oauth_client_remove",
         oauthClientId,
-        `${result.changes} mapping(s) removed, ${tokens.changes} token(s) revoked, ${codes.changes} authorization code(s) invalidated`,
+        `${mappings.changes} mapping(s) removed, ${tokens.changes} token(s) revoked, ${codes.changes} authorization code(s) invalidated`,
       );
     }
 
-    return changed;
+    return {
+      removed,
+      mappingsRemoved: mappings.changes,
+      tokensRevoked: tokens.changes,
+      codesInvalidated: codes.changes,
+    };
   });
 
-  return txn();
+  // IMMEDIATE: serialize with in-flight token exchanges from the server process.
+  return txn.immediate();
 }
 
 export interface ClearOAuthClientsResult {
@@ -1531,7 +1545,8 @@ export function clearOAuthClients(
     };
   });
 
-  return txn();
+  // IMMEDIATE: serialize with in-flight token exchanges from the server process.
+  return txn.immediate();
 }
 
 function handleOAuthClientsList(
@@ -1565,24 +1580,35 @@ function handleOAuthClientsList(
   console.log(formatTable(headers, rows, widths));
 }
 
-function handleOAuthClientsRemove(
+export function handleOAuthClientsRemove(
   db: Database.Database,
   oauthClientId: string,
   jsonOutput: boolean,
 ): void {
-  const success = removeOAuthClient(db, oauthClientId);
+  const result = removeOAuthClient(db, oauthClientId);
 
   if (jsonOutput) {
-    console.log(JSON.stringify({ oauthClientId, removed: success }));
-  } else if (success) {
-    console.log(`Removed OAuth client mapping: ${oauthClientId} (tokens revoked)`);
+    console.log(
+      JSON.stringify({
+        oauthClientId,
+        removed: result.removed,
+        mappingsRemoved: result.mappingsRemoved,
+        tokensRevoked: result.tokensRevoked,
+        codesInvalidated: result.codesInvalidated,
+      }),
+    );
+  } else if (result.removed) {
+    console.log(
+      `Removed OAuth client ${oauthClientId}: ${result.mappingsRemoved} mapping(s) removed, ` +
+        `${result.tokensRevoked} token(s) revoked, ${result.codesInvalidated} authorization code(s) invalidated`,
+    );
   } else {
-    console.error(`OAuth client mapping not found: ${oauthClientId}`);
+    console.error(`OAuth client has no mappings, tokens, or authorization codes: ${oauthClientId}`);
     process.exit(1);
   }
 }
 
-function handleOAuthClientsClear(
+export function handleOAuthClientsClear(
   db: Database.Database,
   principalId: string,
   jsonOutput: boolean,

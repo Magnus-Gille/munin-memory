@@ -422,48 +422,65 @@ export class MuninOAuthProvider implements OAuthServerProvider {
     redirectUri?: string,
     resource?: URL,
   ): Promise<OAuthTokens> {
-    // Fail closed if the client has been removed since the code was issued.
-    this.assertClientRegistered(client.client_id);
-
     const codeHash = hashOpaqueValue(authorizationCode);
 
-    // Atomically claim the code: UPDATE ... WHERE used = 0, check changes === 1
-    const claimed = this.db
-      .prepare("UPDATE oauth_auth_codes SET used = 1 WHERE code = ? AND used = 0")
-      .run(codeHash);
+    // Claim, validate and issue in ONE immediate transaction. The admin CLI
+    // runs in a separate process on the same database file; taking the write
+    // lock up front means a concurrent clear/remove either completes first
+    // (the code is invalidated or the client is gone) or waits until the
+    // issued pair is committed and revokes it, never observing a claimed code
+    // with no tokens yet.
+    //
+    // Validation failures must still burn the code (single use), so they are
+    // returned and thrown after commit; only infrastructure errors roll back.
+    const txn = this.db.transaction((): OAuthTokens | InvalidGrantError => {
+      // Fail closed if the client has been removed since the code was issued.
+      this.assertClientRegistered(client.client_id);
 
-    if (claimed.changes !== 1) {
-      throw new InvalidGrantError("Invalid or expired authorization code");
+      // Atomically claim the code: UPDATE ... WHERE used = 0, check changes === 1
+      const claimed = this.db
+        .prepare("UPDATE oauth_auth_codes SET used = 1 WHERE code = ? AND used = 0")
+        .run(codeHash);
+
+      if (claimed.changes !== 1) {
+        return new InvalidGrantError("Invalid or expired authorization code");
+      }
+
+      // Now read the code data (already marked used, safe from replay)
+      const row = this.db
+        .prepare("SELECT * FROM oauth_auth_codes WHERE code = ?")
+        .get(codeHash) as OAuthAuthCodeRow | undefined;
+
+      if (!row) {
+        return new InvalidGrantError("Invalid or expired authorization code");
+      }
+
+      if (row.client_id !== client.client_id) {
+        return new InvalidGrantError("Authorization code was not issued to this client");
+      }
+
+      const nowSecs = Math.floor(Date.now() / 1000);
+      if (row.expires_at < nowSecs) {
+        return new InvalidGrantError("Authorization code has expired");
+      }
+
+      // RFC 6749 Section 4.1.3: if redirect_uri was included in the authorization
+      // request, it MUST be identical in the token request
+      if (redirectUri && row.redirect_uri && redirectUri !== row.redirect_uri) {
+        return new InvalidGrantError("redirect_uri does not match the authorization request");
+      }
+
+      const scopes: string[] = JSON.parse(row.scopes);
+      const resourceStr = resource?.toString() ?? row.resource ?? undefined;
+
+      return this.issueTokenPair(client.client_id, scopes, resourceStr, row.principal_id ?? undefined);
+    });
+
+    const result = txn.immediate();
+    if (result instanceof InvalidGrantError) {
+      throw result;
     }
-
-    // Now read the code data (already marked used, safe from replay)
-    const row = this.db
-      .prepare("SELECT * FROM oauth_auth_codes WHERE code = ?")
-      .get(codeHash) as OAuthAuthCodeRow | undefined;
-
-    if (!row) {
-      throw new InvalidGrantError("Invalid or expired authorization code");
-    }
-
-    if (row.client_id !== client.client_id) {
-      throw new InvalidGrantError("Authorization code was not issued to this client");
-    }
-
-    const nowSecs = Math.floor(Date.now() / 1000);
-    if (row.expires_at < nowSecs) {
-      throw new InvalidGrantError("Authorization code has expired");
-    }
-
-    // RFC 6749 Section 4.1.3: if redirect_uri was included in the authorization
-    // request, it MUST be identical in the token request
-    if (redirectUri && row.redirect_uri && redirectUri !== row.redirect_uri) {
-      throw new InvalidGrantError("redirect_uri does not match the authorization request");
-    }
-
-    const scopes: string[] = JSON.parse(row.scopes);
-    const resourceStr = resource?.toString() ?? row.resource ?? undefined;
-
-    return this.issueTokenPair(client.client_id, scopes, resourceStr, row.principal_id ?? undefined);
+    return result;
   }
 
   private assertClientRegistered(clientId: string): void {
@@ -481,13 +498,14 @@ export class MuninOAuthProvider implements OAuthServerProvider {
     scopes?: string[],
     resource?: URL,
   ): Promise<OAuthTokens> {
-    this.assertClientRegistered(client.client_id);
-
     const refreshTokenHash = hashOpaqueValue(refreshToken);
 
     // Validate, consume and rotate atomically: a rejected request (wrong client,
     // expired token, scope escalation) rolls back and leaves the token usable.
+    // IMMEDIATE so it serializes with the admin CLI's revocation (separate process).
     const txn = this.db.transaction((): OAuthTokens => {
+      this.assertClientRegistered(client.client_id);
+
       const row = this.db
         .prepare(
           "SELECT * FROM oauth_tokens WHERE token = ? AND token_type = 'refresh' AND revoked = 0",
@@ -541,7 +559,7 @@ export class MuninOAuthProvider implements OAuthServerProvider {
       return this.issueTokenPair(client.client_id, tokenScopes, resourceStr, row.principal_id ?? undefined);
     });
 
-    return txn();
+    return txn.immediate();
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
