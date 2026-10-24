@@ -1420,6 +1420,41 @@ export const migrations: Migration[] = [
       db.exec("ALTER TABLE entries ADD COLUMN embedding_identity TEXT");
     },
   },
+  {
+    version: 32,
+    description: "Restrict entries_au FTS maintenance to indexed columns (#412)",
+    up: (db) => {
+      // entries_au (v28) had no OF list, so every UPDATE — notably the embedding
+      // worker's embedding_status writes — deleted and re-inserted the FTS row
+      // and re-ran munin_split_tokens() over the full content. Restrict it to
+      // the columns the entries_fts table indexes (content, namespace, key,
+      // tags; the code-health WHEN logic reads only tags) plus rowid, which
+      // keys the external-content FTS rows. Body and exclusion logic are
+      // unchanged from v28, and the FTS index stays valid, so no rebuild is
+      // needed. DROP IF EXISTS + CREATE keeps this idempotent.
+      db.exec(`
+        DROP TRIGGER IF EXISTS entries_au;
+
+        CREATE TRIGGER entries_au AFTER UPDATE OF content, namespace, key, tags, rowid ON entries
+        BEGIN
+          INSERT INTO entries_fts(entries_fts, rowid, content, namespace, key, tags)
+          SELECT 'delete', old.rowid, old.content || ' ' || munin_split_tokens(old.content), old.namespace, old.key, old.tags
+          WHERE json_valid(old.tags)
+            AND NOT EXISTS (
+              SELECT 1 FROM json_each(old.tags)
+               WHERE type = 'text' AND value = 'code-health:evidence-v1'
+            );
+          INSERT INTO entries_fts(rowid, content, namespace, key, tags)
+          SELECT new.rowid, new.content || ' ' || munin_split_tokens(new.content), new.namespace, new.key, new.tags
+          WHERE json_valid(new.tags)
+            AND NOT EXISTS (
+              SELECT 1 FROM json_each(new.tags)
+               WHERE type = 'text' AND value = 'code-health:evidence-v1'
+            );
+        END;
+      `);
+    },
+  },
 ];
 
 /**

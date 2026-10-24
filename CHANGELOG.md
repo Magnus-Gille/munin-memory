@@ -82,6 +82,14 @@ changelog is the canonical record of what moved.
   socket Node was closing got a connection reset, which failed Claude's OAuth
   client registration (`POST /register`) and caused intermittent origin 502s.
 
+- Migration 32 (#412) restricts the `entries_au` FTS trigger to
+  `AFTER UPDATE OF content, namespace, key, tags, rowid`. Embedding-worker
+  writes to `embedding_status` and other non-indexed columns no longer delete and
+  re-insert the FTS row or re-run `munin_split_tokens` over the full content.
+  Trigger body and code-health exclusion logic are unchanged and the FTS index
+  is not rebuilt. Rollback is a new forward migration recreating the trigger
+  without the `OF` list.
+
 - Benchmark corpus generation now rebuilds vectors with missing or stale immutable
   identities, records the active identity, and rejects model-binding changes.
 
