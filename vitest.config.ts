@@ -3,6 +3,13 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     exclude: ["node_modules/**", "dist/**", "tmp/**", ".claude/**"],
+    // Several suites build 200–4,096-row fixtures or spawn the quickstart CLI.
+    // They finish quickly on an idle machine but exceeded the 5 s default on a
+    // loaded developer host (load 26–46 on 10 cores, #415): 5–16 spurious
+    // timeouts per full run, none reproducible in isolation. A higher ceiling
+    // only changes when a hung test is reported; assertions and tighter
+    // per-test timeouts are unchanged.
+    testTimeout: 20_000,
     coverage: {
       provider: "v8",
       include: ["src/**"],
