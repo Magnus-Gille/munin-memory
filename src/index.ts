@@ -191,6 +191,7 @@ export interface ConsentIdentity {
 
 let cleanupTimerId: ReturnType<typeof setInterval> | undefined;
 let activeDb: Database.Database | undefined;
+let activeHttpServer: HttpServer | undefined;
 
 export interface MaintenancePruneTimerOptions {
   intervalMs?: number;
@@ -1067,6 +1068,7 @@ async function startHttp(database: Database.Database) {
   });
 
   const httpServer = createHttpServer(app);
+  activeHttpServer = httpServer;
 
   cleanupTimerId = startMaintenancePruneTimer(database, {
     additionalCleanup: () => oauthProvider.cleanupExpired(),
@@ -1146,24 +1148,115 @@ async function main() {
   }
 }
 
-// Graceful shutdown
-async function shutdown() {
+// --- Graceful shutdown ---
+
+// How long shutdown waits for in-flight HTTP requests to finish before it
+// force-closes their sockets. Bounded so a stuck request cannot block a deploy
+// restart indefinitely; systemd's default stop timeout is 90 s, so this leaves
+// ample room for stopping the workers and closing the DB afterwards.
+export const SHUTDOWN_DRAIN_TIMEOUT_MS = 10_000;
+
+export interface ShutdownDeps {
+  /** HTTP transport only; undefined for stdio. */
+  httpServer?: HttpServer;
+  stopEmbeddingWorker: () => Promise<void>;
+  stopConsolidationWorker: () => Promise<void>;
+  closeDatabase: () => void;
+  exit: (code: number) => void;
+  log?: (message: string, err?: unknown) => void;
+  /** Exit code to use when every step succeeds (1 on the fatal startup path). */
+  exitCode?: number;
+  drainTimeoutMs?: number;
+}
+
+/**
+ * Stop accepting connections, drain in-flight HTTP requests (bounded), stop both
+ * background workers independently, close the database, then exit. Order matters:
+ * requests may still write to the DB, so it closes only after they have drained,
+ * and a failing worker stop must not prevent the other stop or the DB close.
+ */
+export async function runGracefulShutdown(deps: ShutdownDeps): Promise<void> {
+  const log = deps.log ?? ((message: string, err?: unknown) => console.error(message, err ?? ""));
+  let exitCode = deps.exitCode ?? 0;
+
+  if (deps.httpServer) {
+    try {
+      await drainHttpServer(deps.httpServer, deps.drainTimeoutMs ?? SHUTDOWN_DRAIN_TIMEOUT_MS, log);
+    } catch (err) {
+      log("Error closing HTTP server during shutdown:", err);
+      exitCode = 1;
+    }
+  }
+
+  const stops = await Promise.allSettled([deps.stopEmbeddingWorker(), deps.stopConsolidationWorker()]);
+  const names = ["embedding", "consolidation"];
+  stops.forEach((result, i) => {
+    if (result.status === "rejected") {
+      // A worker stop can reject (in-flight DB/write/embedding errors). Don't let
+      // that skip the other worker or the DB close.
+      log(`Error stopping ${names[i]} worker during shutdown:`, result.reason);
+      exitCode = 1;
+    }
+  });
+
+  try {
+    deps.closeDatabase();
+  } catch (err) {
+    log("Error closing database during shutdown:", err);
+    exitCode = 1;
+  }
+  deps.exit(exitCode);
+}
+
+function drainHttpServer(
+  httpServer: HttpServer,
+  timeoutMs: number,
+  log: (message: string, err?: unknown) => void,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let sweep: ReturnType<typeof setInterval> | undefined;
+    const finish = (err?: Error | null) => {
+      clearTimeout(timer);
+      clearInterval(sweep);
+      // Closing a server that never started listening is not a shutdown failure.
+      if (err && (err as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING") reject(err);
+      else resolve();
+    };
+
+    // Stop accepting new connections; the callback fires once every open
+    // connection has ended.
+    httpServer.close(finish);
+    httpServer.closeIdleConnections();
+    // Defensive: a keep-alive connection that goes idle when its last response
+    // finishes must not hold close() open for the whole keep-alive window.
+    sweep = setInterval(() => httpServer.closeIdleConnections(), 100);
+    timer = setTimeout(() => {
+      log(`HTTP requests still in flight after ${timeoutMs} ms; closing their connections`);
+      httpServer.closeAllConnections();
+    }, timeoutMs);
+  });
+}
+
+let shutdownStarted = false;
+
+function shutdown(exitCode = 0): Promise<void> {
+  if (shutdownStarted) return Promise.resolve();
+  shutdownStarted = true;
   stopMaintenancePruneTimer(cleanupTimerId);
   cleanupTimerId = undefined;
-  let exitCode = 0;
-  try {
-    await stopEmbeddingWorker();
-    await stopConsolidationWorker();
-  } catch (err) {
-    // A worker stop can reject (in-flight DB/write/embedding errors). Don't let
-    // that drop the rest of shutdown — the finally still closes the DB and exits.
-    console.error("Error stopping workers during shutdown:", err);
-    exitCode = 1;
-  } finally {
-    activeDb?.close();
-    activeDb = undefined;
-    process.exit(exitCode);
-  }
+  return runGracefulShutdown({
+    httpServer: activeHttpServer,
+    stopEmbeddingWorker,
+    stopConsolidationWorker,
+    closeDatabase: () => {
+      const database = activeDb;
+      activeDb = undefined;
+      database?.close();
+    },
+    exit: (code) => process.exit(code),
+    exitCode,
+  });
 }
 
 const isMainModule =
@@ -1176,12 +1269,6 @@ if (isMainModule) {
 
   main().catch(async (err) => {
     console.error("Fatal error:", err);
-    stopMaintenancePruneTimer(cleanupTimerId);
-    cleanupTimerId = undefined;
-    await stopEmbeddingWorker();
-    await stopConsolidationWorker();
-    activeDb?.close();
-    activeDb = undefined;
-    process.exit(1);
+    await shutdown(1);
   });
 }
