@@ -821,16 +821,9 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
       return;
     }
 
+    // Per-request binding: provider.authorize() reads this from res.locals to bind
+    // the identity to the pending auth. Never share it through provider state.
     res.locals.consentIdentity = identity;
-
-    // Resolve identity for GET /authorize — pass to OAuth provider so
-    // authorize() can bind it to the pending auth
-    if ((req.method === "GET" || req.method === "POST") && consentPath === "/authorize") {
-      oauthProvider.setLastResolvedIdentity({
-        email: identity.email,
-        principalId: identity.principalId,
-      });
-    }
 
     next();
   });

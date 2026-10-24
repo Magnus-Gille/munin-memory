@@ -1448,7 +1448,7 @@ describe("checkRateLimit — precise cap behavior", () => {
 });
 
 // ---------------------------------------------------------------------------
-// createHttpApp — /authorize GET identity null fallback (oauthProvider.setLastResolvedIdentity(undefined))
+// createHttpApp — /authorize GET identity null fallback
 // ---------------------------------------------------------------------------
 
 describe("createHttpApp — GET /authorize identity null fallback", () => {

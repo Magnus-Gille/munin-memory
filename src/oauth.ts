@@ -208,6 +208,12 @@ function matchesBearerToken(token: string, expected: Buffer | undefined): boolea
   return tokenBuf.length === expected.length && timingSafeEqual(tokenBuf, expected);
 }
 
+/** Identity resolved by the consent middleware and carried on `res.locals.consentIdentity`. */
+interface ConsentIdentityBinding {
+  email: string;
+  principalId: string | null;
+}
+
 // --- OAuth Provider ---
 
 export class MuninOAuthProvider implements OAuthServerProvider {
@@ -217,7 +223,6 @@ export class MuninOAuthProvider implements OAuthServerProvider {
   private readonly consumerApiKeyBuf: Buffer | undefined;
   private readonly clientSecretWrapKey: Buffer | undefined;
   private readonly pendingAuths = new Map<string, PendingAuth>();
-  private lastResolvedIdentity: { email: string; principalId: string | null } | undefined;
 
   constructor(
     private db: Database.Database,
@@ -252,12 +257,15 @@ export class MuninOAuthProvider implements OAuthServerProvider {
       expiresAt: Math.floor(Date.now() / 1000) + AUTH_CODE_TTL,
     };
 
-    // If identity was resolved before authorize (set via setLastResolvedIdentity),
-    // bind it to the pending auth
-    if (this.lastResolvedIdentity) {
-      pending.resolvedPrincipalId = this.lastResolvedIdentity.principalId ?? undefined;
-      pending.resolvedEmail = this.lastResolvedIdentity.email;
-      this.lastResolvedIdentity = undefined;
+    // Bind the identity the consent middleware resolved for THIS request. It
+    // travels on res.locals (per request), never through provider state: the SDK
+    // handler parses the body asynchronously before calling authorize(), so shared
+    // state would let concurrent requests from different principals cross.
+    const identity = (res.locals as { consentIdentity?: ConsentIdentityBinding } | undefined)
+      ?.consentIdentity;
+    if (identity) {
+      pending.resolvedPrincipalId = identity.principalId ?? undefined;
+      pending.resolvedEmail = identity.email;
     }
 
     this.pendingAuths.set(nonce, pending);
@@ -272,14 +280,6 @@ export class MuninOAuthProvider implements OAuthServerProvider {
     res.setHeader("Content-Type", "text/html");
     res.setHeader("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'");
     res.send(html);
-  }
-
-  /**
-   * Set the resolved identity for the next authorize() call.
-   * Called by the consent middleware before the SDK's authorize handler.
-   */
-  setLastResolvedIdentity(identity: { email: string; principalId: string | null } | undefined): void {
-    this.lastResolvedIdentity = identity;
   }
 
   /**

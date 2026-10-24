@@ -63,6 +63,14 @@ changelog is the canonical record of what moved.
 
 ### Security
 
+- **OAuth consent identity binding (#411).** The resolved consent identity is now
+  bound per request (`res.locals.consentIdentity`) instead of through a shared
+  provider field. Previously two concurrent `POST /authorize` requests from
+  different principals could cross: one pending authorization received the other
+  principal's identity and the other was left unbound. Approval re-resolved the
+  identity so there was no escalation, but the GET/POST-time binding of the
+  consent TOCTOU defence was not reliable. `setLastResolvedIdentity` is removed.
+
 - **OAuth token lifecycle (#408).** Revoking an OAuth access or refresh token via
   the revocation endpoint now revokes the whole access/refresh pair, so a client
   "disconnect" no longer leaves a 30-day refresh token (or a live access token)
