@@ -279,11 +279,25 @@ describe("admin CLI output reports what was actually affected (#407)", () => {
     });
   });
 
-  it("clear --json and text print all counts", async () => {
+  it("clear text output prints all counts", async () => {
     await provider.exchangeAuthorizationCode(SHARED_CLIENT, approve(provider, "alice"));
+    approve(provider, "alice"); // one unredeemed code
     handleOAuthClientsClear(db, "alice", false);
     expect(logSpy.mock.calls[0][0]).toContain("1 OAuth client mapping(s)");
     expect(logSpy.mock.calls[0][0]).toContain("2 token(s) revoked");
+    expect(logSpy.mock.calls[0][0]).toContain("1 authorization code(s) invalidated");
+  });
+
+  it("clear --json prints mapping, token and code counts", async () => {
+    await provider.exchangeAuthorizationCode(SHARED_CLIENT, approve(provider, "alice"));
+    approve(provider, "alice"); // one unredeemed code
+    handleOAuthClientsClear(db, "alice", true);
+    expect(JSON.parse(logSpy.mock.calls[0][0] as string)).toEqual({
+      principalId: "alice",
+      removed: 1,
+      tokensRevoked: 2,
+      codesInvalidated: 1,
+    });
   });
 });
 
