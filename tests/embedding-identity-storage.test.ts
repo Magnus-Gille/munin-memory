@@ -37,7 +37,7 @@ it("adds nullable identity once without relabeling or mutating legacy memory", (
     const before = humanRows(legacy);
     runMigrations(legacy);
     runMigrations(legacy);
-    expect(getSchemaVersion(legacy)).toBe(31);
+    expect(getSchemaVersion(legacy)).toBe(32);
     expect(legacy.prepare("PRAGMA table_info(entries)").all()).toContainEqual(expect.objectContaining({ name: "embedding_identity", notnull: 0 }));
     expect(legacy.prepare("SELECT embedding_identity FROM entries").get()).toEqual({ embedding_identity: null });
     expect(humanRows(legacy)).toEqual(before);

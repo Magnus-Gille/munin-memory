@@ -484,7 +484,7 @@ describe("migration v29 — bind code-health receipts to retained records", () =
     runMigrations(db);
     const columns = db.prepare("PRAGMA table_info(write_receipts)").all() as Array<{ name: string; notnull: number }>;
     expect(columns.find(({ name }) => name === "code_health_record_id")).toMatchObject({ notnull: 0 });
-    expect(getSchemaVersion(db)).toBe(31);
+    expect(getSchemaVersion(db)).toBe(32);
     db.close();
   });
 
@@ -575,7 +575,7 @@ describe("migration v30 — repair managed-row FTS exclusion", () => {
 
     runMigrations(db);
 
-    expect(getSchemaVersion(db)).toBe(31);
+    expect(getSchemaVersion(db)).toBe(32);
     expect(find("livecodehealthmigrationtoken")).toHaveLength(0);
     expect(find("orphanedcodehealthmigrationtoken")).toHaveLength(0);
     expect(find("ordinarywebfetch")).toHaveLength(1);
@@ -1605,6 +1605,166 @@ describe("migration v20 — correction lineage", () => {
       ).run(after, after, after);
     }).toThrow(/UNIQUE constraint failed/);
 
+    db.close();
+  });
+});
+
+describe("migration v32 — entries_au fires only for indexed columns (#412)", () => {
+  const NOW = "2026-10-20T00:00:00.000Z";
+
+  function insertEntry(
+    db: Database.Database,
+    id: string,
+    namespace: string,
+    key: string,
+    content: string,
+    tags = "[]",
+  ): number {
+    db.prepare(
+      `INSERT INTO entries (id, namespace, key, entry_type, content, tags, agent_id, created_at, updated_at)
+       VALUES (?, ?, ?, 'state', ?, ?, 'agent:a', ?, ?)`,
+    ).run(id, namespace, key, content, tags, NOW, NOW);
+    return (db.prepare("SELECT rowid FROM entries WHERE id = ?").get(id) as { rowid: number }).rowid;
+  }
+
+  function matchIds(db: Database.Database, query: string): string[] {
+    return (
+      db.prepare(
+        `SELECT e.id FROM entries_fts f JOIN entries e ON e.rowid = f.rowid
+          WHERE entries_fts MATCH ? ORDER BY e.id`,
+      ).all(query) as Array<{ id: string }>
+    ).map((row) => row.id);
+  }
+
+  function triggerSql(db: Database.Database): string {
+    return (
+      db.prepare("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'entries_au'").get() as { sql: string }
+    ).sql;
+  }
+
+  /** Replace the tokenizer UDF with a counting wrapper to observe FTS rewrites. */
+  function countTokenizerCalls(db: Database.Database): { calls: () => number; reset: () => void } {
+    let calls = 0;
+    db.function("munin_split_tokens", { deterministic: true, varargs: false }, (text: unknown) => {
+      calls += 1;
+      return splitCamelCaseTokens(text);
+    });
+    return { calls: () => calls, reset: () => { calls = 0; } };
+  }
+
+  it("declares the indexed column list in sqlite_master on fresh and upgraded databases", () => {
+    const fresh = openRawDb();
+    runMigrations(fresh);
+    expect(getSchemaVersion(fresh)).toBe(32);
+    expect(triggerSql(fresh)).toMatch(/AFTER UPDATE OF content, namespace, key, tags ON entries\b/);
+    fresh.close();
+    cleanupTestDb();
+
+    const upgraded = openRawDb();
+    applyMigrationsThrough(upgraded, 31);
+    expect(triggerSql(upgraded)).not.toMatch(/UPDATE OF/);
+    runMigrations(upgraded);
+    expect(triggerSql(upgraded)).toMatch(/AFTER UPDATE OF content, namespace, key, tags ON entries\b/);
+    upgraded.close();
+  });
+
+  it("keeps the trigger body and code-health WHEN logic identical to v28", () => {
+    const db = openRawDb();
+    applyMigrationsThrough(db, 31);
+    const before = triggerSql(db);
+    runMigrations(db);
+    const after = triggerSql(db);
+    expect(before).toContain("code-health:evidence-v1");
+    expect(after.replace(" OF content, namespace, key, tags", "")).toBe(before);
+    db.close();
+  });
+
+  it("does not rewrite the FTS row for updates that touch no indexed column", () => {
+    const db = openRawDb();
+    runMigrations(db);
+    insertEntry(db, "e1", "projects/fts412", "note", "BigPayload body text", '["alpha"]');
+    const counter = countTokenizerCalls(db);
+
+    counter.reset();
+    db.prepare("UPDATE entries SET embedding_status = 'generated' WHERE id = 'e1'").run();
+    db.prepare("UPDATE entries SET embedding_model = 'm', embedding_identity = 'i', updated_at = ? WHERE id = 'e1'").run("2026-10-21T00:00:00.000Z");
+    db.prepare("UPDATE entries SET classification = 'client-restricted' WHERE id = 'e1'").run();
+    expect(counter.calls()).toBe(0);
+    expect(matchIds(db, "bigpayload")).toEqual(["e1"]);
+
+    // Control: an indexed column update rewrites the row (delete + insert).
+    counter.reset();
+    db.prepare("UPDATE entries SET content = 'BigPayload body text two' WHERE id = 'e1'").run();
+    expect(counter.calls()).toBe(2);
+    db.close();
+  });
+
+  it("does not rewrite a deliberately desynced FTS row on a status-only update", () => {
+    const db = openRawDb();
+    runMigrations(db);
+    const rowid = insertEntry(db, "e1", "projects/fts412", "note", "originalterm");
+    // Drop the real FTS row so only a trigger-driven rewrite could restore it.
+    db.prepare(
+      "INSERT INTO entries_fts(entries_fts, rowid, content, namespace, key, tags) VALUES ('delete', ?, ?, ?, ?, ?)",
+    ).run(rowid, "originalterm ", "projects/fts412", "note", "[]");
+    expect(matchIds(db, "originalterm")).toEqual([]);
+
+    db.prepare("UPDATE entries SET embedding_status = 'generated' WHERE id = 'e1'").run();
+    expect(matchIds(db, "originalterm")).toEqual([]);
+    db.close();
+  });
+
+  it("still syncs FTS when content, namespace, key or tags change", () => {
+    const db = openRawDb();
+    runMigrations(db);
+    insertEntry(db, "e1", "projects/oldspace", "oldkey", "oldcontent", '["oldtag"]');
+
+    db.prepare("UPDATE entries SET content = 'newcontent' WHERE id = 'e1'").run();
+    expect(matchIds(db, "oldcontent")).toEqual([]);
+    expect(matchIds(db, "newcontent")).toEqual(["e1"]);
+
+    db.prepare("UPDATE entries SET namespace = 'projects/newspace' WHERE id = 'e1'").run();
+    expect(matchIds(db, "namespace:oldspace")).toEqual([]);
+    expect(matchIds(db, "namespace:newspace")).toEqual(["e1"]);
+
+    db.prepare("UPDATE entries SET key = 'newkey' WHERE id = 'e1'").run();
+    expect(matchIds(db, "key:oldkey")).toEqual([]);
+    expect(matchIds(db, "key:newkey")).toEqual(["e1"]);
+
+    db.prepare("UPDATE entries SET tags = '[\"newtag\"]' WHERE id = 'e1'").run();
+    expect(matchIds(db, "tags:oldtag")).toEqual([]);
+    expect(matchIds(db, "tags:newtag")).toEqual(["e1"]);
+
+    // Managed code-health evidence must still leave and re-enter the index via tags.
+    db.prepare("UPDATE entries SET tags = '[\"code-health:evidence-v1\"]' WHERE id = 'e1'").run();
+    expect(matchIds(db, "newcontent")).toEqual([]);
+    db.prepare("UPDATE entries SET tags = '[]' WHERE id = 'e1'").run();
+    expect(matchIds(db, "newcontent")).toEqual(["e1"]);
+
+    expect(() => db.exec("INSERT INTO entries_fts(entries_fts) VALUES('integrity-check')")).not.toThrow();
+    db.close();
+  });
+
+  it("leaves existing FTS rows consistent and is idempotent", () => {
+    const db = openRawDb();
+    applyMigrationsThrough(db, 31);
+    insertEntry(db, "e1", "projects/fts412", "note", "UpgradeWebFetch marker");
+    insertEntry(db, "e2", "projects/fts412", "other", "hidden", '["code-health:evidence-v1"]');
+    const ftsBefore = db.prepare("SELECT rowid FROM entries_fts WHERE entries_fts MATCH 'marker'").all();
+
+    runMigrations(db);
+    runMigrations(db);
+    const v32 = migrations.find(({ version }) => version === 32)!;
+    db.transaction(() => v32.up(db))();
+
+    expect(getSchemaVersion(db)).toBe(32);
+    expect(db.prepare("SELECT rowid FROM entries_fts WHERE entries_fts MATCH 'marker'").all()).toEqual(ftsBefore);
+    expect(matchIds(db, "web fetch")).toEqual(["e1"]);
+    expect(matchIds(db, "hidden")).toEqual([]);
+    expect(
+      db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'trigger' AND name = 'entries_au'").get(),
+    ).toEqual({ n: 1 });
+    expect(() => db.exec("INSERT INTO entries_fts(entries_fts) VALUES('integrity-check')")).not.toThrow();
     db.close();
   });
 });
