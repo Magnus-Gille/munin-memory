@@ -86,9 +86,13 @@ changelog is the canonical record of what moved.
   `retrieval_events.query_text` / `retrieval_feedback.query_text`, and pagination
   snapshots store masked query, namespace and tag filters. Searching uses the
   caller's original text; cursor resume compares secret-shaped arguments by a
-  keyed digest (HMAC-SHA256 under the snapshot's cursor secret), so a different
-  secret is never accepted as a continuation, and `memory_query` responses echo
-  the masked `query` on every page. Namespace and key format errors redact
+  keyed digest (HMAC-SHA256 under a random per-process key that is never
+  persisted), so a different secret is never accepted as a continuation. After a
+  restart, or for snapshots created before this change, a secret-bearing
+  argument cannot be verified and the client is told to resume with the cursor
+  only. `memory_query` responses also `memory_query` responses echo
+  the masked `query` on every page, and `memory_read_batch` failure items mask
+  credential-shaped namespace/key values. Namespace and key format errors redact
   credential-shaped values, and `memory_update_status` rejects a secret-bearing
   namespace before any format error. Historical rows are not
   rewritten; scrubbing existing `retrieval_events.query_text` is a separate

@@ -3,7 +3,8 @@ import Database from "better-sqlite3";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { join } from "node:path";
 import { initDatabase, writeState, logRetrievalEvent, logRetrievalFeedback } from "../src/db.js";
-import { registerTools } from "../src/tools.js";
+import { registerTools, _rotateQueryDigestKeyForTesting } from "../src/tools.js";
+import { createHmac } from "node:crypto";
 import { validateTags, validateWriteInput, validateLogInput, redactSecrets } from "../src/security.js";
 import { createTestStorage } from "./helpers/test-storage.js";
 
@@ -200,6 +201,91 @@ describe("query cursor resume with secret-bearing arguments (#409)", () => {
     expect(other.message).toBe(CURSOR_MISMATCH);
     const same = await call("memory_query", { cursor: first.next_cursor, namespace: `projects/${FIXTURE_TOKEN_2}` });
     expect(same.ok).toBe(true);
+  });
+});
+
+describe("resume digests are keyed outside the database (#409)", () => {
+  const UNVERIFIABLE = "Resume with the cursor only";
+
+  function seedPaged(): void {
+    for (let index = 0; index < 15; index += 1) {
+      writeState(db, `projects/keyed-${index}`, "status", `ghp ${"X".repeat(36)} keyed ${index}`, ["active"]);
+    }
+  }
+
+  async function firstPage(): Promise<Record<string, any>> {
+    seedPaged();
+    const first = await call("memory_query", { query: FIXTURE_TOKEN, search_mode: "lexical", limit: 10 });
+    expect(first.has_more).toBe(true);
+    return first;
+  }
+
+  it("does not key the digest with the snapshot's stored cursor secret", async () => {
+    await firstPage();
+    const row = db.prepare("SELECT request_shape, cursor_secret FROM query_snapshots").get() as { request_shape: string; cursor_secret: string };
+    const stored = JSON.parse(row.request_shape).original_digests.query as string;
+    expect(typeof stored).toBe("string");
+    const guesses = [
+      createHmac("sha256", row.cursor_secret).update(`query\0${FIXTURE_TOKEN}`).digest("base64url"),
+      createHmac("sha256", row.cursor_secret).update(`query\0${row.cursor_secret}\0${FIXTURE_TOKEN}`).digest("base64url"),
+    ];
+    for (const guess of guesses) expect(guess).not.toBe(stored);
+  });
+
+  it("explains how to resume when a legacy snapshot has a masked field but no digest", async () => {
+    const first = await firstPage();
+    const row = db.prepare("SELECT id, request_shape FROM query_snapshots").get() as { id: string; request_shape: string };
+    const legacy = JSON.parse(row.request_shape);
+    delete legacy.original_digests;
+    delete legacy.digest_key_id;
+    db.prepare("UPDATE query_snapshots SET request_shape = ? WHERE id = ?").run(JSON.stringify(legacy), row.id);
+
+    const withSecret = await call("memory_query", { cursor: first.next_cursor, query: FIXTURE_TOKEN });
+    expect(withSecret.ok).toBe(false);
+    expect(withSecret.error).toBe("validation_error");
+    expect(withSecret.message).toContain(UNVERIFIABLE);
+    expect(JSON.stringify(withSecret)).not.toContain(FIXTURE_TOKEN);
+
+    const cursorOnly = await call("memory_query", { cursor: first.next_cursor });
+    expect(cursorOnly.ok).toBe(true);
+    expect(cursorOnly.returned).toBeGreaterThan(0);
+  });
+
+  it("explains how to resume after the process digest key is lost", async () => {
+    const first = await firstPage();
+    _rotateQueryDigestKeyForTesting();
+
+    const withSecret = await call("memory_query", { cursor: first.next_cursor, query: FIXTURE_TOKEN });
+    expect(withSecret.ok).toBe(false);
+    expect(withSecret.message).toContain(UNVERIFIABLE);
+
+    const cursorOnly = await call("memory_query", { cursor: first.next_cursor });
+    expect(cursorOnly.ok).toBe(true);
+
+    // New snapshots use the new key and verify normally.
+    const fresh = await call("memory_query", { query: FIXTURE_TOKEN, search_mode: "lexical", limit: 10 });
+    const same = await call("memory_query", { cursor: fresh.next_cursor, query: FIXTURE_TOKEN });
+    expect(same.ok).toBe(true);
+    const other = await call("memory_query", { cursor: fresh.next_cursor, query: FIXTURE_TOKEN_2 });
+    expect(other.ok).toBe(false);
+    expect(other.message).toBe("Query cursor does not match the supplied query arguments.");
+  });
+});
+
+describe("memory_read_batch failure items never echo credential-shaped identifiers (#409)", () => {
+  it("masks namespace and key echoed in validation-error items", async () => {
+    const result = await call("memory_read_batch", {
+      reads: [
+        { namespace: "projects/ok", key: `${FIXTURE_TOKEN}.invalid` },
+        { namespace: `projects/${FIXTURE_TOKEN}.invalid`, key: "k" },
+        { namespace: "projects/ok", key: "missing" },
+      ],
+    });
+    expect(result.ok).toBe(true);
+    expect(JSON.stringify(result)).not.toContain(FIXTURE_TOKEN);
+    expect(result.results[0]).toMatchObject({ found: false, namespace: "projects/ok", key: "[REDACTED].invalid" });
+    expect(result.results[1]).toMatchObject({ found: false, namespace: "projects/[REDACTED].invalid", key: "k" });
+    expect(result.results[2]).toMatchObject({ found: false, namespace: "projects/ok", key: "missing" });
   });
 });
 
