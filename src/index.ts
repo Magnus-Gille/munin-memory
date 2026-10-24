@@ -8,7 +8,7 @@ import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middlew
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import express from "express";
 import type { Request, Response, NextFunction } from "express";
-import { createServer, IncomingMessage } from "node:http";
+import { createServer, IncomingMessage, type RequestListener, type Server as HttpServer } from "node:http";
 import {
   timingSafeEqual,
   randomUUID,
@@ -1032,6 +1032,23 @@ export function createHttpApp(options: HttpAppOptions): { app: express.Express; 
   return { app, oauthProvider };
 }
 
+// cloudflared keeps idle origin connections for 90 s by default. If Node closes
+// them first (its default is 5 s), the proxy can reuse a socket the origin is
+// tearing down and the request is reset; non-idempotent POSTs such as OAuth
+// /register then fail outright (#404). Stay idle longer than the proxy.
+export const HTTP_KEEP_ALIVE_TIMEOUT_MS = 95_000;
+
+export function createHttpServer(listener: RequestListener): HttpServer {
+  const httpServer = createServer(listener);
+
+  // Server timeouts
+  httpServer.requestTimeout = 30_000;
+  httpServer.headersTimeout = 10_000;
+  httpServer.keepAliveTimeout = HTTP_KEEP_ALIVE_TIMEOUT_MS;
+
+  return httpServer;
+}
+
 async function startHttp(database: Database.Database) {
   if (!hasHttpBearerCredential()) {
     console.error(getHttpCredentialErrorMessage());
@@ -1049,11 +1066,7 @@ async function startHttp(database: Database.Database) {
     httpPort,
   });
 
-  const httpServer = createServer(app);
-
-  // Server timeouts
-  httpServer.requestTimeout = 30_000;
-  httpServer.headersTimeout = 10_000;
+  const httpServer = createHttpServer(app);
 
   cleanupTimerId = startMaintenancePruneTimer(database, {
     additionalCleanup: () => oauthProvider.cleanupExpired(),

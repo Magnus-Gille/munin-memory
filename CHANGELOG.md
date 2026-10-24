@@ -77,6 +77,11 @@ changelog is the canonical record of what moved.
 
 ### Fixed
 
+- The HTTP server now keeps idle connections for 95 s instead of Node's 5 s
+  default, longer than cloudflared's 90 s origin pool (#404). A proxy reusing a
+  socket Node was closing got a connection reset, which failed Claude's OAuth
+  client registration (`POST /register`) and caused intermittent origin 502s.
+
 - Benchmark corpus generation now rebuilds vectors with missing or stale immutable
   identities, records the active identity, and rejects model-binding changes.
 
