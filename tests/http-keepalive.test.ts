@@ -62,7 +62,11 @@ describe("HTTP server keep-alive (#404)", () => {
     "serves a second request on a connection that idled past Node's default keep-alive",
     async () => {
       server = createHttpServer((_req, res) => res.end("ok"));
-      await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", () => resolve()));
+      // Fail fast if the sandbox refuses to listen or connect, instead of hanging to the timeout.
+      await new Promise<void>((resolve, reject) => {
+        server!.once("error", reject);
+        server!.listen(0, "127.0.0.1", () => resolve());
+      });
       const { port } = server.address() as AddressInfo;
 
       const sock = connect(port, "127.0.0.1");
@@ -71,7 +75,10 @@ describe("HTTP server keep-alive (#404)", () => {
       sock.on("close", () => {
         closedByServer = true;
       });
-      await new Promise<void>((resolve) => sock.once("connect", () => resolve()));
+      await new Promise<void>((resolve, reject) => {
+        sock.once("error", reject);
+        sock.once("connect", () => resolve());
+      });
 
       sock.write(REQUEST);
       expect(await readResponse(sock)).toMatch(/^HTTP\/1\.1 200/);
@@ -83,6 +90,7 @@ describe("HTTP server keep-alive (#404)", () => {
       sock.write(REQUEST);
       expect(await readResponse(sock)).toMatch(/^HTTP\/1\.1 200/);
     },
-    IDLE_PAST_NODE_DEFAULT_MS + 5_000,
+    // Headroom for a loaded host; the test itself idles for IDLE_PAST_NODE_DEFAULT_MS.
+    IDLE_PAST_NODE_DEFAULT_MS + 10_000,
   );
 });
