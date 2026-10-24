@@ -8,6 +8,19 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Security
+
+- `memory_write` (patches and full overwrites) and `memory_update_status`
+  (including `validate_only` previews) now check the existing entry against the caller's classification
+  ceiling, using the same predicate as `memory_read`, before merging, previewing,
+  or changing its classification (#406). Previously a principal with write access
+  but a lower ceiling could lower a hidden entry's classification with a tag-only
+  patch, overwrite and declassify it with a full write, learn its revision from a
+  CAS or `create_if_absent` conflict, or see protected status content in a preview. Such calls are now denied
+  as hidden targets (`access_denied` for agents, `{"found": false}` otherwise,
+  `classification_error` for owners) and modify nothing. Callers whose ceiling
+  covers the entry are unaffected.
+
 ### Added
 
 - A core-first whole-message experiment (#342) tests optional neighbor expansion
