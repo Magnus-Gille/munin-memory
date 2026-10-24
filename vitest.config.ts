@@ -14,15 +14,15 @@ export default defineConfig({
       provider: "v8",
       include: ["src/**"],
       reporter: ["text-summary", "json-summary"],
-      // Ratchet floors: supported Node 22/24 CI measured 90.05% statements,
-      // 85.41% branches, 93.76% functions and 91.48% lines for #342, unchanged
-      // from #389. Local Node 24 lines were 91.53%; use the hosted matrix floor.
+      // Ratchet floors: supported Node 22/24 CI measured 90.39% statements,
+      // 85.66% branches, 93.98% functions and 91.80% lines for the #396 quality
+      // round (run 40101900171, up from 90.05/85.41/93.76/91.48 for #342).
       // Raise with measured improvements; never lower to admit a regression.
       thresholds: {
-        statements: 90,
-        branches: 85,
-        functions: 93,
-        lines: 91.4,
+        statements: 90.3,
+        branches: 85.6,
+        functions: 93.9,
+        lines: 91.7,
       },
     },
   },
