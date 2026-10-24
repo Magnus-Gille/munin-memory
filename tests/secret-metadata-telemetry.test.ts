@@ -287,6 +287,46 @@ describe("memory_read_batch failure items never echo credential-shaped identifie
     expect(result.results[1]).toMatchObject({ found: false, namespace: "projects/[REDACTED].invalid", key: "k" });
     expect(result.results[2]).toMatchObject({ found: false, namespace: "projects/ok", key: "missing" });
   });
+
+  it("masks well-formed secret-shaped identifiers in not-found and unreadable items", async () => {
+    // Well-formed identifiers pass validation, so the not-found and denied branches echo them too.
+    const ownerResult = await call("memory_read_batch", {
+      reads: [{ namespace: "projects/ok", key: FIXTURE_TOKEN }],
+    });
+    expect(JSON.stringify(ownerResult)).not.toContain(FIXTURE_TOKEN);
+    expect(ownerResult.results[0]).toMatchObject({ found: false, key: "[REDACTED]" });
+
+    const familyServer = new Server({ name: "test-munin", version: "0.0.1" }, { capabilities: { tools: {} } });
+    registerTools(familyServer, db, SESSION_ID, {
+      principalId: "alice",
+      principalType: "family",
+      accessibleNamespaces: [{ pattern: "users/alice/*", permissions: "rw" }],
+      maxClassification: "internal",
+      transportType: "consumer",
+    } as never);
+    const handler = (familyServer as unknown as { _requestHandlers: Map<string, Function> })._requestHandlers.get("tools/call")!;
+    const response = await handler({ method: "tools/call", params: { name: "memory_read_batch", arguments: {
+      reads: [{ namespace: `projects/${FIXTURE_TOKEN}`, key: "k" }],
+    } } });
+    const familyResult = JSON.parse((response as { content: Array<{ text: string }> }).content[0].text);
+    expect(JSON.stringify(familyResult)).not.toContain(FIXTURE_TOKEN);
+    expect(familyResult.results[0]).toMatchObject({ found: false, namespace: "projects/[REDACTED]" });
+  });
+});
+
+describe("keyed writes never replay credential-shaped identifiers (#409)", () => {
+  it("rejects a secret-shaped namespace before looking up an idempotency receipt", async () => {
+    // A receipt stored before #409 could carry a credential-shaped namespace; the
+    // secret scan must run before the receipt lookup, so it is never replayed.
+    const idempotencyKey = "6f1c2e3a-4b5d-4c6e-8f7a-9b0c1d2e3f4a";
+    db.prepare(`INSERT INTO write_receipts (principal_id, idempotency_key, tool_name, namespace,
+      request_hash, entry_id, entry_key, entry_updated_at, classification, result_status)
+      VALUES ('owner', ?, 'memory_write', ?, 'legacy-hash', 'legacy-entry', 'k', '2026-01-01T00:00:00Z', 'internal', 'created')`)
+      .run(idempotencyKey, `projects/${FIXTURE_TOKEN}`);
+    expectSecretRejection(await call("memory_write", {
+      namespace: `projects/${FIXTURE_TOKEN}`, key: "k", content: "x", idempotency_key: idempotencyKey,
+    }));
+  });
 });
 
 describe("format errors never echo credential-shaped namespaces or keys (#409)", () => {

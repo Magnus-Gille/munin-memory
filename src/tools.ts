@@ -8025,6 +8025,10 @@ function withWriteReceipt(
   if (typeof suppliedKey !== "string" || !WRITE_REPLAY_UUID_PATTERN.test(suppliedKey)) {
     return errResult(action, "validation_error", "idempotency_key must be a UUID.");
   }
+  // Reject credential-shaped identifiers before any receipt lookup, so replaying a
+  // receipt stored before #409 cannot echo them back (same contract as the handlers).
+  const metadataSecretCheck = scanMetadataForSecrets({ namespace: args.namespace, key: args.key, tags: args.tags });
+  if (!metadataSecretCheck.valid) return errResult(action, "validation_error", metadataSecretCheck.error!);
   const namespace = args.namespace;
   if (typeof namespace !== "string" || !validateWriteNamespace(namespace).valid) return handle();
   if (!canWrite(ctx, namespace)) return accessDeniedResponse(db, ctx, action);
@@ -11544,7 +11548,7 @@ export function registerTools(
                 if (!nsCheck.valid) return { found: false, namespace: maskEchoedIdentifier(ns), key: maskEchoedIdentifier(k), error: nsCheck.error };
                 const keyCheck = validateKey(k);
                 if (!keyCheck.valid) return { found: false, namespace: maskEchoedIdentifier(ns), key: maskEchoedIdentifier(k), error: keyCheck.error };
-                if (!canRead(ctx, ns)) return { found: false, namespace: ns, key: k };
+                if (!canRead(ctx, ns)) return { found: false, namespace: maskEchoedIdentifier(ns), key: maskEchoedIdentifier(k) };
 
                 const entry = readState(db, ns, k);
                 if (entry) {
@@ -11570,7 +11574,7 @@ export function registerTools(
                   }
                   return result;
                 }
-                return { found: false, namespace: ns, key: k };
+                return { found: false, namespace: maskEchoedIdentifier(ns), key: maskEchoedIdentifier(k) };
               });
 
               return okResult("read_batch", { results });
