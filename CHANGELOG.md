@@ -63,6 +63,17 @@ changelog is the canonical record of what moved.
 
 ### Security
 
+- **OAuth token lifecycle (#408).** Revoking an OAuth access or refresh token via
+  the revocation endpoint now revokes the whole access/refresh pair, so a client
+  "disconnect" no longer leaves a 30-day refresh token (or a live access token)
+  behind. Refresh rotation now revokes the previous access token. A refresh
+  request may only narrow the originally granted scopes; requesting scopes outside
+  the grant is rejected with `invalid_scope` instead of being issued. Expected
+  grant failures (unknown, replayed, expired or foreign refresh tokens and
+  authorization codes, redirect mismatch) now return HTTP 400 `invalid_grant`
+  instead of HTTP 500 `server_error`. A rejected refresh request no longer
+  consumes the refresh token.
+
 - **OAuth admin revocation (#407).** `oauth-clients clear <principal>` now revokes
   every OAuth access and refresh token bound to the principal and invalidates its
   unredeemed authorization codes, even when the principal-client mapping belongs to
