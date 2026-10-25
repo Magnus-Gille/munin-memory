@@ -12,6 +12,18 @@ changelog is the canonical record of what moved.
 
 ### Added
 
+- M5 packing-quality judges now request the frozen strict JSON Schema verdict
+  through the existing stdin payload; reader calls and response handling stay
+  unchanged. An immutable public protocol amendment records the PEG500 remedy,
+  separate unscored readiness warmup, unchanged scoring gates, and retention of
+  prior attempts.
+
+- An opt-in paired answer-quality harness (#342) reproduces frozen baseline and
+  core-first contexts at 8,192 estimated tokens, calibrates a local judge, and
+  retains hash-bound per-call receipts with paired gains, losses and uncertainty.
+  Interrupted or invalid calls block replay; ordinary CI uses fake transports.
+  The packing rule and runtime defaults remain unchanged.
+
 - A core-first whole-message experiment (#342) tests optional neighbor expansion
   after admitting query-matched messages at the same 8,192 estimated tokens.
   It retains paired comparisons against the frozen baseline, passage packing
