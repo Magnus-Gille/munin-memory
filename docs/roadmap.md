@@ -233,7 +233,7 @@ Defer unless evidence changes the product thesis:
 
 ## Planning discipline
 
-- GitHub Issues own executable backlog work; this file owns ordering and gates.
+- Plane `MUNIN` tickets own executable backlog work; this file owns ordering and gates.
 - Local state files own branch, commit, blocker, and exact-next-step detail.
 - Munin project status owns the brief cross-environment current summary.
 - Update this roadmap when a phase outcome or dependency changes, not after every

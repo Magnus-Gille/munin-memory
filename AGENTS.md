@@ -49,7 +49,7 @@ Prefer these over expanding this file:
 - Read a local `STATUS.md`, `PROGRESS.md`, or `TODO.md` before resuming substantial repository work when one exists.
 - Persist decisions with rationale at natural breakpoints. Project execution detail belongs in the local state file; cross-environment summary belongs in `projects/munin-memory/status`.
 - Read current status before overwriting it and use compare-and-swap via `expected_updated_at` where supported.
-- GitHub Issues are the task/bug tracker. Munin stores project phase, decisions, rationale, and durable context—not a duplicate issue backlog.
+- Plane project `MUNIN` tickets (https://tickets.gille.ai) are the task/bug tracker. Munin stores project phase, decisions, rationale, and durable context—not a duplicate issue backlog. GitHub Issues on this public repo are only an intake for outside reports; an agent moves an actionable report into a Plane ticket and closes the GitHub issue with a link to it.
 
 ## Non-negotiable invariants
 
