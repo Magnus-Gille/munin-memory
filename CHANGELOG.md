@@ -8,6 +8,12 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Security
+
+- Hardened transitive dependency floors for `@hono/node-server` (GHSA-rmxm-3fg6-px4f),
+  `qs` (GHSA-6pq8-jhm2-2vcw), and `minimatch` (GHSA-g3hv-75wg-m249). These updates
+  address dependency advisories; no proven application exploit is claimed.
+
 ## [0.7.0] — 2026-10-24
 
 ### Added

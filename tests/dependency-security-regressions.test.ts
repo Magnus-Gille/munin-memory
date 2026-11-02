@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import uri from "fast-uri";
+import qs from "qs";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
@@ -62,6 +63,38 @@ describe("SDK URI resolver dependency security (#356)", () => {
     );
     expect(uri.resolve("https://trusted.example/base/", "../app")).toBe(
       "https://trusted.example/app",
+    );
+  });
+});
+
+describe("qs comma serializer dependency security (GHSA-6pq8-jhm2-2vcw)", () => {
+  it.each([false, true])(
+    "does not throw when an array element shadows toString (encodeValuesOnly: %s)",
+    (encodeValuesOnly) => {
+      const value = JSON.parse('{"a":[{"toString":"x"}]}');
+
+      expect(() => qs.stringify(value, {
+        arrayFormat: "comma",
+        encodeValuesOnly,
+      })).not.toThrow();
+      expect(qs.stringify(value, {
+        arrayFormat: "comma",
+        encodeValuesOnly,
+      })).toBe("a=%5Bobject%20Object%5D");
+    },
+  );
+
+  it("does not throw for nested arrays with a shadowed toString", () => {
+    const value = JSON.parse('{"a":[[{"toString":"x"}]]}');
+
+    expect(qs.stringify(value, { arrayFormat: "comma" })).toBe(
+      "a=%5Bobject%20Object%5D",
+    );
+  });
+
+  it("preserves ordinary comma serialization", () => {
+    expect(qs.stringify({ a: ["alpha", "beta"] }, { arrayFormat: "comma" })).toBe(
+      "a=alpha%2Cbeta",
     );
   });
 });
