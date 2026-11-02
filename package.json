@@ -90,11 +90,12 @@
     "fast-uri": "^3.1.9",
     "hono": "^4.13.7",
     "ip-address": "^10.7.4",
-    "@hono/node-server": "^2.0.5",
+    "@hono/node-server": "^2.1.6",
+    "minimatch": "^11.0.1",
     "protobufjs": "^7.6.5",
     "form-data": "^4.0.6",
     "sharp": "^0.35.4",
-    "qs": "^6.16.0"
+    "qs": "^6.17.1"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
