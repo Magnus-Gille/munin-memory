@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "frozen_at": "2026-10-21T13:20:33.624355+00:00",
+  "scope": "#342 answer-quality closeout, bounded #344/#345 support",
+  "candidate_source": "c647b1b5676f7ad6e0a4f14361bcd3d0a6ee019d",
+  "candidate_rule": "query-message-cores-v1 (unchanged #392)",
+  "control": "#341 serializeContext linear/stop",
+  "dataset": "all500 LongMemEval-S frozen20261018; development-set evaluation, NOT held-out",
+  "retrieval": {
+    "mode": "hybrid",
+    "runner": "production_ranker",
+    "recency_weight": 0,
+    "top_k": 10,
+    "as_of": "2026-10-01T00:00:00.000Z",
+    "context_budget": 8192,
+    "estimator": "utf8_bytes_div4_ceil_v1"
+  },
+  "inference": {
+    "route": "existing m5 codex private profile",
+    "provider_kind": "local",
+    "reader": "gemma4",
+    "judge": "gpt-oss-120b",
+    "temperature": 0,
+    "max_output_tokens": 1024,
+    "output_profile": "complete-within-budget",
+    "traffic_purpose": "evaluation",
+    "actual_weight_revision": "unknown; response alias and usage recorded",
+    "extra_paid_api_calls": 0,
+    "mandate_extra_api_cap_usd": 25,
+    "cost_usd_receipt": null,
+    "note": "Local self-hosted route selected; monetary provider receipt and immutable runtime weight revision unavailable. Do not fabricate either."
+  },
+  "execution": {
+    "one_request_at_a_time": true,
+    "stage_order": [
+      "calibration",
+      "all_readers",
+      "all_judges",
+      "sensitivity"
+    ],
+    "variant_order": "counterbalanced deterministically by sorted query index; same retrieval for both",
+    "checkpoint": "per call, durable pending before dispatch, completed before next call; unknown pending blocks auto replay",
+    "failures": "retain and stop; no inferred verdicts, blind retries or silent model fallback",
+    "timeout_ms": 120000,
+    "model_policy": "no model/prompt/packing tuning from outcome"
+  },
+  "calibration": {
+    "source": "public2026-07-24 recorded reader answers and Sonnet4.5 verdicts; comparator labels, NOT human truth",
+    "nonpreference_sample": "12 per each of five categories, SHA256(seed227|query_id) order; 6correct/6incorrect where available, fill remaining by hash",
+    "preference_sample": "all30, reported separately; never gate against ambiguous historic labels",
+    "blind_duplicates": "first10 selected nonpreference cases by SHA256 order; no original judgment or variant labels shown",
+    "controls": "6 deterministic positive/negative synthetic factual/abstention cases",
+    "gate": "at least90% agreement with60 recorded nonpreference verdicts; at least90% duplicate consistency; all6controls; no malformed/truncated/incomplete calls. Failure means no trustworthy headline answer-quality claim and keep candidate experimental."
+  },
+  "analysis": {
+    "primary": "paired judged-correct count across all500, gained/lost IDs, category results and abstention",
+    "uncertainty": "deterministic paired bootstrap95%,2000resamples,seed227",
+    "preferences": "30case primary outcome plus separately frozen preference-aware rubric sensitivity on same saved answers, original rubric remains unchanged",
+    "evidence_regressions": "explicitly analyze six#390 losses and prior29cohort, without algorithm retuning",
+    "promotion_gate": [
+      "full500 valid matched pairs",
+      "paired accuracy improvement>=5percentagepoints with95%CI lower bound>0",
+      "no category with at least30cases loses more than5percentagepoints",
+      "calibration passes",
+      "independent held-out or representative real-agent evidence available"
+    ],
+    "decision": "Any unmet promotion gate retains experimental status; measured benefit on this development set cannot imply generalization. No holdout is presently available. A documented no-go is an accepted sprint endpoint."
+  },
+  "completion": "Report paired answer quality and limits; retain experimental status if any adoption gate is unfulfilled."
+}
