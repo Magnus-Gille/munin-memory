@@ -24,9 +24,11 @@
  *   MUNIN_BRIDGE_RATE_LIMIT_RETRIES — 429 retries (default: 2).
  *   MUNIN_BRIDGE_RATE_LIMIT_MAX_WAIT_MS — Total 429 wait budget (default: 10000).
  *   MUNIN_BRIDGE_RATE_LIMIT_JITTER_MS — Additive jitter ceiling (default: 250).
+ *   MUNIN_BRIDGE_NETWORK_RETRIES — Network-error retries for reads (default: 5).
+ *   MUNIN_BRIDGE_NETWORK_MAX_WAIT_MS — Total network backoff budget (default: 20000).
  *
  * Thrown network failures report a sanitised cause summary and are retried only
- * for read-only requests, never writes. Server-marked admission-v1 429 responses
+ * for read-only requests (including initialize), never writes. Server-marked admission-v1 429 responses
  * remain retryable because they reject before execution. Every request carries
  * X-Munin-Request-Id.
  */
@@ -607,15 +609,43 @@ export const WRITE_OUTCOME_UNKNOWN_GUIDANCE =
 
 export interface BridgeNetworkRetryConfig {
   maxRetries: number;
+  /** Backoff per retry; retries past the end reuse the last value. */
   delaysMs: readonly number[];
   jitterMs: number;
+  /** Total backoff budget across all network retries of one request. */
+  maxWaitMs: number;
 }
 
+/**
+ * Sized to ride out a short connectivity gap (a laptop waking, Wi-Fi
+ * re-associating, a tunnel reconnecting) during the MCP initialize handshake:
+ * about 15 s of backoff before giving up. Applies to read-only requests only,
+ * and every attempt also stays within the per-request timeout.
+ */
 export const DEFAULT_BRIDGE_NETWORK_RETRY: BridgeNetworkRetryConfig = {
-  maxRetries: 2,
-  delaysMs: [150, 500],
-  jitterMs: 50,
+  maxRetries: 5,
+  delaysMs: [250, 1000, 2000, 4000, 8000],
+  jitterMs: 250,
+  maxWaitMs: 20_000,
 };
+
+export function getBridgeNetworkRetryConfig(
+  env: NodeJS.ProcessEnv = process.env,
+): BridgeNetworkRetryConfig {
+  return {
+    ...DEFAULT_BRIDGE_NETWORK_RETRY,
+    maxRetries: nonNegativeInteger(
+      env.MUNIN_BRIDGE_NETWORK_RETRIES,
+      DEFAULT_BRIDGE_NETWORK_RETRY.maxRetries,
+      10,
+    ),
+    maxWaitMs: positiveInteger(
+      env.MUNIN_BRIDGE_NETWORK_MAX_WAIT_MS,
+      DEFAULT_BRIDGE_NETWORK_RETRY.maxWaitMs,
+      60_000,
+    ),
+  };
+}
 
 export const BRIDGE_REQUEST_ID_HEADER = "X-Munin-Request-Id";
 
@@ -679,7 +709,7 @@ export function createFetchWithTimeout(
   const now = options.now ?? Date.now;
   const retry = options.retry ?? getBridgeRateLimitRetryConfig();
   const retryLog = options.log ?? (() => {});
-  const networkRetry = options.networkRetry ?? DEFAULT_BRIDGE_NETWORK_RETRY;
+  const networkRetry = options.networkRetry ?? getBridgeNetworkRetryConfig();
   const uuid = options.uuid ?? randomUUID;
 
   return async (input, init) => {
@@ -711,6 +741,7 @@ export function createFetchWithTimeout(
       let retriesUsed = 0;
       let waitedMs = 0;
       let networkRetriesUsed = 0;
+      let networkWaitedMs = 0;
 
       while (true) {
         let response: Response;
@@ -737,6 +768,7 @@ export function createFetchWithTimeout(
           if (
             retryable &&
             networkRetriesUsed < networkRetry.maxRetries &&
+            networkWaitedMs + delayMs <= networkRetry.maxWaitMs &&
             now() - startedAt + delayMs < timeoutMs
           ) {
             networkRetriesUsed += 1;
@@ -744,6 +776,7 @@ export function createFetchWithTimeout(
               `Network error (${causeSummary}); retry ${networkRetriesUsed}/${networkRetry.maxRetries} in ${delayMs}ms [request id ${requestId}]`,
             );
             await sleep(delayMs, controller.signal);
+            networkWaitedMs += delayMs;
             continue;
           }
           const failure = new BridgeNetworkError({

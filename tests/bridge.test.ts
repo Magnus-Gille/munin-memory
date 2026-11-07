@@ -11,6 +11,8 @@ import {
   loadBridgeCredentials,
   createFetchWithTimeout,
   getBridgeRateLimitRetryConfig,
+  getBridgeNetworkRetryConfig,
+  DEFAULT_BRIDGE_NETWORK_RETRY,
   parseRetryAfterMs,
   resolveBridgeClientId,
   BridgeRateLimitRetryExhaustedError,
@@ -129,6 +131,34 @@ describe("bridge admission identity and retry configuration", () => {
         MUNIN_BRIDGE_RATE_LIMIT_JITTER_MS: "bad",
       }),
     ).toEqual(getBridgeRateLimitRetryConfig({}));
+  });
+
+  it("defaults network retry to a window that outlasts a short network drop", () => {
+    const config = getBridgeNetworkRetryConfig({});
+    expect(config).toEqual(DEFAULT_BRIDGE_NETWORK_RETRY);
+    expect(config.maxRetries).toBe(5);
+    expect(config.delaysMs).toEqual([250, 1000, 2000, 4000, 8000]);
+    expect(config.maxWaitMs).toBe(20_000);
+  });
+
+  it("reads network retry overrides from the environment", () => {
+    expect(
+      getBridgeNetworkRetryConfig({
+        MUNIN_BRIDGE_NETWORK_RETRIES: "0",
+        MUNIN_BRIDGE_NETWORK_MAX_WAIT_MS: "3000",
+      }),
+    ).toEqual({ ...DEFAULT_BRIDGE_NETWORK_RETRY, maxRetries: 0, maxWaitMs: 3000 });
+  });
+
+  it("uses safe network retry defaults for malformed or out-of-range values", () => {
+    for (const [retries, maxWait] of [["-1", "0"], ["bad", "x"], ["11", "60001"], ["2.5", "1e4"]]) {
+      expect(
+        getBridgeNetworkRetryConfig({
+          MUNIN_BRIDGE_NETWORK_RETRIES: retries,
+          MUNIN_BRIDGE_NETWORK_MAX_WAIT_MS: maxWait,
+        }),
+      ).toEqual(DEFAULT_BRIDGE_NETWORK_RETRY);
+    }
   });
 });
 
@@ -2379,6 +2409,10 @@ describe("createFetchWithTimeout network retry", () => {
     logs = [];
   });
 
+  // A short, fixed schedule keeps the message and classification tests below
+  // independent of the default retry window (tested separately).
+  const SHORT_NETWORK_RETRY = { maxRetries: 2, delaysMs: [150, 500], jitterMs: 50, maxWaitMs: 5000 };
+
   function make(fetchFn: typeof fetch, extra: Record<string, unknown> = {}) {
     return createFetchWithTimeout(5000, {
       fetchFn,
@@ -2386,9 +2420,76 @@ describe("createFetchWithTimeout network retry", () => {
       random: () => 0,
       uuid: () => "req-id-1234",
       log: (m) => logs.push(m),
+      networkRetry: SHORT_NETWORK_RETRY,
       ...extra,
     });
   }
+
+  it("retries a read-only request through the default backoff window", async () => {
+    const fetchFn = vi.fn().mockRejectedValue(
+      fetchError("ENOTFOUND", "getaddrinfo ENOTFOUND munin.example", "getaddrinfo"),
+    );
+    const wrapped = createFetchWithTimeout(60_000, {
+      fetchFn,
+      sleep,
+      random: () => 0.5,
+      uuid: () => "req-id-1234",
+      log: (m) => logs.push(m),
+    });
+    const err = await wrapped("https://example.com/mcp", {
+      method: "POST",
+      body: rpcBody("initialize"),
+    }).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(BridgeNetworkError);
+    expect(sleep.mock.calls.map((c) => c[0])).toEqual([375, 1125, 2125, 4125, 8125]);
+    expect(fetchFn).toHaveBeenCalledTimes(6);
+    expect((err as Error).message).toContain("not confirmed after 6 attempts");
+  });
+
+  it("recovers when the network returns within the default window", async () => {
+    const fetchFn = vi
+      .fn()
+      .mockRejectedValueOnce(fetchError("ENOTFOUND", "x", "getaddrinfo"))
+      .mockRejectedValueOnce(fetchError("ENETUNREACH", "x", "connect"))
+      .mockRejectedValueOnce(fetchError("ECONNREFUSED", "x", "connect"))
+      .mockResolvedValueOnce(okResponse());
+    const wrapped = createFetchWithTimeout(60_000, {
+      fetchFn,
+      sleep,
+      random: () => 0,
+      uuid: () => "req-id-1234",
+    });
+    const result = await wrapped("https://example.com/mcp", { method: "POST", body: rpcBody("initialize") });
+    expect(result.status).toBe(200);
+    expect(fetchFn).toHaveBeenCalledTimes(4);
+  });
+
+  it("stops retrying when the next backoff would exceed the network wait budget", async () => {
+    const fetchFn = vi.fn().mockRejectedValue(fetchError("ECONNREFUSED", "x", "connect"));
+    const wrapped = createFetchWithTimeout(60_000, {
+      fetchFn,
+      sleep,
+      random: () => 0,
+      uuid: () => "req-id-1234",
+      networkRetry: { ...DEFAULT_BRIDGE_NETWORK_RETRY, jitterMs: 0, maxWaitMs: 3500 },
+    });
+    await expect(
+      wrapped("https://example.com/mcp", { method: "POST", body: rpcBody("ping") }),
+    ).rejects.toBeInstanceOf(BridgeNetworkError);
+    // 250 + 1000 + 2000 = 3250 fits; the next 4000ms backoff would exceed 3500.
+    expect(sleep.mock.calls.map((c) => c[0])).toEqual([250, 1000, 2000]);
+    expect(fetchFn).toHaveBeenCalledTimes(4);
+  });
+
+  it("still never retries a write with the default window", async () => {
+    const fetchFn = vi.fn().mockRejectedValue(fetchError("ENOTFOUND", "x", "getaddrinfo"));
+    const wrapped = createFetchWithTimeout(60_000, { fetchFn, sleep, uuid: () => "req-id-1234" });
+    await expect(
+      wrapped("https://example.com/mcp", { method: "POST", body: toolCallBody("memory_write") }),
+    ).rejects.toMatchObject({ readOnly: false, attempts: 1 });
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
 
   it("never retries the mixed append/export code-health tool automatically", async () => {
     for (const action of ["append", "export"]) {
@@ -2598,7 +2699,7 @@ describe("createFetchWithTimeout network retry", () => {
     await expect(
       wrapped("https://example.com/mcp", { method: "POST", body: rpcBody("ping") }),
     ).rejects.toBeInstanceOf(BridgeNetworkError);
-    // 150ms first backoff already exceeds the 100ms budget.
+    // 250ms first default backoff already exceeds the 100ms budget.
     expect(fetchFn).toHaveBeenCalledTimes(1);
   });
 
