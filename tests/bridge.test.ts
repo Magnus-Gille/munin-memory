@@ -2481,6 +2481,63 @@ describe("createFetchWithTimeout network retry", () => {
     expect(fetchFn).toHaveBeenCalledTimes(4);
   });
 
+  it("stops the default window at the request timeout when failures are slow (real backoff timers)", async () => {
+    vi.useFakeTimers();
+    try {
+      // Each attempt fails only after 1s, as a slow connect timeout would.
+      const fetchFn = vi.fn(
+        () =>
+          new Promise<Response>((_resolve, reject) => {
+            setTimeout(() => reject(fetchError("ETIMEDOUT", "x", "connect")), 1000);
+          }),
+      );
+      const wrapped = createFetchWithTimeout(5000, {
+        fetchFn: fetchFn as unknown as typeof fetch,
+        random: () => 0,
+        uuid: () => "req-id-1234",
+      });
+      const settled = wrapped("https://example.com/mcp", {
+        method: "POST",
+        body: rpcBody("initialize"),
+      }).catch((e: Error) => e);
+      await vi.advanceTimersByTimeAsync(10_000);
+      const err = await settled;
+      // t=1000 fail, +250 -> t=2250 fail, +1000 -> t=4250 fail; +2000 would pass 5000.
+      expect(err).toBeInstanceOf(BridgeNetworkError);
+      expect(fetchFn).toHaveBeenCalledTimes(3);
+      expect((err as Error).message).toContain("not confirmed after 3 attempts");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("aborts during backoff when the caller aborts, without another attempt", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchFn = vi.fn().mockRejectedValue(fetchError("ENOTFOUND", "x", "getaddrinfo"));
+      const wrapped = createFetchWithTimeout(60_000, {
+        fetchFn,
+        random: () => 0,
+        uuid: () => "req-id-1234",
+      });
+      const caller = new AbortController();
+      const settled = wrapped("https://example.com/mcp", {
+        method: "POST",
+        body: rpcBody("initialize"),
+        signal: caller.signal,
+      }).catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(100); // inside the first 250ms backoff
+      caller.abort(new Error("client cancelled"));
+      await vi.advanceTimersByTimeAsync(10_000);
+      const err = await settled;
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toBe("client cancelled");
+      expect(fetchFn).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("still never retries a write with the default window", async () => {
     const fetchFn = vi.fn().mockRejectedValue(fetchError("ENOTFOUND", "x", "getaddrinfo"));
     const wrapped = createFetchWithTimeout(60_000, { fetchFn, sleep, uuid: () => "req-id-1234" });
