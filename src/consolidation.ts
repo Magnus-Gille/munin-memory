@@ -160,6 +160,10 @@ let workerTimer: ReturnType<typeof setTimeout> | null = null;
 let workerProcessing = false;
 let workerInflightPromise: Promise<void> | null = null;
 let workerDb: Database.Database | null = null;
+// Aborted by stopConsolidationWorker() so an in-flight LLM call is cancelled on
+// shutdown instead of being abandoned (MUNIN-424). Replaced after each abort so
+// the worker can be restarted (tests, re-init).
+let llmAbortController = new AbortController();
 
 // Health tracking state (for loud failure signal)
 let lastError: string | null = null;
@@ -177,6 +181,7 @@ async function callOpenRouter(prompt: string): Promise<ChatCompletionResponse> {
     apiKey,
     maxTokens: 4096,
     title: "Munin Memory Consolidation",
+    signal: llmAbortController.signal,
   });
 }
 
@@ -337,6 +342,10 @@ export async function stopConsolidationWorker(): Promise<void> {
     clearTimeout(workerTimer);
     workerTimer = null;
   }
+  // Cancel any in-flight LLM call. Nothing is persisted for an aborted run, so
+  // the batch's logs stay unincorporated and are retried on the next start.
+  llmAbortController.abort();
+  llmAbortController = new AbortController();
   try {
     // A rejecting in-flight batch must not skip the state reset below.
     if (workerInflightPromise) await workerInflightPromise;
@@ -423,6 +432,7 @@ export async function processConsolidationBatch(): Promise<void> {
   }
 
   workerProcessing = true;
+  const batchSignal = llmAbortController.signal;
 
   try {
     const db = workerDb;
@@ -439,6 +449,13 @@ export async function processConsolidationBatch(): Promise<void> {
 
     for (const candidate of candidates) {
       const result = await consolidateNamespace(db, candidate.namespace);
+
+      // Shutdown abort: not an API failure. Leave breaker/health untouched, stop
+      // the batch; the namespace's logs remain unincorporated for the next run.
+      if (batchSignal.aborted) {
+        console.log(`Consolidation batch aborted by shutdown at ${candidate.namespace}; logs left unincorporated`);
+        break;
+      }
 
       // A provider-policy skip is expected and must not trip the API failure
       // circuit breaker. It remains eligible for processing if policy changes.

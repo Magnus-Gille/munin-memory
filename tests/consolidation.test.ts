@@ -1303,6 +1303,83 @@ describe("startConsolidationWorker / stopConsolidationWorker", () => {
   });
 });
 
+// ─── Shutdown aborts the in-flight LLM call (MUNIN-424) ──────────────────────
+
+describe("stopConsolidationWorker aborts an in-flight LLM call (MUNIN-424)", () => {
+  let originalFetch: typeof globalThis.fetch;
+  let savedBaseUrl: string | undefined;
+  let logSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    savedBaseUrl = process.env.MUNIN_LLM_BASE_URL;
+    delete process.env.MUNIN_LLM_BASE_URL;
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    logSpy.mockRestore();
+    _setApiKey(null);
+    _setWorkerDb(null);
+    if (savedBaseUrl === undefined) delete process.env.MUNIN_LLM_BASE_URL;
+    else process.env.MUNIN_LLM_BASE_URL = savedBaseUrl;
+  });
+
+  it("aborts a hanging call, leaves logs unincorporated, and does not trip the breaker", async () => {
+    for (let i = 0; i < _consolidationConfig.minLogs; i++) {
+      appendLog(db, "projects/hang", `Log ${i}`, []);
+    }
+    let receivedSignal: AbortSignal | undefined;
+    const fetchMock = vi.fn((_url: unknown, init?: RequestInit) => {
+      receivedSignal = init?.signal ?? undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        // Hangs forever unless the signal aborts.
+        init?.signal?.addEventListener("abort", () => reject(init.signal!.reason), { once: true });
+      });
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    _setApiKey("test-key");
+    _setWorkerDb(db);
+    const batch = processConsolidationBatch();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    expect(receivedSignal).toBeDefined();
+    expect(receivedSignal!.aborted).toBe(false);
+
+    const started = Date.now();
+    await stopConsolidationWorker();
+    await batch;
+    expect(Date.now() - started).toBeLessThan(2_000); // well inside the 20 s shutdown limit
+
+    expect(receivedSignal!.aborted).toBe(true);
+    // Batch state: nothing persisted, logs stay unincorporated, breaker untouched.
+    expect(readState(db, "projects/hang", "synthesis")).toBeNull();
+    expect(getConsolidationMetadata(db, "projects/hang")).toBeNull();
+    expect(getConsolidationHealth().failures).toBe(0);
+    expect(getConsolidationHealth().circuit_breaker_tripped).toBe(false);
+    expect(getConsolidationHealth().last_error).toBeNull();
+  });
+
+  it("the call carries a finite deadline even without shutdown", async () => {
+    for (let i = 0; i < _consolidationConfig.minLogs; i++) {
+      appendLog(db, "projects/deadline", `Log ${i}`, []);
+    }
+    let receivedSignal: AbortSignal | undefined;
+    globalThis.fetch = vi.fn((_url: unknown, init?: RequestInit) => {
+      receivedSignal = init?.signal ?? undefined;
+      return Promise.reject(new Error("boom"));
+    }) as unknown as typeof fetch;
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    _setApiKey("test-key");
+    _setWorkerDb(db);
+    await processConsolidationBatch();
+    errSpy.mockRestore();
+    expect(receivedSignal).toBeDefined();
+    // A genuine failure still counts toward the breaker.
+    expect(getConsolidationHealth().failures).toBe(1);
+  });
+});
+
 // ─── Startup OpenRouter key health check (#168) ──────────────────────────────
 
 describe("startConsolidationWorker — OpenRouter key health check (#168)", () => {
