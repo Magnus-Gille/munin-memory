@@ -64,6 +64,21 @@ MIMIR_OFFSITE_MAX_DELETE_PCT=25
 The `MIMIR_OFFSITE_*` prefix is retained for compatibility with the shared
 backup implementation. It does not require the Mimir service.
 
+## NAS backup snapshot method
+
+`scripts/backup-to-nas.sh` takes its snapshot with `sqlite3 ... "VACUUM INTO"`,
+the same method as `offsite-snapshot.sh`. It previously used the online
+`.backup` command, which restarts whenever the source database changes; with
+the embedding worker writing continuously it ran for over two hours on a 2.6 GB
+database where `VACUUM INTO` took 94 seconds (MUNIN-421). `VACUUM INTO` reads
+one WAL snapshot and does not block writers. The post-snapshot
+`PRAGMA integrity_check`, size verification at the destination, retention and
+destinations are unchanged.
+
+The script logs a timestamped `[step]` line for the snapshot, integrity check,
+transfer and retention stages (visible in `journalctl -u munin-backup`), so a
+`TimeoutStartSec` kill can be placed in a specific stage.
+
 ## NAS backup status
 
 The separate `munin-backup.service` job publishes a fixed, generic status to
