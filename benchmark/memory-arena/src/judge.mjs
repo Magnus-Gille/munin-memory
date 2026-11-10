@@ -116,7 +116,13 @@ const jobs = [];
 for (const [qid, answers] of Object.entries(items).sort()) {
   const q = QUESTIONS[qid];
   // Re-judge if new answers arrived since this question was judged.
-  if (judged.has(qid) && judged.get(qid).n === answers.length) continue;
+  // --force-qids N01,N02,…: re-judge these questions even if already judged (appended; last record wins).
+  const force = process.argv.includes('--force-qids') ? process.argv[process.argv.indexOf('--force-qids') + 1].split(',') : [];
+  // Records carry a hash of the answer set (`h`), so changed answers are re-judged automatically; older
+  // records without `h` are skipped on equal count unless forced.
+  const h = crypto.createHash('sha256').update(JSON.stringify(answers.map((a) => [a.cell, a.final]).sort())).digest('hex').slice(0, 16);
+  const rec = judged.get(qid);
+  if (rec && (rec.h ? rec.h === h : rec.n === answers.length && !force.includes(qid))) continue;
   const used = new Set();
   const blinded = shuffle(answers.map((a) => {
     let l; do { l = label(); } while (used.has(l)); used.add(l);
@@ -146,10 +152,10 @@ Grade every answer independently on its own merits (do not compare them to each 
 ${blinded.map((b) => `<answer label="${b.label}">\n${b.text}\n</answer>`).join('\n\n')}
 
 Return one grade per label.`;
-  jobs.push({ qid, n: answers.length, blinded, prompt });
+  jobs.push({ qid, n: answers.length, h, blinded, prompt });
 }
 
-async function judgeOne({ qid, n, blinded, prompt }) {
+async function judgeOne({ qid, n, h, blinded, prompt }) {
   let parsed; let cost = 0;
   for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
     let text;
@@ -170,7 +176,7 @@ async function judgeOne({ qid, n, blinded, prompt }) {
   }
   if (!parsed) { console.error(`judge failed for ${qid}`); return; }
   for (const g of parsed.grades) g.score = Math.max(0, Math.min(1, Math.round(g.score * 2) / 2));
-  fs.appendFileSync(outFile, JSON.stringify({ qid, n, judge: BACKEND === 'codex' ? `codex:${CODEX_MODEL}` : JUDGE_MODEL, grades: parsed.grades, cost_usd: cost }) + '\n');
+  fs.appendFileSync(outFile, JSON.stringify({ qid, n, h, judge: BACKEND === 'codex' ? `codex:${CODEX_MODEL}` : JUDGE_MODEL, grades: parsed.grades, cost_usd: cost }) + '\n');
   console.log(`${qid}: judged ${n} answers ($${cost.toFixed(3)})`);
 }
 

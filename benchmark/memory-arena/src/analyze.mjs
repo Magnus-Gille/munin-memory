@@ -116,7 +116,10 @@ for (const c of Object.values(cells)) {
 const graded = rows.filter((x) => x.score !== null);
 out.judge_det_agreement = mean(graded.map((x) => ((x.score >= 0.5) === x.det ? 1 : 0)));
 // Inter-judge agreement (deviation): primary vs secondary judge on the answers both graded.
-const both = rows.filter((x) => x.score != null && grade2[`${x.cell}|${x.qid}`]);
+// After the Munin scale rerun (results/scale-rerun.json), the secondary judge's Munin scale grades refer
+// to the replaced v1 answers, so they are excluded from inter-judge agreement.
+const SCALE_RERUN = fs.existsSync(path.join(RES, 'scale-rerun.json'));
+const both = rows.filter((x) => x.score != null && grade2[`${x.cell}|${x.qid}`] && !(SCALE_RERUN && x.arm === 'munin' && x.phase === 'scale'));
 out.inter_judge = {
   primary: PRIMARY, secondary: SECONDARY, n: both.length,
   exact: mean(both.map((x) => (grade2[`${x.cell}|${x.qid}`].score === x.score ? 1 : 0))),

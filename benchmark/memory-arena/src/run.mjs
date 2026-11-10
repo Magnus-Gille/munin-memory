@@ -120,17 +120,20 @@ async function phaseIngestProbe() {
 // ---------------------------------------------------------------- phase 3 seeding
 async function seedScale(arm) {
   if (ARM === 'munin') {
+    // SEED_V2 (2026-11-10, after unblinding): v1 wrote the status entry at the FIRST log date, so Munin
+    // truthfully reported "status not updated since March" while the source showed later activity. v2
+    // writes the logs at their dates and the status — the current truth — at the LAST log date, as in
+    // real use. The lifecycle is passed as-is; Munin itself normalizes "paused" to "stopped".
     for (const p of scale.projects) {
-      const tag = { paused: 'stopped' }[p.lifecycle] ?? p.lifecycle;
-      const first = p.logs[0]?.date ?? '2026-03-01';
-      await arm.setClock(`${first}T08:00:00+01:00`);
-      const w = await arm.exec('memory_write', { namespace: `projects/${p.slug}`, key: 'status', content: p.status, tags: [tag] });
-      if (w.isError) throw new Error(`seed status failed: ${w.text.slice(0, 300)}`);
       for (const l of p.logs) {
         await arm.setClock(`${l.date}T12:00:00+02:00`);
         const r = await arm.exec('memory_log', { namespace: `projects/${p.slug}`, content: l.text, tags: [] });
         if (r.isError) throw new Error(`seed log failed: ${r.text.slice(0, 300)}`);
       }
+      const lastDate = p.logs.at(-1)?.date ?? '2026-03-01';
+      await arm.setClock(`${lastDate}T12:30:00+02:00`);
+      const w = await arm.exec('memory_write', { namespace: `projects/${p.slug}`, key: 'status', content: p.status, tags: [p.lifecycle] });
+      if (w.isError) throw new Error(`seed status failed: ${w.text.slice(0, 300)}`);
     }
     await arm.setClock('2026-10-20T09:00:00+02:00');
     for (const x of scale.people) {
@@ -164,14 +167,21 @@ async function seedScale(arm) {
 }
 
 async function phaseScale() {
-  const arm = makeArm('scale');
+  // --scale-store <sub>: fresh store subdirectory (the Munin scale rerun uses 'scale-v2').
+  const arm = makeArm(typeof args['scale-store'] === 'string' ? args['scale-store'] : 'scale');
+  if (args['seed-only']) {
+    // Seed and snapshot only (no model calls) — used to verify seeding without API access.
+    await arm.start();
+    try { console.log(JSON.stringify(await seedScale(arm))); fs.writeFileSync(path.join(cellDir, 'store-scale-seed-check.json'), JSON.stringify(arm.snapshot(), null, 2)); } finally { await arm.stop(); }
+    return;
+  }
   const have = done('scale.jsonl');
   const qs = PILOT ? scale.questions.slice(0, 2) : scale.questions;
   if (qs.every((q) => have.has(q.id))) return;
   await arm.start();
   const meta = { cell: cellId, started: new Date().toISOString() };
   try {
-    const seededMarker = path.join(STORE_ROOT, 'scale', '.seeded');
+    const seededMarker = path.join(STORE_ROOT, typeof args['scale-store'] === 'string' ? args['scale-store'] : 'scale', '.seeded');
     if (!fs.existsSync(seededMarker)) { meta.seed = await seedScale(arm); fs.writeFileSync(seededMarker, JSON.stringify(meta.seed)); }
     for (const q of qs) {
       if (have.has(q.id)) continue;
