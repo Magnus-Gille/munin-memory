@@ -15,7 +15,10 @@ const RES = path.join(ROOT, 'results');
 // Console usage limit mid-judging; see RESULTS.md deviations). Same prompt/rubric/schema, separate dir/key.
 const BACKEND = process.argv.includes('--backend') ? process.argv[process.argv.indexOf('--backend') + 1] : 'anthropic';
 const CODEX_MODEL = 'gpt-6.1-terra';
-const BLIND = path.join(RES, BACKEND === 'codex' ? 'blind-codex' : 'blind');
+// --v2 (deviation after unblinding v1): the judge also receives the SOURCE MATERIAL, because without it
+// v1 graded correct extra details as "unsupported" (0.5 + hallucinated) uniformly across all cells.
+const V2 = process.argv.includes('--v2');
+const BLIND = path.join(RES, (BACKEND === 'codex' ? 'blind-codex' : 'blind') + (V2 ? '-v2' : ''));
 fs.mkdirSync(BLIND, { recursive: true });
 const capArg = process.argv.indexOf('--cap');
 const ledger = new Ledger(path.join(RES, 'ledgers'), capArg > 0 ? Number(process.argv[capArg + 1]) : 49.5, 'judge');
@@ -123,14 +126,20 @@ for (const [qid, answers] of Object.entries(items).sort()) {
   fs.writeFileSync(keyFile, JSON.stringify(key));
   const cat = q.category;
   const rubric = RUBRIC[cat] ?? RUBRIC.default;
+  const source = !V2 ? '' : q.phase === 'scale'
+    ? `SOURCE MATERIAL (everything the assistants' memory contained):\n${scale.projects.map((p) => `${p.status}\nLog:\n${p.logs.map((l) => `- ${l.date}: ${l.text}`).join('\n')}`).join('\n\n')}\n\n${scale.people.map((x) => x.text).join('\n\n')}\n\n`
+    : `SOURCE MATERIAL (the user's earlier conversations, the only information the assistants were given):\n${scenario.sessions.map((s) => `<conversation date="${s.date}">\n${s.user_message}\n</conversation>`).join('\n')}\n\n`;
+  const halluc = V2
+    ? 'Also set stale=true if the answer presents an outdated value as current, and hallucinated=true only if it asserts a specific fact that contradicts the source material or does not appear in it. Extra details that are consistent with the source material are fine and must NOT lower the score.'
+    : 'Also set stale=true if the answer presents an outdated value as current, and hallucinated=true if it asserts a specific fact that contradicts the gold answer or is not supported by it (not for mere omissions).';
   const prompt = `You are grading answers from several anonymous AI assistants. Each assistant serves the same user (Elin Varg) and answered the same question from its own long-term memory of earlier conversations. Today is 2026-11-10.
 
-QUESTION: ${q.question}
+${source}QUESTION: ${q.question}
 GOLD ANSWER: ${q.gold_answer}
 ${q.notes ? `GRADER NOTES: ${q.notes}\n` : ''}CATEGORY: ${cat}
 
 RUBRIC: ${rubric}
-Also set stale=true if the answer presents an outdated value as current, and hallucinated=true if it asserts a specific fact that contradicts the gold answer or is not supported by it (not for mere omissions).
+${halluc}
 
 Grade every answer independently on its own merits (do not compare them to each other). Answers:
 

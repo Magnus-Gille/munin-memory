@@ -30,8 +30,8 @@ function loadGrades(dir) {
   for (const [qid, j] of lastJ) for (const x of j.grades) g[`${k[`${qid}:${x.label}`]}|${qid}`] = x;
   return g;
 }
-const PRIMARY = process.env.ARENA_JUDGE_DIR ?? 'blind-codex';
-const SECONDARY = PRIMARY === 'blind-codex' ? 'blind' : 'blind-codex';
+const PRIMARY = process.env.ARENA_JUDGE_DIR ?? 'blind-codex-v2';
+const SECONDARY = process.env.ARENA_JUDGE2_DIR ?? (PRIMARY === 'blind' ? 'blind-codex-v2' : 'blind');
 const grade = loadGrades(PRIMARY); // `${cell}|${qid}` -> grade
 const grade2 = loadGrades(SECONDARY);
 
