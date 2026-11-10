@@ -210,6 +210,10 @@ assert_dest_on_mounted_fs() {
     fi
 }
 
+# VACUUM INTO takes a read lock on the live DB while the embedding worker writes;
+# without a busy timeout sqlite3 fails immediately with "database is locked (5)".
+SQLITE_OPTS=(-cmd ".timeout ${MUNIN_BACKUP_BUSY_TIMEOUT_MS:-60000}")
+
 # Per-step timestamps so a timeout can be located (MUNIN-421 follow-up).
 step() { echo "$(date -Iseconds) [step] $*"; }
 
@@ -252,12 +256,12 @@ fi
 rm -f "$LOCAL_TMP" "${LOCAL_TMP}-journal" "${LOCAL_TMP}-wal" "${LOCAL_TMP}-shm"
 SQL_TMP=${LOCAL_TMP//\'/\'\'}
 step "snapshot start (VACUUM INTO ${LOCAL_TMP})"
-sqlite3 "$DB" "VACUUM INTO '${SQL_TMP}'"
+sqlite3 "${SQLITE_OPTS[@]}" "$DB" "VACUUM INTO '${SQL_TMP}'"
 step "snapshot done ($(size_bytes "$LOCAL_TMP" || echo '?') bytes)"
 
 # ── 2. Verify snapshot integrity ─────────────────────────────────────────────
 step "integrity_check start"
-INTEGRITY=$(sqlite3 "$LOCAL_TMP" "PRAGMA integrity_check;" 2>&1)
+INTEGRITY=$(sqlite3 "${SQLITE_OPTS[@]}" "$LOCAL_TMP" "PRAGMA integrity_check;" 2>&1)
 if [ "$INTEGRITY" != "ok" ]; then
     echo "ERROR: Integrity check failed: $INTEGRITY" >&2
     exit 1  # staging snapshot is removed by the EXIT trap

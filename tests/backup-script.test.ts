@@ -55,12 +55,13 @@ function stubSqlite3(binDir: string): void {
   writeExecutable(
     join(binDir, "sqlite3"),
     `#!/bin/bash
-if [[ "\$2" == "VACUUM INTO '"* ]]; then
-  f="\${2#VACUUM INTO \\'}"
+sql="\${@: -1}"
+if [[ "\$sql" == "VACUUM INTO '"* ]]; then
+  f="\${sql#VACUUM INTO \\'}"
   : > "\${f%\\'}"
   exit 0
 fi
-if [[ "\$2" == *integrity_check* ]]; then
+if [[ "\$sql" == *integrity_check* ]]; then
   echo ok
   exit 0
 fi
@@ -637,11 +638,13 @@ exit 0
 
     // Concurrent writer: a separate connection committing continuously.
     const stopFile = join(scratch, "stop");
-    const writer = spawn(
+    const spawnWriter = () => spawn(
       "bash",
       ["-c", `while [ ! -e "${stopFile}" ]; do sqlite3 "${db}" "PRAGMA busy_timeout=5000; INSERT INTO t(v) SELECT hex(randomblob(64)) FROM t LIMIT 200;" >/dev/null 2>&1; done`],
       { stdio: "ignore" },
     );
+    // Several aggressive writers to provoke "database is locked" on an unguarded snapshot.
+    const writers = [spawnWriter(), spawnWriter(), spawnWriter()];
     try {
       await new Promise((r) => setTimeout(r, 300));
       const result = spawnSync("bash", [backupScript], {
@@ -649,6 +652,7 @@ exit 0
           ...scriptEnv(),
           HOME: scratch,
           MUNIN_BACKUP_DB: db,
+          ...(process.env.MUNIN_TEST_BUSY_TIMEOUT_MS ? { MUNIN_BACKUP_BUSY_TIMEOUT_MS: process.env.MUNIN_TEST_BUSY_TIMEOUT_MS } : {}),
           MUNIN_BACKUP_STAGING: staging,
           MUNIN_BACKUP_HOST: "backup@example.invalid",
           MUNIN_BACKUP_REMOTE_DIR: remoteDir,
@@ -673,7 +677,7 @@ exit 0
       expect(existsSync(join(staging, names[0]!))).toBe(false);
     } finally {
       writeFileSync(stopFile, "");
-      await new Promise((r) => writer.once("exit", r));
+      await Promise.all(writers.map((w) => new Promise((r) => w.once("exit", r))));
     }
   }, 90_000);
 

@@ -71,7 +71,9 @@ the same method as `offsite-snapshot.sh`. It previously used the online
 `.backup` command, which restarts whenever the source database changes; with
 the embedding worker writing continuously it ran for over two hours on a 2.6 GB
 database where `VACUUM INTO` took 94 seconds (MUNIN-421). `VACUUM INTO` reads
-one WAL snapshot and does not block writers. The post-snapshot
+one WAL snapshot, but can still return `database is locked` under write load, so
+the sqlite3 calls use a busy timeout (`MUNIN_BACKUP_BUSY_TIMEOUT_MS`, default
+60000). The post-snapshot
 `PRAGMA integrity_check`, size verification at the destination, retention and
 destinations are unchanged.
 
