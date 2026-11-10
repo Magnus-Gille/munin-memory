@@ -1,0 +1,1385 @@
+{
+  "generator": "scale.mjs seed 20261110",
+  "projects": [
+    {
+      "name": "Fjällräv",
+      "slug": "fjallrav",
+      "lifecycle": "active",
+      "status": "# Project Fjällräv\n- Client: Tallbacka Kommun\n- Topic: customer churn model\n- Lead: Ingrid Sjöberg\n- Vendor: Osprey Data\n- Budget: 1.6 MSEK\n- Deadline: 2026-10-07\n- Lifecycle: active",
+      "logs": [
+        {
+          "date": "2026-03-06",
+          "text": "Decided to keep weekly status calls on Tuesdays with Tallbacka Kommun."
+        },
+        {
+          "date": "2026-06-19",
+          "text": "Osprey Data delivered the first integration build; minor issues logged."
+        },
+        {
+          "date": "2026-07-13",
+          "text": "Steering meeting: Ingrid Sjöberg presented progress on the customer churn model to Tallbacka Kommun."
+        },
+        {
+          "date": "2026-08-03",
+          "text": "Data access request approved by Tallbacka Kommun IT; test environment ready."
+        }
+      ],
+      "description": "Tallbacka Kommun — customer churn model, active"
+    },
+    {
+      "name": "Ask",
+      "slug": "ask",
+      "lifecycle": "active",
+      "status": "# Project Ask\n- Client: Norrsken Logistik\n- Topic: demand forecasting\n- Lead: Pär Ödman\n- Vendor: Kestrel Cloud\n- Budget: 0.4 MSEK\n- Deadline: 2026-10-12\n- Lifecycle: active",
+      "logs": [
+        {
+          "date": "2026-04-08",
+          "text": "Budget review: spend on track against 0.4 MSEK."
+        },
+        {
+          "date": "2026-04-13",
+          "text": "Kickoff held with Norrsken Logistik; scope agreed for the demand forecasting."
+        },
+        {
+          "date": "2026-05-17",
+          "text": "Workshop with Norrsken Logistik end users to collect feedback on the demand forecasting."
+        },
+        {
+          "date": "2026-07-03",
+          "text": "Data access request approved by Norrsken Logistik IT; test environment ready."
+        },
+        {
+          "date": "2026-09-13",
+          "text": "Decided to keep weekly status calls on Tuesdays with Norrsken Logistik."
+        }
+      ],
+      "description": "Norrsken Logistik — demand forecasting, active"
+    },
+    {
+      "name": "Björk",
+      "slug": "bjork",
+      "lifecycle": "active",
+      "status": "# Project Björk\n- Client: Grönhaga Energi\n- Topic: route optimisation\n- Lead: Sara Nyborg\n- Vendor: Falcon Labs\n- Budget: 1.9 MSEK\n- Deadline: 2026-11-10\n- Lifecycle: active",
+      "logs": [
+        {
+          "date": "2026-03-09",
+          "text": "Falcon Labs delivered the first integration build; minor issues logged."
+        },
+        {
+          "date": "2026-06-02",
+          "text": "Workshop with Grönhaga Energi end users to collect feedback on the route optimisation."
+        },
+        {
+          "date": "2026-07-19",
+          "text": "Kickoff held with Grönhaga Energi; scope agreed for the route optimisation."
+        },
+        {
+          "date": "2026-08-07",
+          "text": "Budget review: spend on track against 1.9 MSEK."
+        },
+        {
+          "date": "2026-08-13",
+          "text": "Steering meeting: Sara Nyborg presented progress on the route optimisation to Grönhaga Energi."
+        }
+      ],
+      "description": "Grönhaga Energi — route optimisation, active"
+    },
+    {
+      "name": "Dovhjort",
+      "slug": "dovhjort",
+      "lifecycle": "active",
+      "status": "# Project Dovhjort\n- Client: Sjövik Försäkring\n- Topic: claims triage\n- Lead: Oskar Lindmark\n- Vendor: Osprey Data\n- Budget: 1.3 MSEK\n- Deadline: 2026-12-11\n- Lifecycle: active",
+      "logs": [
+        {
+          "date": "2026-03-26",
+          "text": "Steering meeting: Oskar Lindmark presented progress on the claims triage to Sjövik Försäkring."
+        },
+        {
+          "date": "2026-05-02",
+          "text": "Data access request approved by Sjövik Försäkring IT; test environment ready."
+        },
+        {
+          "date": "2026-06-14",
+          "text": "Decided to keep weekly status calls on Tuesdays with Sjövik Försäkring."
+        },
+        {
+          "date": "2026-09-19",
+          "text": "Osprey Data delivered the first integration build; minor issues logged."
+        }
+      ],
+      "description": "Sjövik Försäkring — claims triage, active"
+    },
+    {
+      "name": "Ekorre",
+      "slug": "ekorre",
+      "lifecycle": "paused",
+      "status": "# Project Ekorre\n- Client: Bergsli Bygg\n- Topic: invoice automation\n- Lead: Tove Brandt\n- Vendor: Osprey Data\n- Budget: 1.6 MSEK\n- Deadline: 2026-12-01\n- Lifecycle: paused",
+      "logs": [
+        {
+          "date": "2026-03-05",
+          "text": "Osprey Data delivered the first integration build; minor issues logged."
+        },
+        {
+          "date": "2026-03-16",
+          "text": "Workshop with Bergsli Bygg end users to collect feedback on the invoice automation."
+        },
+        {
+          "date": "2026-05-01",
+          "text": "Steering meeting: Tove Brandt presented progress on the invoice automation to Bergsli Bygg."
+        },
+        {
+          "date": "2026-06-11",
+          "text": "Kickoff held with Bergsli Bygg; scope agreed for the invoice automation."
+        }
+      ],
+      "description": "Bergsli Bygg — invoice automation, paused"
+    },
+    {
+      "name": "Falk",
+      "slug": "falk",
+      "lifecycle": "active",
+      "status": "# Project Falk\n- Client: Ljusdal Medtech\n- Topic: data platform migration\n- Lead: Johan Rask\n- Vendor: Osprey Data\n- Budget: 0.6 MSEK\n- Deadline: 2026-09-22\n- Lifecycle: active",
+      "logs": [
+        {
+          "date": "2026-05-04",
+          "text": "Kickoff held with Ljusdal Medtech; scope agreed for the data platform migration."
+        },
+        {
+          "date": "2026-05-23",
+          "text": "Data access request approved by Ljusdal Medtech IT; test environment ready."
+        },
+        {
+          "date": "2026-06-18",
+          "text": "Workshop with Ljusdal Medtech end users to collect feedback on the data platform migration."
+        },
+        {
+          "date": "2026-09-24",
+          "text": "Budget review: spend on track against 0.6 MSEK."
+        }
+      ],
+      "description": "Ljusdal Medtech — data platform migration, active"
+    },
+    {
+      "name": "Gädda",
+      "slug": "gadda",
+      "lifecycle": "blocked",
+      "status": "# Project Gädda\n- Client: Strandviks Rederi\n- Topic: energy usage dashboard\n- Lead: Maja Holmqvist\n- Vendor: Harrier Hosting\n- Budget: 1.6 MSEK\n- Deadline: 2026-10-03\n- Lifecycle: blocked — blocked: waiting for a signed data processing agreement from the client",
+      "logs": [
+        {
+          "date": "2026-03-10",
+          "text": "Kickoff held with Strandviks Rederi; scope agreed for the energy usage dashboard."
+        },
+        {
+          "date": "2026-04-01",
+          "text": "Harrier Hosting delivered the first integration build; minor issues logged."
+        },
+        {
+          "date": "2026-05-05",
+          "text": "Workshop with Strandviks Rederi end users to collect feedback on the energy usage dashboard."
+        },
+        {
+          "date": "2026-06-01",
+          "text": "Steering meeting: Maja Holmqvist presented progress on the energy usage dashboard to Strandviks Rederi."
+        },
+        {
+          "date": "2026-09-08",
+          "text": "Budget review: spend on track against 1.6 MSEK."
+        }
+      ],
+      "description": "Strandviks Rederi — energy usage dashboard, blocked"
+    },
+    {
+      "name": "Hermelin",
+      "slug": "hermelin",
+      "lifecycle": "active",
+      "status": "# Project Hermelin\n- Client: Ekholm Retail\n- Topic: document search\n- Lead: Anders Kallio\n- Vendor: Kestrel Labs\n- Budget: 0.5 MSEK\n- Deadline: 2026-10-12\n- Lifecycle: active",
+      "logs": [
+        {
+          "date": "2026-03-04",
+          "text": "Decided to keep weekly status calls on Tuesdays with Ekholm Retail."
+        },
+        {
+          "date": "2026-03-12",
+          "text": "Kestrel Analytics delivered the first integration build; minor issues logged."
+        },
+        {
+          "date": "2026-05-10",
+          "text": "Data access request approved by Ekholm Retail IT; test environment ready."
+        },
+        {
+          "date": "2026-09-26",
+          "text": "Steering meeting: Anders Kallio presented progress on the document search to Ekholm Retail."
+        }
+      ],
+      "description": "Ekholm Retail — document search, active"
+    },
+    {
+      "name": "Igelkott",
+      "slug": "igelkott",
+      "lifecycle": "active",
+      "status": "# Project Igelkott\n- Client: Vintergatan Media\n- Topic: chatbot for support\n- Lead: Lena Wiklander\n- Vendor: Kestrel Analytics\n- Budget: 1.1 MSEK\n- Deadline: 2026-09-17\n- Lifecycle: active",
+      "logs": [
+        {
+          "date": "2026-03-13",
+          "text": "Kestrel Analytics delivered the first integration build; minor issues logged."
+        },
+        {
+          "date": "2026-04-10",
+          "text": "Decided to keep weekly status calls on Tuesdays with Vintergatan Media."
+        },
+        {
+          "date": "2026-05-09",
+          "text": "Data access request approved by Vintergatan Media IT; test environment ready."
+        },
+        {
+          "date": "2026-07-07",
+          "text": "Budget review: spend on track against 1.1 MSEK."
+        },
+        {
+          "date": "2026-10-02",
+          "text": "Steering meeting: Lena Wiklander presented progress on the chatbot for support to Vintergatan Media."
+        }
+      ],
+      "description": "Vintergatan Media — chatbot for support, active"
+    },
+    {
+      "name": "Järv",
+      "slug": "jarv",
+      "lifecycle": "active",
+      "status": "# Project Järv\n- Client: Dalstorp Livs\n- Topic: contract analysis\n- Lead: Erik Fahlén\n- Vendor: Kestrel Cloud\n- Budget: 1.5 MSEK\n- Deadline: 2026-10-06\n- Lifecycle: active",
+      "logs": [
+        {
+          "date": "2026-03-17",
+          "text": "Data access request approved by Dalstorp Livs IT; test environment ready."
+        },
+        {
+          "date": "2026-06-04",
+          "text": "Budget review: spend on track against 1.5 MSEK."
+        },
+        {
+          "date": "2026-07-26",
+          "text": "Kestrel Cloud delivered the first integration build; minor issues logged."
+        },
+        {
+          "date": "2026-08-20",
+          "text": "Workshop with Dalstorp Livs end users to collect feedback on the contract analysis."
+        },
+        {
+          "date": "2026-10-08",
+          "text": "Kickoff held with Dalstorp Livs; scope agreed for the contract analysis."
+        }
+      ],
+      "description": "Dalstorp Livs — contract analysis, active"
+    },
+    {
+      "name": "Kråka",
+      "slug": "kraka",
+      "lifecycle": "completed",
+      "status": "# Project Kråka\n- Client: Tallbacka Kommun\n- Topic: customer churn model\n- Lead: Ingrid Sjöberg\n- Vendor: Harrier Hosting\n- Budget: 1.3 MSEK\n- Deadline: 2026-10-14\n- Lifecycle: completed",
+      "logs": [
+        {
+          "date": "2026-03-24",
+          "text": "Kickoff held with Tallbacka Kommun; scope agreed for the customer churn model."
+        },
+        {
+          "date": "2026-04-12",
+          "text": "Budget review: spend on track against 1.3 MSEK."
+        },
+        {
+          "date": "2026-04-18",
+          "text": "Workshop with Tallbacka Kommun end users to collect feedback on the customer churn model."
+        },
+        {
+          "date": "2026-05-13",
+          "text": "Harrier Hosting delivered the first integration build; minor issues logged."
+        }
+      ],
+      "description": "Tallbacka Kommun — customer churn model, completed"
+    },
+    {
+      "name": "Lärka",
+      "slug": "larka",
+      "lifecycle": "completed",
+      "status": "# Project Lärka\n- Client: Norrsken Logistik\n- Topic: demand forecasting\n- Lead: Pär Ödman\n- Vendor: Kite Networks\n- Budget: 1.3 MSEK\n- Deadline: 2026-09-25\n- Lifecycle: completed",
+      "logs": [
+        {
+          "date": "2026-04-11",
+          "text": "Steering meeting: Pär Ödman presented progress on the demand forecasting to Norrsken Logistik."
+        },
+        {
+          "date": "2026-05-22",
+          "text": "Kite Networks delivered the first integration build; minor issues logged."
+        },
+        {
+          "date": "2026-09-08",
+          "text": "Postgres upgrade stalled: schema drift between staging and production; rollback executed, retry planned after freeze."
+        },
+        {
+          "date": "2026-09-20",
+          "text": "Budget review: spend on track against 1.3 MSEK."
+        },
+        {
+          "date": "2026-10-17",
+          "text": "Kickoff held with Norrsken Logistik; scope agreed for the demand forecasting."
+        },
+        {
+          "date": "2026-10-26",
+          "text": "Workshop with Norrsken Logistik end users to collect feedback on the demand forecasting."
+        }
+      ],
+      "description": "Norrsken Logistik — demand forecasting, completed"
+    },
+    {
+      "name": "Mård",
+      "slug": "mard",
+      "lifecycle": "active",
+      "status": "# Project Mård\n- Client: Grönhaga Energi\n- Topic: route optimisation\n- Lead: Sara Nyborg\n- Vendor: Kestrel Cloud\n- Budget: 0.7 MSEK\n- Deadline: 2026-11-17\n- Lifecycle: active",
+      "logs": [
+        {
+          "date": "2026-04-14",
+          "text": "Kickoff held with Grönhaga Energi; scope agreed for the route optimisation."
+        },
+        {
+          "date": "2026-07-27",
+          "text": "Data access request approved by Grönhaga Energi IT; test environment ready."
+        },
+        {
+          "date": "2026-08-08",
+          "text": "Kestrel Cloud delivered the first integration build; minor issues logged."
+        },
+        {
+          "date": "2026-08-18",
+          "text": "Workshop with Grönhaga Energi end users to collect feedback on the route optimisation."
+        },
+        {
+          "date": "2026-10-09",
+          "text": "Budget review: spend on track against 0.7 MSEK."
+        }
+      ],
+      "description": "Grönhaga Energi — route optimisation, active"
+    },
+    {
+      "name": "Näktergal",
+      "slug": "naktergal",
+      "lifecycle": "active",
+      "status": "# Project Näktergal\n- Client: Sjövik Försäkring\n- Topic: claims triage\n- Lead: Oskar Lindmark\n- Vendor: Osprey Data\n- Budget: 0.4 MSEK\n- Deadline: 2026-09-27\n- Lifecycle: active",
+      "logs": [
+        {
+          "date": "2026-05-12",
+          "text": "Data access request approved by Sjövik Försäkring IT; test environment ready."
+        },
+        {
+          "date": "2026-07-01",
+          "text": "Steering meeting: Oskar Lindmark presented progress on the claims triage to Sjövik Försäkring."
+        },
+        {
+          "date": "2026-07-10",
+          "text": "Decided to keep weekly status calls on Tuesdays with Sjövik Försäkring."
+        },
+        {
+          "date": "2026-10-06",
+          "text": "Budget review: spend on track against 0.4 MSEK."
+        }
+      ],
+      "description": "Sjövik Försäkring — claims triage, active"
+    },
+    {
+      "name": "Orre",
+      "slug": "orre",
+      "lifecycle": "blocked",
+      "status": "# Project Orre\n- Client: Bergsli Bygg\n- Topic: invoice automation\n- Lead: Tove Brandt\n- Vendor: Merlin Compute\n- Budget: 1.8 MSEK\n- Deadline: 2026-09-22\n- Lifecycle: blocked — blocked: vendor API credentials not yet issued",
+      "logs": [
+        {
+          "date": "2026-05-14",
+          "text": "Budget review: spend on track against 1.8 MSEK."
+        },
+        {
+          "date": "2026-05-15",
+          "text": "Data access request approved by Bergsli Bygg IT; test environment ready."
+        },
+        {
+          "date": "2026-08-22",
+          "text": "Kickoff held with Bergsli Bygg; scope agreed for the invoice automation."
+        },
+        {
+          "date": "2026-09-03",
+          "text": "Workshop with Bergsli Bygg end users to collect feedback on the invoice automation."
+        },
+        {
+          "date": "2026-09-18",
+          "text": "Merlin Compute delivered the first integration build; minor issues logged."
+        }
+      ],
+      "description": "Bergsli Bygg — invoice automation, blocked"
+    },
+    {
+      "name": "Pilgrimsfalk",
+      "slug": "pilgrimsfalk",
+      "lifecycle": "completed",
+      "status": "# Project Pilgrimsfalk\n- Client: Ljusdal Medtech\n- Topic: data platform migration\n- Lead: Johan Rask\n- Vendor: Merlin Compute\n- Budget: 1.8 MSEK\n- Deadline: 2026-12-07\n- Lifecycle: completed",
+      "logs": [
+        {
+          "date": "2026-03-18",
+          "text": "Kickoff held with Ljusdal Medtech; scope agreed for the data platform migration."
+        },
+        {
+          "date": "2026-05-25",
+          "text": "Workshop with Ljusdal Medtech end users to collect feedback on the data platform migration."
+        },
+        {
+          "date": "2026-06-27",
+          "text": "Merlin Compute delivered the first integration build; minor issues logged."
+        },
+        {
+          "date": "2026-09-27",
+          "text": "Budget review: spend on track against 1.8 MSEK."
+        }
+      ],
+      "description": "Ljusdal Medtech — data platform migration, completed"
+    },
+    {
+      "name": "Rådjur",
+      "slug": "radjur",
+      "lifecycle": "active",
+      "status": "# Project Rådjur\n- Client: Strandviks Rederi\n- Topic: energy usage dashboard\n- Lead: Maja Holmqvist\n- Vendor: Merlin Compute\n- Budget: 1.9 MSEK\n- Deadline: 2026-10-16\n- Lifecycle: active",
+      "logs": [
+        {
+          "date": "2026-04-07",
+          "text": "Steering meeting: Maja Holmqvist presented progress on the energy usage dashboard to Strandviks Rederi."
+        },
+        {
+          "date": "2026-07-14",
+          "text": "Decided to replace the rule-based matcher with a fine-tuned embedding model; Erik Fahlén owns the change."
+        },
+        {
+          "date": "2026-07-18",
+          "text": "Workshop with Strandviks Rederi end users to collect feedback on the energy usage dashboard."
+        },
+        {
+          "date": "2026-07-23",
+          "text": "Kickoff held with Strandviks Rederi; scope agreed for the energy usage dashboard."
+        },
+        {
+          "date": "2026-09-21",
+          "text": "Merlin Compute delivered the first integration build; minor issues logged."
+        }
+      ],
+      "description": "Strandviks Rederi — energy usage dashboard, active"
+    },
+    {
+      "name": "Sälg",
+      "slug": "salg",
+      "lifecycle": "active",
+      "status": "# Project Sälg\n- Client: Ekholm Retail\n- Topic: document search\n- Lead: Anders Kallio\n- Vendor: Osprey Data\n- Budget: 1.0 MSEK\n- Deadline: 2026-09-25\n- Lifecycle: active",
+      "logs": [
+        {
+          "date": "2026-06-07",
+          "text": "Workshop with Ekholm Retail end users to collect feedback on the document search."
+        },
+        {
+          "date": "2026-06-08",
+          "text": "Budget review: spend on track against 1.0 MSEK."
+        },
+        {
+          "date": "2026-07-24",
+          "text": "Kickoff held with Ekholm Retail; scope agreed for the document search."
+        },
+        {
+          "date": "2026-09-15",
+          "text": "Data access request approved by Ekholm Retail IT; test environment ready."
+        }
+      ],
+      "description": "Ekholm Retail — document search, active"
+    },
+    {
+      "name": "Tjäder",
+      "slug": "tjader",
+      "lifecycle": "paused",
+      "status": "# Project Tjäder\n- Client: Vintergatan Media\n- Topic: chatbot for support\n- Lead: Lena Wiklander\n- Vendor: Plover Security\n- Budget: 1.7 MSEK\n- Deadline: 2026-12-04\n- Lifecycle: paused",
+      "logs": [
+        {
+          "date": "2026-06-03",
+          "text": "Deadline moved from 30 September to 15 November after the data delivery from Strandviks Rederi slipped."
+        },
+        {
+          "date": "2026-06-24",
+          "text": "Kickoff held with Vintergatan Media; scope agreed for the chatbot for support."
+        },
+        {
+          "date": "2026-08-01",
+          "text": "Plover Security delivered the first integration build; minor issues logged."
+        },
+        {
+          "date": "2026-08-24",
+          "text": "Workshop with Vintergatan Media end users to collect feedback on the chatbot for support."
+        },
+        {
+          "date": "2026-09-23",
+          "text": "Steering meeting: Lena Wiklander presented progress on the chatbot for support to Vintergatan Media."
+        },
+        {
+          "date": "2026-10-02",
+          "text": "Deadline moved again, now 4 December, because the security review was rescheduled."
+        }
+      ],
+      "description": "Vintergatan Media — chatbot for support, paused"
+    },
+    {
+      "name": "Uv",
+      "slug": "uv",
+      "lifecycle": "paused",
+      "status": "# Project Uv\n- Client: Dalstorp Livs\n- Topic: contract analysis\n- Lead: Erik Fahlén\n- Vendor: Osprey Data\n- Budget: 1.0 MSEK\n- Deadline: 2026-10-20\n- Lifecycle: paused",
+      "logs": [
+        {
+          "date": "2026-03-07",
+          "text": "Data access request approved by Dalstorp Livs IT; test environment ready."
+        },
+        {
+          "date": "2026-08-02",
+          "text": "Budget review: spend on track against 1.0 MSEK."
+        },
+        {
+          "date": "2026-08-12",
+          "text": "Steering meeting: Erik Fahlén presented progress on the contract analysis to Dalstorp Livs."
+        },
+        {
+          "date": "2026-08-19",
+          "text": "Decided to keep weekly status calls on Tuesdays with Dalstorp Livs."
+        },
+        {
+          "date": "2026-10-24",
+          "text": "Workshop with Dalstorp Livs end users to collect feedback on the contract analysis."
+        }
+      ],
+      "description": "Dalstorp Livs — contract analysis, paused"
+    },
+    {
+      "name": "Vildsvin",
+      "slug": "vildsvin",
+      "lifecycle": "active",
+      "status": "# Project Vildsvin\n- Client: Tallbacka Kommun\n- Topic: customer churn model\n- Lead: Ingrid Sjöberg\n- Vendor: Kestrel Analytics\n- Budget: 1.5 MSEK\n- Deadline: 2026-12-02\n- Lifecycle: active",
+      "logs": [
+        {
+          "date": "2026-04-02",
+          "text": "Kestrel Analytics delivered the first integration build; minor issues logged."
+        },
+        {
+          "date": "2026-06-23",
+          "text": "Decided to keep weekly status calls on Tuesdays with Tallbacka Kommun."
+        },
+        {
+          "date": "2026-07-09",
+          "text": "Data access request approved by Tallbacka Kommun IT; test environment ready."
+        },
+        {
+          "date": "2026-08-17",
+          "text": "Budget review: spend on track against 1.5 MSEK."
+        },
+        {
+          "date": "2026-08-27",
+          "text": "Pilot went live at the Gävle depot; first week shows 11% shorter routes."
+        },
+        {
+          "date": "2026-09-07",
+          "text": "Steering meeting: Ingrid Sjöberg presented progress on the customer churn model to Tallbacka Kommun."
+        }
+      ],
+      "description": "Tallbacka Kommun — customer churn model, active"
+    },
+    {
+      "name": "Älg",
+      "slug": "alg",
+      "lifecycle": "active",
+      "status": "# Project Älg\n- Client: Norrsken Logistik\n- Topic: demand forecasting\n- Lead: Pär Ödman\n- Vendor: Kite Networks\n- Budget: 1.9 MSEK\n- Deadline: 2026-11-24\n- Lifecycle: active",
+      "logs": [
+        {
+          "date": "2026-03-15",
+          "text": "Decided to keep weekly status calls on Tuesdays with Norrsken Logistik."
+        },
+        {
+          "date": "2026-04-03",
+          "text": "Workshop with Norrsken Logistik end users to collect feedback on the demand forecasting."
+        },
+        {
+          "date": "2026-06-25",
+          "text": "Data access request approved by Norrsken Logistik IT; test environment ready."
+        },
+        {
+          "date": "2026-08-15",
+          "text": "Budget review: spend on track against 1.9 MSEK."
+        },
+        {
+          "date": "2026-10-16",
+          "text": "Kickoff held with Norrsken Logistik; scope agreed for the demand forecasting."
+        }
+      ],
+      "description": "Norrsken Logistik — demand forecasting, active"
+    },
+    {
+      "name": "Örn",
+      "slug": "orn",
+      "lifecycle": "active",
+      "status": "# Project Örn\n- Client: Grönhaga Energi\n- Topic: route optimisation\n- Lead: Sara Nyborg\n- Vendor: Plover Security\n- Budget: 1.1 MSEK\n- Deadline: 2026-10-10\n- Lifecycle: active",
+      "logs": [
+        {
+          "date": "2026-05-06",
+          "text": "Decided to keep weekly status calls on Tuesdays with Grönhaga Energi."
+        },
+        {
+          "date": "2026-05-16",
+          "text": "Workshop with Grönhaga Energi end users to collect feedback on the route optimisation."
+        },
+        {
+          "date": "2026-05-27",
+          "text": "Budget review: spend on track against 1.1 MSEK."
+        },
+        {
+          "date": "2026-08-25",
+          "text": "Data access request approved by Grönhaga Energi IT; test environment ready."
+        }
+      ],
+      "description": "Grönhaga Energi — route optimisation, active"
+    },
+    {
+      "name": "Bäver",
+      "slug": "baver",
+      "lifecycle": "paused",
+      "status": "# Project Bäver\n- Client: Sjövik Försäkring\n- Topic: claims triage\n- Lead: Oskar Lindmark\n- Vendor: Heron Systems\n- Budget: 1.0 MSEK\n- Deadline: 2026-09-06\n- Lifecycle: paused",
+      "logs": [
+        {
+          "date": "2026-04-06",
+          "text": "Kickoff held with Sjövik Försäkring; scope agreed for the claims triage."
+        },
+        {
+          "date": "2026-06-26",
+          "text": "Budget review: spend on track against 1.0 MSEK."
+        },
+        {
+          "date": "2026-09-11",
+          "text": "Heron Systems delivered the first integration build; minor issues logged."
+        },
+        {
+          "date": "2026-10-01",
+          "text": "Workshop with Sjövik Försäkring end users to collect feedback on the claims triage."
+        }
+      ],
+      "description": "Sjövik Försäkring — claims triage, paused"
+    },
+    {
+      "name": "Duvhök",
+      "slug": "duvhok",
+      "lifecycle": "paused",
+      "status": "# Project Duvhök\n- Client: Bergsli Bygg\n- Topic: invoice automation\n- Lead: Tove Brandt\n- Vendor: Heron Systems\n- Budget: 1.1 MSEK\n- Deadline: 2026-09-11\n- Lifecycle: paused",
+      "logs": [
+        {
+          "date": "2026-03-11",
+          "text": "Workshop with Bergsli Bygg end users to collect feedback on the invoice automation."
+        },
+        {
+          "date": "2026-04-05",
+          "text": "Heron Systems delivered the first integration build; minor issues logged."
+        },
+        {
+          "date": "2026-10-14",
+          "text": "Steering meeting: Tove Brandt presented progress on the invoice automation to Bergsli Bygg."
+        },
+        {
+          "date": "2026-10-22",
+          "text": "Kickoff held with Bergsli Bygg; scope agreed for the invoice automation."
+        }
+      ],
+      "description": "Bergsli Bygg — invoice automation, paused"
+    },
+    {
+      "name": "Fiskmås",
+      "slug": "fiskmas",
+      "lifecycle": "active",
+      "status": "# Project Fiskmås\n- Client: Ljusdal Medtech\n- Topic: data platform migration\n- Lead: Johan Rask\n- Vendor: Heron Systems\n- Budget: 1.9 MSEK\n- Deadline: 2026-12-06\n- Lifecycle: active",
+      "logs": [
+        {
+          "date": "2026-03-22",
+          "text": "Data access request approved by Ljusdal Medtech IT; test environment ready."
+        },
+        {
+          "date": "2026-06-13",
+          "text": "Steering meeting: Johan Rask presented progress on the data platform migration to Ljusdal Medtech."
+        },
+        {
+          "date": "2026-06-21",
+          "text": "Decided to keep weekly status calls on Tuesdays with Ljusdal Medtech."
+        },
+        {
+          "date": "2026-08-06",
+          "text": "Kickoff held with Ljusdal Medtech; scope agreed for the data platform migration."
+        },
+        {
+          "date": "2026-08-09",
+          "text": "Heron Systems delivered the first integration build; minor issues logged."
+        }
+      ],
+      "description": "Ljusdal Medtech — data platform migration, active"
+    },
+    {
+      "name": "Gråsparv",
+      "slug": "grasparv",
+      "lifecycle": "active",
+      "status": "# Project Gråsparv\n- Client: Strandviks Rederi\n- Topic: energy usage dashboard\n- Lead: Maja Holmqvist\n- Vendor: Kestrel Cloud\n- Budget: 1.9 MSEK\n- Deadline: 2026-12-26\n- Lifecycle: active",
+      "logs": [
+        {
+          "date": "2026-03-14",
+          "text": "Kestrel Cloud delivered the first integration build; minor issues logged."
+        },
+        {
+          "date": "2026-04-24",
+          "text": "Budget review: spend on track against 1.9 MSEK."
+        },
+        {
+          "date": "2026-05-26",
+          "text": "Steering meeting: Maja Holmqvist presented progress on the energy usage dashboard to Strandviks Rederi."
+        },
+        {
+          "date": "2026-06-17",
+          "text": "Decided to keep weekly status calls on Tuesdays with Strandviks Rederi."
+        },
+        {
+          "date": "2026-09-01",
+          "text": "Data access request approved by Strandviks Rederi IT; test environment ready."
+        }
+      ],
+      "description": "Strandviks Rederi — energy usage dashboard, active"
+    },
+    {
+      "name": "Hackspett",
+      "slug": "hackspett",
+      "lifecycle": "active",
+      "status": "# Project Hackspett\n- Client: Ekholm Retail\n- Topic: document search\n- Lead: Anders Kallio\n- Vendor: Osprey Data\n- Budget: 1.6 MSEK\n- Deadline: 2026-11-18\n- Lifecycle: active",
+      "logs": [
+        {
+          "date": "2026-03-27",
+          "text": "Decided to keep weekly status calls on Tuesdays with Ekholm Retail."
+        },
+        {
+          "date": "2026-04-20",
+          "text": "Steering meeting: Anders Kallio presented progress on the document search to Ekholm Retail."
+        },
+        {
+          "date": "2026-05-20",
+          "text": "Data access request approved by Ekholm Retail IT; test environment ready."
+        },
+        {
+          "date": "2026-10-11",
+          "text": "Budget review: spend on track against 1.6 MSEK."
+        }
+      ],
+      "description": "Ekholm Retail — document search, active"
+    },
+    {
+      "name": "Isbjörn",
+      "slug": "isbjorn",
+      "lifecycle": "active",
+      "status": "# Project Isbjörn\n- Client: Vintergatan Media\n- Topic: chatbot for support\n- Lead: Lena Wiklander\n- Vendor: Kestrel Cloud\n- Budget: 0.8 MSEK\n- Deadline: 2026-09-25\n- Lifecycle: active",
+      "logs": [
+        {
+          "date": "2026-04-16",
+          "text": "Decided to keep weekly status calls on Tuesdays with Vintergatan Media."
+        },
+        {
+          "date": "2026-06-12",
+          "text": "Kickoff held with Vintergatan Media; scope agreed for the chatbot for support."
+        },
+        {
+          "date": "2026-06-22",
+          "text": "Kestrel Cloud delivered the first integration build; minor issues logged."
+        },
+        {
+          "date": "2026-09-09",
+          "text": "Steering meeting: Lena Wiklander presented progress on the chatbot for support to Vintergatan Media."
+        }
+      ],
+      "description": "Vintergatan Media — chatbot for support, active"
+    },
+    {
+      "name": "Jorduggla",
+      "slug": "jorduggla",
+      "lifecycle": "active",
+      "status": "# Project Jorduggla\n- Client: Dalstorp Livs\n- Topic: contract analysis\n- Lead: Erik Fahlén\n- Vendor: Swift Integrations\n- Budget: 2.0 MSEK\n- Deadline: 2026-09-04\n- Lifecycle: active",
+      "logs": [
+        {
+          "date": "2026-07-25",
+          "text": "Decided to keep weekly status calls on Tuesdays with Dalstorp Livs."
+        },
+        {
+          "date": "2026-09-16",
+          "text": "Data access request approved by Dalstorp Livs IT; test environment ready."
+        },
+        {
+          "date": "2026-10-03",
+          "text": "Steering meeting: Erik Fahlén presented progress on the contract analysis to Dalstorp Livs."
+        },
+        {
+          "date": "2026-10-04",
+          "text": "Budget review: spend on track against 2.0 MSEK."
+        }
+      ],
+      "description": "Dalstorp Livs — contract analysis, active"
+    },
+    {
+      "name": "Kungsörn",
+      "slug": "kungsorn",
+      "lifecycle": "active",
+      "status": "# Project Kungsörn\n- Client: Tallbacka Kommun\n- Topic: customer churn model\n- Lead: Ingrid Sjöberg\n- Vendor: Heron Systems\n- Budget: 0.7 MSEK\n- Deadline: 2026-12-04\n- Lifecycle: active",
+      "logs": [
+        {
+          "date": "2026-05-19",
+          "text": "Heron Systems delivered the first integration build; minor issues logged."
+        },
+        {
+          "date": "2026-08-04",
+          "text": "Steering meeting: Ingrid Sjöberg presented progress on the customer churn model to Tallbacka Kommun."
+        },
+        {
+          "date": "2026-08-26",
+          "text": "Decided to keep weekly status calls on Tuesdays with Tallbacka Kommun."
+        },
+        {
+          "date": "2026-09-05",
+          "text": "Data access request approved by Tallbacka Kommun IT; test environment ready."
+        }
+      ],
+      "description": "Tallbacka Kommun — customer churn model, active"
+    },
+    {
+      "name": "Lodmott",
+      "slug": "lodmott",
+      "lifecycle": "paused",
+      "status": "# Project Lodmott\n- Client: Norrsken Logistik\n- Topic: demand forecasting\n- Lead: Pär Ödman\n- Vendor: Osprey Data\n- Budget: 0.6 MSEK\n- Deadline: 2026-11-16\n- Lifecycle: paused",
+      "logs": [
+        {
+          "date": "2026-04-26",
+          "text": "Decided to keep weekly status calls on Tuesdays with Norrsken Logistik."
+        },
+        {
+          "date": "2026-06-15",
+          "text": "Osprey Data delivered the first integration build; minor issues logged."
+        },
+        {
+          "date": "2026-09-14",
+          "text": "Steering meeting: Pär Ödman presented progress on the demand forecasting to Norrsken Logistik."
+        },
+        {
+          "date": "2026-10-07",
+          "text": "Kickoff held with Norrsken Logistik; scope agreed for the demand forecasting."
+        }
+      ],
+      "description": "Norrsken Logistik — demand forecasting, paused"
+    },
+    {
+      "name": "Murmeldjur",
+      "slug": "murmeldjur",
+      "lifecycle": "paused",
+      "status": "# Project Murmeldjur\n- Client: Grönhaga Energi\n- Topic: route optimisation\n- Lead: Sara Nyborg\n- Vendor: Harrier Hosting\n- Budget: 1.2 MSEK\n- Deadline: 2026-09-12\n- Lifecycle: paused",
+      "logs": [
+        {
+          "date": "2026-04-04",
+          "text": "Budget review: spend on track against 0.5 MSEK."
+        },
+        {
+          "date": "2026-06-16",
+          "text": "Kickoff held with Grönhaga Energi; scope agreed for the route optimisation."
+        },
+        {
+          "date": "2026-07-21",
+          "text": "Decided to keep weekly status calls on Tuesdays with Grönhaga Energi."
+        },
+        {
+          "date": "2026-08-14",
+          "text": "Data access request approved by Grönhaga Energi IT; test environment ready."
+        },
+        {
+          "date": "2026-08-19",
+          "text": "Budget increased from 0.8 MSEK to 1.2 MSEK to cover a second pilot site."
+        },
+        {
+          "date": "2026-09-02",
+          "text": "Workshop with Grönhaga Energi end users to collect feedback on the route optimisation."
+        }
+      ],
+      "description": "Grönhaga Energi — route optimisation, paused"
+    },
+    {
+      "name": "Nötväcka",
+      "slug": "notvacka",
+      "lifecycle": "paused",
+      "status": "# Project Nötväcka\n- Client: Sjövik Försäkring\n- Topic: claims triage\n- Lead: Oskar Lindmark\n- Vendor: Kestrel Analytics\n- Budget: 1.0 MSEK\n- Deadline: 2026-12-19\n- Lifecycle: paused",
+      "logs": [
+        {
+          "date": "2026-05-03",
+          "text": "Kestrel Analytics delivered the first integration build; minor issues logged."
+        },
+        {
+          "date": "2026-05-21",
+          "text": "Decided to keep weekly status calls on Tuesdays with Sjövik Försäkring."
+        },
+        {
+          "date": "2026-07-02",
+          "text": "Data access request approved by Sjövik Försäkring IT; test environment ready."
+        },
+        {
+          "date": "2026-08-23",
+          "text": "Steering meeting: Oskar Lindmark presented progress on the claims triage to Sjövik Försäkring."
+        }
+      ],
+      "description": "Sjövik Försäkring — claims triage, paused"
+    },
+    {
+      "name": "Ormvråk",
+      "slug": "ormvrak",
+      "lifecycle": "active",
+      "status": "# Project Ormvråk\n- Client: Bergsli Bygg\n- Topic: invoice automation\n- Lead: Tove Brandt\n- Vendor: Falcon Labs\n- Budget: 1.6 MSEK\n- Deadline: 2026-09-22\n- Lifecycle: active",
+      "logs": [
+        {
+          "date": "2026-03-20",
+          "text": "Kickoff held with Bergsli Bygg; scope agreed for the invoice automation."
+        },
+        {
+          "date": "2026-05-24",
+          "text": "Falcon Labs delivered the first integration build; minor issues logged."
+        },
+        {
+          "date": "2026-06-05",
+          "text": "Decided to keep weekly status calls on Tuesdays with Bergsli Bygg."
+        },
+        {
+          "date": "2026-06-20",
+          "text": "Steering meeting: Tove Brandt presented progress on the invoice automation to Bergsli Bygg."
+        }
+      ],
+      "description": "Bergsli Bygg — invoice automation, active"
+    },
+    {
+      "name": "Pärluggla",
+      "slug": "parluggla",
+      "lifecycle": "active",
+      "status": "# Project Pärluggla\n- Client: Ljusdal Medtech\n- Topic: data platform migration\n- Lead: Johan Rask\n- Vendor: Plover Security\n- Budget: 0.3 MSEK\n- Deadline: 2026-11-23\n- Lifecycle: active",
+      "logs": [
+        {
+          "date": "2026-04-17",
+          "text": "Budget review: spend on track against 0.3 MSEK."
+        },
+        {
+          "date": "2026-04-21",
+          "text": "Workshop with Ljusdal Medtech end users to collect feedback on the data platform migration."
+        },
+        {
+          "date": "2026-08-10",
+          "text": "Data access request approved by Ljusdal Medtech IT; test environment ready."
+        },
+        {
+          "date": "2026-09-17",
+          "text": "Decided to keep weekly status calls on Tuesdays with Ljusdal Medtech."
+        },
+        {
+          "date": "2026-10-12",
+          "text": "Steering meeting: Johan Rask presented progress on the data platform migration to Ljusdal Medtech."
+        }
+      ],
+      "description": "Ljusdal Medtech — data platform migration, active"
+    },
+    {
+      "name": "Rapphöna",
+      "slug": "rapphona",
+      "lifecycle": "completed",
+      "status": "# Project Rapphöna\n- Client: Strandviks Rederi\n- Topic: energy usage dashboard\n- Lead: Maja Holmqvist\n- Vendor: Osprey Data\n- Budget: 1.5 MSEK\n- Deadline: 2026-12-25\n- Lifecycle: completed",
+      "logs": [
+        {
+          "date": "2026-03-25",
+          "text": "Steering meeting: Maja Holmqvist presented progress on the energy usage dashboard to Strandviks Rederi."
+        },
+        {
+          "date": "2026-04-25",
+          "text": "Decided to keep weekly status calls on Tuesdays with Strandviks Rederi."
+        },
+        {
+          "date": "2026-05-18",
+          "text": "Data access request approved by Strandviks Rederi IT; test environment ready."
+        },
+        {
+          "date": "2026-07-17",
+          "text": "Osprey Data delivered the first integration build; minor issues logged."
+        },
+        {
+          "date": "2026-08-05",
+          "text": "Budget review: spend on track against 1.5 MSEK."
+        }
+      ],
+      "description": "Strandviks Rederi — energy usage dashboard, completed"
+    },
+    {
+      "name": "Skata",
+      "slug": "skata",
+      "lifecycle": "blocked",
+      "status": "# Project Skata\n- Client: Ekholm Retail\n- Topic: document search\n- Lead: Anders Kallio\n- Vendor: Swift Integrations\n- Budget: 1.0 MSEK\n- Deadline: 2026-10-12\n- Lifecycle: blocked — blocked: client froze all IT changes until year end",
+      "logs": [
+        {
+          "date": "2026-03-08",
+          "text": "Budget review: spend on track against 1.0 MSEK."
+        },
+        {
+          "date": "2026-04-22",
+          "text": "Workshop with Ekholm Retail end users to collect feedback on the document search."
+        },
+        {
+          "date": "2026-04-23",
+          "text": "Swift Integrations delivered the first integration build; minor issues logged."
+        },
+        {
+          "date": "2026-10-21",
+          "text": "Kickoff held with Ekholm Retail; scope agreed for the document search."
+        }
+      ],
+      "description": "Ekholm Retail — document search, blocked"
+    },
+    {
+      "name": "Trana",
+      "slug": "trana",
+      "lifecycle": "paused",
+      "status": "# Project Trana\n- Client: Vintergatan Media\n- Topic: chatbot for support\n- Lead: Lena Wiklander\n- Vendor: Harrier Hosting\n- Budget: 2.0 MSEK\n- Deadline: 2026-11-10\n- Lifecycle: paused",
+      "logs": [
+        {
+          "date": "2026-03-01",
+          "text": "Kickoff held with Vintergatan Media; scope agreed for the chatbot for support."
+        },
+        {
+          "date": "2026-04-15",
+          "text": "Steering meeting: Lena Wiklander presented progress on the chatbot for support to Vintergatan Media."
+        },
+        {
+          "date": "2026-07-12",
+          "text": "Harrier Hosting delivered the first integration build; minor issues logged."
+        },
+        {
+          "date": "2026-09-10",
+          "text": "Workshop with Vintergatan Media end users to collect feedback on the chatbot for support."
+        },
+        {
+          "date": "2026-10-20",
+          "text": "Budget review: spend on track against 2.0 MSEK."
+        }
+      ],
+      "description": "Vintergatan Media — chatbot for support, paused"
+    },
+    {
+      "name": "Vessla",
+      "slug": "vessla",
+      "lifecycle": "active",
+      "status": "# Project Vessla\n- Client: Dalstorp Livs\n- Topic: contract analysis\n- Lead: Erik Fahlén\n- Vendor: Swift Integrations\n- Budget: 0.3 MSEK\n- Deadline: 2026-11-13\n- Lifecycle: active",
+      "logs": [
+        {
+          "date": "2026-03-19",
+          "text": "Swift Integrations delivered the first integration build; minor issues logged."
+        },
+        {
+          "date": "2026-04-19",
+          "text": "Workshop with Dalstorp Livs end users to collect feedback on the contract analysis."
+        },
+        {
+          "date": "2026-05-08",
+          "text": "Steering meeting: Erik Fahlén presented progress on the contract analysis to Dalstorp Livs."
+        },
+        {
+          "date": "2026-06-09",
+          "text": "Kickoff held with Dalstorp Livs; scope agreed for the contract analysis."
+        },
+        {
+          "date": "2026-10-23",
+          "text": "Decided to keep weekly status calls on Tuesdays with Dalstorp Livs."
+        }
+      ],
+      "description": "Dalstorp Livs — contract analysis, active"
+    }
+  ],
+  "people": [
+    {
+      "name": "Ingrid Sjöberg",
+      "slug": "ingrid-sjoberg",
+      "text": "# Ingrid Sjöberg\n- Role: lead consultant\n- Company: Varg Partner\n- Email: ingrid.sjoberg@vargpartner.se",
+      "description": "lead consultant, Varg Partner"
+    },
+    {
+      "name": "Oskar Lindmark",
+      "slug": "oskar-lindmark",
+      "text": "# Oskar Lindmark\n- Role: data engineer\n- Company: Varg Partner\n- Email: oskar.lindmark@vargpartner.se",
+      "description": "data engineer, Varg Partner"
+    },
+    {
+      "name": "Maja Holmqvist",
+      "slug": "maja-holmqvist",
+      "text": "# Maja Holmqvist\n- Role: project manager\n- Company: Varg Partner\n- Email: maja.holmqvist@vargpartner.se",
+      "description": "project manager, Varg Partner"
+    },
+    {
+      "name": "Erik Fahlén",
+      "slug": "erik-fahlen",
+      "text": "# Erik Fahlén\n- Role: solution architect\n- Company: Varg Partner\n- Email: erik.fahlen@vargpartner.se",
+      "description": "solution architect, Varg Partner"
+    },
+    {
+      "name": "Sara Nyborg",
+      "slug": "sara-nyborg",
+      "text": "# Sara Nyborg\n- Role: UX lead\n- Company: Varg Partner\n- Email: sara.nyborg@vargpartner.se",
+      "description": "UX lead, Varg Partner"
+    },
+    {
+      "name": "Johan Rask",
+      "slug": "johan-rask",
+      "text": "# Johan Rask\n- Role: ML engineer\n- Company: Varg Partner\n- Email: johan.rask@vargpartner.se",
+      "description": "ML engineer, Varg Partner"
+    },
+    {
+      "name": "Lena Wiklander",
+      "slug": "lena-wiklander",
+      "text": "# Lena Wiklander\n- Role: security specialist\n- Company: Varg Partner\n- Email: lena.wiklander@vargpartner.se",
+      "description": "security specialist, Varg Partner"
+    },
+    {
+      "name": "Pär Ödman",
+      "slug": "par-odman",
+      "text": "# Pär Ödman\n- Role: backend developer\n- Company: Varg Partner\n- Email: par.odman@vargpartner.se",
+      "description": "backend developer, Varg Partner"
+    },
+    {
+      "name": "Tove Brandt",
+      "slug": "tove-brandt",
+      "text": "# Tove Brandt\n- Role: analyst\n- Company: Varg Partner\n- Email: tove.brandt@vargpartner.se",
+      "description": "analyst, Varg Partner"
+    },
+    {
+      "name": "Anders Kallio",
+      "slug": "anders-kallio",
+      "text": "# Anders Kallio\n- Role: delivery manager\n- Company: Varg Partner\n- Email: anders.kallio@vargpartner.se",
+      "description": "delivery manager, Varg Partner"
+    },
+    {
+      "name": "Hanna Strömgren",
+      "slug": "hanna-stromgren",
+      "text": "# Hanna Strömgren\n- Role: procurement contact\n- Company: Norrsken Logistik\n- Email: hanna.stromgren@norrskenlogistik.se",
+      "description": "procurement contact, Norrsken Logistik"
+    },
+    {
+      "name": "Hannes Strömberg",
+      "slug": "hannes-stromberg",
+      "text": "# Hannes Strömberg\n- Role: IT manager\n- Company: Grönhaga Energi\n- Email: hannes.stromberg@gronhaga.se",
+      "description": "IT manager, Grönhaga Energi"
+    }
+  ],
+  "questions": [
+    {
+      "id": "N01",
+      "kind": "lookup",
+      "question": "Which project uses Kestrel Labs as its vendor?",
+      "gold_answer": "Hermelin",
+      "required": [
+        [
+          "Hermelin"
+        ]
+      ],
+      "forbidden": []
+    },
+    {
+      "id": "N02",
+      "kind": "latest",
+      "question": "What is the current deadline for the Tjäder project?",
+      "gold_answer": "4 December 2026",
+      "required": [
+        [
+          "4 December",
+          "December 4",
+          "2026-12-04",
+          "4 dec",
+          "4th of December",
+          "Dec 4"
+        ]
+      ],
+      "forbidden": [
+        "15 November",
+        "November 15",
+        "30 September"
+      ]
+    },
+    {
+      "id": "N03",
+      "kind": "aggregation",
+      "question": "Which projects are blocked right now?",
+      "gold_answer": "Gädda, Orre and Skata",
+      "required": [
+        [
+          "Gädda",
+          "Gadda"
+        ],
+        [
+          "Orre"
+        ],
+        [
+          "Skata"
+        ]
+      ],
+      "forbidden": []
+    },
+    {
+      "id": "N04",
+      "kind": "aggregation",
+      "question": "How many projects is Ingrid Sjöberg the lead for, and which ones?",
+      "gold_answer": "4: Fjällräv, Kråka, Vildsvin, Kungsörn",
+      "required": [
+        [
+          "4"
+        ],
+        [
+          "Fjällräv",
+          "fjallrav"
+        ],
+        [
+          "Kråka",
+          "kraka"
+        ],
+        [
+          "Vildsvin",
+          "vildsvin"
+        ],
+        [
+          "Kungsörn",
+          "kungsorn"
+        ]
+      ],
+      "forbidden": []
+    },
+    {
+      "id": "N05",
+      "kind": "dated",
+      "question": "What was decided on 14 July 2026, and in which project?",
+      "gold_answer": "Rådjur: replace the rule-based matcher with a fine-tuned embedding model (owner Erik Fahlén)",
+      "required": [
+        [
+          "Rådjur",
+          "Radjur"
+        ],
+        [
+          "embedding"
+        ]
+      ],
+      "forbidden": []
+    },
+    {
+      "id": "N06",
+      "kind": "lookup",
+      "question": "Which project had its budget raised to 1.2 MSEK, and why?",
+      "gold_answer": "Murmeldjur, to cover a second pilot site",
+      "required": [
+        [
+          "Murmeldjur"
+        ],
+        [
+          "second pilot",
+          "pilot site"
+        ]
+      ],
+      "forbidden": []
+    },
+    {
+      "id": "N07",
+      "kind": "paraphrase",
+      "question": "Which project ran into trouble with its database migration, and what was the cause?",
+      "gold_answer": "Lärka — schema drift between staging and production (Postgres upgrade, rolled back)",
+      "required": [
+        [
+          "Lärka",
+          "Larka"
+        ],
+        [
+          "schema drift",
+          "schema"
+        ]
+      ],
+      "forbidden": []
+    },
+    {
+      "id": "N08",
+      "kind": "lookup",
+      "question": "What is the email address of the procurement contact at Norrsken Logistik?",
+      "gold_answer": "hanna.stromgren@norrskenlogistik.se",
+      "required": [
+        [
+          "hanna.stromgren@norrskenlogistik.se"
+        ]
+      ],
+      "forbidden": [
+        "hannes.stromberg"
+      ]
+    },
+    {
+      "id": "N09",
+      "kind": "abstention",
+      "question": "Which vendor does the Lodjur project use?",
+      "gold_answer": "No such project is recorded (there is no Lodjur project).",
+      "required": [],
+      "forbidden": []
+    },
+    {
+      "id": "N10",
+      "kind": "lookup",
+      "question": "Why is the Orre project blocked?",
+      "gold_answer": "Vendor API credentials have not been issued yet",
+      "required": [
+        [
+          "credential"
+        ]
+      ],
+      "forbidden": [
+        "data processing agreement",
+        "froze"
+      ]
+    },
+    {
+      "id": "N11",
+      "kind": "aggregation",
+      "question": "Which projects do we run for Sjövik Försäkring?",
+      "gold_answer": "Dovhjort, Näktergal, Bäver, Nötväcka",
+      "required": [
+        [
+          "Dovhjort",
+          "dovhjort"
+        ],
+        [
+          "Näktergal",
+          "naktergal"
+        ],
+        [
+          "Bäver",
+          "baver"
+        ],
+        [
+          "Nötväcka",
+          "notvacka"
+        ]
+      ],
+      "forbidden": []
+    },
+    {
+      "id": "N12",
+      "kind": "dated",
+      "question": "What happened in the Vildsvin project at the end of August?",
+      "gold_answer": "The pilot went live at the Gävle depot (first week: 11% shorter routes)",
+      "required": [
+        [
+          "Gävle",
+          "Gavle"
+        ],
+        [
+          "pilot",
+          "live"
+        ]
+      ],
+      "forbidden": []
+    }
+  ]
+}
