@@ -6864,11 +6864,10 @@ export const MCP_SERVER_INSTRUCTIONS =
 
 function namespaceSchema(
   description: string,
-  options?: { title?: string; examples?: string[] },
+  options?: { examples?: string[] },
 ) {
   return {
     type: "string" as const,
-    title: options?.title ?? "Namespace",
     pattern: NAMESPACE_PATTERN,
     description,
     ...(options?.examples ? { examples: options.examples } : {}),
@@ -6877,11 +6876,10 @@ function namespaceSchema(
 
 function writeTargetNamespaceSchema(
   description: string,
-  options?: { title?: string; examples?: string[] },
+  options?: { examples?: string[] },
 ) {
   return {
     type: "string" as const,
-    title: options?.title ?? "Namespace",
     pattern: WRITE_NAMESPACE_PATTERN,
     description,
     ...(options?.examples ? { examples: options.examples } : {}),
@@ -6890,11 +6888,10 @@ function writeTargetNamespaceSchema(
 
 function keySchema(
   description: string,
-  options?: { title?: string; examples?: string[] },
+  options?: { examples?: string[] },
 ) {
   return {
     type: "string" as const,
-    title: options?.title ?? "Key",
     pattern: KEY_PATTERN,
     description,
     ...(options?.examples ? { examples: options.examples } : {}),
@@ -6908,12 +6905,10 @@ function tagsArraySchema(
 ) {
   return {
     type: "array" as const,
-    title: "Tags",
     ...(typeof options?.maxItems === "number" ? { maxItems: options.maxItems } : {}),
     items: {
       type: "string" as const,
       ...(options?.validateItems ? { pattern: TAG_PATTERN } : {}),
-      examples: ["decision", "active", "client:acme"],
     },
     description,
     ...(examples ? { examples } : {}),
@@ -6936,11 +6931,19 @@ function attachOrientLibrarianSummary(
   }
 }
 
+const IDEMPOTENCY_KEY_DESCRIPTION =
+  "UUID recovery key: after an uncertain outcome, retry the identical call with the same key to get the original result without re-applying it. Use a new key per operation.";
+
+const VALID_FROM_DESCRIPTION =
+  "ISO 8601 time a correction becomes valid; only with supersedes. This write path rejects future timestamps (only `memory_read(as_of)` may round-trip a just-returned row boundary).";
+
+const SCOPED_NAMESPACE_DESCRIPTION = "Namespace or prefix; prefix filters may end with '/'.";
+
 const TOOL_DEFINITIONS = [
   {
     name: "memory_orient",
     description:
-      `\`memory_orient\` is the session handshake and first memory operation. START HERE: call this at the beginning of every conversation before using any other memory tool when it is callable. If a host/deferred tool discovery layer does not expose \`memory_orient\`, use \`memory_status\` to inspect available tools or \`memory_resume\` for targeted context as a fallback. Returns conventions, a computed project dashboard (grouped by lifecycle from status entries), optional curated notes, actionable maintenance suggestions, and optionally a namespace overview — everything needed to orient yourself in one call. Use \`memory_resume\` after this when you want a targeted continuation pack for a project, namespace, or opener.\n\nThe dashboard is computed automatically from status entries in projects/* and clients/* namespaces. No manual workbench maintenance needed. Demo namespaces and completed task-run namespaces are hidden by default.\n\nUse \`detail\` to control response size. \`${DEFAULT_ORIENT_DETAIL}\` is the default for routine handshakes, and \`beginner\` is the safest first-time mode when you want the mental model, tool index, common workflows, and safe write examples without live estate data. \`standard\` and \`full\` expand into the live dashboard/namespace overview. Every orient response includes \`generated_at\` and \`response_budget_meta\`, which reports any budget-driven omission or truncation.`,
+      `\`memory_orient\` is the session handshake: call it as the first memory operation of every conversation when it is callable. If deferred tool discovery did not expose it, use \`memory_status\` or \`memory_resume\` instead. Returns conventions, a dashboard computed from projects/* and clients/* status entries (grouped by lifecycle; demo and finished task namespaces hidden), maintenance suggestions, and optionally a namespace overview. \`detail\`: \`${DEFAULT_ORIENT_DETAIL}\` (default) for routine handshakes; \`beginner\` for the mental model, tool index, workflows and safe write examples without live data; \`standard\`/\`full\` for more. Follow with \`memory_resume\` for a targeted pack. \`response_budget_meta\` reports any truncation.`,
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -6948,44 +6951,40 @@ const TOOL_DEFINITIONS = [
           type: "string",
           enum: ["beginner", "compact", "standard", "full"],
           description:
-            `Optional. Controls response size. \`${DEFAULT_ORIENT_DETAIL}\` is the default. \`beginner\` returns the mental model, starter tool index, three common workflows, and safe write examples with no live dashboard or namespace estate data. \`compact\` returns a skeleton dashboard (phase one-liner per entry, no synthesis or cross-refs, no namespace list). \`standard\` adds synthesis summaries and cross-reference counts. \`full\` includes full cross-reference arrays and the full conventions document.`,
+            "`compact`: phase one-liner per dashboard entry, no namespace list. `beginner`: no live data. `standard`: adds synthesis and cross-reference counts. `full`: full cross-references and conventions.",
         },
         include_demo: {
           type: "boolean",
-          description:
-            "Optional. If true, include demo/* namespaces in the namespace overview. Default: false.",
+          description: "Include demo/* namespaces in the overview. Default false.",
         },
         include_completed_tasks: {
           type: "boolean",
-          description:
-            "Optional. If true, include completed/failed task-run namespaces (tasks/*) in the namespace overview. Default: false. Active, pending, and special task namespaces (tasks/admin, tasks/_heartbeat) are always shown.",
+          description: "Include completed/failed tasks/* namespaces in the overview. Default false.",
         },
         include_full_conventions: {
           type: "boolean",
-          description:
-            "Deprecated alias for `detail: \"full\"`.",
+          description: "Deprecated alias for `detail: \"full\"`.",
         },
         dashboard_limit_per_group: {
           type: "integer",
           description:
-            "Optional. Maximum entries to return per lifecycle group in the dashboard. Defaults to 10 in every live-dashboard detail mode so the mandatory first call stays bounded as an estate grows. Ignored in `beginner`, which never returns live dashboard data. Raise it explicitly when you can afford the tokens. `dashboard_meta.counts` reports the true size of each group and `dashboard_meta.truncated_groups` lists the ones that were capped.",
+            "Max entries per lifecycle group. Default 10. `dashboard_meta` reports true counts and truncated groups.",
         },
         namespace_limit: {
           type: "integer",
           description:
-            "Optional. Maximum namespaces to return in the namespace overview. Defaults to 20 in `compact` and 50 otherwise; on a large estate the full list is the single biggest contributor to orient's response size. Ignored in `beginner`, which never returns live namespace estate data. `namespaces_meta` reports `total`, `returned`, and `truncated` so a capped list is never mistaken for the whole estate — use `memory_list` to page through all of them.",
+            "Max namespaces in the overview. Default 20 (compact) or 50. `namespaces_meta` reports the total; page with `memory_list`.",
         },
         include_namespaces: {
           type: "boolean",
-          description:
-            "Optional. If false, omit the namespace overview entirely. By default `compact` and `beginner` omit it and other detail levels include it. `beginner` ignores this flag and never returns live namespace estate data.",
+          description: "False omits the namespace overview. Default: omitted in compact/beginner, included otherwise.",
         },
         response_character_budget: {
           type: "integer",
           minimum: MIN_ORIENT_RESPONSE_CHARACTER_BUDGET,
           maximum: MAX_ORIENT_RESPONSE_CHARACTER_BUDGET,
           description:
-            `Optional. Total response-size cap measured on the final JSON string returned by this tool. Accepts ${MIN_ORIENT_RESPONSE_CHARACTER_BUDGET}-${MAX_ORIENT_RESPONSE_CHARACTER_BUDGET} and defaults to ${DEFAULT_ORIENT_RESPONSE_CHARACTER_BUDGET} characters in every detail mode so the mandatory handshake stays inside common host limits. When the response would exceed the budget, memory_orient preserves the core handshake, trims lower-priority sections first, and reports each budget-driven omission or truncation in \`response_budget_meta.adjustments\`. Raise it explicitly when your host can afford a larger first response.`,
+            `Total response size cap in characters. Default ${DEFAULT_ORIENT_RESPONSE_CHARACTER_BUDGET}. Lower-priority sections are trimmed first and listed in \`response_budget_meta.adjustments\`.`,
         },
       },
       required: [],
@@ -6994,38 +6993,33 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_resume",
     description:
-      "Build a compact, targeted continuation pack after `memory_orient`. Use this when you have a project hint, namespace, or opener and want the most relevant current status, recent decision context, open loops, and optional recent namespace history without running broad search.",
+      "Targeted continuation pack after `memory_orient`: the most relevant current status, recent decisions, open loops and optional history for a project, namespace or opener, without broad search.",
     inputSchema: {
       type: "object" as const,
       properties: {
         opener: {
           type: "string",
-          description:
-            "Optional. User opener or task phrasing to bias the pack toward likely-relevant context.",
+          description: "User opener or task phrasing to bias the pack.",
         },
         namespace: namespaceSchema(
-          "Optional. Exact namespace or namespace prefix to focus on. Prefix filters may end with '/'. Prefer exact tracked namespaces such as `projects/grimnir`.",
-          { examples: ["projects/grimnir", "projects/"] },
+          `${SCOPED_NAMESPACE_DESCRIPTION} Prefer exact tracked namespaces.`,
+          { examples: ["projects/grimnir"] },
         ),
         project: {
           type: "string",
-          description:
-            "Optional. Project slug or tracked namespace hint, such as `grimnir` or `projects/grimnir`.",
+          description: "Project slug or namespace hint, e.g. `grimnir`.",
         },
         limit: {
           type: "integer",
-          description:
-            "Optional. Maximum number of items to include in the resume pack. Default 6, max 10.",
+          description: "Max items. Default 6, max 10.",
         },
         include_history: {
           type: "boolean",
-          description:
-            "Optional. Include a few recent audit-history items for the focused namespace. Default: false.",
+          description: "Include recent audit history. Default false.",
         },
         include_attention: {
           type: "boolean",
-          description:
-            "Optional. Include blocked or attention-worthy tracked work when relevant. Default: true.",
+          description: "Include blocked or attention-worthy work. Default true.",
         },
       },
       required: [],
@@ -7034,39 +7028,32 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_extract",
     description:
-      "Suggest reviewable memory operations from explicit conversation signals. Use this after `memory_orient` when you have messy notes or transcript text and want proposed `memory_log`, `memory_write`, or `memory_update_status` calls. By default this is suggestion-only. Pass `persist:true` to save the proposals in the durable, principal-and-session-scoped review inbox without changing memory truth; a stable server-derived session is required. Then inspect or act on them with `memory_review`.\n\nUse `memory_extract` when you have unstructured text and are unsure what (if anything) is worth persisting or where it belongs. When you already know the single decision or event to record, skip extraction and call `memory_log` directly. Extraction never silently approves its own proposals.",
+      "Propose `memory_log`, `memory_write` or `memory_update_status` operations from unstructured notes or transcript text. Suggestion-only by default; `persist:true` saves them to the principal- and session-scoped review inbox (needs a stable server session) without changing memory, for `memory_review`. If you already know the one thing to record, call `memory_log` directly. Never approves its own proposals.",
     inputSchema: {
       type: "object" as const,
       properties: {
         conversation_text: {
           type: "string",
-          description:
-            "Raw transcript text, notes, or a rough recap to inspect for explicit capture-worthy signals.",
+          description: "Transcript, notes or recap to inspect.",
         },
-        namespace_hint: namespaceSchema(
-          "Optional exact namespace to target if you already know where the memory should go.",
-          { title: "Namespace Hint", examples: ["projects/grimnir"] },
-        ),
+        namespace_hint: namespaceSchema("Exact target namespace, if known."),
         project_hint: {
           type: "string",
-          description:
-            "Optional. Project slug or tracked namespace hint, such as `grimnir` or `projects/grimnir`.",
+          description: "Project slug or namespace hint.",
         },
         max_suggestions: {
           type: "integer",
-          description:
-            "Optional. Maximum number of suggestions to return. Default 5, max 10.",
+          description: "Default 5, max 10.",
         },
         persist: {
           type: "boolean",
-          description:
-            "Optional. Save each returned suggestion as a pending durable review proposal. Memory truth remains unchanged until explicit approval. Default false.",
+          description: "Save suggestions as pending review proposals. Default false.",
         },
         classification: {
           type: "string",
           enum: CLASSIFICATION_LEVELS,
           description:
-            "Optional classification requested for persisted proposals. Namespace floors and the caller/transport ceiling are enforced at creation and again at approval.",
+            "Classification for persisted proposals; namespace floors and caller ceilings apply at creation and approval.",
         },
       },
       required: ["conversation_text"],
@@ -7075,7 +7062,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_review",
     description:
-      "Review durable proposals created by `memory_extract persist:true`. By default every action is scoped to the current server-derived session and principal; a known proposal ID from another session is indistinguishable from a missing ID. Pass `scope:\"principal\"` explicitly to list, inspect, or act on proposals from other sessions of the same principal; this never expands to another principal. Legacy rows without a creator session are available only in explicit principal scope. Use `list` or `get` to inspect, `preview` for the exact operation, freshness preconditions, and pure-read approval-effect fields, `edit` or `decline` while reviewing, `approve` to apply through the normal authorization/classification/secret/CAS gates, and `prepare_undo` to create a second review proposal that corrects an approved state or log while preserving history. List filters `namespace` and `operation_type` are exact-match filters. Successful preview responses include `preview_wrote_memory:false`, `approval_would_write_memory:true|false`, `approval_status` in `would_write|would_conflict|duplicate_noop|not_approvable`, optional `approval_error { code, message }`, and optional `persisted_status` when Munin is showing a derived effective status such as `expired` without mutating the stored row. When retention has already purged a terminal proposal payload, preview still returns the truthful non-writing terminal outcome but omits `exact_operation` because no retained payload remains to display. Request-level preview errors such as `validation_error`, `not_found`, or `payload_expired` omit those effect fields because no preview payload is available to describe. Successful preview responses are metering-free and return no legacy `writes_memory` field. No action except `approve` changes memory truth.",
+      "Act on durable proposals from `memory_extract persist:true`. Scoped to the current session and principal by default (other sessions' IDs look missing); `scope:\"principal\"` widens to the same principal's other sessions, never another principal. `list`/`get` inspect; `preview` shows the exact operation and the pure-read approval effect (`approval_status`: would_write|would_conflict|duplicate_noop|not_approvable); `edit`/`decline` while reviewing; `approve` applies it through the normal authorization, classification, secret and CAS gates; `prepare_undo` creates a correcting proposal for an approved item. Only `approve` changes memory.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -7086,39 +7073,37 @@ const TOOL_DEFINITIONS = [
         scope: {
           type: "string",
           enum: ["session", "principal"],
-          description:
-            "Optional review scope. Defaults to the current server-derived session. Use principal only for intentional same-principal cross-session review.",
+          description: "Default session. Use principal only for intentional cross-session review.",
         },
         proposal_id: {
           type: "string",
-          description: "Required for every action except list.",
+          description: "Required except for list.",
         },
         status: {
           type: "string",
           enum: ["pending", "approved", "declined", "edited", "superseded", "expired", "failed"],
-          description: "Optional list filter.",
+          description: "List filter.",
         },
         namespace: {
           type: "string",
-          description: "Optional list filter. Exact target namespace match; namespace access is still enforced.",
+          description: "Exact list filter.",
         },
         operation_type: {
           type: "string",
           enum: ["memory_write", "memory_log", "memory_update_status"],
-          description: "Optional list filter. Exact proposal operation/action type match.",
+          description: "Exact list filter.",
         },
         limit: {
           type: "integer",
-          description: "Optional list limit. Default 20, max 100.",
+          description: "List limit. Default 20, max 100.",
         },
         operation: {
           type: "object",
-          description:
-            "Replacement memory_write, memory_log, or memory_update_status operation for edit. It is validated and its current target preconditions are captured before storage.",
+          description: "Replacement memory_write, memory_log or memory_update_status operation for edit.",
         },
         reason: {
           type: "string",
-          description: "Required for edit, decline, and prepare_undo; stored in bounded audit detail.",
+          description: "Required for edit, decline and prepare_undo.",
         },
       },
       required: ["action"],
@@ -7127,28 +7112,22 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_narrative",
     description:
-      "Derive a compact narrative view for one namespace from current status, recent logs, and audit history. Use this when you want project-arc signals such as blocker age, decision churn, reversals, or long gaps without pretending that Munin has a hidden planning model. Every signal is source-backed.",
+      "Source-backed narrative for one namespace from status, logs and audit history: blocker age, decision churn, reversals, long gaps.",
     inputSchema: {
       type: "object" as const,
       properties: {
-        namespace: namespaceSchema(
-          "Namespace or namespace prefix to analyze. Prefix filters may end with '/'. For project arcs, prefer exact tracked namespaces such as `projects/munin-memory`.",
-          { examples: ["projects/munin-memory", "projects/"] },
-        ),
+        namespace: namespaceSchema(SCOPED_NAMESPACE_DESCRIPTION, { examples: ["projects/munin-memory"] }),
         since: {
           type: "string",
-          description:
-            "Optional. ISO 8601 timestamp. Restrict logs and audit history to this lower bound.",
+          description: "ISO 8601 lower bound for logs and history.",
         },
         limit: {
           type: "integer",
-          description:
-            "Optional. Maximum number of timeline items to return. Default 8, max 20.",
+          description: "Max timeline items. Default 8, max 20.",
         },
         include_sources: {
           type: "boolean",
-          description:
-            "Optional. Include explicit source objects for the signals and timeline. Default: false.",
+          description: "Include source objects. Default false.",
         },
       },
       required: ["namespace"],
@@ -7157,23 +7136,18 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_commitments",
     description:
-      "Surface explicit commitments derived from canonical tracked-status content and attributable source text. Use this when you want to review open, at-risk, overdue, or recently completed follow-through items rather than rely on fuzzy prose search.\n\nRead-only: this tool derives and reports commitments from existing entries; callers cannot write commitments directly. Canonical tracked-status Next Steps (for example via `memory_update_status`), dated future clauses in visible tracked-status prose, explicit `memory_log` commitment phrases such as `We agreed to: ...` or `I commit to: ...`, and future-dated `memory_log` phrases such as `I will ... by YYYY-MM-DD` or `I will ... on YYYY-MM-DD` can surface here. Generic non-status state fields are not commitment sources. Legacy plain markdown status blobs with ad-hoc `Next Steps:` headings remain readable but are not commitment-eligible until migrated to the canonical structure. When visible matches are dropped, the response may include content-blind `exclusion_diagnostics` counts of matched candidate units, not full entry bodies.",
+      "Read-only view of open, at-risk, overdue and recently completed commitments. Sources: canonical tracked-status Next Steps (via `memory_update_status`), dated future clauses in visible tracked-status prose, explicit `memory_log` commitment phrases (`We agreed to: ...`, `I commit to: ...`), and future-dated `memory_log` phrases (`I will ... by YYYY-MM-DD`). Legacy plain markdown status blobs with ad-hoc `Next Steps:` headings are not eligible until migrated.",
     inputSchema: {
       type: "object" as const,
       properties: {
-        namespace: namespaceSchema(
-          "Optional. Restrict the view to one namespace or namespace prefix. Prefix filters may end with '/'.",
-          { examples: ["projects/grimnir", "projects/"] },
-        ),
+        namespace: namespaceSchema(SCOPED_NAMESPACE_DESCRIPTION),
         since: {
           type: "string",
-          description:
-            "Optional. ISO 8601 timestamp. Restrict commitment derivation and listing to this lower bound.",
+          description: "ISO 8601 lower bound.",
         },
         limit: {
           type: "integer",
-          description:
-            "Optional. Maximum number of items to return per bucket. Default 10, max 25.",
+          description: "Max items per bucket. Default 10, max 25.",
         },
       },
       required: [],
@@ -7182,28 +7156,22 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_patterns",
     description:
-      "Derive conservative, reviewable patterns from repeated decision logs, tracked-status follow-through, and commitment outcomes. Use this for compressed summaries, not hidden policy: every surfaced pattern stays tied to explicit source entries.",
+      "Derive conservative, source-backed patterns from repeated decisions, status follow-through and commitment outcomes.",
     inputSchema: {
       type: "object" as const,
       properties: {
-        namespace: namespaceSchema(
-          "Optional. Restrict derivation to one namespace or namespace prefix. Prefix filters may end with '/'.",
-          { examples: ["projects/grimnir", "projects/"] },
-        ),
+        namespace: namespaceSchema(SCOPED_NAMESPACE_DESCRIPTION),
         topic: {
           type: "string",
-          description:
-            "Optional. Simple term filter applied to candidate source text and namespace names.",
+          description: "Term filter on source text and namespace names.",
         },
         since: {
           type: "string",
-          description:
-            "Optional. ISO 8601 timestamp. Restrict candidate entries to this lower bound.",
+          description: "ISO 8601 lower bound.",
         },
         limit: {
           type: "integer",
-          description:
-            "Optional. Maximum number of patterns and heuristics to return. Default 5, max 10.",
+          description: "Default 5, max 10.",
         },
       },
       required: [],
@@ -7212,23 +7180,18 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_handoff",
     description:
-      "Assemble a source-backed handoff pack for one namespace: current state, recent decisions, open loops, recent actors, and recommended next actions. Use this when one agent or environment is handing work to another.",
+      "Source-backed handoff pack for one namespace: current state, recent decisions, open loops, recent actors and next actions.",
     inputSchema: {
       type: "object" as const,
       properties: {
-        namespace: namespaceSchema(
-          "Namespace or namespace prefix to hand off. Prefix filters may end with '/'.",
-          { examples: ["projects/grimnir", "projects/"] },
-        ),
+        namespace: namespaceSchema(SCOPED_NAMESPACE_DESCRIPTION),
         since: {
           type: "string",
-          description:
-            "Optional. ISO 8601 timestamp. Restrict logs and audit history to this lower bound.",
+          description: "ISO 8601 lower bound for logs and history.",
         },
         limit: {
           type: "integer",
-          description:
-            "Optional. Maximum number of recent decisions, actors, and next actions to return. Default 5, max 10.",
+          description: "Max decisions, actors and next actions. Default 5, max 10.",
         },
       },
       required: ["namespace"],
@@ -7237,84 +7200,75 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_write",
     description:
-      "Successful full writes return a bounded, authorization-filtered advisory `intake` report and the effective stored `classification`; read-authorized intake metadata includes `candidate_count`, `candidate_cap` and `candidates_truncated`, while write-only calls omit these fields. Intake never blocks the write.\n\n" +
-      "Store or replace a state entry. For tracked `projects/*` or `clients/*` status entries, prefer `memory_update_status`; omitting a lifecycle tag preserves the existing lifecycle, while `tags: []` cannot remove one. Optional `valid_until` adds soft expiry. To preserve outdated content as history, use `supersedes` with the target UUID and exact `expected_updated_at`.\n\nClassification, namespace floors, secret rejection, and write visibility are enforced on every write. `expected_updated_at` is an optional compare-and-swap guard; `create_if_absent:true` provides an atomic first write and cannot be combined with CAS or patch. Use the namespace, key, and tag schemas for conventions and valid shapes.",
+      "Store or replace a state entry (namespace + key). For tracked `projects/*` or `clients/*` status, prefer `memory_update_status`; omitting a lifecycle tag preserves the existing one. Classification floors and secret rejection apply to every write. Use `expected_updated_at` for compare-and-swap, `create_if_absent` for an atomic first write, `patch` for partial edits, `valid_until` for soft expiry, and `supersedes` to correct while keeping history. Returns the stored `classification` and an advisory `intake` report.",
     inputSchema: {
       type: "object" as const,
       properties: {
         idempotency_key: {
           type: "string",
           pattern: WRITE_REPLAY_UUID_PATTERN.source,
-          description: "Optional UUID recovery key. Repeat exactly the same arguments and key after an uncertain write outcome to retrieve its original metadata without applying it again. Keys are scoped to the authenticated principal and cannot be reused for another operation.",
+          description: IDEMPOTENCY_KEY_DESCRIPTION,
         },
         namespace: writeTargetNamespaceSchema(
-          "Write target namespace. Must start with an alphanumeric character, then use only letters, digits, '_', '-', and '/'. Trailing slashes and empty segments are rejected: use `maintenance`, not `maintenance/`.",
-          { examples: ["projects/hugin-munin", "people/owner", "decisions/tech-stack"] },
+          "Write target namespace. Trailing slashes and empty segments are rejected: use `maintenance`, not `maintenance/`.",
+          { examples: ["projects/hugin-munin", "people/owner"] },
         ),
-        key: keySchema(
-          "Short descriptive slug such as `status`, `architecture`, or `preferences`. Use letters, digits, '_', and '-' only.",
-          { examples: ["status", "architecture", "preferences"] },
-        ),
+        key: keySchema("Short slug such as `status`, `architecture` or `preferences`."),
         content: {
           type: "string",
-          description:
-            "The content to store. Markdown supported. Be specific and write for your future self.",
+          description: "Markdown content. Be specific; write for your future self.",
         },
         tags: tagsArraySchema(
-          "Optional freeform tags for cross-cutting queries. For tracked `status` entries, prefer lifecycle tags `active`, `blocked`, `completed`, `stopped`, `maintenance`, or `archived`; aliases auto-normalize (`done` -> `completed`, `paused` -> `stopped`, `inactive` -> `archived`). Reuse canonical tags such as `decision`, `architecture`, `preference`, `milestone`, `convention`, `bug`, `feature`, and `research`, plus prefixed forms like `client:acme`, `person:alice`, `topic:auth`, `type:pdf`, or `source:external`/`source:internal`. Do not pass a comma-separated string.",
-          [["decision", "active", "client:acme"]],
+          "Optional freeform tags (array, not a comma-separated string). Status lifecycle: `active`, `blocked`, `completed`, `stopped`, `maintenance`, `archived` (`done`, `paused`, `inactive` normalize). Reuse `decision`, `architecture`, `preference`, `milestone`, `convention`, `bug`, `feature`, `research`, and prefixed forms like `client:acme`, `topic:auth`, `source:external`.",
+          [["decision", "client:acme"]],
           { validateItems: true, maxItems: MAX_TAGS },
         ),
         classification: {
           type: "string",
           enum: [...CLASSIFICATION_LEVELS],
-          description:
-            "Optional explicit classification. If omitted, the server uses the namespace floor or preserves an existing higher classification.",
+          description: "Default: namespace floor, or an existing higher level.",
         },
         classification_override: {
           type: "boolean",
-          description:
-            "Optional owner-only escape hatch for writes below the namespace floor.",
+          description: "Owner-only: allow a write below the namespace floor.",
         },
         valid_until: {
           type: ["string", "null"],
           description:
-            "Optional. ISO 8601 timestamp after which this state entry is treated as expired in broad retrieval, while remaining available to direct read/get. Explicit null clears an existing expiry.",
+            "ISO 8601 soft expiry: afterwards hidden from broad retrieval but still directly readable. null clears it. Not with patch.",
         },
         expected_updated_at: {
           type: "string",
           description:
-            "Optional compare-and-swap guard for any state write (all namespaces, not only tracked projects/*/clients/* statuses): pass the updated_at from your last read to prevent blind overwrites. Returns a conflict error if the entry was modified since. OPTIONAL — omit it entirely for an unconditional write; it is never required to create a new entry.",
+            "Optional compare-and-swap guard: the updated_at from your last read; conflicts if the entry changed. Omit for unconditional writes and new entries.",
         },
         supersedes: {
           type: "string",
           description:
-            "Optional entry UUID to correct. Creates a new revision and preserves the target as historical evidence. Requires expected_updated_at and content; mutually exclusive with patch and create_if_absent.",
+            "UUID of an entry to correct: creates a new revision and keeps the target as history. Needs expected_updated_at and content; not with patch or create_if_absent.",
         },
         valid_from: {
           type: "string",
-          description:
-            "Optional ISO 8601 time at which a correction becomes valid. Only accepted with supersedes. This write path rejects future timestamps; the only narrow temporal exception is `memory_read(as_of)` at the exact visible current row boundary, which may round-trip a just-returned timestamp.",
+          description: VALID_FROM_DESCRIPTION,
         },
         create_if_absent: {
           type: "boolean",
           description:
-            "Optional atomic first-write guard. When true, creates the state entry only if namespace+key is absent. If another writer already created it, returns error:'conflict', conflict_reason:'already_exists', and current_updated_at without overwriting the winner. Soft-expired state rows still exist and therefore conflict. Mutually exclusive with expected_updated_at and patch.",
+            "Create only if namespace+key is absent; otherwise error `conflict` (`already_exists`) with current_updated_at. Not with expected_updated_at or patch.",
         },
         patch: {
           type: "object",
-          description: "Partial update for an existing entry. Mutually exclusive with content. Entry must already exist.",
+          description: "Partial update of an existing entry, instead of content.",
           additionalProperties: false,
           properties: {
-            content_append: { type: "string", description: "Text to append after existing content (separated by newline)" },
-            content_prepend: { type: "string", description: "Text to prepend before existing content (separated by newline)" },
+            content_append: { type: "string", description: "Appended after a newline." },
+            content_prepend: { type: "string", description: "Prepended before a newline." },
             tags_add: {
               type: "array",
               maxItems: MAX_TAGS,
               items: { type: "string", pattern: TAG_PATTERN },
-              description: "Tags to add (deduplicated with existing)",
             },
-            tags_remove: { type: "array", items: { type: "string" }, description: "Tags to remove from existing" },
+            tags_remove: { type: "array", items: { type: "string" } },
           },
         },
       },
@@ -7325,67 +7279,63 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_update_status",
     description:
-      "Update a tracked status entry, or with `validate_only:true` validate a prospective status preview that may target any authorized namespace the caller can write. Real mutations remain restricted to tracked namespaces such as `projects/*` or `clients/*`. Uses canonical Phase, Current Work, Blockers, Next Steps, and optional Notes sections. Prefer this over `memory_write` for partial status updates. Optional `valid_until` sets or clears a soft-expiry review horizon; expired statuses remain available to direct reads, surface in `memory_attention` when requested, and stay hidden from broad search. Dry runs validate auth, CAS, classification, lifecycle, and content without mutation; real mutations remain restricted to tracked namespaces.\n\nCall this only when the project's phase, current work, blockers, next steps, lifecycle, or review horizon actually changes — not after every `memory_log`. Status changes are not auto-logged; call `memory_log` separately when recording a decision or milestone.",
+      "Partially update a tracked status entry: each supplied section (Phase, Current Work, Blockers, Next Steps, Notes) replaces that section; also sets lifecycle and the `valid_until` review horizon. Prefer this over `memory_write` for status. Call it only when phase, work, blockers, next steps, lifecycle or review horizon actually change — not after every `memory_log`; status changes are not auto-logged. With `validate_only:true` it previews without mutating and may target any authorized namespace the caller can write; real mutations remain restricted to tracked namespaces.",
     inputSchema: {
       type: "object" as const,
       properties: {
         idempotency_key: {
           type: "string",
           pattern: WRITE_REPLAY_UUID_PATTERN.source,
-          description: "Optional UUID recovery key. Repeat exactly the same arguments and key after an uncertain write outcome to retrieve its original metadata without applying it again. Keys are scoped to the authenticated principal and cannot be reused for another operation.",
+          description: IDEMPOTENCY_KEY_DESCRIPTION,
         },
         namespace: writeTargetNamespaceSchema(
-          "Namespace to target. Real mutations require a tracked namespace from the caller's configured tracked roots (default `projects/*` or `clients/*`). With `validate_only:true`, the same validation path may preview any writable namespace the caller is authorized to write. Trailing slashes and empty segments are rejected.",
-          { examples: ["projects/grimnir", "clients/acme"] },
+          "Real mutations require a tracked namespace (default `projects/*`, `clients/*`); with `validate_only:true` any writable namespace can be previewed. No trailing slash.",
+          { examples: ["projects/grimnir"] },
         ),
         phase: {
           type: "string",
-          description: "Optional. Replace the Phase section.",
         },
         current_work: {
           type: "string",
-          description: "Optional. Replace the Current Work section.",
         },
         blockers: {
           type: "string",
-          description: "Optional. Replace the Blockers section. Use 'None.' to clear blockers explicitly.",
+          description: "'None.' clears blockers explicitly.",
         },
         next_steps: {
           type: "array",
           items: { type: "string" },
-          description: "Optional. Replace the Next Steps bullet list. Pass an empty array to clear it.",
+          description: "Replaces the bullet list; [] clears it.",
         },
         notes: {
           type: "string",
-          description: "Optional. Replace the Notes section.",
         },
         lifecycle: {
           type: "string",
           enum: [...LIFECYCLE_TAGS],
-          description: "Optional. Sets the tracked lifecycle tag while preserving non-lifecycle tags.",
+          description: "Sets the lifecycle tag; other tags are kept.",
         },
         valid_until: {
           type: ["string", "null"],
           description:
-            "Optional. ISO 8601 timestamp sets a soft-expiry review horizon; explicit null clears it and omission preserves the existing value. Expired statuses remain available to direct read/get, are surfaced by memory_attention when include_expiring is enabled, and are hidden from broad search by default.",
+            "ISO 8601 soft-expiry review horizon; null clears, omit to keep. Expired statuses stay directly readable, surface in memory_attention and are hidden from broad search.",
         },
         validate_only: {
           type: "boolean",
-          description:
-            "Optional. When true, validate the full prospective status update and return the normalized preview without mutating memory state. This dry-run mode may target any namespace the caller can write, including sandbox/testing namespaces; omitting it preserves the normal tracked-namespace write restriction.",
+          description: "Validate and return the normalized preview without writing.",
         },
         classification: {
           type: "string",
           enum: [...CLASSIFICATION_LEVELS],
-          description: "Optional. Sets or preserves the authoritative classification for this tracked status.",
         },
         classification_override: {
           type: "boolean",
-          description: "Optional owner-only escape hatch for writing below the namespace floor.",
+          description: "Owner-only: allow writing below the namespace floor.",
         },
         expected_updated_at: {
           type: "string",
-          description: "Optional compare-and-swap guard. Pass the updated_at from a prior read to avoid blind overwrites. OPTIONAL — omit it for an unconditional update; it is never required to create a new tracked status.",
+          description:
+            "Optional compare-and-swap guard from a prior read. Omit for unconditional updates and new statuses.",
         },
       },
       additionalProperties: false,
@@ -7395,22 +7345,16 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_read",
     description:
-      "Retrieve a specific state entry by namespace and key. By default this returns the current revision; pass `as_of` to select the authorized recorded revision valid at a past instant. As-of reconstruction is guaranteed across explicit correction lineage created with `supersedes`; ordinary overwrites, patches, and legacy backfilled rows may return `found:false` with `history_available:false` for authorized uncovered times. Future timestamps are rejected except the exact visible current row boundary (`updated_at`/`valid_from`) echoed from a server response; hidden future boundaries still fail. Returns full content, tags, timestamps, and the server-injected classification floor tag.",
+      "Read one state entry by namespace and key: full content, tags, timestamps and classification. `as_of` returns the revision valid at a past instant; this is reliable across `supersedes` correction lineage, while ordinary overwrites may return found:false with history_available:false.",
     inputSchema: {
       type: "object" as const,
       properties: {
-        namespace: namespaceSchema(
-          "Exact namespace to read from.",
-          { examples: ["projects/grimnir"] },
-        ),
-        key: keySchema(
-          "Key of the state entry to read.",
-          { examples: ["status", "architecture"] },
-        ),
+        namespace: namespaceSchema("Exact namespace."),
+        key: keySchema("State key."),
         as_of: {
           type: "string",
           description:
-            "Optional ISO 8601 timestamp. Returns the recorded state revision valid at that instant. Only explicit correction lineage created with supersedes is fully rewindable; ordinary overwrites or patches may return found:false with history_available:false for authorized uncovered times instead. The exact visible current valid_from/updated_at boundary may be round-tripped even if it is narrowly ahead of the server clock; all other future timestamps, including hidden boundaries, are rejected.",
+            "ISO 8601 instant. Future times are rejected, except the exact visible current valid_from/updated_at boundary echoed from a server response; hidden boundaries are rejected.",
         },
       },
       required: ["namespace", "key"],
@@ -7419,7 +7363,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_read_batch",
     description:
-      "Retrieve multiple state entries in a single call. Returns an array of results (found or not found) in the same order as the input. Use this to orient on multiple projects at once instead of making sequential `memory_read` calls.",
+      "Read several state entries in one call; results (found or not) keep input order. Use instead of sequential `memory_read` calls.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -7428,18 +7372,11 @@ const TOOL_DEFINITIONS = [
           items: {
             type: "object",
             properties: {
-              namespace: namespaceSchema(
-                "Exact namespace to read from.",
-                { examples: ["projects/grimnir"] },
-              ),
-              key: keySchema(
-                "Key of the state entry to read.",
-                { examples: ["status", "architecture"] },
-              ),
+              namespace: namespaceSchema("Exact namespace."),
+              key: keySchema("State key."),
             },
             required: ["namespace", "key"],
           },
-          description: 'Array of {namespace, key} pairs to read. E.g. [{"namespace": "projects/foo", "key": "status"}, {"namespace": "projects/bar", "key": "status"}]',
         },
       },
       required: ["reads"],
@@ -7448,13 +7385,12 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_get",
     description:
-      "Retrieve the full content of a single memory entry by its opaque ID (normally a UUID returned by `memory_query`), including an authorized correction link when present. Any non-empty ID is accepted as a lookup and returns `found:false` when absent. Use this after query previews or to inspect a historical superseded UUID; use `memory_read` when you already know namespace+key. Works for state and log entries.",
+      "Get one state or log entry by ID (normally a UUID from `memory_query`), with its correction link when authorized; found:false when absent. Use `memory_read` when you know namespace+key.",
     inputSchema: {
       type: "object" as const,
       properties: {
         id: {
           type: "string",
-          description: "Opaque entry ID to retrieve (normally a UUID returned by memory_query)",
         },
       },
       additionalProperties: false,
@@ -7464,72 +7400,68 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_query",
     description:
-      "Search and filter memories with lexical, semantic, or hybrid `search_mode`. Queryless browsing is allowed with filters such as namespace, tags, entry type, or time range; each page `limit` defaults to 10 and caps at 50. Responses report `returned`, `total_matched` (exact unless `retrieval.candidates_truncated` is true), `has_more`, and an opaque `next_cursor` when more results remain. Pagination snapshots are created only when more than one page is needed, expire after 5 minutes, and are bounded per principal and globally; a caller may evict its own oldest active snapshots, but resumes fail with `capacity_exceeded` rather than deleting another principal's cursor. Resume with that `cursor`; you may change `limit` on resume, but every other explicit query/filter/mode/serialization argument must be omitted or normalize to the frozen snapshot shape exactly. Semantic `total_matched` is exact (unless `retrieval.candidates_truncated`) over currently retrievable candidates indexed with the active embedding model; entries without a compatible embedding are outside that candidate set. Hybrid totals are exact (unless `retrieval.candidates_truncated`) over the union of lexical matches and those currently retrievable semantic candidates, so entries without embeddings can still match lexically. Those mode rules define the retrieval candidate set; server-policy canonical orientation and blocked/needs-attention entries may then be injected before final reranking. Structural reranking (tracked-status class, entry type, recency) applies only to the 50 best-relevance candidates; results after that window keep retrieval order. Inside the window results stay anchored to relevance order: each entry's ranking position is adjusted by a bounded amount (structural class: up to five positions' worth of lift or one of demotion; recency: in proportion to `search_recency_weight`, about two positions' worth at the default) and entries are then ordered by the adjusted position, so an entry's final place also depends on how its neighbours were adjusted. Entries whose structural score is at or below the demotion threshold (a plain tombstone, for example) sort after all others; a tombstone that also carries a strong structural boost can stay above it. Broad orientation and attention-triage queries keep structural-first ordering. Injected entries become members of the frozen final result set and count in `total_matched`. Namespace filters are literal and case-sensitive: a bare namespace includes descendants (`namespace_scope: subtree`), while a trailing-slash prefix includes only descendants (`namespace_scope: prefix`). Broad retrieval hides expired state unless `include_expired:true`; `explain:true` returns retrieval metadata frozen with the snapshot: `heuristic_score` is the structural input to the ordering, while `freshness_score` is informational (age relative to now) and recency in the ordering comes from the relative `updated_at` rank among the candidates. If more than 500 candidates match, the 500 best are kept and pageable, `retrieval.candidates_truncated` is true with `retrieval.candidate_cap: 500`, and `total_matched` is then a lower bound; narrow the query or filters for an exact total.",
+      "Search memories (`search_mode`: hybrid default, lexical, semantic) or browse by filters without a query. Results are ordered by relevance with bounded structural and recency adjustments; broad orientation and attention queries rank tracked status first. Expired state is hidden unless `include_expired`. Pages default to 10 (max 50); pass `next_cursor` as `cursor` to continue (snapshot expires after 5 minutes; only `limit` may change). The mode rules define the retrieval candidate set; canonical orientation and blocked/needs-attention entries may then be injected, join the frozen final result set and count in `total_matched`. `total_matched` is a lower bound when `retrieval.candidates_truncated` (500-candidate cap).",
     inputSchema: {
       type: "object" as const,
       properties: {
         query: {
           type: "string",
           description:
-            "Search terms. Natural language works best (default mode is hybrid). Queries are tokenized server-side: quoted phrases are preserved, other terms are split on whitespace, and all terms must match (implicit AND). Boolean operators (`AND`/`OR`/`NOT`/`NEAR`) are not supported — write term lists or natural language instead of FTS5 expressions. Optional — omit to browse by filters alone (tags, namespace, time range). Concrete tokens likely present in structured-vocabulary content improve lexical retrieval.",
+            "Natural-language terms (all must match lexically; quoted phrases kept; no AND/OR/NOT operators). Omit to browse by filters.",
         },
         cursor: {
           type: "string",
-          description: "Optional opaque authenticated pagination cursor returned by a prior `memory_query` page. Resume with this to fetch the next page from the same bounded snapshot. `limit` may change on resume; other explicit bound query/filter/mode/serialization arguments must be omitted or normalize to the stored snapshot shape exactly.",
+          description: "Opaque `next_cursor` from a prior page.",
         },
         namespace: namespaceSchema(
-          "Optional. Filter to a literal, case-sensitive namespace scope or prefix. A bare namespace includes that namespace and descendants; a trailing slash matches descendants under that literal prefix and reports the corresponding namespace scope. Prefix filters may end with '/'. If a filtered query is empty, drop this filter before reformulating.",
-          { examples: ["projects/", "projects/grimnir"] },
+          "Literal, case-sensitive scope; a bare namespace includes descendants. Prefix filters may end with '/' to match only descendants. If a filtered query is empty, drop this filter before reformulating.",
+          { examples: ["projects/"] },
         ),
         entry_type: {
           type: "string",
           enum: ["state", "log"],
-          description: "Optional. Filter by entry type.",
         },
-        tags: tagsArraySchema(
-          "Optional freeform tag filter. Matches entries that have all supplied tags. Reuse canonical tags such as `decision`, lifecycle tags such as `active`, and prefixed forms such as `client:acme` or `type:pdf`.",
-          [["decision", "active"], ["client:acme", "type:pdf"]],
-        ),
+        tags: tagsArraySchema("Optional freeform tag filter; entries must have all tags."),
         limit: {
           type: "number",
-          description: "Max results to return in this page. Default 10, max 50. You may change this between resumed pages.",
+          description: "Page size. Default 10, max 50.",
         },
         search_mode: {
           type: "string",
           enum: ["lexical", "semantic", "hybrid"],
           description:
-            "Search mode. Default: hybrid (RRF fusion of keyword + vector). Lexical: FTS5 keyword search. Semantic: vector KNN similarity. Degrades to lexical if embeddings unavailable.",
+            "hybrid: keyword + vector fusion (default). lexical: keyword. semantic: vector. Degrades to lexical without embeddings.",
         },
         search_recency_weight: {
           type: "number",
-          description:
-            `Optional. Scales a bounded recency adjustment from 0 to 1 (0 disables it): up to ten positions' worth of sort-key adjustment at 1 and about two at the default ${DEFAULT_SEARCH_RECENCY_WEIGHT}, so newer entries are not always first, and an entry's final place also depends on how its neighbours were adjusted. Broad orientation and attention-triage queries instead use newest-first among entries of equal structural score when the weight is above 0. Default ${DEFAULT_SEARCH_RECENCY_WEIGHT}. Only affects query-based search, not filter-only browsing.`,
+          description: `0-1 recency adjustment strength (default ${DEFAULT_SEARCH_RECENCY_WEIGHT}); 0 disables. Query search only.`,
         },
         include_expired: {
           type: "boolean",
-          description:
-            "Optional. If true, include expired current state entries and mark them as expired. Superseded revisions remain hidden. Default: false.",
+          description: "Include expired current state, marked expired. Default false.",
         },
         explain: {
           type: "boolean",
-          description: "Optional. If true, include retrieval metadata and a per-result `match{}` block. The block carries `heuristic_score`, `freshness_score`, and `reasons` in every mode, plus the mode-specific signals: `lexical_rank`/`lexical_score` for lexical, `semantic_rank`/`semantic_distance` for semantic, and all of those plus `hybrid_score` (the RRF fusion score) for hybrid. `heuristic_score` is the structural input to the result ordering; `freshness_score` is informational (age relative to now), while recency in the ordering comes from the relative `updated_at` rank among the candidates. The metadata is frozen with the snapshot. Use it to debug ranking in any search mode.",
+          description:
+            "Add retrieval metadata and a per-result `match{}` block (heuristic_score, freshness_score, reasons, mode-specific ranks and scores).",
         },
         since: {
           type: "string",
-          description: "Optional. ISO 8601 timestamp. Only return entries updated at or after this time. E.g. '2026-04-01T00:00:00Z'.",
+          description: "ISO 8601; updated at or after.",
         },
         until: {
           type: "string",
-          description: "Optional. ISO 8601 timestamp. Only return entries updated at or before this time.",
+          description: "ISO 8601; updated at or before.",
         },
         require_lexical_match: {
           type: "boolean",
-          description: "Optional (default false). In semantic/hybrid modes, drop results that have no lexical (FTS5) match — i.e. require a lexical anchor for every result. Use when you want to avoid loosely-related vector neighbours (e.g. searching for an exact identifier). No effect in lexical mode. Note: a hybrid query that collapses to semantic-only always emits a `warning` regardless of this flag.",
+          description: "Semantic/hybrid: drop results with no keyword match, e.g. for exact identifiers. Default false.",
         },
         serialization: {
           type: "string",
           enum: ["linear", "boundary"],
-          description: "Optional (default \"linear\"). Output ordering of ranked results. \"linear\" preserves the order after structural reranking; the visible lexical_rank, semantic_rank, and hybrid_score signals may differ from a result's final position. \"boundary\" places the strongest results from that reranked order at the two context edges (first result first, second result last, third result second, …) to counter the \"Lost in the Middle\" attention dip when dropping a long result list straight into context. The result set and underlying retrieval signals are unchanged — only display order — and retrieval analytics record the same linear order before any boundary transform. No effect on filter-only browse queries.",
+          description:
+            "Default \"linear\": \"linear\" preserves the order after structural reranking, so lexical_rank, semantic_rank and hybrid_score may differ from a result's final position. \"boundary\" puts the strongest results at both ends (1st first, 2nd last, ...) against lost-in-the-middle; same result set.",
         },
       },
       additionalProperties: false,
@@ -7539,52 +7471,25 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_attention",
     description:
-      "Return deterministic triage items for tracked work. Surfaces blocked statuses, stale active work, expiring or expired tracked statuses, near-term event staleness, and tracked namespaces missing status or lifecycle structure. Use this instead of broad natural-language search when you explicitly want what needs attention.",
+      "Deterministic triage of tracked work: blocked, stale, expiring or expired statuses, near-term events, past-dated plans, and namespaces missing status or lifecycle. Use instead of search when you want what needs attention. Every include_* flag defaults to true.",
     inputSchema: {
       type: "object" as const,
       properties: {
         namespace_prefix: {
           type: "string",
-          title: "Namespace Prefix",
-          description:
-            "Optional namespace prefix filter such as `projects/` or `clients/`.",
-          examples: ["projects/", "clients/"],
+          description: "Prefix filter, e.g. `projects/`.",
         },
-        include_blocked: {
-          type: "boolean",
-          description: "Optional. Include blocked statuses. Default: true.",
-        },
-        include_stale: {
-          type: "boolean",
-          description: "Optional. Include active-but-stale statuses. Default: true.",
-        },
-        include_upcoming_events: {
-          type: "boolean",
-          description: "Optional. Include stale statuses with near-term event dates. Default: true.",
-        },
-        include_temporal_stale: {
-          type: "boolean",
-          description: "Optional. Include statuses that reference a past date with forward-looking phrasing. Default: true.",
-        },
-        include_expiring: {
-          type: "boolean",
-          description: "Optional. Include expiring-soon and expired tracked statuses. Default: true.",
-        },
-        include_missing_status: {
-          type: "boolean",
-          description: "Optional. Include tracked namespaces that have entries but no status key. Default: true.",
-        },
-        include_conflicting_lifecycle: {
-          type: "boolean",
-          description: "Optional. Include statuses with conflicting lifecycle tags. Default: true.",
-        },
-        include_missing_lifecycle: {
-          type: "boolean",
-          description: "Optional. Include statuses missing a lifecycle tag. Default: true.",
-        },
+        include_blocked: { type: "boolean" },
+        include_stale: { type: "boolean", description: "Active but stale." },
+        include_upcoming_events: { type: "boolean", description: "Stale with near-term event dates." },
+        include_temporal_stale: { type: "boolean", description: "Past dates in forward-looking phrasing." },
+        include_expiring: { type: "boolean", description: "Expiring soon or expired." },
+        include_missing_status: { type: "boolean", description: "Tracked namespaces without a status key." },
+        include_conflicting_lifecycle: { type: "boolean" },
+        include_missing_lifecycle: { type: "boolean" },
         limit: {
           type: "integer",
-          description: "Optional. Maximum number of attention items to return. Default: 20, max 50.",
+          description: "Default 20, max 50.",
         },
       },
       required: [],
@@ -7593,51 +7498,47 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_log",
     description:
-      "Successful log writes return the same bounded, authorization-filtered advisory `intake` report as full state writes plus the effective stored `classification`. Read-authorized intake metadata includes `candidate_count`, `candidate_cap` and `candidates_truncated`; write-only calls omit these fields. Append immutable chronological decisions, events, and milestones. Corrections use `supersedes` with exact `expected_updated_at`; status changes do not auto-log. Use canonical tags such as `decision`, `milestone`, `blocker`, `discovery`, and `correction` plus useful prefixed tags.",
+      "Append an immutable log entry for a decision, event or milestone. Status changes are not auto-logged. Correct an entry with `supersedes` plus exact `expected_updated_at`. Returns the stored `classification` and an advisory `intake` report.",
     inputSchema: {
       type: "object" as const,
       properties: {
         idempotency_key: {
           type: "string",
           pattern: WRITE_REPLAY_UUID_PATTERN.source,
-          description: "Optional UUID recovery key. Repeat exactly the same arguments and key after an uncertain write outcome to retrieve its original metadata without applying it again. Keys are scoped to the authenticated principal and cannot be reused for another operation.",
+          description: IDEMPOTENCY_KEY_DESCRIPTION,
         },
         namespace: writeTargetNamespaceSchema(
-          "Write target namespace to log to. Must start with an alphanumeric character, then use only letters, digits, '_', '-', and '/'. Trailing slashes and empty segments are rejected: use `maintenance`, not `maintenance/`.",
-          { examples: ["projects/hugin", "clients/acme", "decisions/tech-stack"] },
+          "Write target namespace. Trailing slashes and empty segments are rejected: use `maintenance`, not `maintenance/`.",
+          { examples: ["projects/hugin"] },
         ),
         content: {
           type: "string",
-          description:
-            "The log entry content. Be specific — include what was decided and why.",
+          description: "Be specific: what was decided and why.",
         },
         tags: tagsArraySchema(
-          "Optional freeform tags. Reuse canonical tags such as `decision`, `milestone`, `blocker`, `discovery`, or `correction`, plus prefixed forms like `client:acme`, `person:alice`, `topic:auth`, `type:meeting-notes`, or `source:external`/`source:internal` when they improve retrieval.",
-          [["decision"], ["client:acme", "milestone"]],
+          "Optional freeform tags: `decision`, `milestone`, `blocker`, `discovery`, `correction`, and prefixed forms like `client:acme`, `person:alice`, `topic:auth`, `type:meeting-notes`, `source:external`.",
+          [["decision", "client:acme"]],
           { validateItems: true, maxItems: MAX_TAGS },
         ),
         classification: {
           type: "string",
           enum: [...CLASSIFICATION_LEVELS],
-          description: "Optional explicit classification for the log entry.",
         },
         classification_override: {
           type: "boolean",
-          description: "Optional owner-only escape hatch for writes below the namespace floor.",
+          description: "Owner-only: allow a write below the namespace floor.",
         },
         supersedes: {
           type: "string",
-          description:
-            "Optional log-entry UUID to correct. Appends a new immutable log and links it to the historical target. Requires expected_updated_at.",
+          description: "Log UUID to correct; appends a linked correction. Needs expected_updated_at.",
         },
         expected_updated_at: {
           type: "string",
-          description: "Required CAS timestamp when supersedes is supplied.",
+          description: "Required with supersedes.",
         },
         valid_from: {
           type: "string",
-          description:
-            "Optional ISO 8601 time at which a correction becomes valid. Only accepted with supersedes. This write path rejects future timestamps; the only narrow temporal exception is `memory_read(as_of)` at the exact visible current row boundary, which may round-trip a just-returned timestamp.",
+          description: VALID_FROM_DESCRIPTION,
         },
       },
       required: ["namespace", "content"],
@@ -7645,26 +7546,27 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: "memory_code_health",
-    description: "Store and export bounded code-health agent evidence under the frozen Grimnir v1 contract. Append one validated observation or terminal assessment with a principal-scoped idempotency key; export uses an exact filter and deterministic complete pagination. Producer records and referenced context remain scoped to one authenticated principal and namespace. This tool stores evidence only and does not score code quality or authorize cleanup.",
+    description:
+      "Store and export code-health agent evidence under the frozen Grimnir v1 contract. `append` stores one validated observation or terminal assessment; `export` pages a deterministic, complete snapshot. Records stay scoped to one authenticated principal and namespace. Stores evidence only; does not score code or authorize cleanup.",
     inputSchema: {
       type: "object",
       properties: {
-        action: { type: "string", enum: ["append", "export"], description: "append validates and stores one record; export starts or resumes a frozen authorized snapshot." },
+        action: { type: "string", enum: ["append", "export"] },
         namespace: { type: "string", description: "Exact authorized namespace that owns the evidence." },
-        idempotency_key: { type: "string", description: "Required UUID for append; stable across transport retries." },
-        record: { type: "object", description: "One closed v1 observation or assessment object from the frozen code-health agent schema." },
-        expected_updated_at: { type: "string", description: "Required with a correction; exact current target timestamp." },
+        idempotency_key: { type: "string", description: "Required UUID for append; stable across retries." },
+        record: { type: "object", description: "One closed v1 observation or assessment object." },
+        expected_updated_at: { type: "string", description: "Required with a correction." },
         classification: { type: "string", enum: ["public", "internal", "client-confidential", "client-restricted"] },
-        producer_principal_id: { type: "string", description: "Owner-only exact source principal filter; otherwise the authenticated caller." },
+        producer_principal_id: { type: "string", description: "Owner-only source principal filter." },
         repo_owner: { type: "string" },
         repo_name: { type: "string" },
         task_id: { type: "string" },
-        since: { type: "string", description: "Inclusive whole-second UTC observed_at lower bound." },
-        until: { type: "string", description: "Inclusive whole-second UTC observed_at upper bound." },
-        model: { type: "string", description: "Exact match against actual_worker.observed_model." },
+        since: { type: "string", description: "Inclusive whole-second UTC observed_at bound." },
+        until: { type: "string", description: "Inclusive whole-second UTC observed_at bound." },
+        model: { type: "string", description: "Exact actual_worker.observed_model match." },
         rubric_version: { type: "string", enum: ["changeability-1.0"] },
         limit: { type: "integer", minimum: 1, maximum: 100 },
-        cursor: { type: "string", description: "Opaque continuation cursor from an unexpired export snapshot." },
+        cursor: { type: "string" },
       },
       required: ["action", "namespace"],
       additionalProperties: false,
@@ -7673,33 +7575,26 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_list",
     description:
-      "Browse memory contents. Without a namespace, shows visible namespaces with counts and last activity; with a namespace, shows state keys, log count, and recent log previews. Demo and completed task-run namespaces are hidden by default. `limit` and `offset` page only the top-level namespace listing; non-default paging with `namespace` is rejected rather than ignored.",
+      "Browse memory. Without namespace: visible namespaces with counts and last activity, paged by `limit`/`offset`. With namespace: its state keys, log count and recent log previews (paging rejected). Demo and completed task namespaces are hidden by default.",
     inputSchema: {
       type: "object" as const,
       properties: {
-        namespace: namespaceSchema(
-          "Optional exact namespace to inspect. If omitted, list all visible namespaces.",
-          { examples: ["projects/grimnir"] },
-        ),
+        namespace: namespaceSchema("Exact namespace to inspect; omit to list namespaces."),
         include_demo: {
           type: "boolean",
-          description:
-            "Optional. If true, include demo/* namespaces in the top-level listing. Default: false.",
+          description: "Include demo/*. Default false.",
         },
         include_completed_tasks: {
           type: "boolean",
-          description:
-            "Optional. If true, include completed/failed task-run namespaces in the top-level listing. Default: false.",
+          description: "Include completed/failed task namespaces. Default false.",
         },
         limit: {
           type: "integer",
-          description:
-            "Optional. Max namespaces to return in the top-level listing (default 20, max 200). Non-default values are rejected when a namespace is provided.",
+          description: "Default 20, max 200.",
         },
         offset: {
           type: "integer",
-          description:
-            "Optional. Skip first N namespaces for pagination of the top-level listing (default 0). Non-default values are rejected when a namespace is provided.",
+          description: "Default 0.",
         },
       },
       additionalProperties: false,
@@ -7709,38 +7604,35 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_history",
     description:
-      "View the chronological audit trail of changes to memory. Returns a timeline of writes, updates, corrections, deletes, namespace deletes, and log appends. Use this to answer 'what changed recently?' or 'what happened in this namespace?' — unlike memory_query (which is relevance-based search), this is a change feed ordered by time. Namespace filters are literal and case-sensitive: bare `projects/foo` returns that namespace plus descendants, while trailing-slash `projects/foo/` returns only descendants under that literal prefix.\n\nCursor semantics (read carefully): a call WITHOUT `cursor` or `older_cursor` returns the most recent changes first (newest→oldest), sets `sync_cursor` to the newest visible audit id in that initial feed (or `0` when the feed is empty), and uses `older_cursor` / `has_older` for paging further back in time. A call WITH `older_cursor` continues that newest-first history view with older rows only, returns `sync_cursor: null`, and expects the caller to retain the initial page's watermark for later forward polling. A call WITH `cursor` switches to ascending sync mode: it returns rows with `id > cursor` in ascending (oldest→newest) order, and `next_cursor` / `sync_cursor` then advance to the NEWEST id seen; an empty sync page preserves the input cursor as both values. `cursor` and `older_cursor` are mutually exclusive. `has_more` is a direction alias (`has_older` on newest-first pages, `has_newer` on sync pages), so directional clients should prefer the explicit fields.",
+      "Chronological audit feed of writes, updates, corrections, deletes and log appends: 'what changed?', unlike relevance-based `memory_query`. Namespace filters are literal and case-sensitive: bare `projects/foo` returns that namespace plus descendants, while trailing-slash `projects/foo/` returns only descendants under that literal prefix.\n\nWithout cursors: newest first, with `sync_cursor` (newest id; 0 if empty) and `older_cursor`/`has_older`. `older_cursor` pages further back (`sync_cursor: null`; keep the first page's watermark). `cursor` switches to ascending sync mode (`id > cursor`); `next_cursor`/`sync_cursor` advance to the newest id seen, and an empty page keeps the input cursor. `cursor` and `older_cursor` are mutually exclusive.",
     inputSchema: {
       type: "object" as const,
       properties: {
         namespace: {
           type: "string",
-          title: "Namespace Filter",
           description:
-            "Optional. Filter to a literal, case-sensitive namespace scope. A bare namespace returns that namespace plus descendants; a trailing-slash prefix returns only descendants under that literal prefix.",
-          examples: ["projects/munin-memory", "projects/"],
+            "Filter to a literal, case-sensitive namespace scope: a bare namespace returns that namespace plus descendants; a trailing-slash prefix returns only descendants under that literal prefix.",
         },
         since: {
           type: "string",
-          description:
-            "Optional. ISO 8601 timestamp. Only return changes after this time. E.g. '2026-03-20T00:00:00Z' for the last week.",
+          description: "ISO 8601; changes after this time.",
         },
         action: {
           type: "string",
           enum: ["write", "update", "patch", "supersede", "delete", "delete_namespace", "log", "cross_zone_block"],
-          description: "Optional. Filter by action type. 'patch' covers partial writes (content_append/prepend, tags_add/remove), which are audited separately from full-content 'update'. 'cross_zone_block' surfaces containment-guard security events.",
+          description: "'patch': partial writes. 'cross_zone_block': containment-guard security events.",
         },
         cursor: {
           type: "integer",
-          description: "Optional. Exclusive lower-bound audit cursor. When provided, entries are returned in ascending audit order for sync/polling workflows.",
+          description: "Exclusive lower-bound audit id; ascending sync order.",
         },
         older_cursor: {
           type: "integer",
-          description: "Optional. Exclusive upper-bound audit cursor for newest-first history browsing. Use the `older_cursor` returned by a cursorless or older-paging response to fetch the next older page.",
+          description: "Exclusive upper-bound audit id for newest-first paging.",
         },
         limit: {
           type: "integer",
-          description: "Optional. Maximum entries to return. Default: 20, max: 100.",
+          description: "Default 20, max 100.",
         },
       },
       additionalProperties: false,
@@ -7750,22 +7642,15 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_delete",
     description:
-      "Delete a specific state entry by namespace+key, or all entries in a namespace. Preview without `delete_token` is required before confirmation. `state_count` includes current and superseded state revisions; `current_state_count` and `historical_state_count` make the destructive scope explicit. The returned token is bound to the exact preview and becomes stale if targets change. If authorization or classification would split a correction lineage, preview fails closed with `partial_lineage` and issues no token.",
+      "Delete one state entry (namespace+key) or a whole namespace. A call without `delete_token` previews the scope (current and historical revision counts) and returns a token bound to that preview; repeat with it to delete. The token goes stale if targets change. Fails closed with `partial_lineage` if authorization or classification would split a correction lineage.",
     inputSchema: {
       type: "object" as const,
       properties: {
-        namespace: namespaceSchema(
-          "Exact namespace to delete from. Preview is always required before deletion.",
-          { examples: ["projects/grimnir"] },
-        ),
-        key: keySchema(
-          "Optional. If provided, delete only this state entry. If omitted, delete all state and log entries in the namespace.",
-          { examples: ["status", "architecture"] },
-        ),
+        namespace: namespaceSchema("Exact namespace."),
+        key: keySchema("Delete only this state entry; omit for every entry in the namespace."),
         delete_token: {
           type: "string",
-          description:
-            "The token returned from a preview call. Required to execute the delete.",
+          description: "Token from the preview.",
         },
       },
       required: ["namespace"],
@@ -7774,26 +7659,22 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_insights",
     description:
-      "Return per-entry retrieval analytics: how often each entry was retrieved (impressions), opened (opens), followed by writes or logs, and whether it was stale when opened. Useful for understanding which memories are most actionable and which are frequently stale. Requires at least min_impressions retrieval events (default 3) to appear in results; when nothing clears the threshold the response carries an explanatory `message` rather than a bare empty array. The response's `aggregates` object is intentionally global across namespaces and is labeled with a global scope; only `entries` is namespace-filtered.",
+      "Per-entry retrieval analytics: impressions, opens, follow-up writes or logs, and staleness when opened. Entries need `min_impressions` (default 3); otherwise a `message` explains the empty result. `aggregates` are global across namespaces; only `entries` is namespace-filtered.",
     inputSchema: {
       type: "object" as const,
       properties: {
         namespace: {
           type: "string",
-          title: "Namespace Filter",
           description:
-            "Optional. Restrict results to a literal, case-sensitive namespace scope. A bare namespace is exact-only here; a trailing-slash prefix such as `projects/` matches descendants under that literal prefix.",
-          examples: ["projects/", "projects/grimnir"],
+            "Literal, case-sensitive filter: a bare namespace is exact-only here; a trailing slash matches descendants.",
         },
         min_impressions: {
           type: "integer",
-          description:
-            "Optional. Minimum number of retrieval impressions for an entry to appear in results. Default: 3.",
+          description: "Default 3.",
         },
         limit: {
           type: "integer",
-          description:
-            "Optional. Maximum number of entries to return. Default: 20, max: 50.",
+          description: "Default 20, max 50.",
         },
       },
       required: [],
@@ -7802,7 +7683,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_retrieval_feedback",
     description:
-      "Submit explicit feedback on retrieval quality. Use after a search/query returned poor results, missed an expected entry, returned stale content, or ranked results badly. Also use to confirm good results. Auto-links to the most recent retrieval event in the current session. Owner-only. Feedback with missing_result + expected entry info feeds into benchmark ground truth candidates.",
+      "Owner-only. Report retrieval quality after a query (or confirm good results); links to this session's latest retrieval. `missing_result` with expected-entry details feeds benchmark ground-truth candidates.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -7810,35 +7691,25 @@ const TOOL_DEFINITIONS = [
           type: "string",
           enum: ["bad_results", "missing_result", "wrong_order", "stale_results", "good_results"],
           description:
-            "Type of feedback: bad_results (irrelevant results), missing_result (expected entry not returned), wrong_order (relevant but poorly ranked), stale_results (outdated content surfaced), good_results (retrieval worked well).",
+            "bad_results: irrelevant. missing_result: expected entry absent. wrong_order: poorly ranked. stale_results: outdated. good_results: worked well.",
         },
         query: {
           type: "string",
-          description:
-            "Optional. The query that produced the results. Defaults to the query from the most recent retrieval event in this session.",
+          description: "Default: this session's latest retrieval query.",
         },
         expected_namespace: {
           type: "string",
-          title: "Expected Namespace",
-          description:
-            "Optional exact namespace of the entry that should have been returned (for `missing_result` or `wrong_order`).",
-          examples: ["projects/grimnir"],
+          description: "Exact namespace of the expected entry.",
         },
         expected_key: {
           type: "string",
-          title: "Expected Key",
-          description: "Optional key of the entry that should have been returned.",
-          examples: ["status", "architecture"],
         },
         expected_entry_id: {
           type: "string",
-          description:
-            "Optional. The UUID of the entry that should have been returned.",
         },
         detail: {
           type: "string",
-          description:
-            "Optional. Free-text explanation of what went wrong or why results were good.",
+          description: "Free-text explanation.",
         },
       },
       required: ["feedback_type"],
@@ -7847,18 +7718,17 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_consolidate",
     description:
-      "Preview a source-grounded consolidation for an eligible tracked namespace, then confirm its exact preview token to persist it. Manual calls never write on the first call. Every persisted claim is a verbatim excerpt linked to source log UUIDs; testing/ephemeral namespaces are rejected. Owner-only.",
+      "Owner-only. Preview a source-grounded consolidation for an eligible tracked namespace, then call again with its `confirm_token` to persist it; the first call never writes. Every claim is a verbatim excerpt linked to source log UUIDs; testing/ephemeral namespaces are rejected.",
     inputSchema: {
       type: "object" as const,
       properties: {
         namespace: writeTargetNamespaceSchema(
-          "Required write target namespace for a manual consolidation preview, such as `projects/hugin`. Trailing slashes and empty segments are rejected. Confirm the exact preview with `confirm_token` before persisting it.",
-          { examples: ["projects/hugin"] },
+          "Tracked write target namespace, e.g. `projects/hugin`. Trailing slashes and empty segments are rejected.",
         ),
         confirm_token: {
           type: "string",
           minLength: 1,
-          description: "Token returned by a reviewed preview. Supplying it persists that exact preview once; tokens expire after 10 minutes and are invalid after restart.",
+          description: "Token from a reviewed preview; persists it once. Expires after 10 minutes or a restart.",
         },
       },
       required: ["namespace"],
@@ -7868,7 +7738,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_status",
     description:
-      "`memory_status` returns server capabilities, version, and feature availability. Use to discover what search modes, tools, and features are available on this server instance. It is a safe fallback orientation check when a host/deferred tool discovery layer tells you to call `memory_orient` but did not expose `memory_orient` as callable.",
+      "`memory_status` reports server version, capabilities, available tools and search modes. It is the safe fallback orientation check when deferred tool discovery did not expose `memory_orient` as callable.",
     inputSchema: {
       type: "object" as const,
       properties: {},
@@ -7878,7 +7748,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_health",
     description:
-      "Owner-only. Returns a read-only memory-engine health snapshot for operator dashboards (e.g. Heimdall). Sections: `embedding` (queue counts, model-relative stuck count, coverage), `size`, `retrieval` (volume + mode-mix fractions), `classification` (by_level), `maintenance`, `consolidation` (worker + circuit-breaker enums, backlog), and `security_events`. Each section degrades independently — a failing sub-query yields `section.ok: false` without aborting the payload. Top-level `partial: true` when any section failed. Canonical contract: `docs/memory-health.schema.json` (`schema_version: 2`).",
+      "Owner-only, read-only memory-engine health snapshot for operator dashboards. Sections: `embedding`, `size`, `retrieval`, `classification`, `maintenance`, `consolidation`, `security_events`; each degrades independently (`section.ok: false`, top-level `partial: true`). Contract: `docs/memory-health.schema.json` (`schema_version: 2`).",
     inputSchema: {
       type: "object" as const,
       properties: {},
