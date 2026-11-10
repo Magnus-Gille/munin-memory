@@ -30,9 +30,11 @@ const budget = () => `${(0.3 + Math.floor(R() * 18) / 10).toFixed(1)} MSEK`;
 const projects = PROJECT_NAMES.map((name, i) => {
   const client = CLIENTS[i % CLIENTS.length];
   const lead = PEOPLE[(i * 7) % PEOPLE.length][0];
-  const vendor = pick(VENDORS.filter((v) => v !== 'Kestrel Labs'));
+  // Needle attributes are fixed here (before logs are generated) so logs stay consistent; RNG call order unchanged.
+  const pickedVendor = pick(VENDORS.filter((v) => v !== 'Kestrel Labs'));
+  const vendor = name === 'Hermelin' ? 'Kestrel Labs' : pickedVendor;
   const topic = TOPICS[(i * 3) % TOPICS.length];
-  return { name, slug: slug(name), client, lead, vendor, topic, lifecycle: pick(LIFECYCLE), budget: budget(), deadlines: [], logs: [] };
+  return { name, slug: slug(name), client, lead, vendor, topic, lifecycle: pick(LIFECYCLE), budget: ((b) => (name === 'Murmeldjur' ? '0.8 MSEK' : b))(budget()), deadlines: [], logs: [] };
 });
 
 // Generic dated logs (distractors with overlapping vocabulary).
@@ -59,7 +61,6 @@ const byName = Object.fromEntries(projects.map((p) => [p.name, p]));
 const needles = [];
 
 // N1 unique vendor (near-miss vendors exist: Kestrel Analytics, Kestrel Cloud, Falcon Labs)
-byName['Hermelin'].vendor = 'Kestrel Labs';
 needles.push({ id: 'N01', kind: 'lookup', question: 'Which project uses Kestrel Labs as its vendor?', gold_answer: 'Hermelin', required: [['Hermelin']], forbidden: [] });
 
 // N2 latest deadline among several moves
@@ -86,7 +87,7 @@ byName['Rådjur'].logs.push({ date: '2026-07-14', text: 'Decided to replace the 
 needles.push({ id: 'N05', kind: 'dated', question: 'What was decided on 14 July 2026, and in which project?', gold_answer: 'Rådjur: replace the rule-based matcher with a fine-tuned embedding model (owner Erik Fahlén)', required: [['Rådjur', 'Radjur'], ['embedding']], forbidden: [] });
 
 // N6 budget increase to a unique amount
-byName['Murmeldjur'].budget = '1.2 MSEK';
+byName['Murmeldjur'].budget = '1.2 MSEK'; // raised from the 0.8 MSEK used in its earlier logs
 byName['Murmeldjur'].logs.push({ date: '2026-08-19', text: 'Budget increased from 0.8 MSEK to 1.2 MSEK to cover a second pilot site.' });
 needles.push({ id: 'N06', kind: 'lookup', question: 'Which project had its budget raised to 1.2 MSEK, and why?', gold_answer: 'Murmeldjur, to cover a second pilot site', required: [['Murmeldjur'], ['second pilot', 'pilot site']], forbidden: [] });
 

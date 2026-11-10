@@ -33,7 +33,8 @@ export async function runApiSession({ arm, model, system, userText, ledger, tag,
   try {
     for (let i = 0; i < MAX_ITER; i++) {
       const body = {
-        model, max_tokens: 16000, system, messages,
+        // Explicit breakpoint after tools+system so the shared prefix is reused across sessions.
+        model, max_tokens: 16000, system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }], messages,
         tools: arm.apiTools(), output_config: { effort },
         cache_control: { type: 'ephemeral' },
       };

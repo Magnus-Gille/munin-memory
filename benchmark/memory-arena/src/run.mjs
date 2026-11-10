@@ -2,6 +2,7 @@
 // Usage: node src/run.mjs --arm munin|memtool|ccmem --model claude-haiku-5-5 [--rep 1] [--phases ingest,probe,scale] [--pilot] [--cap 48]
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { Ledger } from './api.mjs';
 import { MuninArm, MemtoolArm, ClaudeCodeArm, runApiSession } from './arms.mjs';
@@ -21,7 +22,17 @@ const RESULTS = path.join(ROOT, PILOT ? 'results-pilot' : 'results');
 const cellId = `${ARM}__${MODEL}__r${REP}`;
 const cellDir = path.join(RESULTS, 'runs', cellId);
 // Stores live outside the repo (Claude Code must not see the repository's instruction files).
-const STORE_ROOT = path.join(process.env.ARENA_STORE_ROOT ?? '/tmp/memory-arena-stores', PILOT ? 'pilot' : 'main', cellId);
+// Private per-user base (macOS os.tmpdir() is per-user); refuse a base we do not own or that others can access,
+// because the Claude Code arm loads project settings from its working directory.
+const STORE_BASE = process.env.ARENA_STORE_ROOT ?? path.join(os.tmpdir(), 'memory-arena-stores');
+fs.mkdirSync(STORE_BASE, { recursive: true, mode: 0o700 });
+{
+  const st = fs.lstatSync(STORE_BASE);
+  if (!st.isDirectory() || st.uid !== process.getuid() || (st.mode & 0o077) !== 0) {
+    throw new Error(`Refusing store base ${STORE_BASE}: must be a directory owned by this user with mode 0700`);
+  }
+}
+const STORE_ROOT = path.join(STORE_BASE, PILOT ? 'pilot' : 'main', cellId);
 fs.mkdirSync(cellDir, { recursive: true });
 const ledger = new Ledger(path.join(RESULTS, 'ledger.json'), CAP);
 
