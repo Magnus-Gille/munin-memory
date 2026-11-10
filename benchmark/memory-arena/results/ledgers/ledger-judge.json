@@ -1,0 +1,17 @@
+{
+  "total_usd": 1.3130360000000003,
+  "calls": 30,
+  "by_model": {
+    "claude-opus-5-5": {
+      "usd": 1.3130360000000003,
+      "calls": 30,
+      "input": 102704,
+      "output": 45111,
+      "cache_write": 0,
+      "cache_read": 0
+    }
+  },
+  "by_tag": {
+    "judge": 1.3130360000000003
+  }
+}

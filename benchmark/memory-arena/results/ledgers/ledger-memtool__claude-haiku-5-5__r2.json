@@ -1,0 +1,19 @@
+{
+  "total_usd": 0.10072468500000005,
+  "calls": 199,
+  "by_model": {
+    "claude-haiku-5-5": {
+      "usd": 0.10072468500000005,
+      "calls": 199,
+      "input": 524,
+      "output": 79371,
+      "cache_write": 449867,
+      "cache_read": 475341
+    }
+  },
+  "by_tag": {
+    "memtool/ingest": 0.030498050000000002,
+    "memtool/probe": 0.036781535,
+    "memtool/scale": 0.033445100000000005
+  }
+}

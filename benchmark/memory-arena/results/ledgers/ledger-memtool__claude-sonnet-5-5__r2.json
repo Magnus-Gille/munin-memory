@@ -1,0 +1,19 @@
+{
+  "total_usd": 2.7901924000000013,
+  "calls": 374,
+  "by_model": {
+    "claude-sonnet-5-5": {
+      "usd": 2.7901924000000013,
+      "calls": 374,
+      "input": 980,
+      "output": 100023,
+      "cache_write": 645210,
+      "cache_read": 874887
+    }
+  },
+  "by_tag": {
+    "memtool/ingest": 0.6736591999999999,
+    "memtool/probe": 0.9288031000000001,
+    "memtool/scale": 1.1877301
+  }
+}

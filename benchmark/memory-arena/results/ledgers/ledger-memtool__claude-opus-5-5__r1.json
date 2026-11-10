@@ -1,0 +1,19 @@
+{
+  "total_usd": 3.9293350000000005,
+  "calls": 239,
+  "by_model": {
+    "claude-opus-5-5": {
+      "usd": 3.9293350000000005,
+      "calls": 239,
+      "input": 602,
+      "output": 73581,
+      "cache_write": 454195,
+      "cache_read": 921660
+    }
+  },
+  "by_tag": {
+    "memtool/ingest": 1.0225596000000001,
+    "memtool/probe": 1.7045403999999986,
+    "memtool/scale": 1.2022350000000006
+  }
+}

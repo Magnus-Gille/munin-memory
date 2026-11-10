@@ -1,0 +1,5 @@
+{
+  "total_usd": 4.246,
+  "calls": null,
+  "note": "reconstructed from per-session trace costs: haiku+sonnet r1 API cells (4.205) + pilot (0.041); legacy single ledger was overwritten by parallel writers"
+}
