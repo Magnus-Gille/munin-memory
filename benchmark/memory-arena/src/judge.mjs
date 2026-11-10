@@ -11,7 +11,11 @@ import { Ledger, createMessage } from './api.mjs';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(here, '..');
 const RES = path.join(ROOT, 'results');
-const BLIND = path.join(RES, 'blind');
+// --backend codex: cross-vendor judge via headless Codex (added after the Anthropic API account hit its
+// Console usage limit mid-judging; see RESULTS.md deviations). Same prompt/rubric/schema, separate dir/key.
+const BACKEND = process.argv.includes('--backend') ? process.argv[process.argv.indexOf('--backend') + 1] : 'anthropic';
+const CODEX_MODEL = 'gpt-6.1-terra';
+const BLIND = path.join(RES, BACKEND === 'codex' ? 'blind-codex' : 'blind');
 fs.mkdirSync(BLIND, { recursive: true });
 const capArg = process.argv.indexOf('--cap');
 const ledger = new Ledger(path.join(RES, 'ledgers'), capArg > 0 ? Number(process.argv[capArg + 1]) : 49.5, 'judge');
@@ -82,6 +86,30 @@ const SCHEMA = {
 function shuffle(a) { for (let i = a.length - 1; i > 0; i--) { const j = crypto.randomInt(i + 1); [a[i], a[j]] = [a[j], a[i]]; } return a; }
 function label() { return Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ'[crypto.randomInt(24)]).join(''); }
 
+// Headless Codex judge: no user config (no MCP servers), read-only sandbox, ephemeral, empty cwd,
+// env allowlist; the prompt (synthetic data only) goes in on stdin.
+async function codexJudge(prompt) {
+  const { spawn } = await import('node:child_process');
+  const os = await import('node:os');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'arena-judge-'));
+  const schemaFile = path.join(dir, 'schema.json'); const outFile2 = path.join(dir, 'out.json');
+  fs.writeFileSync(schemaFile, JSON.stringify(SCHEMA));
+  const env = {}; for (const k of ['PATH', 'HOME', 'USER', 'LANG']) if (process.env[k]) env[k] = process.env[k];
+  const code = await new Promise((resolve) => {
+    const p = spawn('codex', ['exec', '--ignore-user-config', '--sandbox', 'read-only', '--ephemeral', '--skip-git-repo-check',
+      '-C', dir, '-m', CODEX_MODEL, '-c', 'model_reasoning_effort="medium"', '--output-schema', schemaFile, '-o', outFile2, '-'],
+    { cwd: dir, env: { ...env, TERM: 'dumb' }, stdio: ['pipe', 'ignore', 'ignore'] });
+    p.stdin.end(prompt);
+    const t = setTimeout(() => p.kill('SIGTERM'), 900_000);
+    p.on('close', (c) => { clearTimeout(t); resolve(c); });
+  });
+  const text = fs.existsSync(outFile2) ? fs.readFileSync(outFile2, 'utf8') : '';
+  fs.rmSync(dir, { recursive: true, force: true });
+  if (code !== 0) throw new Error(`codex exit ${code}`);
+  return text;
+}
+
+const jobs = [];
 for (const [qid, answers] of Object.entries(items).sort()) {
   const q = QUESTIONS[qid];
   // Re-judge if new answers arrived since this question was judged.
@@ -109,21 +137,35 @@ Grade every answer independently on its own merits (do not compare them to each 
 ${blinded.map((b) => `<answer label="${b.label}">\n${b.text}\n</answer>`).join('\n\n')}
 
 Return one grade per label.`;
-  let resp; let parsed;
+  jobs.push({ qid, n: answers.length, blinded, prompt });
+}
+
+async function judgeOne({ qid, n, blinded, prompt }) {
+  let parsed; let cost = 0;
   for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
-    resp = await createMessage({
-      model: JUDGE_MODEL, max_tokens: 16000, output_config: { effort: 'medium', format: { type: 'json_schema', schema: SCHEMA } },
-      messages: [{ role: 'user', content: prompt }],
-    }, { ledger, tag: 'judge' });
+    let text;
     try {
-      parsed = JSON.parse(resp.content.filter((b) => b.type === 'text').map((b) => b.text).join(''));
+      if (BACKEND === 'codex') text = await codexJudge(prompt);
+      else {
+        const resp = await createMessage({
+          model: JUDGE_MODEL, max_tokens: 16000, output_config: { effort: 'medium', format: { type: 'json_schema', schema: SCHEMA } },
+          messages: [{ role: 'user', content: prompt }],
+        }, { ledger, tag: 'judge' });
+        cost += resp._cost_usd;
+        text = resp.content.filter((b) => b.type === 'text').map((b) => b.text).join('');
+      }
+      parsed = JSON.parse(text);
       const labels = new Set(blinded.map((b) => b.label));
       if (parsed.grades.length !== labels.size || !parsed.grades.every((g) => labels.has(g.label))) parsed = null;
-    } catch { parsed = null; }
+    } catch (e) { console.error(`${qid} attempt ${attempt}: ${e.message.slice(0, 200)}`); parsed = null; }
   }
-  if (!parsed) { console.error(`judge failed for ${qid}`); continue; }
+  if (!parsed) { console.error(`judge failed for ${qid}`); return; }
   for (const g of parsed.grades) g.score = Math.max(0, Math.min(1, Math.round(g.score * 2) / 2));
-  fs.appendFileSync(outFile, JSON.stringify({ qid, n: answers.length, grades: parsed.grades, cost_usd: resp._cost_usd }) + '\n');
-  console.log(`${qid}: judged ${answers.length} answers ($${resp._cost_usd.toFixed(3)})`);
+  fs.appendFileSync(outFile, JSON.stringify({ qid, n, judge: BACKEND === 'codex' ? `codex:${CODEX_MODEL}` : JUDGE_MODEL, grades: parsed.grades, cost_usd: cost }) + '\n');
+  console.log(`${qid}: judged ${n} answers ($${cost.toFixed(3)})`);
 }
+
+const POOL = BACKEND === 'codex' ? 4 : 1;
+let next = 0;
+await Promise.all(Array.from({ length: POOL }, async () => { while (next < jobs.length) await judgeOne(jobs[next++]); }));
 console.log(`judge $${ledger.state.total_usd.toFixed(2)}; all ledgers $${ledger.globalTotal().toFixed(2)}`);

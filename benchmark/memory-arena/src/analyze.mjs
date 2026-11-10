@@ -18,11 +18,22 @@ const MODELS = ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5'];
 const SHORT = { 'claude-opus-5-5': 'Opus', 'claude-sonnet-5-5': 'Sonnet', 'claude-haiku-5-5': 'Haiku' };
 
 // ---------------------------------------------------------------- unblind
-const key = JSON.parse(fs.readFileSync(path.join(RES, 'blind/key.json'), 'utf8'));
-const last = new Map();
-for (const l of fs.readFileSync(path.join(RES, 'blind/judgments.jsonl'), 'utf8').split('\n').filter(Boolean)) { const j = JSON.parse(l); last.set(j.qid, j); }
-const grade = {}; // `${cell}|${qid}` -> grade
-for (const [qid, j] of last) for (const g of j.grades) grade[`${key[`${qid}:${g.label}`]}|${qid}`] = g;
+// Deviation: primary judge dir selectable (default blind-codex — the Anthropic judge stopped at 30/48
+// questions when the API account hit its Console usage limit). Secondary judge used for agreement only.
+function loadGrades(dir) {
+  const kf = path.join(RES, dir, 'key.json'); const jf = path.join(RES, dir, 'judgments.jsonl');
+  if (!fs.existsSync(kf) || !fs.existsSync(jf)) return {};
+  const k = JSON.parse(fs.readFileSync(kf, 'utf8'));
+  const lastJ = new Map();
+  for (const l of fs.readFileSync(jf, 'utf8').split('\n').filter(Boolean)) { const j = JSON.parse(l); lastJ.set(j.qid, j); }
+  const g = {};
+  for (const [qid, j] of lastJ) for (const x of j.grades) g[`${k[`${qid}:${x.label}`]}|${qid}`] = x;
+  return g;
+}
+const PRIMARY = process.env.ARENA_JUDGE_DIR ?? 'blind-codex';
+const SECONDARY = PRIMARY === 'blind-codex' ? 'blind' : 'blind-codex';
+const grade = loadGrades(PRIMARY); // `${cell}|${qid}` -> grade
+const grade2 = loadGrades(SECONDARY);
 
 // ---------------------------------------------------------------- deterministic check
 const ABSTAIN = /(don'?t|do not|cannot|can'?t) (know|find|see|tell)|no (record|information|mention|entry|note|details?)|not (in|on) (my )?(memory|record|file)|(isn'?t|wasn'?t|not) (recorded|stored|saved|mentioned)|haven'?t (got|been told|recorded|saved)|nothing (about|on|in)|vet inte|ingen uppgift|no such project|does not exist|doesn'?t exist|not aware of/i;
@@ -104,6 +115,18 @@ for (const c of Object.values(cells)) {
 }
 const graded = rows.filter((x) => x.score !== null);
 out.judge_det_agreement = mean(graded.map((x) => ((x.score >= 0.5) === x.det ? 1 : 0)));
+// Inter-judge agreement (deviation): primary vs secondary judge on the answers both graded.
+const both = rows.filter((x) => x.score != null && grade2[`${x.cell}|${x.qid}`]);
+out.inter_judge = {
+  primary: PRIMARY, secondary: SECONDARY, n: both.length,
+  exact: mean(both.map((x) => (grade2[`${x.cell}|${x.qid}`].score === x.score ? 1 : 0))),
+  within_half: mean(both.map((x) => (Math.abs(grade2[`${x.cell}|${x.qid}`].score - x.score) <= 0.5 ? 1 : 0))),
+  mean_primary: mean(both.map((x) => x.score)), mean_secondary: mean(both.map((x) => grade2[`${x.cell}|${x.qid}`].score)),
+  by_arm_secondary_mean: Object.fromEntries(ARMS.map((a) => [a, mean(both.filter((x) => x.arm === a && x.rep === 'r1').map((x) => grade2[`${x.cell}|${x.qid}`].score))])),
+  by_arm_primary_mean: Object.fromEntries(ARMS.map((a) => [a, mean(both.filter((x) => x.arm === a && x.rep === 'r1').map((x) => x.score))])),
+};
+// Replication (deviation): r2 cells for every model; pooled r1+r2 arm means.
+out.replication = Object.fromEntries(ARMS.map((a) => [a, Object.fromEntries(['r1', 'r2'].map((rp) => [rp, mean(rows.filter((x) => x.arm === a && x.rep === rp).map((x) => x.score))]))]));
 
 const D = (a, b, f, models) => pairedDiff(a, b, f, models);
 out.diffs = {
@@ -176,6 +199,9 @@ md.push('', '## Paired differences (score points, 95% bootstrap CI)', '', '| Com
 for (const [k, d] of Object.entries(out.diffs)) if (d) md.push(`| ${k} | ${d.n} | ${(d.diff * 100).toFixed(1)} pp | [${(d.ci95[0] * 100).toFixed(1)}, ${(d.ci95[1] * 100).toFixed(1)}] |`);
 md.push('', '## Hypotheses', '', '| # | Statement | Supported |', '|---|---|---|');
 for (const [k, h] of Object.entries(out.hypotheses)) md.push(`| ${k} | ${h.stmt} | ${h.supported ? 'yes' : 'no'} |`);
+const ij = out.inter_judge;
+md.push('', `Primary judge: \`${PRIMARY}\`. Inter-judge agreement with \`${SECONDARY}\` on ${ij.n} shared answers: exact ${pct(ij.exact)}, within 0.5 ${pct(ij.within_half)}; mean score primary ${pct(ij.mean_primary)} vs secondary ${pct(ij.mean_secondary)}. Arm means on shared r1 answers — primary: ${ARMS.map((a) => `${a} ${pct(ij.by_arm_primary_mean[a])}`).join(', ')}; secondary: ${ARMS.map((a) => `${a} ${pct(ij.by_arm_secondary_mean[a])}`).join(', ')}.`);
+md.push('', `Replication (overall score, all models): ${ARMS.map((a) => `${a} r1 ${pct(out.replication[a].r1)} / r2 ${pct(out.replication[a].r2)}`).join('; ')}.`);
 md.push('', `Judge vs deterministic rubric agreement (score ≥ 0.5 ⇔ substring rubric pass): ${pct(out.judge_det_agreement)} over ${graded.length} graded answers.`);
 md.push('', '## Per-question scores (judge)', '', `| Q | Category | ${MODELS.flatMap((m) => ARMS.map((a) => `${SHORT[m][0]}-${a}`)).join(' | ')} |`, `|---|---|${MODELS.flatMap(() => ARMS.map(() => '---')).join('|')}|`);
 for (const q of Object.keys(Q)) {
