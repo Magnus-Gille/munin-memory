@@ -14,7 +14,7 @@ const RES = path.join(ROOT, 'results');
 const BLIND = path.join(RES, 'blind');
 fs.mkdirSync(BLIND, { recursive: true });
 const capArg = process.argv.indexOf('--cap');
-const ledger = new Ledger(path.join(RES, 'ledger.json'), capArg > 0 ? Number(process.argv[capArg + 1]) : 49.5);
+const ledger = new Ledger(path.join(RES, 'ledgers'), capArg > 0 ? Number(process.argv[capArg + 1]) : 49.5, 'judge');
 const JUDGE_MODEL = 'claude-opus-5-5';
 
 const scenario = JSON.parse(fs.readFileSync(path.join(ROOT, 'corpus/scenario.json'), 'utf8'));
@@ -126,4 +126,4 @@ Return one grade per label.`;
   fs.appendFileSync(outFile, JSON.stringify({ qid, n: answers.length, grades: parsed.grades, cost_usd: resp._cost_usd }) + '\n');
   console.log(`${qid}: judged ${answers.length} answers ($${resp._cost_usd.toFixed(3)})`);
 }
-console.log(`ledger total $${ledger.state.total_usd.toFixed(2)}`);
+console.log(`judge $${ledger.state.total_usd.toFixed(2)}; all ledgers $${ledger.globalTotal().toFixed(2)}`);

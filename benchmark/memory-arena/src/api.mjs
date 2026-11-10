@@ -37,14 +37,28 @@ export function costOf(model, u) {
     + (u.cache_creation_input_tokens ?? 0) * p.cw + (u.cache_read_input_tokens ?? 0) * p.cr) / 1e6;
 }
 
+// One ledger file per process (`ledger-<name>.json` in `dir`); the cap is checked against the SUM
+// of all ledger files in the directory, so parallel processes share one budget.
 export class Ledger {
-  constructor(file, capUsd) {
-    this.file = file;
+  constructor(dir, capUsd, name) {
+    this.dir = dir;
+    this.file = path.join(dir, `ledger-${name}.json`);
     this.cap = capUsd;
-    this.state = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : { total_usd: 0, calls: 0, by_model: {} };
+    this.state = fs.existsSync(this.file) ? JSON.parse(fs.readFileSync(this.file, 'utf8')) : { total_usd: 0, calls: 0, by_model: {} };
+  }
+  globalTotal() {
+    if (!fs.existsSync(this.dir)) return 0;
+    let t = 0;
+    for (const f of fs.readdirSync(this.dir)) {
+      if (!/^ledger-.*\.json$/.test(f)) continue;
+      const p = path.join(this.dir, f);
+      t += p === this.file ? this.state.total_usd : JSON.parse(fs.readFileSync(p, 'utf8')).total_usd;
+    }
+    return t;
   }
   check() {
-    if (this.state.total_usd >= this.cap) throw new BudgetExceeded(`API budget cap $${this.cap} reached ($${this.state.total_usd.toFixed(2)})`);
+    const t = this.globalTotal();
+    if (t >= this.cap) throw new BudgetExceeded(`API budget cap $${this.cap} reached ($${t.toFixed(2)})`);
   }
   add(model, usage, tag) {
     const c = costOf(model, usage);
@@ -81,9 +95,13 @@ export async function createMessage(body, { ledger, tag }) {
     } catch (e) {
       lastErr = e; await sleep(2000 * 2 ** attempt); continue;
     }
-    const text = await res.text();
+    let text;
+    try { text = await res.text(); } catch (e) { lastErr = e; await sleep(2000 * 2 ** attempt); continue; }
     if (res.ok) {
-      const msg = JSON.parse(text);
+      let msg;
+      // A truncated body under parallel load surfaced as "Unexpected end of JSON input" in the
+      // first main run; treat it as transient. (Such a call may still have been billed.)
+      try { msg = JSON.parse(text); } catch (e) { lastErr = new Error(`truncated response body (${text.length} bytes): ${e.message}`); ledger.state.truncated_bodies = (ledger.state.truncated_bodies ?? 0) + 1; await sleep(2000 * 2 ** attempt); continue; }
       msg._cost_usd = ledger.add(body.model, msg.usage, tag);
       return msg;
     }

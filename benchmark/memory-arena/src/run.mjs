@@ -34,7 +34,7 @@ fs.mkdirSync(STORE_BASE, { recursive: true, mode: 0o700 });
 }
 const STORE_ROOT = path.join(STORE_BASE, PILOT ? 'pilot' : 'main', cellId);
 fs.mkdirSync(cellDir, { recursive: true });
-const ledger = new Ledger(path.join(RESULTS, 'ledger.json'), CAP);
+const ledger = new Ledger(path.join(RESULTS, 'ledgers'), CAP, cellId);
 
 export const BASE_PROMPT = `You are a personal AI assistant for Elin Varg. You have a persistent memory system. Every conversation starts with no knowledge of earlier conversations: the only thing that carries over between conversations is what is stored in your memory system.
 
@@ -80,6 +80,12 @@ async function phaseIngestProbe() {
     if (PHASES.includes('ingest')) {
       const have = done('ingest.jsonl');
       const sessions = PILOT ? scenario.sessions.slice(0, 2) : scenario.sessions;
+      const prev = path.join(cellDir, 'meta-main.json');
+      if (sessions.every((s) => have.has(s.id)) && fs.existsSync(prev)) {
+        // Resumed run: keep the original post-ingest snapshot/metrics instead of re-snapshotting after probes.
+        const old = JSON.parse(fs.readFileSync(prev, 'utf8'));
+        Object.assign(meta, { embeddings_after_ingest: old.embeddings_after_ingest, store_after_ingest: old.store_after_ingest, resumed: true });
+      }
       for (const s of sessions) {
         if (have.has(s.id)) continue;
         if (arm.setClock) await arm.setClock(`${s.date}T10:00:00+02:00`);
@@ -88,8 +94,10 @@ async function phaseIngestProbe() {
         console.log(`[${cellId}] ingest ${s.id} tools=${r.trace.tool_calls.length} $${r.trace.cost_usd.toFixed(4)} ${r.trace.error ?? ''}`);
       }
       if (arm.setClock) await arm.setClock('');
-      if (arm.drainEmbeddings) meta.embeddings_after_ingest = await arm.drainEmbeddings();
-      meta.store_after_ingest = snapshotStore(arm, 'after-ingest');
+      if (!meta.resumed) {
+        if (arm.drainEmbeddings) meta.embeddings_after_ingest = await arm.drainEmbeddings();
+        meta.store_after_ingest = snapshotStore(arm, 'after-ingest');
+      }
     }
     if (PHASES.includes('probe')) {
       const have = done('probe.jsonl');
