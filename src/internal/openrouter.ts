@@ -30,6 +30,13 @@ export interface OpenRouterCallOptions {
   temperature?: number;
   /** X-Title header value. Defaults to "Munin Memory". */
   title?: string;
+  /** Caller-supplied cancellation (e.g. process shutdown). Aborts the request and body read. */
+  signal?: AbortSignal;
+  /**
+   * Hard deadline for the whole call (request + body read). Defaults to
+   * DEFAULT_LLM_TIMEOUT_MS so a hung provider can never block forever.
+   */
+  timeoutMs?: number;
 }
 
 export interface ChatCompletionResponse {
@@ -61,6 +68,8 @@ export class OpenRouterHttpError extends Error {
 
 const DEFAULT_LLM_BASE_URL = "https://openrouter.ai/api/v1";
 const DEFAULT_MAX_TOKENS = 4096;
+/** Default per-call deadline; generous for slow local models, finite for hung providers. */
+export const DEFAULT_LLM_TIMEOUT_MS = 120_000;
 const DEFAULT_TITLE = "Munin Memory";
 const DEFAULT_HTTP_REFERER = "https://github.com/Magnus-Gille/munin-memory";
 
@@ -166,10 +175,14 @@ export async function callOpenRouter(opts: OpenRouterCallOptions): Promise<ChatC
 
   const endpoint = `${getLlmBaseUrl()}/chat/completions`;
 
+  const deadline = AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_LLM_TIMEOUT_MS);
+  const signal = opts.signal ? AbortSignal.any([opts.signal, deadline]) : deadline;
+
   const response = await fetch(endpoint, {
     method: "POST",
     headers,
     body: JSON.stringify(body),
+    signal,
   });
 
   if (!response.ok) {
@@ -178,7 +191,7 @@ export async function callOpenRouter(opts: OpenRouterCallOptions): Promise<ChatC
     throw new OpenRouterHttpError(response.status, detail, retryAfterMs(response));
   }
 
-  return response.json() as Promise<ChatCompletionResponse>;
+  return (await response.json()) as ChatCompletionResponse;
 }
 
 /**

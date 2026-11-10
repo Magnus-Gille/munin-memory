@@ -112,6 +112,13 @@ function filterCrossZoneRefs(
   return allowed;
 }
 
+const SHUTDOWN_ABORT_ERROR = "aborted: consolidation worker stopped";
+
+/** Expected shutdown cancellation: reported quietly, never as an unexpected failure. */
+function isShutdownAbort(signal: AbortSignal): boolean {
+  return signal.aborted;
+}
+
 function unexpectedConsolidationError(): string {
   const reference = reportUnexpectedError("consolidation failed");
   return `Consolidation failed unexpectedly. Contact the server operator with error reference ${reference ?? "unavailable"}.`;
@@ -160,6 +167,10 @@ let workerTimer: ReturnType<typeof setTimeout> | null = null;
 let workerProcessing = false;
 let workerInflightPromise: Promise<void> | null = null;
 let workerDb: Database.Database | null = null;
+// Aborted by stopConsolidationWorker() so an in-flight LLM call is cancelled on
+// shutdown instead of being abandoned (MUNIN-424). Replaced after each abort so
+// the worker can be restarted (tests, re-init).
+let llmAbortController = new AbortController();
 
 // Health tracking state (for loud failure signal)
 let lastError: string | null = null;
@@ -170,13 +181,17 @@ let lastWrittenStatus: "healthy" | "failing" | "tripped" | null = null;
 
 // --- API call ---
 
-async function callOpenRouter(prompt: string): Promise<ChatCompletionResponse> {
+async function callOpenRouter(
+  prompt: string,
+  signal: AbortSignal = llmAbortController.signal,
+): Promise<ChatCompletionResponse> {
   return callLlm({
     model: config.model,
     messages: [{ role: "user", content: prompt }],
     apiKey,
     maxTokens: 4096,
     title: "Munin Memory Consolidation",
+    signal,
   });
 }
 
@@ -337,10 +352,18 @@ export async function stopConsolidationWorker(): Promise<void> {
     clearTimeout(workerTimer);
     workerTimer = null;
   }
+  // Cancel any in-flight LLM call. Nothing is persisted for an aborted run, so
+  // the batch's logs stay unincorporated and are retried on the next start.
+  // The aborted controller stays installed until the worker has settled, so
+  // every attempt of the in-flight batch (including retries) sees the abort.
+  const stoppedController = llmAbortController;
+  stoppedController.abort();
   try {
     // A rejecting in-flight batch must not skip the state reset below.
     if (workerInflightPromise) await workerInflightPromise;
   } finally {
+    // Only now is it safe to arm a fresh controller for a later restart.
+    if (llmAbortController === stoppedController) llmAbortController = new AbortController();
     workerInflightPromise = null;
     if (workerTimer !== null) {
       clearTimeout(workerTimer);
@@ -423,6 +446,7 @@ export async function processConsolidationBatch(): Promise<void> {
   }
 
   workerProcessing = true;
+  const batchSignal = llmAbortController.signal;
 
   try {
     const db = workerDb;
@@ -439,6 +463,13 @@ export async function processConsolidationBatch(): Promise<void> {
 
     for (const candidate of candidates) {
       const result = await consolidateNamespace(db, candidate.namespace);
+
+      // Shutdown abort: not an API failure. Leave breaker/health untouched, stop
+      // the batch; the namespace's logs remain unincorporated for the next run.
+      if (batchSignal.aborted) {
+        console.log(`Consolidation batch aborted by shutdown at ${candidate.namespace}; logs left unincorporated`);
+        break;
+      }
 
       // A provider-policy skip is expected and must not trip the API failure
       // circuit breaker. It remains eligible for processing if policy changes.
@@ -794,6 +825,7 @@ async function callAndParseSynthesis(
   prompt: string,
   maxAttempts: number = config.maxAttempts,
   onResponse?: () => void,
+  signal?: AbortSignal,
 ): Promise<{ response: ChatCompletionResponse; result: SynthesisResult; durationMs: number }> {
   // Re-roll on an unparseable response before surfacing the error. The model's
   // malformed-JSON failures are non-deterministic, so a fresh sample usually
@@ -806,7 +838,10 @@ async function callAndParseSynthesis(
   const startTime = Date.now();
   let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    signal?.throwIfAborted();
     const response = await doCall(prompt);
+    // A response that lands after cancellation is discarded, never retried.
+    signal?.throwIfAborted();
     // Keep snapshot failures outside the parse retry: a stale prompt cannot be
     // made current by asking the model for another completion.
     onResponse?.();
@@ -861,7 +896,8 @@ export async function consolidateNamespace(
     statusTagsParsed,
   );
 
-  const doCall = callApi ?? callOpenRouter;
+  const signal = llmAbortController.signal;
+  const doCall = callApi ?? ((p: string) => callOpenRouter(p, signal));
   if (!callApi && apiKey === null && !isCustomLlmBaseUrl()) {
     return makeRunResult(namespace, { error: "No API key available — consolidation not initialized" });
   }
@@ -875,6 +911,7 @@ export async function consolidateNamespace(
       prompt,
       config.maxAttempts,
       () => assertSnapshotCurrent(db, snapshot),
+      signal,
     );
 
     // Step 5: Discover orphaned cross-references via scanner, merge with LLM refs.
@@ -889,9 +926,13 @@ export async function consolidateNamespace(
     );
 
     // Step 6: Write results
+    signal.throwIfAborted();
     assertSnapshotCurrent(db, snapshot);
     return persistRunResults(db, snapshot, result, mergedRefs, scannerOrphans, response, snapshot.metadata, durationMs);
   } catch {
+    if (isShutdownAbort(signal)) {
+      return makeRunResult(namespace, { duration_ms: Date.now() - startTime, error: SHUTDOWN_ABORT_ERROR });
+    }
     return makeRunResult(namespace, {
       duration_ms: Date.now() - startTime,
       error: unexpectedConsolidationError(),
@@ -964,7 +1005,8 @@ export async function previewConsolidationNamespace(
   if (policyDenial) return policyDenial;
   const prompt = buildSynthesisPrompt(namespace, existingStatus?.content ?? null, existingSynthesis?.content ?? null, logs,
     existingStatus ? parseTags(existingStatus.tags) : undefined, true);
-  const doCall = callApi ?? callOpenRouter;
+  const signal = llmAbortController.signal;
+  const doCall = callApi ?? ((p: string) => callOpenRouter(p, signal));
   if (!callApi && apiKey === null && !isCustomLlmBaseUrl()) {
     return makeRunResult(namespace, { error: "No API key available — consolidation not initialized" });
   }
@@ -975,6 +1017,7 @@ export async function previewConsolidationNamespace(
       prompt,
       config.maxAttempts,
       () => assertSnapshotCurrent(db, snapshot),
+      signal,
     );
     const groundingError = validateStrictGrounding(result, logs);
     if (groundingError) return makeRunResult(namespace, { duration_ms: durationMs, error: `grounding_rejected: ${groundingError}` });
@@ -987,6 +1030,7 @@ export async function previewConsolidationNamespace(
       tags: [],
       cross_references: [],
     };
+    signal.throwIfAborted();
     assertSnapshotCurrent(db, snapshot);
     return makeRunResult(namespace, {
       logs_processed: logs.length,
@@ -997,6 +1041,9 @@ export async function previewConsolidationNamespace(
       source_fingerprint: snapshot.fingerprint,
     });
   } catch {
+    if (isShutdownAbort(signal)) {
+      return makeRunResult(namespace, { duration_ms: Date.now() - startedAt, error: SHUTDOWN_ABORT_ERROR });
+    }
     return makeRunResult(namespace, { duration_ms: Date.now() - startedAt, error: unexpectedConsolidationError() });
   }
 }
