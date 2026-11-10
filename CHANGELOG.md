@@ -8,6 +8,13 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Changed
+
+- `scripts/backup-to-nas.sh` now snapshots with `VACUUM INTO` instead of the
+  online `.backup` command, which could not finish under continuous writes
+  (MUNIN-421), and logs a timestamp per step. Integrity check, retention and
+  destinations are unchanged.
+
 ### Security
 
 - Hardened transitive dependency floors for `@hono/node-server` (GHSA-rmxm-3fg6-px4f),

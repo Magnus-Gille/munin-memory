@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -55,11 +55,13 @@ function stubSqlite3(binDir: string): void {
   writeExecutable(
     join(binDir, "sqlite3"),
     `#!/bin/bash
-if [[ "\$2" == .backup* ]]; then
-  : > "\${2#.backup }"
+sql="\${@: -1}"
+if [[ "\$sql" == "VACUUM INTO '"* ]]; then
+  f="\${sql#VACUUM INTO \\'}"
+  : > "\${f%\\'}"
   exit 0
 fi
-if [[ "\$2" == *integrity_check* ]]; then
+if [[ "\$sql" == *integrity_check* ]]; then
   echo ok
   exit 0
 fi
@@ -67,6 +69,8 @@ exit 0
 `,
   );
 }
+
+const hasSqlite3 = spawnSync("sqlite3", ["--version"]).status === 0;
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -598,5 +602,88 @@ exit 1
     // Nothing may be written through the escaping link.
     expect(existsSync(join(outside, "memory.db"))).toBe(false);
     expect(spawnSync("ls", [outside], { encoding: "utf8" }).stdout.trim()).toBe("");
+  });
+});
+
+describe("snapshot under concurrent writes (MUNIN-421)", () => {
+  it.skipIf(!hasSqlite3)("completes with VACUUM INTO while another connection writes, and the integrity check passes", async () => {
+    const scratch = makeScratch();
+    const binDir = join(scratch, "bin");
+    const remoteDir = join(scratch, "remote");
+    const staging = join(scratch, "staging");
+    mkdirSync(binDir, { recursive: true });
+    mkdirSync(remoteDir, { recursive: true });
+    mkdirSync(staging, { recursive: true });
+    const db = join(scratch, "memory.db");
+    const seed = spawnSync(
+      "sqlite3",
+      [db, "PRAGMA journal_mode=WAL; CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT); WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x<20000) INSERT INTO t(v) SELECT hex(randomblob(64)) FROM c;"],
+      { encoding: "utf8" },
+    );
+    expect(seed.status).toBe(0);
+
+    // Stubbed remote copy: no network, no NAS. "ssh" runs nothing remote but
+    // answers the size probe; "rsync" copies into a local directory.
+    writeExecutable(
+      join(binDir, "fake-ssh"),
+      `#!/bin/bash
+if [[ "$*" == *"stat -c"* ]]; then
+  f=$(printf '%s' "$*" | grep -o "memory-[0-9-]*[.]db" | head -1)
+  stat -c '%s' "${remoteDir}/$(basename "$f")" 2>/dev/null || stat -f '%z' "${remoteDir}/$(basename "$f")"
+fi
+exit 0
+`,
+    );
+    writeExecutable(join(binDir, "fake-rsync"), `#!/bin/bash\ncp "$2" "${remoteDir}/$(basename "\${3#*:}")"\n`);
+
+    // Concurrent writer: a separate connection committing continuously.
+    const stopFile = join(scratch, "stop");
+    const spawnWriter = () => spawn(
+      "bash",
+      ["-c", `while [ ! -e "${stopFile}" ]; do sqlite3 "${db}" "PRAGMA busy_timeout=5000; INSERT INTO t(v) SELECT hex(randomblob(64)) FROM t LIMIT 200;" >/dev/null 2>&1; done`],
+      { stdio: "ignore" },
+    );
+    // Several aggressive writers to provoke "database is locked" on an unguarded snapshot.
+    const writers = [spawnWriter(), spawnWriter(), spawnWriter()];
+    try {
+      await new Promise((r) => setTimeout(r, 300));
+      const result = spawnSync("bash", [backupScript], {
+        env: {
+          ...scriptEnv(),
+          HOME: scratch,
+          MUNIN_BACKUP_DB: db,
+          ...(process.env.MUNIN_TEST_BUSY_TIMEOUT_MS ? { MUNIN_BACKUP_BUSY_TIMEOUT_MS: process.env.MUNIN_TEST_BUSY_TIMEOUT_MS } : {}),
+          MUNIN_BACKUP_STAGING: staging,
+          MUNIN_BACKUP_HOST: "backup@example.invalid",
+          MUNIN_BACKUP_REMOTE_DIR: remoteDir,
+          MUNIN_SSH_BIN: join(binDir, "fake-ssh"),
+          MUNIN_RSYNC_BIN: join(binDir, "fake-rsync"),
+        },
+        encoding: "utf8",
+        timeout: 60_000,
+      });
+      const out = `${result.stdout}\n${result.stderr}`;
+      expect(result.status, out).toBe(0);
+      expect(result.stderr).not.toContain("ERROR");
+      expect(result.stdout).toContain("Backup complete: memory-");
+      for (const marker of ["snapshot start", "snapshot done", "integrity_check ok", "transfer start", "retention done"]) {
+        expect(result.stdout).toContain(`[step] ${marker}`);
+      }
+      const names = spawnSync("ls", [remoteDir], { encoding: "utf8" }).stdout.trim().split("\n");
+      expect(names).toHaveLength(1);
+      const copy = join(remoteDir, names[0]!);
+      const check = spawnSync("sqlite3", [copy, "PRAGMA integrity_check;"], { encoding: "utf8" });
+      expect(check.stdout.trim()).toBe("ok");
+      expect(existsSync(join(staging, names[0]!))).toBe(false);
+    } finally {
+      writeFileSync(stopFile, "");
+      await Promise.all(writers.map((w) => new Promise((r) => w.once("exit", r))));
+    }
+  }, 90_000);
+
+  it("uses VACUUM INTO, not the online .backup API", () => {
+    const src = readFileSync(backupScript, "utf8");
+    expect(src).toContain("VACUUM INTO");
+    expect(src).not.toMatch(/sqlite3 "\$DB" "?'?\.backup/);
   });
 });
