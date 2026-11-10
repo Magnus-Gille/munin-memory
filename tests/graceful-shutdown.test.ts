@@ -418,8 +418,10 @@ describe("consolidation worker stop (#413)", () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     // Fixture-injected failure: the batch's per-namespace failure report throws,
     // which escapes processConsolidationBatch and rejects the in-flight promise.
-    errorSpy.mockImplementation((message: unknown) => {
-      if (typeof message === "string" && message.startsWith("Consolidation failed for")) {
+    // Shutdown aborts the in-flight call (MUNIN-424), so the batch now takes the
+    // abort path instead of the failure path; inject the failure there.
+    const abortLogSpy = vi.spyOn(console, "log").mockImplementation((message: unknown) => {
+      if (typeof message === "string" && message.startsWith("Consolidation batch aborted by shutdown")) {
         throw new Error("fixture injected batch failure");
       }
     });
@@ -448,6 +450,7 @@ describe("consolidation worker stop (#413)", () => {
     } finally {
       globalThis.fetch = originalFetch;
       warnSpy.mockRestore();
+      abortLogSpy.mockRestore();
     }
   });
 });

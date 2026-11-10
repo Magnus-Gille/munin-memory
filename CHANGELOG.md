@@ -18,6 +18,10 @@ changelog is the canonical record of what moved.
   marked failed for the rest of the session. Tune with
   `MUNIN_BRIDGE_NETWORK_RETRIES` and `MUNIN_BRIDGE_NETWORK_MAX_WAIT_MS`. Writes
   are still never retried after a network error.
+- `scripts/backup-to-nas.sh` now snapshots with `VACUUM INTO` instead of the
+  online `.backup` command, which could not finish under continuous writes
+  (MUNIN-421), and logs a timestamp per step. Integrity check, retention and
+  destinations are unchanged.
 
 ### Security
 

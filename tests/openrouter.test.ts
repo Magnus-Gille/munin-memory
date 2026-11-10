@@ -624,3 +624,28 @@ describe("checkOpenRouterKey (#168)", () => {
     expect(result.error).not.toContain(secret);
   });
 });
+
+describe("callOpenRouter — abort signal and deadline (MUNIN-424)", () => {
+  const hangingFetch = () =>
+    vi.fn((_url: unknown, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal!.reason), { once: true });
+      }),
+    );
+  let originalFetch: typeof globalThis.fetch;
+  beforeEach(() => { originalFetch = globalThis.fetch; });
+  afterEach(() => { globalThis.fetch = originalFetch; });
+
+  it("aborts when the caller signal aborts", async () => {
+    globalThis.fetch = hangingFetch() as unknown as typeof fetch;
+    const controller = new AbortController();
+    const call = callOpenRouter({ model: "m", messages: [], apiKey: "k", signal: controller.signal });
+    controller.abort();
+    await expect(call).rejects.toBeDefined();
+  });
+
+  it("aborts on its own deadline when nothing else does", async () => {
+    globalThis.fetch = hangingFetch() as unknown as typeof fetch;
+    await expect(callOpenRouter({ model: "m", messages: [], apiKey: "k", timeoutMs: 20 })).rejects.toBeDefined();
+  });
+});

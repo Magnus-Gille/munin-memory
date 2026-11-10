@@ -3,7 +3,11 @@ set -euo pipefail
 
 # Munin Memory SQLite backup.
 #
-# Uses sqlite3 .backup for a consistent snapshot (no file locking issues).
+# Uses sqlite3 `VACUUM INTO` for a consistent snapshot, like offsite-snapshot.sh.
+# The online `.backup` API restarts whenever the source changes, so under a
+# constantly writing embedding worker it can run for hours or never finish
+# (MUNIN-421: >2 h vs 94 s for VACUUM INTO on the same DB). VACUUM INTO reads
+# one WAL snapshot and does not block writers.
 # Filename format: memory-YYYY-MM-DD-HHMM.db (Heimdall parses this for freshness).
 #
 # TWO DESTINATION MODES, selected by configuration — never hardcoded, so this
@@ -206,6 +210,13 @@ assert_dest_on_mounted_fs() {
     fi
 }
 
+# VACUUM INTO takes a read lock on the live DB while the embedding worker writes;
+# without a busy timeout sqlite3 fails immediately with "database is locked (5)".
+SQLITE_OPTS=(-cmd ".timeout ${MUNIN_BACKUP_BUSY_TIMEOUT_MS:-60000}")
+
+# Per-step timestamps so a timeout can be located (MUNIN-421 follow-up).
+step() { echo "$(date -Iseconds) [step] $*"; }
+
 echo "$(date -Iseconds) Starting Munin backup (mode=${MODE})..."
 
 if [ "$MODE" = "local" ]; then
@@ -240,15 +251,23 @@ if [ "$AVAIL_KB" -lt "$NEED_KB" ]; then
 fi
 
 # ── 1. Consistent snapshot ───────────────────────────────────────────────────
-sqlite3 "$DB" ".backup $LOCAL_TMP"
+# VACUUM INTO refuses to overwrite an existing file, so clear any stale staging
+# file first. Escape single quotes for the SQL string literal.
+rm -f "$LOCAL_TMP" "${LOCAL_TMP}-journal" "${LOCAL_TMP}-wal" "${LOCAL_TMP}-shm"
+SQL_TMP=${LOCAL_TMP//\'/\'\'}
+step "snapshot start (VACUUM INTO ${LOCAL_TMP})"
+sqlite3 "${SQLITE_OPTS[@]}" "$DB" "VACUUM INTO '${SQL_TMP}'"
+step "snapshot done ($(size_bytes "$LOCAL_TMP" || echo '?') bytes)"
 
 # ── 2. Verify snapshot integrity ─────────────────────────────────────────────
-INTEGRITY=$(sqlite3 "$LOCAL_TMP" "PRAGMA integrity_check;" 2>&1)
+step "integrity_check start"
+INTEGRITY=$(sqlite3 "${SQLITE_OPTS[@]}" "$LOCAL_TMP" "PRAGMA integrity_check;" 2>&1)
 if [ "$INTEGRITY" != "ok" ]; then
     echo "ERROR: Integrity check failed: $INTEGRITY" >&2
     exit 1  # staging snapshot is removed by the EXIT trap
 fi
 SNAPSHOT_BYTES=$(size_bytes "$LOCAL_TMP")
+step "integrity_check ok"
 
 # ── 3. GFS retention, applied identically at either destination ──────────────
 # Keep the N most recent daily snapshots plus the M most recent Sunday ones.
@@ -308,6 +327,7 @@ fi
 REMOTE
 
 # ── 4. Deliver to the destination ────────────────────────────────────────────
+step "transfer start (mode=${MODE})"
 if [ "$MODE" = "remote" ]; then
     "$SSH_BIN" "$BACKUP_HOST" "mkdir -p '${BACKUP_REMOTE_DIR}'"
 
@@ -340,6 +360,7 @@ if [ "$MODE" = "remote" ]; then
         exit 69
     fi
 
+    step "transfer verified; retention start"
     "$SSH_BIN" "$BACKUP_HOST" "bash -s '${BACKUP_REMOTE_DIR}' '${KEEP_DAILY}' '${KEEP_SUNDAYS}'" <<<"$PRUNE_SCRIPT"
 else
     # Revalidate immediately before each mutation — the snapshot above is slow
@@ -376,9 +397,11 @@ else
         exit 69
     fi
 
+    step "transfer verified; retention start"
     bash -s "$BACKUP_DIR" "$KEEP_DAILY" "$KEEP_SUNDAYS" <<<"$PRUNE_SCRIPT"
 fi
 
 # ── 5. Staging cleanup is handled by the EXIT trap. ──────────────────────────
+step "retention done"
 "$STATUS_BIN" pass >/dev/null 2>&1 || true
 echo "$(date -Iseconds) Backup complete: ${FILENAME} (mode=${MODE})"
