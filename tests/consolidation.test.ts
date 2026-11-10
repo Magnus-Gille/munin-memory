@@ -1360,6 +1360,64 @@ describe("stopConsolidationWorker aborts an in-flight LLM call (MUNIN-424)", () 
     expect(getConsolidationHealth().last_error).toBeNull();
   });
 
+  it("emits no unexpected-failure diagnostic for an expected shutdown abort", async () => {
+    for (let i = 0; i < _consolidationConfig.minLogs; i++) {
+      appendLog(db, "projects/quiet", `Log ${i}`, []);
+    }
+    globalThis.fetch = vi.fn((_url: unknown, init?: RequestInit) =>
+      new Promise<Response>((_res, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal!.reason), { once: true });
+      })) as unknown as typeof fetch;
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      _setApiKey("test-key");
+      _setWorkerDb(db);
+      const batch = processConsolidationBatch();
+      await vi.waitFor(() => expect(globalThis.fetch).toHaveBeenCalled());
+      await stopConsolidationWorker();
+      await batch;
+      const out = [...errSpy.mock.calls, ...stderrSpy.mock.calls].map((c) => String(c[0])).join("\n");
+      expect(out).not.toMatch(/consolidation failed|error_reference/);
+    } finally {
+      errSpy.mockRestore();
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("does not retry a malformed response after shutdown lands between attempts", async () => {
+    for (let i = 0; i < _consolidationConfig.minLogs; i++) {
+      appendLog(db, "projects/retry", `Log ${i}`, []);
+    }
+    expect(_consolidationConfig.maxAttempts).toBeGreaterThan(1);
+    let stopPromise: Promise<void> | undefined;
+    const callApi = vi.fn(async (): Promise<ChatCompletionResponse> => {
+      stopPromise = stopConsolidationWorker(); // lands after the body, before parsing
+      return { choices: [{ message: { content: "not json" } }] };
+    });
+    const result = await consolidateNamespace(db, "projects/retry", callApi);
+    await stopPromise;
+    expect(callApi).toHaveBeenCalledTimes(1);
+    expect(result.error).toMatch(/aborted/);
+    expect(readState(db, "projects/retry", "synthesis")).toBeNull();
+  });
+
+  it("persists nothing when a valid response arrives after shutdown", async () => {
+    for (let i = 0; i < _consolidationConfig.minLogs; i++) {
+      appendLog(db, "projects/late", `Log ${i}`, []);
+    }
+    let stopPromise: Promise<void> | undefined;
+    const callApi = vi.fn(async (): Promise<ChatCompletionResponse> => {
+      stopPromise = stopConsolidationWorker();
+      return cannedResponse;
+    });
+    const result = await consolidateNamespace(db, "projects/late", callApi);
+    await stopPromise;
+    expect(result.error).toMatch(/aborted/);
+    expect(readState(db, "projects/late", "synthesis")).toBeNull();
+    expect(getConsolidationMetadata(db, "projects/late")).toBeNull();
+  });
+
   it("the call carries a finite deadline even without shutdown", async () => {
     for (let i = 0; i < _consolidationConfig.minLogs; i++) {
       appendLog(db, "projects/deadline", `Log ${i}`, []);
