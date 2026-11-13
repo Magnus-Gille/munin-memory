@@ -28,6 +28,9 @@ DB="${MUNIN_OFFSITE_DB:-$HOME/.munin-memory/memory.db}"           # live memory 
 STAGING="${MUNIN_OFFSITE_STAGING:-$HOME/.munin-memory/offsite-staging}"  # snapshot dir (becomes ROOT)
 SQLITE="${SQLITE_BIN:-sqlite3}"
 LOCK="${MUNIN_OFFSITE_LOCK:-$HOME/.munin-memory/offsite-snapshot.lock}"   # concurrency guard (outside STAGING)
+# VACUUM INTO needs a read lock on the live DB while writers commit; the sqlite3 CLI
+# default busy_timeout is 0 and fails at once with "database is locked (5)" (MUNIN-430).
+BUSY_TIMEOUT_MS="${MUNIN_OFFSITE_BUSY_TIMEOUT_MS:-60000}"
 LOG="${MIMIR_OFFSITE_LOG:-$HOME/.munin-memory/offsite-backup.log}"
 # Heimdall panel identity — mirror offsite-backup.sh's so a snapshot failure lands
 # on the SAME panel as a sync failure.
@@ -115,11 +118,11 @@ rm -f "$SNAP" "$SNAP-wal" "$SNAP-shm"
 SQL_SNAP=${SNAP//\'/\'\'}
 
 log "snapshotting ${DB} → ${SNAP} (VACUUM INTO)"
-"$SQLITE" "$DB" "VACUUM INTO '${SQL_SNAP}'" 2>>"$LOG" \
+"$SQLITE" -cmd ".timeout ${BUSY_TIMEOUT_MS}" "$DB" "VACUUM INTO '${SQL_SNAP}'" 2>>"$LOG" \
   || die "VACUUM INTO failed — snapshot not created, refusing to upload a live DB"
 
 # Verify the snapshot before it leaves the box (a corrupt snapshot is worse than none).
-INTEGRITY=$("$SQLITE" "$SNAP" "PRAGMA integrity_check;" 2>&1 || echo "integrity_check errored")
+INTEGRITY=$("$SQLITE" -cmd ".timeout ${BUSY_TIMEOUT_MS}" "$SNAP" "PRAGMA integrity_check;" 2>&1 || echo "integrity_check errored")
 if [ "$INTEGRITY" != "ok" ]; then
   rm -f "$SNAP" "$SNAP-wal" "$SNAP-shm"
   die "snapshot integrity_check failed: ${INTEGRITY}"
