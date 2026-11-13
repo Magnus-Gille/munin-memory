@@ -687,3 +687,67 @@ exit 0
     expect(src).not.toMatch(/sqlite3 "\$DB" "?'?\.backup/);
   });
 });
+
+describe("offsite snapshot under concurrent writes (MUNIN-430)", () => {
+  it.skipIf(!hasSqlite3)("VACUUM INTO succeeds while other connections write, and the integrity check passes", async () => {
+    const scratch = makeScratch();
+    const scriptsDir = join(scratch, "scripts");
+    mkdirSync(scriptsDir, { recursive: true });
+    const snapshotScript = join(scriptsDir, "offsite-snapshot.sh");
+    writeExecutable(snapshotScript, readFileSync(join(repoRoot, "scripts", "offsite-snapshot.sh"), "utf8"));
+    // Stub the shared push so the test stays hermetic: it only records the staging contents.
+    const handoffMarker = join(scratch, "handoff-ok");
+    writeExecutable(
+      join(scriptsDir, "offsite-backup.sh"),
+      `#!/bin/bash\n[ "$(ls "$MIMIR_OFFSITE_ROOT")" = "munin.sqlite" ] && : > "${handoffMarker}"\nexit 0\n`,
+    );
+    const db = join(scratch, "data", "memory.db");
+    mkdirSync(dirname(db), { recursive: true });
+    const seed = spawnSync(
+      "sqlite3",
+      [db, "PRAGMA journal_mode=WAL; CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT); WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x<20000) INSERT INTO t(v) SELECT hex(randomblob(64)) FROM c;"],
+      { encoding: "utf8" },
+    );
+    expect(seed.status).toBe(0);
+
+    const stopFile = join(scratch, "stop");
+    const spawnWriter = () => spawn(
+      "bash",
+      ["-c", `while [ ! -e "${stopFile}" ]; do sqlite3 "${db}" "PRAGMA busy_timeout=5000; INSERT INTO t(v) SELECT hex(randomblob(64)) FROM t LIMIT 200;" >/dev/null 2>&1; done`],
+      { stdio: "ignore" },
+    );
+    const writers = [spawnWriter(), spawnWriter(), spawnWriter()];
+    try {
+      await new Promise((r) => setTimeout(r, 300));
+      const result = spawnSync("bash", [snapshotScript], {
+        env: {
+          ...scriptEnv(),
+          HOME: scratch,
+          MUNIN_OFFSITE_DB: db,
+          MUNIN_OFFSITE_STAGING: join(scratch, "staging"),
+          MUNIN_OFFSITE_LOCK: join(scratch, "snapshot.lock"),
+          MIMIR_OFFSITE_LOG: join(scratch, "offsite.log"),
+          // Test hook: force 0 to reproduce the pre-fix behaviour (red run).
+          ...(process.env.MUNIN_TEST_BUSY_TIMEOUT_MS ? { MUNIN_OFFSITE_BUSY_TIMEOUT_MS: process.env.MUNIN_TEST_BUSY_TIMEOUT_MS } : {}),
+        },
+        encoding: "utf8",
+        timeout: 60_000,
+      });
+      const out = `${result.stdout}\n${result.stderr}`;
+      expect(result.status, out).toBe(0);
+      expect(result.stderr).toContain("integrity_check=ok");
+      expect(existsSync(handoffMarker)).toBe(true);
+      const check = spawnSync("sqlite3", [join(scratch, "staging", "munin.sqlite"), "PRAGMA integrity_check;"], { encoding: "utf8" });
+      expect(check.stdout.trim()).toBe("ok");
+    } finally {
+      writeFileSync(stopFile, "");
+      await Promise.all(writers.map((w) => new Promise((r) => w.once("exit", r))));
+    }
+  }, 90_000);
+
+  it("sets a busy timeout on both sqlite3 calls", () => {
+    const src = readFileSync(join(repoRoot, "scripts", "offsite-snapshot.sh"), "utf8");
+    expect(src).toMatch(/"\$SQLITE" -cmd "\.timeout \$\{BUSY_TIMEOUT_MS\}" "\$DB" "VACUUM INTO/);
+    expect(src).toMatch(/"\$SQLITE" -cmd "\.timeout \$\{BUSY_TIMEOUT_MS\}" "\$SNAP"/);
+  });
+});

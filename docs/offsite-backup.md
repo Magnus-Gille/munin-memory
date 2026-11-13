@@ -64,6 +64,11 @@ MIMIR_OFFSITE_MAX_DELETE_PCT=25
 The `MIMIR_OFFSITE_*` prefix is retained for compatibility with the shared
 backup implementation. It does not require the Mimir service.
 
+`offsite-snapshot.sh` applies a sqlite busy timeout to the `VACUUM INTO` and
+integrity-check calls (`MUNIN_OFFSITE_BUSY_TIMEOUT_MS`, default 60000) so a
+concurrent writer cannot make the snapshot fail with `database is locked`
+(MUNIN-430; same pattern as `MUNIN_BACKUP_BUSY_TIMEOUT_MS` below).
+
 ## NAS backup snapshot method
 
 `scripts/backup-to-nas.sh` takes its snapshot with `sqlite3 ... "VACUUM INTO"`,
