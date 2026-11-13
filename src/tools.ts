@@ -4700,8 +4700,8 @@ function applyPreparedReviewOperation(
         operation.action !== "memory_update_status" && operation.supersedes
       ) ? [operation.supersedes] : [],
       intentionalOverwrite: Boolean(
-        operation.action !== "memory_update_status"
-          && (operation.supersedes || operation.expected_updated_at),
+        operation.expected_updated_at
+          || (operation.action !== "memory_update_status" && operation.supersedes),
       ),
     },
     warnings,
@@ -7068,7 +7068,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_review",
     description:
-      "Act on durable proposals from `memory_extract persist:true`. Scoped to the current session and principal by default (other sessions' IDs look missing); `scope:\"principal\"` widens to the same principal's other sessions, never another principal. `list`/`get` inspect; `preview` is read-only: success includes preview_wrote_memory:false, `approval_would_write_memory` and `approval_status` (would_write|would_conflict|duplicate_noop|not_approvable); `approval_error` and `persisted_status` are optional, `exact_operation` may be omitted for non-approvable items, and request errors such as `payload_expired` omit effect fields; `edit`/`decline` while reviewing; `approve` applies it through the normal authorization, classification, secret and CAS gates; `prepare_undo` creates a correcting proposal for an approved item. Only `approve` changes memory.",
+      "Act on durable proposals from `memory_extract persist:true`. Scoped to the current session and principal by default; `scope:\"principal\"` widens to the same principal's other sessions, never another principal. `list`/`get` inspect; `preview` is read-only: success includes preview_wrote_memory:false, `approval_would_write_memory` and `approval_status` (would_write|would_conflict|duplicate_noop|not_approvable); `approval_error` and `persisted_status` are optional, `exact_operation` may be omitted for non-approvable items, and request errors such as `payload_expired` omit effect fields; `edit`/`decline` while reviewing; `approve` applies it through normal authorization, classification, secret and CAS gates; `prepare_undo` creates a correcting proposal for an approved item. Only `approve` changes memory.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -7083,7 +7083,11 @@ const TOOL_DEFINITIONS = [
         },
         proposal_id: {
           type: "string",
-          description: "Required except for list. Alias: id.",
+          description: "Required except for list.",
+        },
+        id: {
+          type: "string",
+          description: "Alias of proposal_id.",
         },
         status: {
           type: "string",
@@ -12401,22 +12405,24 @@ export function registerTools(
               if (redactedSourcesSummary) {
                 attentionResult.redacted_sources = redactedSourcesSummary;
               }
+              const scopedRedactedStatuses = visibleTrackedStatuses.redacted.filter((entry) =>
+                matchesNamespacePrefix(entry.namespace, attentionArgs.namespace_prefix)
+              );
+              const scopedRedactedSummary = summarizeRedactedSources(ctx, scopedRedactedStatuses);
               const trackedStatusesInScope = trackedStatusAssessments.filter((assessment) =>
                 matchesNamespacePrefix(assessment.row.namespace, attentionArgs.namespace_prefix)
-              ).length + visibleTrackedStatuses.redacted.filter((entry) =>
-                matchesNamespacePrefix(entry.namespace, attentionArgs.namespace_prefix)
-              ).length;
+              ).length + scopedRedactedStatuses.length;
               if (
                 limitedItems.length === 0
-                && !redactedSourcesSummary
+                && !scopedRedactedSummary
                 && trackedStatusesInScope === 0
                 && typeof attentionArgs.namespace_prefix === "string"
                 && attentionArgs.namespace_prefix !== ""
               ) {
                 attentionResult.message = `No tracked statuses were found under prefix "${attentionArgs.namespace_prefix}"; nothing was examined.`;
-              } else if (limitedItems.length === 0 && !redactedSourcesSummary) {
+              } else if (limitedItems.length === 0 && !scopedRedactedSummary) {
                 attentionResult.message = "All tracked projects appear healthy. No items need attention.";
-              } else if (limitedItems.length === 0 && redactedSourcesSummary) {
+              } else if (limitedItems.length === 0 && scopedRedactedSummary) {
                 attentionResult.message = "No attention items are visible on this connection.";
               }
 
