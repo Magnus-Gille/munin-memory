@@ -6943,7 +6943,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_orient",
     description:
-      `\`memory_orient\` is the session handshake: call it as the first memory operation of every conversation when it is callable. If deferred tool discovery did not expose it, use \`memory_status\` or \`memory_resume\` instead. Returns conventions, a dashboard computed from projects/* and clients/* status entries (grouped by lifecycle; demo and finished task namespaces hidden), maintenance suggestions, and optionally a namespace overview. \`detail\`: \`${DEFAULT_ORIENT_DETAIL}\` (default) for routine handshakes; \`beginner\` for the mental model, tool index, workflows and safe write examples without live data; \`standard\`/\`full\` for more. Follow with \`memory_resume\` for a targeted pack. \`response_budget_meta\` reports any truncation.`,
+      `\`memory_orient\` is the session handshake: call it as the first memory operation of every conversation when it is callable. If deferred tool discovery did not expose it, use \`memory_status\` or \`memory_resume\` instead. Returns conventions, a dashboard computed from projects/* and clients/* status entries (grouped by lifecycle; demo and finished task namespaces hidden), maintenance suggestions, and optionally a namespace overview. \`detail\`: \`${DEFAULT_ORIENT_DETAIL}\` (default) for routine handshakes; \`beginner\` for the mental model, tool index, workflows and safe write examples without live data; \`standard\`/\`full\` for more. Follow with \`memory_resume\` for a targeted pack.`,
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -7062,7 +7062,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_review",
     description:
-      "Act on durable proposals from `memory_extract persist:true`. Scoped to the current session and principal by default (other sessions' IDs look missing); `scope:\"principal\"` widens to the same principal's other sessions, never another principal. `list`/`get` inspect; `preview` shows the exact operation and the pure-read approval effect (`approval_status`: would_write|would_conflict|duplicate_noop|not_approvable); `edit`/`decline` while reviewing; `approve` applies it through the normal authorization, classification, secret and CAS gates; `prepare_undo` creates a correcting proposal for an approved item. Only `approve` changes memory.",
+      "Act on durable proposals from `memory_extract persist:true`. Scoped to the current session and principal by default (other sessions' IDs look missing); `scope:\"principal\"` widens to the same principal's other sessions, never another principal. `list`/`get` inspect; `preview` is read-only: success includes preview_wrote_memory:false, `approval_would_write_memory` and `approval_status` (would_write|would_conflict|duplicate_noop|not_approvable); `approval_error` and `persisted_status` are optional, `exact_operation` may be omitted for non-approvable items, and request errors such as `payload_expired` omit effect fields; `edit`/`decline` while reviewing; `approve` applies it through the normal authorization, classification, secret and CAS gates; `prepare_undo` creates a correcting proposal for an approved item. Only `approve` changes memory.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -7200,7 +7200,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_write",
     description:
-      "Store or replace a state entry (namespace + key). For tracked `projects/*` or `clients/*` status, prefer `memory_update_status`; omitting a lifecycle tag preserves the existing one. Classification floors and secret rejection apply to every write. Use `expected_updated_at` for compare-and-swap, `create_if_absent` for an atomic first write, `patch` for partial edits, `valid_until` for soft expiry, and `supersedes` to correct while keeping history. Returns the stored `classification` and an advisory `intake` report.",
+      "Store or replace a state entry (namespace + key). For tracked `projects/*` or `clients/*` status, prefer `memory_update_status`; omitting a lifecycle tag preserves the existing one. Classification floors and secret rejection apply to every write. Use `expected_updated_at` for compare-and-swap, `create_if_absent` for an atomic first write, `patch` for partial edits, and `supersedes` to correct while keeping history. Returns the stored `classification` and an advisory `intake` report.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -7318,7 +7318,7 @@ const TOOL_DEFINITIONS = [
         valid_until: {
           type: ["string", "null"],
           description:
-            "ISO 8601 soft-expiry review horizon; null clears, omit to keep. Expired statuses stay directly readable, surface in memory_attention and are hidden from broad search.",
+            "ISO 8601 soft-expiry review horizon; null clears, omit to keep. Expired statuses stay directly readable, surface in memory_attention when include_expiring is on, and are hidden from broad search.",
         },
         validate_only: {
           type: "boolean",
@@ -7400,7 +7400,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_query",
     description:
-      "Search memories (`search_mode`: hybrid default, lexical, semantic) or browse by filters without a query. Results are ordered by relevance with bounded structural and recency adjustments; broad orientation and attention queries rank tracked status first. Expired state is hidden unless `include_expired`. Pages default to 10 (max 50); pass `next_cursor` as `cursor` to continue (snapshot expires after 5 minutes; only `limit` may change). The mode rules define the retrieval candidate set; canonical orientation and blocked/needs-attention entries may then be injected, join the frozen final result set and count in `total_matched`. `total_matched` is a lower bound when `retrieval.candidates_truncated` (500-candidate cap).",
+      "Search memories (`search_mode`: hybrid default, lexical, semantic) or browse by filters without a query. Expired state is hidden unless `include_expired`. Pages default to 10 (max 50); pass `next_cursor` as `cursor` to continue (snapshot expires after 5 minutes; only `limit` may change). The mode rules define the retrieval candidate set; canonical orientation and blocked/needs-attention entries may then be injected, join the frozen final result set and count in `total_matched`. `total_matched` is a lower bound when `retrieval.candidates_truncated` (500-candidate cap).",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -7555,7 +7555,7 @@ const TOOL_DEFINITIONS = [
         namespace: { type: "string", description: "Exact authorized namespace that owns the evidence." },
         idempotency_key: { type: "string", description: "Required UUID for append; stable across retries." },
         record: { type: "object", description: "One closed v1 observation or assessment object." },
-        expected_updated_at: { type: "string", description: "Required with a correction." },
+        expected_updated_at: { type: "string", description: "Required with a correction: the target's exact current `updated_at`." },
         classification: { type: "string", enum: ["public", "internal", "client-confidential", "client-restricted"] },
         producer_principal_id: { type: "string", description: "Owner-only source principal filter." },
         repo_owner: { type: "string" },
@@ -7566,7 +7566,7 @@ const TOOL_DEFINITIONS = [
         model: { type: "string", description: "Exact actual_worker.observed_model match." },
         rubric_version: { type: "string", enum: ["changeability-1.0"] },
         limit: { type: "integer", minimum: 1, maximum: 100 },
-        cursor: { type: "string" },
+        cursor: { type: "string", description: "Export `next_cursor` from an unexpired snapshot." },
       },
       required: ["action", "namespace"],
       additionalProperties: false,
@@ -7575,7 +7575,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_list",
     description:
-      "Browse memory. Without namespace: visible namespaces with counts and last activity, paged by `limit`/`offset`. With namespace: its state keys, log count and recent log previews (paging rejected). Demo and completed task namespaces are hidden by default.",
+      "Browse memory. Without namespace: visible namespaces with counts and last activity, paged by `limit`/`offset`. With namespace: its state keys, log count and recent log previews; non-default paging is rejected. Demo and completed task namespaces are hidden by default.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -7659,7 +7659,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_insights",
     description:
-      "Per-entry retrieval analytics: impressions, opens, follow-up writes or logs, and staleness when opened. Entries need `min_impressions` (default 3); otherwise a `message` explains the empty result. `aggregates` are global across namespaces; only `entries` is namespace-filtered.",
+      "Per-entry retrieval analytics: impressions, opens, follow-up writes or logs, and staleness when opened. Entries need `min_impressions` (default 3). `aggregates` are global across namespaces; only `entries` is namespace-filtered.",
     inputSchema: {
       type: "object" as const,
       properties: {

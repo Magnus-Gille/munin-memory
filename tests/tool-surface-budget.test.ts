@@ -83,4 +83,34 @@ describe("MCP tool surface token budget", () => {
     expect(description("memory_query")).toContain("include_expired");
     expect(description("memory_history")).toContain("mutually exclusive");
   });
+
+  it("keeps response-contract guidance flagged by cross-model review (PR #432)", () => {
+    const byName = new Map(tools.map((tool) => [tool.name, tool]));
+    const property = (name: string, prop: string) =>
+      ((byName.get(name)?.inputSchema.properties as Record<string, { description?: string }> | undefined)?.[prop]
+        ?.description) ?? "";
+
+    // memory_review preview: read-only effect fields, optional fields, and error omission.
+    const review = byName.get("memory_review")?.description ?? "";
+    for (const fragment of [
+      "preview_wrote_memory:false",
+      "approval_would_write_memory",
+      "`approval_error` and `persisted_status` are optional",
+      "`exact_operation` may be omitted",
+      "`payload_expired`",
+      "omit effect fields",
+    ]) {
+      expect(review, `memory_review should mention ${fragment}`).toContain(fragment);
+    }
+
+    // memory_code_health: CAS source and export continuation.
+    expect(property("memory_code_health", "expected_updated_at")).toContain("exact current `updated_at`");
+    expect(property("memory_code_health", "cursor")).toContain("next_cursor");
+
+    // memory_list rejects only non-default paging with a namespace.
+    expect(byName.get("memory_list")?.description).toContain("non-default paging is rejected");
+
+    // Expired statuses surface in attention only when include_expiring is enabled.
+    expect(property("memory_update_status", "valid_until")).toContain("include_expiring");
+  });
 });

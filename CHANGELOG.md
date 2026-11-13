@@ -12,7 +12,7 @@ changelog is the canonical record of what moved.
 
 - MCP tool descriptions and input-schema prose are rewritten for brevity
   (MUNIN-431): the `tools/list` payload sent with every request shrinks from
-  ~55,000 to ~30,900 characters (about 15k to 8.5k tokens). Redundant schema
+  ~55,000 to ~31,000 characters (about 15k to 8.6k tokens). Redundant schema
   `title` fields and per-item tag examples are removed. Tool names, argument
   names, types, enums, patterns, required fields, behaviour, authorization and
   untrusted-content handling are unchanged. A ratchet test
