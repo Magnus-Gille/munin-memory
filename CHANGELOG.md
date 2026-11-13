@@ -18,6 +18,10 @@ changelog is the canonical record of what moved.
   untrusted-content handling are unchanged. A ratchet test
   (`tests/tool-surface-budget.test.ts`) and a measurement script
   (`benchmark/tool-surface/measure.ts`) guard the size.
+- `scripts/offsite-snapshot.sh` now sets a sqlite busy timeout
+  (`MUNIN_OFFSITE_BUSY_TIMEOUT_MS`, default 60000) on `VACUUM INTO` and the
+  integrity check, avoiding `database is locked (5)` under concurrent writers
+  (MUNIN-430).
 - `scripts/backup-to-nas.sh` now snapshots with `VACUUM INTO` instead of the
   online `.backup` command, which could not finish under continuous writes
   (MUNIN-421), and logs a timestamp per step. Integrity check, retention and
