@@ -10,6 +10,14 @@ changelog is the canonical record of what moved.
 
 ### Changed
 
+- MCP tool descriptions and input-schema prose are rewritten for brevity
+  (MUNIN-431): the `tools/list` payload sent with every request shrinks from
+  ~55,000 to ~31,000 characters (about 15k to 8.6k tokens). Redundant schema
+  `title` fields and per-item tag examples are removed. Tool names, argument
+  names, types, enums, patterns, required fields, behaviour, authorization and
+  untrusted-content handling are unchanged. A ratchet test
+  (`tests/tool-surface-budget.test.ts`) and a measurement script
+  (`benchmark/tool-surface/measure.ts`) guard the size.
 - The stdio bridge now retries read-only requests after a thrown network error
   for longer: up to five retries with about 0.25/1/2/4/8 s backoff and a 20 s
   total budget (previously two retries within about 0.65 s). A short
@@ -22,7 +30,6 @@ changelog is the canonical record of what moved.
   (`MUNIN_OFFSITE_BUSY_TIMEOUT_MS`, default 60000) on `VACUUM INTO` and the
   integrity check, avoiding `database is locked (5)` under concurrent writers
   (MUNIN-430).
-
 - `scripts/backup-to-nas.sh` now snapshots with `VACUUM INTO` instead of the
   online `.backup` command, which could not finish under continuous writes
   (MUNIN-421), and logs a timestamp per step. Integrity check, retention and
