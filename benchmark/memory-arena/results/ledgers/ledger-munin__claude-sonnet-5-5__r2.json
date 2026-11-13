@@ -1,19 +1,19 @@
 {
-  "total_usd": 4.923933699999999,
-  "calls": 372,
+  "total_usd": 5.438634599999999,
+  "calls": 407,
   "by_model": {
     "claude-sonnet-5-5": {
-      "usd": 4.923933699999999,
-      "calls": 372,
-      "input": 972,
-      "output": 89386,
-      "cache_write": 938535,
-      "cache_read": 8408961
+      "usd": 5.438634599999999,
+      "calls": 407,
+      "input": 1066,
+      "output": 94430,
+      "cache_write": 1062286,
+      "cache_read": 9182438
     }
   },
   "by_tag": {
     "munin/ingest": 1.8877853,
     "munin/probe": 2.195720400000001,
-    "munin/scale": 0.8404280000000003
+    "munin/scale": 1.3551289
   }
 }

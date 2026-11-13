@@ -18,7 +18,10 @@ if (!['munin', 'memtool', 'ccmem'].includes(ARM) || !MODEL) throw new Error('nee
 
 const scenario = JSON.parse(fs.readFileSync(path.join(ROOT, 'corpus/scenario.json'), 'utf8'));
 const scale = JSON.parse(fs.readFileSync(path.join(ROOT, 'corpus/scale.json'), 'utf8'));
-const RESULTS = path.join(ROOT, PILOT ? 'results-pilot' : 'results');
+// ARENA_VARIANT (e.g. 'v071'): separate results dir, store dir and ledger name; spend still counts against the shared results/ledgers cap.
+const VARIANT = process.env.ARENA_VARIANT ?? '';
+if (VARIANT && !/^[a-z0-9]+$/.test(VARIANT)) throw new Error('bad ARENA_VARIANT');
+const RESULTS = path.join(ROOT, PILOT ? 'results-pilot' : VARIANT ? `results-${VARIANT}` : 'results');
 const cellId = `${ARM}__${MODEL}__r${REP}`;
 const cellDir = path.join(RESULTS, 'runs', cellId);
 // Stores live outside the repo (Claude Code must not see the repository's instruction files).
@@ -32,9 +35,9 @@ fs.mkdirSync(STORE_BASE, { recursive: true, mode: 0o700 });
     throw new Error(`Refusing store base ${STORE_BASE}: must be a directory owned by this user with mode 0700`);
   }
 }
-const STORE_ROOT = path.join(STORE_BASE, PILOT ? 'pilot' : 'main', cellId);
+const STORE_ROOT = path.join(STORE_BASE, PILOT ? 'pilot' : VARIANT ? `main-${VARIANT}` : 'main', cellId);
 fs.mkdirSync(cellDir, { recursive: true });
-const ledger = new Ledger(path.join(RESULTS, 'ledgers'), CAP, cellId);
+const ledger = new Ledger(path.join(ROOT, PILOT ? 'results-pilot' : 'results', 'ledgers'), CAP, VARIANT ? `${VARIANT}-${cellId}` : cellId);
 
 export const BASE_PROMPT = `You are a personal AI assistant for Elin Varg. You have a persistent memory system. Every conversation starts with no knowledge of earlier conversations: the only thing that carries over between conversations is what is stored in your memory system.
 

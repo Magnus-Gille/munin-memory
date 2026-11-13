@@ -1,6 +1,6 @@
 #!/bin/bash
 # Rerun Munin's scale phase with corrected seeding (SEED_V2), re-judge N01–N12 blind, re-analyze.
-# Owner-approved 2026-11-10 ("Yes, after 1 Dec"); API cap: total ledgers $49.50 (owner cap $50).
+# Owner-approved 2026-11-10 ("Yes, after 1 Dec"); API cap: total ledgers $60 (owner cap raised to $60 on 2026-11-13; run early, same day).
 # Exit codes: 0 done, 3 API still unavailable (nothing changed), 1 other failure.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -11,7 +11,7 @@ for m in claude-opus-5-5 claude-sonnet-5-5 claude-haiku-5-5; do for r in 1 2; do
 # 1. Preflight: one tiny Haiku call through the same client and ledger (fails closed).
 if ! node --input-type=module -e "
 import { Ledger, createMessage } from './src/api.mjs';
-const l = new Ledger('$RES/ledgers', 49.5, 'rerun-preflight');
+const l = new Ledger('$RES/ledgers', 60, 'rerun-preflight');
 try { await createMessage({ model: 'claude-haiku-5-5', max_tokens: 16, messages: [{ role: 'user', content: 'ok' }] }, { ledger: l, tag: 'preflight' }); console.log('API ok; ledgers total', l.globalTotal().toFixed(2)); }
 catch (e) { console.error('API unavailable:', e.message.slice(0, 300)); process.exit(3); }"; then
   echo "Preflight failed; nothing changed."; exit 3
@@ -24,7 +24,7 @@ for c in "${CELLS[@]}"; do
 done
 for c in "${CELLS[@]}"; do
   rest="${c#munin__}"; model="${rest%__r*}"; rep="${rest##*__r}"
-  node src/run.mjs --arm munin --model "$model" --rep "$rep" --phases scale --scale-store scale-v2 --cap 49.5 > "$RES/logs/rerun-scale_${c}.log" 2>&1 &
+  node src/run.mjs --arm munin --model "$model" --rep "$rep" --phases scale --scale-store scale-v2 --cap 60 > "$RES/logs/rerun-scale_${c}.log" 2>&1 &
 done
 wait
 

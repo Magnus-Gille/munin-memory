@@ -1,0 +1,226 @@
+{
+  "generated": "2026-11-13T22:41:47.639Z",
+  "judge": "codex:gpt-6.1-terra v2 (one blind batch per question, both versions)",
+  "by": {
+    "Opus v0.7.0": {
+      "answers": 96,
+      "judged": 96,
+      "errors": 0,
+      "overall": 0.8541666666666666,
+      "probe": 0.8888888888888888,
+      "scale": 0.75,
+      "stale_update": 0,
+      "abstention_correct": 8,
+      "injection_obeyed": 0,
+      "secret_stored": 0,
+      "input_tokens_per_q": 73079.875,
+      "cost_per_q": 0.06558946666666665,
+      "tools_per_q": 3.1354166666666665,
+      "ingest_cost_per_cell": 2.2129190999999997
+    },
+    "Opus v0.7.1": {
+      "answers": 96,
+      "judged": 96,
+      "errors": 0,
+      "overall": 0.796875,
+      "probe": 0.8402777777777778,
+      "scale": 0.6666666666666666,
+      "stale_update": 0,
+      "abstention_correct": 8,
+      "injection_obeyed": 0,
+      "secret_stored": 0,
+      "input_tokens_per_q": 48562.739583333336,
+      "cost_per_q": 0.05727572291666667,
+      "tools_per_q": 2.9895833333333335,
+      "ingest_cost_per_cell": 2.0231853
+    },
+    "Sonnet v0.7.0": {
+      "answers": 96,
+      "judged": 96,
+      "errors": 0,
+      "overall": 0.8333333333333334,
+      "probe": 0.8541666666666666,
+      "scale": 0.7708333333333334,
+      "stale_update": 0.0625,
+      "abstention_correct": 8,
+      "injection_obeyed": 0,
+      "secret_stored": 0,
+      "input_tokens_per_q": 72775.1875,
+      "cost_per_q": 0.03457440312499998,
+      "tools_per_q": 2.7395833333333335,
+      "ingest_cost_per_cell": 0.9793154000000001
+    },
+    "Sonnet v0.7.1": {
+      "answers": 96,
+      "judged": 96,
+      "errors": 0,
+      "overall": 0.8020833333333334,
+      "probe": 0.7986111111111112,
+      "scale": 0.8125,
+      "stale_update": 0,
+      "abstention_correct": 8,
+      "injection_obeyed": 0,
+      "secret_stored": 0,
+      "input_tokens_per_q": 50009.46875,
+      "cost_per_q": 0.03001293020833333,
+      "tools_per_q": 2.9270833333333335,
+      "ingest_cost_per_cell": 0.8159369999999999
+    },
+    "Haiku v0.7.0": {
+      "answers": 96,
+      "judged": 96,
+      "errors": 0,
+      "overall": 0.8072916666666666,
+      "probe": 0.8125,
+      "scale": 0.7916666666666666,
+      "stale_update": 0,
+      "abstention_correct": 8,
+      "injection_obeyed": 0,
+      "secret_stored": 0,
+      "input_tokens_per_q": 63560.729166666664,
+      "cost_per_q": 0.0017726366666666671,
+      "tools_per_q": 2.4583333333333335,
+      "ingest_cost_per_cell": 0.05085353249999999
+    },
+    "Haiku v0.7.1": {
+      "answers": 96,
+      "judged": 96,
+      "errors": 0,
+      "overall": 0.8125,
+      "probe": 0.8194444444444444,
+      "scale": 0.7916666666666666,
+      "stale_update": 0,
+      "abstention_correct": 8,
+      "injection_obeyed": 0,
+      "secret_stored": 0,
+      "input_tokens_per_q": 41910.489583333336,
+      "cost_per_q": 0.0014797124999999997,
+      "tools_per_q": 2.4270833333333335,
+      "ingest_cost_per_cell": 0.04947274
+    }
+  },
+  "paired": {
+    "overall": {
+      "n": 288,
+      "diff": -0.027777777777777776,
+      "ci95": [
+        -0.059027777777777776,
+        0.003472222222222222
+      ]
+    },
+    "probe": {
+      "n": 216,
+      "diff": -0.032407407407407406,
+      "ci95": [
+        -0.06944444444444445,
+        0.0023148148148148147
+      ]
+    },
+    "scale": {
+      "n": 72,
+      "diff": -0.013888888888888888,
+      "ci95": [
+        -0.0763888888888889,
+        0.04861111111111111
+      ]
+    },
+    "overall_Opus": {
+      "n": 96,
+      "diff": -0.057291666666666664,
+      "ci95": [
+        -0.109375,
+        -0.005208333333333333
+      ]
+    },
+    "overall_Sonnet": {
+      "n": 96,
+      "diff": -0.03125,
+      "ci95": [
+        -0.08333333333333333,
+        0.020833333333333332
+      ]
+    },
+    "overall_Haiku": {
+      "n": 96,
+      "diff": 0.005208333333333333,
+      "ci95": [
+        -0.052083333333333336,
+        0.0625
+      ]
+    },
+    "cat_recall": {
+      "n": 48,
+      "diff": -0.010416666666666666,
+      "ci95": [
+        -0.08333333333333333,
+        0.0625
+      ]
+    },
+    "cat_update": {
+      "n": 48,
+      "diff": -0.09375,
+      "ci95": [
+        -0.17708333333333334,
+        0
+      ]
+    },
+    "cat_temporal": {
+      "n": 36,
+      "diff": -0.05555555555555555,
+      "ci95": [
+        -0.16666666666666666,
+        0.041666666666666664
+      ]
+    },
+    "cat_aggregation": {
+      "n": 36,
+      "diff": -0.013888888888888888,
+      "ci95": [
+        -0.125,
+        0.09722222222222222
+      ]
+    },
+    "cat_abstention": {
+      "n": 24,
+      "diff": 0,
+      "ci95": [
+        0,
+        0
+      ]
+    },
+    "cat_preference": {
+      "n": 18,
+      "diff": 0.027777777777777776,
+      "ci95": [
+        0,
+        0.08333333333333333
+      ]
+    }
+  },
+  "ingest": {
+    "munin070__claude-haiku-5-5__r1": 0.05303669,
+    "munin070__claude-haiku-5-5__r1|secret": false,
+    "munin070__claude-haiku-5-5__r2": 0.048670374999999995,
+    "munin070__claude-haiku-5-5__r2|secret": false,
+    "munin070__claude-opus-5-5__r1": 2.2454305999999997,
+    "munin070__claude-opus-5-5__r1|secret": false,
+    "munin070__claude-opus-5-5__r2": 2.1804076,
+    "munin070__claude-opus-5-5__r2|secret": false,
+    "munin070__claude-sonnet-5-5__r1": 0.9435392,
+    "munin070__claude-sonnet-5-5__r1|secret": false,
+    "munin070__claude-sonnet-5-5__r2": 1.0150916,
+    "munin070__claude-sonnet-5-5__r2|secret": false,
+    "munin__claude-haiku-5-5__r1": 0.048457355,
+    "munin__claude-haiku-5-5__r1|secret": false,
+    "munin__claude-haiku-5-5__r2": 0.05048812500000001,
+    "munin__claude-haiku-5-5__r2|secret": false,
+    "munin__claude-opus-5-5__r1": 2.0389396,
+    "munin__claude-opus-5-5__r1|secret": false,
+    "munin__claude-opus-5-5__r2": 2.0074310000000004,
+    "munin__claude-opus-5-5__r2|secret": false,
+    "munin__claude-sonnet-5-5__r1": 0.8171168,
+    "munin__claude-sonnet-5-5__r1|secret": false,
+    "munin__claude-sonnet-5-5__r2": 0.8147571999999998,
+    "munin__claude-sonnet-5-5__r2|secret": false
+  }
+}

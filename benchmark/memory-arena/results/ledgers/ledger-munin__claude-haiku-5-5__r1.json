@@ -1,0 +1,17 @@
+{
+  "total_usd": 0.02745745,
+  "calls": 32,
+  "by_model": {
+    "claude-haiku-5-5": {
+      "usd": 0.02745745,
+      "calls": 32,
+      "input": 88,
+      "output": 6788,
+      "cache_write": 136006,
+      "cache_read": 705390
+    }
+  },
+  "by_tag": {
+    "munin/scale": 0.02745745
+  }
+}

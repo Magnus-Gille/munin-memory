@@ -10,7 +10,9 @@ import { Ledger, createMessage } from './api.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(here, '..');
-const RES = path.join(ROOT, 'results');
+const VARIANT = process.env.ARENA_VARIANT ?? '';
+if (VARIANT && !/^[a-z0-9]+$/.test(VARIANT)) throw new Error('bad ARENA_VARIANT');
+const RES = path.join(ROOT, VARIANT ? `results-${VARIANT}` : 'results');
 // --backend codex: cross-vendor judge via headless Codex (added after the Anthropic API account hit its
 // Console usage limit mid-judging; see RESULTS.md deviations). Same prompt/rubric/schema, separate dir/key.
 const BACKEND = process.argv.includes('--backend') ? process.argv[process.argv.indexOf('--backend') + 1] : 'anthropic';
@@ -21,7 +23,7 @@ const V2 = process.argv.includes('--v2');
 const BLIND = path.join(RES, (BACKEND === 'codex' ? 'blind-codex' : 'blind') + (V2 ? '-v2' : ''));
 fs.mkdirSync(BLIND, { recursive: true });
 const capArg = process.argv.indexOf('--cap');
-const ledger = new Ledger(path.join(RES, 'ledgers'), capArg > 0 ? Number(process.argv[capArg + 1]) : 49.5, 'judge');
+const ledger = new Ledger(path.join(ROOT, 'results', 'ledgers'), capArg > 0 ? Number(process.argv[capArg + 1]) : 49.5, 'judge');
 const JUDGE_MODEL = 'claude-opus-5-5';
 
 const scenario = JSON.parse(fs.readFileSync(path.join(ROOT, 'corpus/scenario.json'), 'utf8'));

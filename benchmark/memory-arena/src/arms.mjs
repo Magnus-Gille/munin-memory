@@ -10,7 +10,8 @@ import Database from 'better-sqlite3';
 import { createMessage } from './api.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-export const REPO = path.resolve(here, '../../..');
+// ARENA_MUNIN_REPO: run the Munin arm from another build (the v0.7.1 tool-surface check); default = this checkout.
+export const REPO = process.env.ARENA_MUNIN_REPO ? path.resolve(process.env.ARENA_MUNIN_REPO) : path.resolve(here, '../../..');
 const HF_CACHE_SRC = '/Users/magnus/repos/munin-memory/benchmark/generated/evidence-metric/longmemeval-s-20261018/hf-cache';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

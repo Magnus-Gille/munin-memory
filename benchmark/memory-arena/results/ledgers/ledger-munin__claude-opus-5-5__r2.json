@@ -1,19 +1,19 @@
 {
-  "total_usd": 5.230571400000001,
-  "calls": 193,
+  "total_usd": 6.274563800000001,
+  "calls": 232,
   "by_model": {
     "claude-opus-5-5": {
-      "usd": 5.230571400000001,
-      "calls": 193,
-      "input": 506,
-      "output": 65384,
-      "cache_write": 597822,
-      "cache_read": 4658787
+      "usd": 6.274563800000001,
+      "calls": 232,
+      "input": 608,
+      "output": 72519,
+      "cache_write": 741815,
+      "cache_read": 5563384
     }
   },
   "by_tag": {
     "munin/ingest": 2.1804076,
     "munin/probe": 2.0757919999999994,
-    "munin/scale": 0.9743718
+    "munin/scale": 2.0183642
   }
 }
