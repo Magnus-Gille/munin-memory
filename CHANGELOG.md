@@ -10,6 +10,14 @@ changelog is the canonical record of what moved.
 
 ### Changed
 
+- The stdio bridge now retries read-only requests after a thrown network error
+  for longer: up to five retries with about 0.25/1/2/4/8 s backoff and a 20 s
+  total budget (previously two retries within about 0.65 s). A short
+  connectivity gap during the MCP `initialize` handshake, for example a laptop
+  waking or Wi-Fi reconnecting, no longer leaves the client's Munin server
+  marked failed for the rest of the session. Tune with
+  `MUNIN_BRIDGE_NETWORK_RETRIES` and `MUNIN_BRIDGE_NETWORK_MAX_WAIT_MS`. Writes
+  are still never retried after a network error.
 - `scripts/offsite-snapshot.sh` now sets a sqlite busy timeout
   (`MUNIN_OFFSITE_BUSY_TIMEOUT_MS`, default 60000) on `VACUUM INTO` and the
   integrity check, avoiding `database is locked (5)` under concurrent writers
