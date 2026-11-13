@@ -8,6 +8,10 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-11-13
+
+No schema change (still v32); rolling back to 0.7.0 code works against the same database.
+
 ### Changed
 
 - MCP tool descriptions and input-schema prose are rewritten for brevity
@@ -34,6 +38,14 @@ changelog is the canonical record of what moved.
   online `.backup` command, which could not finish under continuous writes
   (MUNIN-421), and logs a timestamp per step. Integrity check, retention and
   destinations are unchanged.
+
+### Fixed
+
+- Shutdown no longer waits on a hung consolidation LLM call (MUNIN-424).
+  `stopConsolidationWorker()` aborts the in-flight OpenRouter-compatible request,
+  and every call now has a 120 s deadline. An aborted batch persists nothing,
+  leaves its logs unincorporated for the next run and does not count toward the
+  circuit breaker.
 
 ### Security
 
@@ -1725,7 +1737,8 @@ Initial public release (commit `c40c127`). Core MCP tool surface
 `memory_list`, `memory_delete`), SQLite + FTS5 storage, Bearer token auth,
 stdio transport, and the first HTTP transport for Raspberry Pi deployment.
 
-[Unreleased]: https://github.com/Magnus-Gille/munin-memory/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/Magnus-Gille/munin-memory/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/Magnus-Gille/munin-memory/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/Magnus-Gille/munin-memory/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/Magnus-Gille/munin-memory/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/Magnus-Gille/munin-memory/compare/v0.5.0...v0.6.0
