@@ -25,7 +25,8 @@ import {
   pruneRedactionLog,
   pruneRetrievalAnalytics,
 } from "./db.js";
-import { MCP_SERVER_INSTRUCTIONS, registerTools } from "./tools.js";
+import { MCP_SERVER_INSTRUCTIONS, REGISTERED_TOOL_NAMES, registerTools } from "./tools.js";
+import { resolveResponseMode, resolveToolProfile } from "./surface.js";
 import { initEmbeddings, startEmbeddingWorker, stopEmbeddingWorker } from "./embeddings.js";
 import { initConsolidation, startConsolidationWorker, stopConsolidationWorker } from "./consolidation.js";
 import { getConfiguredLegacyBearerTransportType, resolveAccessContext } from "./access.js";
@@ -1107,6 +1108,19 @@ async function startStdio(database: Database.Database) {
 async function main() {
   if (transportMode === "http" && !hasHttpBearerCredential()) {
     console.error(getHttpCredentialErrorMessage());
+    process.exit(1);
+  }
+
+  // Fail closed on a mistyped tool profile or response mode (MUNIN-434)
+  // instead of serving a surface the operator did not ask for.
+  try {
+    const profile = resolveToolProfile(REGISTERED_TOOL_NAMES);
+    const mode = resolveResponseMode();
+    if (profile.name !== "full" || mode !== "full") {
+      console.error(`Tool profile: ${profile.name}${profile.tools ? ` (${profile.tools.size} tools)` : ""}; response mode: ${mode}`);
+    }
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
   }
 
