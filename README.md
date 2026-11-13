@@ -318,8 +318,13 @@ allowlisted syscall and a fixed description from a constant table (for example
 `ECONNREFUSED connect: connection refused`). Cause-message free text is excluded
 from that summary; original SDK, HTTP and body error messages can still be retained.
 Only read-only requests (non-`tools/call` messages and an allowlist of read tools) are
-retried after thrown network failures, up to twice (about 150 ms then 500 ms plus
-jitter, within the request timeout). Writes are never retried automatically after a
+retried after thrown network failures: up to five times with backoff of about
+0.25, 1, 2, 4 and 8 seconds plus up to 250 ms jitter, within a 20-second total
+backoff budget and the request timeout. That window lets the bridge's MCP
+`initialize` handshake ride out a short connectivity gap, such as a laptop waking
+or Wi-Fi reconnecting, instead of leaving the client's server marked failed. Override
+with `MUNIN_BRIDGE_NETWORK_RETRIES` (0–10) and `MUNIN_BRIDGE_NETWORK_MAX_WAIT_MS`
+(up to 60000). Writes are never retried automatically after a
 thrown network failure, because no network error proves the server did not apply the
 request. The server-marked `admission-v1` 429 path above remains retryable because it
 rejects before execution. A write that fails reports what is known: when the chain
