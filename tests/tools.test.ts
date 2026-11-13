@@ -10685,6 +10685,28 @@ describe("memory_attention", () => {
     expect(result.items[0].namespace).toBe("clients/acme");
   });
 
+  it("does not claim all-clear when the prefix contains no tracked statuses", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/release-train",
+      key: "status",
+      content: "Healthy.",
+      tags: ["active"],
+    });
+
+    const empty = parseToolResponse(
+      await callTool("memory_attention", { namespace_prefix: "testing/nothing-here" }),
+    ) as { items: unknown[]; message: string };
+    expect(empty.items).toHaveLength(0);
+    expect(empty.message).not.toContain("appear healthy");
+    expect(empty.message).toContain("No tracked statuses were found");
+    expect(empty.message).toContain("testing/nothing-here");
+
+    const healthy = parseToolResponse(
+      await callTool("memory_attention", { namespace_prefix: "projects/release-train" }),
+    ) as { message: string };
+    expect(healthy.message).toContain("appear healthy");
+  });
+
   it("surfaces expired and expiring tracked statuses", async () => {
     const soon = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString();
 

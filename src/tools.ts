@@ -1490,6 +1490,7 @@ function evaluateIntakeAdvisory(
     content: string;
     tags: string[];
     excludeEntryIds?: string[];
+    intentionalOverwrite?: boolean;
   },
   warnings: string[],
 ): IntakeResult | undefined {
@@ -1506,6 +1507,7 @@ function evaluateIntakeAdvisory(
       key: input.key,
       content: input.content,
       tags: input.tags,
+      intentionalOverwrite: input.intentionalOverwrite,
       candidates: sample?.entries ?? [],
       candidateSample: sample ? { truncated: sample.truncated } : undefined,
     });
@@ -4697,6 +4699,10 @@ function applyPreparedReviewOperation(
       excludeEntryIds: (
         operation.action !== "memory_update_status" && operation.supersedes
       ) ? [operation.supersedes] : [],
+      intentionalOverwrite: Boolean(
+        operation.action !== "memory_update_status"
+          && (operation.supersedes || operation.expected_updated_at),
+      ),
     },
     warnings,
   );
@@ -7077,7 +7083,7 @@ const TOOL_DEFINITIONS = [
         },
         proposal_id: {
           type: "string",
-          description: "Required except for list.",
+          description: "Required except for list. Alias: id.",
         },
         status: {
           type: "string",
@@ -9381,16 +9387,28 @@ export function registerTools(
                 });
               }
 
-              if (typeof reviewArgs.proposal_id !== "string" || !reviewArgs.proposal_id) {
+              if (
+                reviewArgs.id !== undefined
+                && reviewArgs.proposal_id !== undefined
+                && reviewArgs.id !== reviewArgs.proposal_id
+              ) {
                 return errResult(
                   "review",
                   "validation_error",
-                  "proposal_id is required for this action.",
+                  "id and proposal_id were both provided but differ; pass only one (they are aliases).",
+                );
+              }
+              const reviewProposalId = reviewArgs.proposal_id ?? reviewArgs.id;
+              if (typeof reviewProposalId !== "string" || !reviewProposalId) {
+                return errResult(
+                  "review",
+                  "validation_error",
+                  "proposal_id (or id) is required for this action.",
                 );
               }
               const proposal = getReviewProposal(
                 db,
-                reviewArgs.proposal_id,
+                reviewProposalId,
                 ctx.principalId,
                 reviewAccess,
               );
@@ -10826,6 +10844,8 @@ export function registerTools(
                   key,
                   content,
                   tags: effectiveTags,
+                  intentionalOverwrite:
+                    expected_updated_at !== undefined || supersedes !== undefined,
                 },
                 warnings,
               );
@@ -12381,7 +12401,20 @@ export function registerTools(
               if (redactedSourcesSummary) {
                 attentionResult.redacted_sources = redactedSourcesSummary;
               }
-              if (limitedItems.length === 0 && !redactedSourcesSummary) {
+              const trackedStatusesInScope = trackedStatusAssessments.filter((assessment) =>
+                matchesNamespacePrefix(assessment.row.namespace, attentionArgs.namespace_prefix)
+              ).length + visibleTrackedStatuses.redacted.filter((entry) =>
+                matchesNamespacePrefix(entry.namespace, attentionArgs.namespace_prefix)
+              ).length;
+              if (
+                limitedItems.length === 0
+                && !redactedSourcesSummary
+                && trackedStatusesInScope === 0
+                && typeof attentionArgs.namespace_prefix === "string"
+                && attentionArgs.namespace_prefix !== ""
+              ) {
+                attentionResult.message = `No tracked statuses were found under prefix "${attentionArgs.namespace_prefix}"; nothing was examined.`;
+              } else if (limitedItems.length === 0 && !redactedSourcesSummary) {
                 attentionResult.message = "All tracked projects appear healthy. No items need attention.";
               } else if (limitedItems.length === 0 && redactedSourcesSummary) {
                 attentionResult.message = "No attention items are visible on this connection.";

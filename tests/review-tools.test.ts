@@ -182,6 +182,33 @@ describe("memory_extract durable review proposals", () => {
     db.close();
   });
 
+  it("accepts id as an alias for proposal_id and rejects conflicting values", async () => {
+    const db = initDatabase(":memory:");
+    const call = makeCall(db);
+    const extracted = await call("memory_extract", {
+      conversation_text: "We decided to keep review approval explicit.",
+      namespace_hint: "projects/munin-memory",
+      persist: true,
+    }) as { proposals: Array<{ id: string }> };
+    const pid = extracted.proposals[0].id;
+
+    const viaId = await call("memory_review", { action: "get", id: pid });
+    expect(viaId.id).toBe(pid);
+    const viaBoth = await call("memory_review", { action: "get", id: pid, proposal_id: pid });
+    expect(viaBoth.id).toBe(pid);
+    const viaProposalId = await call("memory_review", { action: "get", proposal_id: pid });
+    expect(viaProposalId.id).toBe(pid);
+
+    const conflict = await call("memory_review", {
+      action: "get",
+      id: pid,
+      proposal_id: "someone-else",
+    });
+    expect(conflict.error).toBeTruthy();
+    expect(JSON.stringify(conflict)).toContain("validation_error");
+    expect(JSON.stringify(conflict)).toMatch(/id and proposal_id/);
+  });
+
   it("reports preview and approval write effects for every proposal action", async () => {
     useReviewTestClock();
     const db = initDatabase(":memory:");

@@ -80,6 +80,11 @@ export interface EvaluateIntakeInput {
   /** Supplied only when the caller was authorized to read related entries. */
   candidateSample?: { truncated: boolean };
   now?: string;
+  /**
+   * True when the caller demonstrably knew the entry existed (CAS write or
+   * supersedes). Suppresses the informational duplicate_key flag.
+   */
+  intentionalOverwrite?: boolean;
 }
 
 export interface PersistedIntake {
@@ -180,7 +185,7 @@ export function evaluateIntake(input: EvaluateIntakeInput): IntakeResult {
   const duplicate = input.key === null
     ? undefined
     : candidates.find((entry) => entry.key === input.key);
-  if (duplicate) {
+  if (duplicate && !input.intentionalOverwrite) {
     flags.push({
       check: "duplicate_key",
       severity: "info",
