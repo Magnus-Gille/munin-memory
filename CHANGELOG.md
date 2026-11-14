@@ -8,6 +8,29 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Changed
+
+- HTTP request logging is summarized by default (MUNIN-426). The control node
+  journal received one JSON line per request (about 103,000 lines and 85 MiB a
+  day). In the default `summary` mode, successful requests and rate-limiter
+  rejections (429) are aggregated into one `access_summary` line per interval
+  (default 60 s), with per-client request, rate-limited, error, and max-duration
+  counts and per-tool counts. Errors (status 400 and above, except 429) and
+  requests slower than `MUNIN_ACCESS_LOG_SLOW_MS` are still logged as individual
+  lines, capped at `MUNIN_ACCESS_LOG_MAX_INDIVIDUAL` per interval; the overflow is
+  reported as `suppressedIndividual`. Set `MUNIN_ACCESS_LOG_MODE=verbose` to
+  restore one line per request. Summaries carry no session or request ids,
+  headers, or bodies. The summary is flushed during graceful shutdown before the
+  database closes.
+
+### Added
+
+- Environment variables `MUNIN_ACCESS_LOG_MODE` (`summary` or `verbose`, default
+  `summary`), `MUNIN_ACCESS_LOG_INTERVAL_MS` (default `60000`, clamped to
+  1000–3600000), `MUNIN_ACCESS_LOG_SLOW_MS` (default `5000`, `0` disables), and
+  `MUNIN_ACCESS_LOG_MAX_INDIVIDUAL` (default `20`, minimum 1). Invalid values fall
+  back to defaults.
+
 ## [0.7.1] — 2026-11-13
 
 No schema change (still v32); rolling back to 0.7.0 code works against the same database.

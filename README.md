@@ -210,6 +210,10 @@ All configuration is via environment variables. Copy `.env.example` for a starti
 | `MUNIN_RATE_LIMIT_GLOBAL_MAX` | `300` | Process-wide MCP admission backstop per window |
 | `MUNIN_RATE_LIMIT_WINDOW_MS` | `60000` | Continuous-refill admission window in milliseconds |
 | `MUNIN_RATE_LIMIT_MAX_CALLERS` | `1000` | Maximum independently tracked caller buckets; overflow remains capped |
+| `MUNIN_ACCESS_LOG_MODE` | `summary` | HTTP request log to stderr: `summary` aggregates successful and rate-limited requests into one `access_summary` line per interval; `verbose` writes one line per request |
+| `MUNIN_ACCESS_LOG_INTERVAL_MS` | `60000` | Summary interval in milliseconds (clamped to 1000–3600000) |
+| `MUNIN_ACCESS_LOG_SLOW_MS` | `5000` | Requests at or above this duration are logged individually; `0` disables slow-request lines |
+| `MUNIN_ACCESS_LOG_MAX_INDIVIDUAL` | `20` | Individual lines (errors other than 429, slow requests) allowed per interval; overflow is counted as `suppressedIndividual` |
 | `MUNIN_MEMORY_DB_PATH` | `~/.munin-memory/memory.db` | Database file location |
 | `MUNIN_PROFILE` | — | Optional hardware preset: `zero-appliance`, `zero-plus`, or `full-node` |
 | `MUNIN_EMBEDDINGS_ENABLED` | `true` | Enable semantic search |

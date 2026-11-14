@@ -44,6 +44,7 @@ import {
   type RateLimitScope,
 } from "./rate-limit.js";
 import { SERVER_VERSION } from "./version.js";
+import { createAccessLogger, getAccessLogConfig, type AccessLogger } from "./access-log.js";
 import { pruneReviewProposals } from "./review-inbox.js";
 
 export {
@@ -485,8 +486,22 @@ export function extractToolName(body: unknown): string | undefined {
   return getToolFromMessage(body);
 }
 
+let defaultAccessLogger: AccessLogger | undefined;
+
+function getDefaultAccessLogger(): AccessLogger {
+  defaultAccessLogger ??= createAccessLogger({
+    ...getAccessLogConfig(),
+    write: (line) => console.error(line),
+  });
+  return defaultAccessLogger;
+}
+
 function logRequest(entry: RequestLogEntry): void {
-  console.error(JSON.stringify(entry));
+  getDefaultAccessLogger().log(entry);
+}
+
+function stopDefaultAccessLog(): void {
+  defaultAccessLogger?.stop();
 }
 
 export function getRequestAuthLogContext(auth: AuthInfo | undefined): Pick<RequestLogEntry, "authType" | "clientId"> {
@@ -1172,6 +1187,8 @@ export interface ShutdownDeps {
   drainTimeoutMs?: number;
   /** Combined bound for both worker stops. */
   workerStopTimeoutMs?: number;
+  /** Flush the access log; runs after HTTP drain and before the DB closes. */
+  stopAccessLog?: () => void;
 }
 
 /**
@@ -1189,6 +1206,15 @@ export async function runGracefulShutdown(deps: ShutdownDeps): Promise<void> {
       await drainHttpServer(deps.httpServer, deps.drainTimeoutMs ?? SHUTDOWN_DRAIN_TIMEOUT_MS, log);
     } catch (err) {
       log("Error closing HTTP server during shutdown:", err);
+      exitCode = 1;
+    }
+  }
+
+  if (deps.stopAccessLog) {
+    try {
+      deps.stopAccessLog();
+    } catch (err) {
+      log("Error flushing access log during shutdown:", err);
       exitCode = 1;
     }
   }
@@ -1272,6 +1298,7 @@ function shutdown(exitCode = 0): Promise<void> {
   cleanupTimerId = undefined;
   return runGracefulShutdown({
     httpServer: activeHttpServer,
+    stopAccessLog: stopDefaultAccessLog,
     stopEmbeddingWorker,
     stopConsolidationWorker,
     closeDatabase: () => {
