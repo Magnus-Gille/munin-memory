@@ -8,6 +8,10 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+## [0.7.2] — 2026-11-14
+
+No schema change (still v32); rolling back to 0.7.1 code works against the same database.
+
 ### Changed
 
 - HTTP request logging is summarized by default (MUNIN-426). The control node
