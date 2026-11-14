@@ -17,9 +17,16 @@ changelog is the canonical record of what moved.
   (default 60 s), with per-client request, rate-limited, error, and max-duration
   counts and per-tool counts. Errors (status 400 and above, except 429) and
   requests slower than `MUNIN_ACCESS_LOG_SLOW_MS` are still logged as individual
-  lines, capped at `MUNIN_ACCESS_LOG_MAX_INDIVIDUAL` per interval; the overflow is
-  reported as `suppressedIndividual`. Set `MUNIN_ACCESS_LOG_MODE=verbose` to
-  restore one line per request. Summaries carry no session or request ids,
+  lines. They are capped at `MUNIN_ACCESS_LOG_MAX_INDIVIDUAL` per interval for each
+  source (client id, or the shared unauthenticated source) and class (5xx or
+  other), so an anonymous 401 flood cannot hide an authenticated client's 500,
+  with a total ceiling of five times that value; the overflow is reported as
+  `suppressedIndividual`. Summary state is bounded per interval: at most 1,000
+  distinct sources are tracked (the rest share one `_overflow` entry), client
+  labels are truncated to 128 characters, each client lists at most 10 tool names
+  (further requests are counted in `toolsOther`), and the summary names at most 20
+  clients (the rest are folded into `otherClients`). Set
+  `MUNIN_ACCESS_LOG_MODE=verbose` to restore one line per request. Summaries carry no session or request ids,
   headers, or bodies. The summary is flushed during graceful shutdown before the
   database closes.
 

@@ -136,6 +136,11 @@ describe("access logger", () => {
     slowLogger.log(slow);
     expect(slowH.lines).toEqual([JSON.stringify(slow)]);
 
+    // "At or above" the threshold: a request of exactly slowMs is logged too.
+    const boundary = entry({ status: 200, durationMs: 5000 });
+    slowLogger.log(boundary);
+    expect(slowH.lines).toEqual([JSON.stringify(slow), JSON.stringify(boundary)]);
+
     const disabledH = harness();
     const disabledLogger = createAccessLogger(options(disabledH, { slowMs: 0 }));
     disabledLogger.log(entry({ status: 200, durationMs: 60_000 }));
@@ -163,6 +168,78 @@ describe("access logger", () => {
     expect(h.lines).toHaveLength(4);
     logger.flush();
     expect(parse(h.lines.at(-1)!).suppressedIndividual).toBe(0);
+  });
+
+  it("keeps an authenticated client's 500 visible during an anonymous 401 flood (individual budgets are per source)", () => {
+    const h = harness();
+    const logger = createAccessLogger(options(h, { maxIndividualPerInterval: 2 }));
+    const anonymous = (): RequestLogEntry =>
+      entry({ status: 401, authType: "none", clientId: undefined, toolName: undefined });
+
+    for (let i = 0; i < 6; i += 1) logger.log(anonymous());
+    expect(h.lines).toHaveLength(2);
+
+    const serverError = entry({ status: 500, clientId: "client-a" });
+    logger.log(serverError);
+    expect(h.lines.at(-1)).toBe(JSON.stringify(serverError));
+    expect(h.lines).toHaveLength(3);
+
+    logger.flush();
+    const summary = parse(h.lines.at(-1)!);
+    expect(summary.suppressedIndividual).toBe(4);
+  });
+
+  it("keeps a client's 5xx visible during a flood of its own 4xx errors", () => {
+    const h = harness();
+    const logger = createAccessLogger(options(h, { maxIndividualPerInterval: 2 }));
+
+    for (let i = 0; i < 6; i += 1) logger.log(entry({ status: 403, clientId: "client-a" }));
+    expect(h.lines).toHaveLength(2);
+
+    const serverError = entry({ status: 502, clientId: "client-a" });
+    logger.log(serverError);
+    expect(h.lines.at(-1)).toBe(JSON.stringify(serverError));
+  });
+
+  it("does not let one authenticated client's errors use up another client's budget", () => {
+    const h = harness();
+    const logger = createAccessLogger(options(h, { maxIndividualPerInterval: 2 }));
+
+    for (let i = 0; i < 6; i += 1) logger.log(entry({ status: 400, clientId: "client-a" }));
+    const other = entry({ status: 400, clientId: "client-b" });
+    logger.log(other);
+
+    expect(h.lines).toHaveLength(3);
+    expect(h.lines.at(-1)).toBe(JSON.stringify(other));
+  });
+
+  it("bounds the total individual lines per interval across all sources", () => {
+    const h = harness();
+    // Ceiling is 5 x the per-source budget: 5 x 2 = 10.
+    const logger = createAccessLogger(options(h, { maxIndividualPerInterval: 2 }));
+
+    for (let i = 0; i < 30; i += 1) logger.log(entry({ status: 500, clientId: `client-${i}` }));
+    expect(h.lines).toHaveLength(10);
+
+    logger.flush();
+    const summary = parse(h.lines.at(-1)!);
+    expect(summary.suppressedIndividual).toBe(20);
+    expect(summary.total).toBe(30);
+  });
+
+  it("bounds tracked clients and keeps counting the rest in otherClients", () => {
+    const h = harness();
+    const logger = createAccessLogger(options(h, { maxClients: 3 }));
+
+    for (let i = 0; i < 2_500; i += 1) logger.log(entry({ clientId: `client-${i}` }));
+    logger.flush();
+
+    const summary = parse(h.lines.at(-1)!);
+    expect(summary.total).toBe(2_500);
+    expect(Object.keys(summary.clients)).toHaveLength(3);
+    const listed = Object.values(summary.clients as Record<string, { requests: number }>)
+      .reduce((sum, client) => sum + client.requests, 0);
+    expect(listed + summary.otherClients.requests).toBe(2_500);
   });
 
   it("caps the clients map and folds the remainder into otherClients", () => {
@@ -194,9 +271,65 @@ describe("access logger", () => {
     }
     logger.flush();
 
-    const tools = parse(h.lines[0]!).clients["client-a"].tools as Record<string, number>;
-    expect(Object.keys(tools)).toHaveLength(11);
-    expect(tools._other).toBe(2);
+    const client = parse(h.lines[0]!).clients["client-a"];
+    expect(Object.keys(client.tools)).toHaveLength(10);
+    expect(client.toolsOther).toBe(2);
+  });
+
+  it("keeps a tool literally named _other distinct from the tools overflow count", () => {
+    const h = harness();
+    const logger = createAccessLogger(options(h));
+    for (let i = 0; i < 5; i += 1) logger.log(entry({ toolName: "_other" }));
+    for (let i = 0; i < 10; i += 1) logger.log(entry({ toolName: `tool_${i}` }));
+    logger.flush();
+
+    const client = parse(h.lines[0]!).clients["client-a"];
+    expect(client.tools._other).toBe(5);
+    expect(client.toolsOther).toBe(1);
+  });
+
+  it("does not lose a client literally named __proto__ from the summary", () => {
+    const h = harness();
+    const logger = createAccessLogger(options(h));
+    logger.log(entry({ clientId: "__proto__", status: 429 }));
+    logger.flush();
+
+    const summary = parse(h.lines[0]!);
+    expect(Object.keys(summary.clients)).toEqual(["__proto__"]);
+    expect(Object.getOwnPropertyDescriptor(summary.clients, "__proto__")?.value).toMatchObject({
+      requests: 1,
+      rateLimited: 1,
+    });
+  });
+
+  it("truncates very long client labels so retained memory per client is bounded", () => {
+    const h = harness();
+    const logger = createAccessLogger(options(h));
+    const longId = "c".repeat(100_000);
+    logger.log(entry({ clientId: longId }));
+    logger.log(entry({ clientId: longId }));
+    logger.flush();
+
+    const summary = parse(h.lines[0]!);
+    const keys = Object.keys(summary.clients);
+    expect(keys).toHaveLength(1);
+    expect(keys[0]!.length).toBeLessThanOrEqual(128);
+    expect(summary.clients[keys[0]!].requests).toBe(2);
+  });
+
+  it("does not let the interval timer keep the process alive (unref)", () => {
+    const h = harness();
+    const spy = vi.spyOn(globalThis, "setInterval");
+    try {
+      const logger = createAccessLogger(options(h));
+      logger.log(entry());
+      const timer = spy.mock.results.at(-1)?.value as { hasRef?: () => boolean } | undefined;
+      expect(typeof timer?.hasRef).toBe("function");
+      expect(timer!.hasRef!()).toBe(false);
+      logger.stop();
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("writes one individual line per request in verbose mode and no summaries", () => {

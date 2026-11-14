@@ -5,9 +5,12 @@ import type { RequestLogEntry } from "./index.js";
 // `verbose` writes one JSON line per request, as the service always did.
 // `summary` (default) aggregates successful and rate-limited requests into one
 // `access_summary` line per interval, and writes individual lines only for
-// errors (status >= 400 other than 429), slow requests, and within a bounded
-// per-interval budget. Summaries carry no session or request ids and no
-// headers or bodies.
+// errors (status >= 400 other than 429) and slow requests, within bounded
+// per-interval budgets. Budgets are kept per source (client id, or the shared
+// unauthenticated source) and per class (5xx versus everything else), so a
+// flood from one source or of one kind cannot hide another client's errors;
+// a global ceiling bounds the total. Summaries carry no session or request ids
+// and no headers or bodies.
 
 export type AccessLogMode = "summary" | "verbose";
 
@@ -17,7 +20,11 @@ export interface AccessLogOptions {
   intervalMs: number;
   /** Requests at or above this duration get an individual line. 0 disables. */
   slowMs: number;
-  /** Individual lines allowed per interval; overflow is counted in the summary. */
+  /**
+   * Individual lines allowed per interval for each source and class (5xx or
+   * other). A global ceiling of GLOBAL_INDIVIDUAL_CEILING_FACTOR times this
+   * value bounds the total. Overflow is counted in the summary.
+   */
   maxIndividualPerInterval: number;
   /** Maximum clients listed by name in each summary (default 20). */
   maxClients?: number;
@@ -50,6 +57,13 @@ const MIN_INDIVIDUAL = 1;
 const DEFAULT_MAX_CLIENTS = 20;
 const MAX_TOOLS_PER_CLIENT = 10;
 const RATE_LIMITED_STATUS = 429;
+/** Total individual lines per interval = this factor x the per-source budget. */
+const GLOBAL_INDIVIDUAL_CEILING_FACTOR = 5;
+/** Distinct sources tracked per interval; further sources share one overflow entry. */
+const MAX_TRACKED_SOURCES = 1_000;
+const OVERFLOW_SOURCE = "_overflow";
+/** Longest client label kept; longer ids are truncated so per-client memory stays bounded. */
+const MAX_LABEL_LENGTH = 128;
 
 function parseNonNegativeInteger(raw: string | undefined): number | undefined {
   if (raw === undefined) return undefined;
@@ -102,14 +116,20 @@ interface ClientSummary {
   errors: number;
   maxDurationMs: number;
   tools: Record<string, number>;
+  /** Requests for tool names beyond the per-client name cap; omitted when zero. */
+  toolsOther?: number;
 }
 
 function newCounters(): ClientCounters {
   return { requests: 0, rateLimited: 0, errors: 0, maxDurationMs: 0, tools: new Map(), toolsOther: 0 };
 }
 
+function boundLabel(label: string): string {
+  return label.length > MAX_LABEL_LENGTH ? label.slice(0, MAX_LABEL_LENGTH) : label;
+}
+
 function clientKey(entry: RequestLogEntry): string {
-  return entry.clientId ?? entry.authType ?? "anonymous";
+  return boundLabel(entry.clientId ?? entry.authType ?? "anonymous");
 }
 
 function isIndividualStatus(status: number): boolean {
@@ -133,16 +153,26 @@ export function createAccessLogger(options: AccessLogOptions): AccessLogger {
   let total = 0;
   let byStatus = new Map<number, number>();
   let clients = new Map<string, ClientCounters>();
+  let individualBySourceClass = new Map<string, number>();
   let individualThisInterval = 0;
   let suppressedIndividual = 0;
+  const globalIndividualCeiling = maxIndividualPerInterval * GLOBAL_INDIVIDUAL_CEILING_FACTOR;
 
   function resetWindow(): void {
     windowStart = undefined;
     total = 0;
     byStatus = new Map();
     clients = new Map();
+    individualBySourceClass = new Map();
     individualThisInterval = 0;
     suppressedIndividual = 0;
+  }
+
+  /** Source key used for both counters and budgets; bounded against key floods. */
+  function sourceKey(entry: RequestLogEntry): string {
+    const key = clientKey(entry);
+    if (clients.has(key) || clients.size < MAX_TRACKED_SOURCES) return key;
+    return OVERFLOW_SOURCE;
   }
 
   function armTimer(): void {
@@ -152,8 +182,11 @@ export function createAccessLogger(options: AccessLogOptions): AccessLogger {
     timer.unref();
   }
 
-  function writeIndividual(entry: RequestLogEntry): void {
-    if (individualThisInterval < maxIndividualPerInterval) {
+  function writeIndividual(entry: RequestLogEntry, source: string): void {
+    const budgetKey = `${source}|${entry.status >= 500 ? "5xx" : "other"}`;
+    const used = individualBySourceClass.get(budgetKey) ?? 0;
+    if (used < maxIndividualPerInterval && individualThisInterval < globalIndividualCeiling) {
+      individualBySourceClass.set(budgetKey, used + 1);
       individualThisInterval += 1;
       write(JSON.stringify(entry));
     } else {
@@ -161,16 +194,15 @@ export function createAccessLogger(options: AccessLogOptions): AccessLogger {
     }
   }
 
-  function record(entry: RequestLogEntry): void {
+  function record(entry: RequestLogEntry, source: string): void {
     if (windowStart === undefined) windowStart = now();
     total += 1;
     byStatus.set(entry.status, (byStatus.get(entry.status) ?? 0) + 1);
 
-    const key = clientKey(entry);
-    let counters = clients.get(key);
+    let counters = clients.get(source);
     if (!counters) {
       counters = newCounters();
-      clients.set(key, counters);
+      clients.set(source, counters);
     }
     counters.requests += 1;
     if (entry.status === RATE_LIMITED_STATUS) counters.rateLimited += 1;
@@ -194,15 +226,15 @@ export function createAccessLogger(options: AccessLogOptions): AccessLogger {
     const folded = ranked.slice(maxClients);
 
     const toSummary = (counters: ClientCounters): ClientSummary => {
-      const tools: Record<string, number> = Object.fromEntries(counters.tools);
-      if (counters.toolsOther > 0) tools._other = counters.toolsOther;
-      return {
+      const summary: ClientSummary = {
         requests: counters.requests,
         rateLimited: counters.rateLimited,
         errors: counters.errors,
         maxDurationMs: counters.maxDurationMs,
-        tools,
+        tools: Object.fromEntries(counters.tools),
       };
+      if (counters.toolsOther > 0) summary.toolsOther = counters.toolsOther;
+      return summary;
     };
 
     const other = newCounters();
@@ -213,8 +245,11 @@ export function createAccessLogger(options: AccessLogOptions): AccessLogger {
       other.maxDurationMs = Math.max(other.maxDurationMs, counters.maxDurationMs);
     }
 
-    const clientsOut: Record<string, ClientSummary> = {};
-    for (const [key, counters] of listed) clientsOut[key] = toSummary(counters);
+    // fromEntries defines own properties, so a client id such as "__proto__"
+    // is kept instead of invoking the prototype setter.
+    const clientsOut: Record<string, ClientSummary> = Object.fromEntries(
+      listed.map(([key, counters]) => [key, toSummary(counters)]),
+    );
 
     return {
       timestamp: new Date(end).toISOString(),
@@ -249,11 +284,12 @@ export function createAccessLogger(options: AccessLogOptions): AccessLogger {
       return;
     }
 
-    const slow = slowMs > 0 && entry.durationMs > slowMs;
+    const source = sourceKey(entry);
+    const slow = slowMs > 0 && entry.durationMs >= slowMs;
     if (isIndividualStatus(entry.status) || slow) {
-      writeIndividual(entry);
+      writeIndividual(entry, source);
     }
-    record(entry);
+    record(entry, source);
     armTimer();
   }
 
