@@ -25,6 +25,12 @@ function childEnv(extra = {}) {
 
 export const MAX_ITER = 30;
 
+// MUNIN-434 lean variant: pass ONLY the tool-surface switches through to the Munin server
+// (never other env; childEnv stays an allowlist). Unset = server defaults (full surface).
+const MUNIN_SURFACE_ENV = Object.fromEntries(
+  ['MUNIN_TOOL_PROFILE', 'MUNIN_RESPONSE_MODE'].filter((k) => process.env[k]).map((k) => [k, process.env[k]]),
+);
+
 // ---------------------------------------------------------------- shared API loop
 export async function runApiSession({ arm, model, system, userText, ledger, tag, effort = 'medium' }) {
   const messages = [{ role: 'user', content: userText }];
@@ -89,6 +95,7 @@ export class MuninArm {
         MUNIN_MEMORY_DB_PATH: this.db, MUNIN_TRANSPORT: 'stdio',
         MUNIN_EMBEDDINGS_ENABLED: 'true', MUNIN_SEMANTIC_ENABLED: 'true', MUNIN_EMBEDDINGS_LOCAL_ONLY: 'true',
         MUNIN_CONSOLIDATION_ENABLED: 'false', ARENA_CLOCK_FILE: this.clockFile,
+        ...MUNIN_SURFACE_ENV,
       }),
       stderr: fs.openSync(path.join(this.dir, 'server.stderr.log'), 'a'),
     });
