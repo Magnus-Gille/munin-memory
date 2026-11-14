@@ -162,11 +162,36 @@ inte sökningen; `memory_log` tappade bl.a. "chronological" och listan med kanon
 för att skilja det från brus. Notera också domarbatch-effekten: samma v0.7.0-svar fick 80–85 % här mot
 78–81 % i huvudkörningen.
 
+## Uppföljning: MUNIN-434 kärnprofil + kompakta svar (2026-11-14)
+
+MUNIN-434 (PR #436, commit b2a28ee) lägger till `MUNIN_TOOL_PROFILE=core` (8 verktyg i stället för 25) och
+`MUNIN_RESPONSE_MODE=compact` (redundanta fält tas bort ur query-, orient- och skrivsvar). Dessutom
+återställs `memory_log`-vägledningen ("datera varje beslut", kanoniska taggar) och `memory_update_status`
+får regeln "bara det användaren sagt". Hela Munin-armen kördes med båda växlarna på, Sonnet + Haiku × 2
+repetitioner, och bedömdes blint **i samma batch** som v0.7.1-svaren (Codex v2, 8 svar per fråga).
+Detaljer: `results-lean/compare.md`, `compare.json`, `rows.jsonl`, `runs.tar.gz`.
+
+| Modell | Totalt v0.7.1 → lean | Input-tokens/fråga | $/fråga | Inmatning $/cell |
+|---|---|---|---|---|
+| Sonnet | 79 % → 88 % | 50,0 k → 24,8 k (−50 %) | −36 % | −17 % |
+| Haiku | 83 % → 83 % | 41,9 k → 26,0 k (−38 %) | −20 % | −18 % |
+
+Parvis lean − v0.7.1 (192 par): **+4,2 pp [0,0; +8,3]**; Sonnet +8,3 pp [+3,6; +13,5], Haiku 0,0 pp
+[−6,8; +6,8]; probe +6,3 pp [+1,4; +11,1], skala −2,1 pp [−10,4; +6,3] (flera delgrupper, ingen korrigering
+för multipla test). Säkerhet oförändrad: abstention 8/8 i alla celler, injektion 0, hemlighet lagrad 0/4,
+stale 0 %. Inget svar försökte anropa ett verktyg utanför kärnprofilen.
+
+Tolkning: tokenbesparingen är större än den offline-projicerade (−37 %) för Sonnet, som också gjorde färre
+verktygsanrop per fråga (2,9 → 2,5). Kvalitetsvinsten för Sonnet sammanfaller med den återställda
+loggvägledningen — Sonnet anropade `memory_log` 68 gånger under inmatningen mot 21 i v0.7.1, och störst
+förbättring syns på Q18 (kontraktsdatum, som v0.7.1 tappade) och uppdateringsfrågorna Q10/Q15. De tre
+ändringarna testades tillsammans, så effekterna går inte att särskilja; n = 2.
+
 ## Kostnad
 
 Anthropic API (testpersoner + 30 domarfrågor): **$35,19** enligt ledgers (taket $50); avhuggna svar kan ha
-debiterats utöver det. Omkörning 2026-11-13: skalfasen $2,8 och v0.7.1-kontrollen $14,3; totalt **$52,70**
-(taket höjt till $60). Claude Code-armen: nominellt $12,83 på abonnemang. Codex-domaren: abonnemang.
+debiterats utöver det. Omkörning 2026-11-13: skalfasen $2,8 och v0.7.1-kontrollen $14,3; totalt $52,70
+(taket höjt till $60). MUNIN-434-kontrollen 2026-11-14: $3,39; totalt **$56,09**. Claude Code-armen: nominellt $12,83 på abonnemang. Codex-domaren: abonnemang.
 
 ## Begränsningar
 

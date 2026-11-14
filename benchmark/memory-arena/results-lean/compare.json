@@ -1,0 +1,178 @@
+{
+  "generated": "2026-11-14T13:25:02.798Z",
+  "judge": "codex:gpt-6.1-terra v2 (one blind batch per question, both versions)",
+  "by": {
+    "Sonnet v0.7.1": {
+      "answers": 96,
+      "judged": 96,
+      "errors": 0,
+      "overall": 0.7916666666666666,
+      "probe": 0.7986111111111112,
+      "scale": 0.7708333333333334,
+      "stale_update": 0,
+      "abstention_correct": 8,
+      "injection_obeyed": 0,
+      "secret_stored": 0,
+      "input_tokens_per_q": 50009.46875,
+      "cost_per_q": 0.03001293020833333,
+      "tools_per_q": 2.9270833333333335,
+      "ingest_cost_per_cell": 0.8159369999999999
+    },
+    "Sonnet lean": {
+      "answers": 96,
+      "judged": 96,
+      "errors": 0,
+      "overall": 0.875,
+      "probe": 0.9027777777777778,
+      "scale": 0.7916666666666666,
+      "stale_update": 0,
+      "abstention_correct": 8,
+      "injection_obeyed": 0,
+      "secret_stored": 0,
+      "input_tokens_per_q": 24829.114583333332,
+      "cost_per_q": 0.01911401979166667,
+      "tools_per_q": 2.5,
+      "ingest_cost_per_cell": 0.6776365
+    },
+    "Haiku v0.7.1": {
+      "answers": 96,
+      "judged": 96,
+      "errors": 0,
+      "overall": 0.8333333333333334,
+      "probe": 0.8263888888888888,
+      "scale": 0.8541666666666666,
+      "stale_update": 0,
+      "abstention_correct": 8,
+      "injection_obeyed": 0,
+      "secret_stored": 0,
+      "input_tokens_per_q": 41910.489583333336,
+      "cost_per_q": 0.0014797124999999997,
+      "tools_per_q": 2.4270833333333335,
+      "ingest_cost_per_cell": 0.04947274
+    },
+    "Haiku lean": {
+      "answers": 96,
+      "judged": 96,
+      "errors": 0,
+      "overall": 0.8333333333333334,
+      "probe": 0.8472222222222222,
+      "scale": 0.7916666666666666,
+      "stale_update": 0,
+      "abstention_correct": 8,
+      "injection_obeyed": 0,
+      "secret_stored": 0,
+      "input_tokens_per_q": 25967.354166666668,
+      "cost_per_q": 0.0012361016145833333,
+      "tools_per_q": 2.4895833333333335,
+      "ingest_cost_per_cell": 0.04021361
+    }
+  },
+  "paired": {
+    "overall": {
+      "n": 192,
+      "diff": 0.041666666666666664,
+      "ci95": [
+        0,
+        0.08333333333333333
+      ]
+    },
+    "probe": {
+      "n": 144,
+      "diff": 0.0625,
+      "ci95": [
+        0.013888888888888888,
+        0.1111111111111111
+      ]
+    },
+    "scale": {
+      "n": 48,
+      "diff": -0.020833333333333332,
+      "ci95": [
+        -0.10416666666666667,
+        0.0625
+      ]
+    },
+    "overall_Sonnet": {
+      "n": 96,
+      "diff": 0.08333333333333333,
+      "ci95": [
+        0.036458333333333336,
+        0.13541666666666666
+      ]
+    },
+    "overall_Haiku": {
+      "n": 96,
+      "diff": 0,
+      "ci95": [
+        -0.06770833333333333,
+        0.06770833333333333
+      ]
+    },
+    "cat_recall": {
+      "n": 32,
+      "diff": 0.046875,
+      "ci95": [
+        -0.078125,
+        0.15625
+      ]
+    },
+    "cat_update": {
+      "n": 32,
+      "diff": 0.109375,
+      "ci95": [
+        0.015625,
+        0.203125
+      ]
+    },
+    "cat_temporal": {
+      "n": 24,
+      "diff": 0.125,
+      "ci95": [
+        -0.041666666666666664,
+        0.2916666666666667
+      ]
+    },
+    "cat_aggregation": {
+      "n": 24,
+      "diff": 0.08333333333333333,
+      "ci95": [
+        0,
+        0.1875
+      ]
+    },
+    "cat_abstention": {
+      "n": 16,
+      "diff": 0,
+      "ci95": [
+        0,
+        0
+      ]
+    },
+    "cat_preference": {
+      "n": 12,
+      "diff": -0.041666666666666664,
+      "ci95": [
+        -0.125,
+        0
+      ]
+    }
+  },
+  "ingest": {
+    "munin071__claude-haiku-5-5__r1": 0.048457355,
+    "munin071__claude-haiku-5-5__r1|secret": false,
+    "munin071__claude-haiku-5-5__r2": 0.05048812500000001,
+    "munin071__claude-haiku-5-5__r2|secret": false,
+    "munin071__claude-sonnet-5-5__r1": 0.8171168,
+    "munin071__claude-sonnet-5-5__r1|secret": false,
+    "munin071__claude-sonnet-5-5__r2": 0.8147571999999998,
+    "munin071__claude-sonnet-5-5__r2|secret": false,
+    "munin__claude-haiku-5-5__r1": 0.040616295000000004,
+    "munin__claude-haiku-5-5__r1|secret": false,
+    "munin__claude-haiku-5-5__r2": 0.039810925,
+    "munin__claude-haiku-5-5__r2|secret": false,
+    "munin__claude-sonnet-5-5__r1": 0.6982460999999999,
+    "munin__claude-sonnet-5-5__r1|secret": false,
+    "munin__claude-sonnet-5-5__r2": 0.6570269,
+    "munin__claude-sonnet-5-5__r2|secret": false
+  }
+}
