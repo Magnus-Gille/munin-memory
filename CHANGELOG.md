@@ -22,10 +22,12 @@ changelog is the canonical record of what moved.
   other), so an anonymous 401 flood cannot hide an authenticated client's 500,
   with a total ceiling of five times that value; the overflow is reported as
   `suppressedIndividual`. Summary state is bounded per interval: at most 1,000
-  distinct sources are tracked (the rest share one `_overflow` entry), client
-  labels are truncated to 128 characters, each client lists at most 10 tool names
-  (further requests are counted in `toolsOther`), and the summary names at most 20
-  clients (the rest are folded into `otherClients`). Set
+  distinct sources are tracked (the rest share one overflow bucket that is
+  reported inside `otherClients`), client ids and tool names longer than 128
+  characters are shortened to a prefix plus a digest of the full value (so they
+  stay distinct), each client lists at most 10 tool names (further requests are
+  counted in `toolsOther`), and the summary names at most 20 clients (the rest are
+  folded into `otherClients`). Set
   `MUNIN_ACCESS_LOG_MODE=verbose` to restore one line per request. Summaries carry no session or request ids,
   headers, or bodies. The summary is flushed during graceful shutdown before the
   database closes.

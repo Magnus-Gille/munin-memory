@@ -242,6 +242,84 @@ describe("access logger", () => {
     expect(listed + summary.otherClients.requests).toBe(2_500);
   });
 
+  it("observably stops tracking sources beyond the cap and folds them into otherClients", () => {
+    const h = harness();
+    // maxClients far above the tracking cap, so only the tracking cap limits the named clients.
+    const logger = createAccessLogger(options(h, { maxClients: 5_000 }));
+
+    for (let i = 0; i < 2_500; i += 1) logger.log(entry({ clientId: `client-${i}` }));
+    logger.flush();
+
+    const summary = parse(h.lines.at(-1)!);
+    expect(summary.total).toBe(2_500);
+    expect(Object.keys(summary.clients)).toHaveLength(1_000);
+    expect(summary.otherClients.requests).toBe(1_500);
+  });
+
+  it("keeps a real client named _overflow separate from overflow traffic", () => {
+    const h = harness();
+    const logger = createAccessLogger(options(h, { maxClients: 5_000, maxIndividualPerInterval: 2 }));
+
+    // Track the real "_overflow" client and 999 others: the tracking cap (1,000) is reached.
+    logger.log(entry({ clientId: "_overflow" }));
+    for (let i = 0; i < 999; i += 1) logger.log(entry({ clientId: `c-${i}` }));
+    // Two untracked clients exhaust the shared overflow budget for 5xx lines.
+    logger.log(entry({ clientId: "new-1", status: 500 }));
+    logger.log(entry({ clientId: "new-2", status: 500 }));
+    // The real "_overflow" client's own first 500 must still get its individual line.
+    const own = entry({ clientId: "_overflow", status: 500 });
+    logger.log(own);
+    expect(h.lines).toContain(JSON.stringify(own));
+
+    logger.flush();
+    const summary = parse(h.lines.at(-1)!);
+    expect(summary.suppressedIndividual).toBe(0);
+    expect(summary.clients["_overflow"]).toMatchObject({ requests: 2, errors: 1 });
+    expect(summary.otherClients).toMatchObject({ requests: 2, errors: 2 });
+  });
+
+  it("keeps clients that share a 128-character prefix distinct", () => {
+    const h = harness();
+    const logger = createAccessLogger(options(h, { maxIndividualPerInterval: 2 }));
+    const prefix = "a".repeat(128);
+    const first = prefix + "first";
+    const second = prefix + "second";
+
+    logger.log(entry({ clientId: first, status: 500 }));
+    logger.log(entry({ clientId: first, status: 500 }));
+    const secondEntry = entry({ clientId: second, status: 500 });
+    logger.log(secondEntry);
+    // The second client has its own budget, so its first 500 is not suppressed by the first's.
+    expect(h.lines).toContain(JSON.stringify(secondEntry));
+
+    logger.flush();
+    const summary = parse(h.lines.at(-1)!);
+    expect(summary.suppressedIndividual).toBe(0);
+    const keys = Object.keys(summary.clients);
+    expect(keys).toHaveLength(2);
+    for (const key of keys) expect(key.length).toBeLessThanOrEqual(128);
+    expect(Object.values(summary.clients as Record<string, { requests: number }>).map((c) => c.requests).sort())
+      .toEqual([1, 2]);
+  });
+
+  it("bounds oversized tool names and keeps distinct oversized names distinct", () => {
+    const h = harness();
+    const logger = createAccessLogger(options(h));
+    const huge = "x".repeat(10_000_000);
+    logger.log(entry({ toolName: huge }));
+    logger.log(entry({ toolName: huge }));
+    logger.log(entry({ toolName: "x".repeat(10_000_001) }));
+    logger.flush();
+
+    const line = h.lines.at(-1)!;
+    expect(line.length).toBeLessThan(4_096);
+    const tools = parse(line).clients["client-a"].tools as Record<string, number>;
+    const names = Object.keys(tools);
+    expect(names).toHaveLength(2);
+    for (const name of names) expect(name.length).toBeLessThanOrEqual(128);
+    expect(Object.values(tools).sort()).toEqual([1, 2]);
+  });
+
   it("caps the clients map and folds the remainder into otherClients", () => {
     const h = harness();
     const logger = createAccessLogger(options(h, { maxClients: 2 }));

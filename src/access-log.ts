@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { RequestLogEntry } from "./index.js";
 
 // Request access logging for the HTTP transport (MUNIN-426).
@@ -59,11 +60,18 @@ const MAX_TOOLS_PER_CLIENT = 10;
 const RATE_LIMITED_STATUS = 429;
 /** Total individual lines per interval = this factor x the per-source budget. */
 const GLOBAL_INDIVIDUAL_CEILING_FACTOR = 5;
-/** Distinct sources tracked per interval; further sources share one overflow entry. */
+/** Distinct sources tracked per interval; further sources share one overflow bucket. */
 const MAX_TRACKED_SOURCES = 1_000;
-const OVERFLOW_SOURCE = "_overflow";
-/** Longest client label kept; longer ids are truncated so per-client memory stays bounded. */
+/**
+ * Internal key of the shared overflow bucket. A symbol cannot collide with any
+ * caller-controlled client label, and the bucket is reported as `otherClients`.
+ */
+const OVERFLOW_SOURCE: unique symbol = Symbol("access-log-overflow");
+type SourceKey = string | typeof OVERFLOW_SOURCE;
+/** Longest client or tool label kept; longer ones are shortened so retained memory stays bounded. */
 const MAX_LABEL_LENGTH = 128;
+const LABEL_PREFIX_LENGTH = 100;
+const LABEL_DIGEST_LENGTH = 16;
 
 function parseNonNegativeInteger(raw: string | undefined): number | undefined {
   if (raw === undefined) return undefined;
@@ -124,8 +132,18 @@ function newCounters(): ClientCounters {
   return { requests: 0, rateLimited: 0, errors: 0, maxDurationMs: 0, tools: new Map(), toolsOther: 0 };
 }
 
+/**
+ * Bound a caller-controlled label (client id, tool name). Longer labels become
+ * `<100-char prefix>~<16 hex digest of the whole label>`: bounded in size, and
+ * still distinct for distinct inputs. The prefix is copied through a Buffer so the
+ * retained string owns its storage; a plain `slice` of a long string can keep the
+ * original (possibly multi-megabyte) string alive as its backing store.
+ */
 function boundLabel(label: string): string {
-  return label.length > MAX_LABEL_LENGTH ? label.slice(0, MAX_LABEL_LENGTH) : label;
+  if (label.length <= MAX_LABEL_LENGTH) return label;
+  const prefix = Buffer.from(label.slice(0, LABEL_PREFIX_LENGTH), "utf8").toString("utf8");
+  const digest = createHash("sha256").update(label).digest("hex").slice(0, LABEL_DIGEST_LENGTH);
+  return `${prefix}~${digest}`;
 }
 
 function clientKey(entry: RequestLogEntry): string {
@@ -152,7 +170,7 @@ export function createAccessLogger(options: AccessLogOptions): AccessLogger {
   let windowStart: number | undefined;
   let total = 0;
   let byStatus = new Map<number, number>();
-  let clients = new Map<string, ClientCounters>();
+  let clients = new Map<SourceKey, ClientCounters>();
   let individualBySourceClass = new Map<string, number>();
   let individualThisInterval = 0;
   let suppressedIndividual = 0;
@@ -169,10 +187,12 @@ export function createAccessLogger(options: AccessLogOptions): AccessLogger {
   }
 
   /** Source key used for both counters and budgets; bounded against key floods. */
-  function sourceKey(entry: RequestLogEntry): string {
+  function sourceKey(entry: RequestLogEntry): SourceKey {
     const key = clientKey(entry);
-    if (clients.has(key) || clients.size < MAX_TRACKED_SOURCES) return key;
-    return OVERFLOW_SOURCE;
+    if (clients.has(key)) return key;
+    // The overflow bucket does not count toward the tracking cap.
+    const tracked = clients.has(OVERFLOW_SOURCE) ? clients.size - 1 : clients.size;
+    return tracked < MAX_TRACKED_SOURCES ? key : OVERFLOW_SOURCE;
   }
 
   function armTimer(): void {
@@ -182,8 +202,9 @@ export function createAccessLogger(options: AccessLogOptions): AccessLogger {
     timer.unref();
   }
 
-  function writeIndividual(entry: RequestLogEntry, source: string): void {
-    const budgetKey = `${source}|${entry.status >= 500 ? "5xx" : "other"}`;
+  function writeIndividual(entry: RequestLogEntry, source: SourceKey): void {
+    // Label-derived keys carry an "s:" prefix, so they cannot equal the overflow key.
+    const budgetKey = `${source === OVERFLOW_SOURCE ? "overflow" : `s:${source}`}|${entry.status >= 500 ? "5xx" : "other"}`;
     const used = individualBySourceClass.get(budgetKey) ?? 0;
     if (used < maxIndividualPerInterval && individualThisInterval < globalIndividualCeiling) {
       individualBySourceClass.set(budgetKey, used + 1);
@@ -194,7 +215,7 @@ export function createAccessLogger(options: AccessLogOptions): AccessLogger {
     }
   }
 
-  function record(entry: RequestLogEntry, source: string): void {
+  function record(entry: RequestLogEntry, source: SourceKey): void {
     if (windowStart === undefined) windowStart = now();
     total += 1;
     byStatus.set(entry.status, (byStatus.get(entry.status) ?? 0) + 1);
@@ -209,11 +230,12 @@ export function createAccessLogger(options: AccessLogOptions): AccessLogger {
     else if (isIndividualStatus(entry.status)) counters.errors += 1;
     counters.maxDurationMs = Math.max(counters.maxDurationMs, entry.durationMs);
     if (entry.toolName !== undefined) {
-      const current = counters.tools.get(entry.toolName);
+      const toolName = boundLabel(entry.toolName);
+      const current = counters.tools.get(toolName);
       if (current !== undefined) {
-        counters.tools.set(entry.toolName, current + 1);
+        counters.tools.set(toolName, current + 1);
       } else if (counters.tools.size < MAX_TOOLS_PER_CLIENT) {
-        counters.tools.set(entry.toolName, 1);
+        counters.tools.set(toolName, 1);
       } else {
         counters.toolsOther += 1;
       }
@@ -221,9 +243,12 @@ export function createAccessLogger(options: AccessLogOptions): AccessLogger {
   }
 
   function summarize(end: number): Record<string, unknown> {
-    const ranked = [...clients.entries()].sort((a, b) => b[1].requests - a[1].requests);
+    const overflow = clients.get(OVERFLOW_SOURCE);
+    const ranked = [...clients.entries()]
+      .filter((pair): pair is [string, ClientCounters] => pair[0] !== OVERFLOW_SOURCE)
+      .sort((a, b) => b[1].requests - a[1].requests);
     const listed = ranked.slice(0, maxClients);
-    const folded = ranked.slice(maxClients);
+    const folded = overflow ? [...ranked.slice(maxClients), [OVERFLOW_SOURCE, overflow] as const] : ranked.slice(maxClients);
 
     const toSummary = (counters: ClientCounters): ClientSummary => {
       const summary: ClientSummary = {
