@@ -544,14 +544,18 @@ const DEMOTED_HEURISTIC_CEILING = -10;
  *   recency lift    = search_recency_weight * RANK_RECENCY_MAX_LIFT * r
  * where r in [0, 1] is the relative `updated_at` rank among the candidates.
  */
-/** Heuristic points per position of structural lift. */
-export const RANK_STRUCTURAL_DIVISOR = 5;
+/**
+ * Heuristic points per position of structural lift. A tracked status (+26) is
+ * worth at most one position, so a clearly better-matching entry of any class
+ * keeps its place (MUNIN-335: relevance dominates on ordinary queries).
+ */
+export const RANK_STRUCTURAL_DIVISOR = 26;
 /** Most positions a structural class can move an entry up. */
-export const RANK_STRUCTURAL_MAX_LIFT = 5;
+export const RANK_STRUCTURAL_MAX_LIFT = 1;
 /** Most positions a structural class can move an entry down. */
 export const RANK_STRUCTURAL_MAX_DEMOTION = 1;
 /** Positions the newest candidate gains at `search_recency_weight` 1. */
-export const RANK_RECENCY_MAX_LIFT = 10;
+export const RANK_RECENCY_MAX_LIFT = 5;
 /**
  * Sort keys are rounded to this many units per position before comparison, so
  * floating-point noise cannot reorder candidates and the comparator stays a

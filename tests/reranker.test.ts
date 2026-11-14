@@ -78,7 +78,10 @@ describe("rerankQueryResults recency tie-break (#74)", () => {
     return [getById(db, olderId)!, getById(db, newerId)!];
   }
 
-  const params = { query: "decision", search_recency_weight: 0.2 } as Parameters<typeof rerankQueryResults>[1];
+  // At the default weight (0.2) recency lifts the newer entry by exactly one
+  // position, which only ties with its neighbour, so input order decides. Strict
+  // promotion is asserted at weight 1 (five positions).
+  const params = { query: "decision", search_recency_weight: 1 } as Parameters<typeof rerankQueryResults>[1];
 
   it("orders the newer entry first even when both timestamps are in the future (freshness would clamp to 1.0)", () => {
     const future = Date.now() + 60_000;
@@ -1091,9 +1094,15 @@ describe("rerankQueryResults exact-anchor floor (#252)", () => {
     expect(order[0]!.id).toBe(anchor.id);
   });
 
-  it("leaves ordinary topical queries to the structural heuristic", () => {
-    // Several entries carry the term, so nothing is uniquely named and the
-    // existing tracked-status/recency ordering must still win.
+  it("leaves ordinary topical queries to relevance, letting a tracked status move only one place", () => {
+    // Several entries carry the term, so nothing is uniquely named. Relevance (input
+    // index) dominates; the tracked-status lift is at most one place. Recency is off
+    // so the keys are exact.
+    //   a (log, index 0):   key 0 + 3/26 ~ 0.1154
+    //   noise-0 (tracked, index 1): key 1 - 1 = 0 -> one place ahead of a
+    //   b (log, index 2):   key 2 + 3/26 ~ 2.1154
+    //   noise-1 (tracked, index 3): key 3 - 1 = 2 -> ahead of b, behind a
+    //   noise-2 (tracked, index 4): key 4 - 1 = 3 -> behind b
     appendLog(db, "testing/topic-a", "Notes about deployment planning.", []);
     appendLog(db, "testing/topic-b", "More deployment planning notes.", []);
     const a = getById(db, (db.prepare("SELECT id FROM entries WHERE namespace='testing/topic-a'").get() as { id: string }).id)!;
@@ -1101,12 +1110,17 @@ describe("rerankQueryResults exact-anchor floor (#252)", () => {
     const noise = noiseEntries(3);
 
     const order = rerankQueryResults(
-      [a, b, ...noise],
-      { query: "deployment planning" } as Parameters<typeof rerankQueryResults>[1],
+      [a, noise[0]!, b, noise[1]!, noise[2]!],
+      { query: "deployment planning", search_recency_weight: 0 } as Parameters<typeof rerankQueryResults>[1],
       new Set(),
     );
-    // A tracked status still outranks a bare log on a topical query.
-    expect(order[0]!.key).toBe("status");
+    expect(order.map((e) => e.namespace)).toEqual([
+      "projects/noise-0",
+      "testing/topic-a",
+      "projects/noise-1",
+      "testing/topic-b",
+      "projects/noise-2",
+    ]);
   });
 });
 
@@ -1170,13 +1184,13 @@ describe("rerankQueryResults relevance-anchored ordering (#335, #248)", () => {
       // heuristic 6 (state)
       case "state":
         return { ...base, namespace: `notes/${label}`, key: "item", entry_type: "state", content: `state ${label}` } as Entry;
-      // heuristic 6 + 20 = 26 (tracked status), lift capped at 5
+      // heuristic 6 + 20 = 26 (tracked status), lift 26/26 = 1 (the cap)
       case "tracked":
         return { ...base, namespace: `projects/${label}`, key: "status", entry_type: "state", content: `tracked ${label}` } as Entry;
       // heuristic 6 - 30 = -24 (demoted)
       case "tombstone":
         return { ...base, namespace: `notes/${label}`, key: "item", entry_type: "state", content: `TOMBSTONE ${label}` } as Entry;
-      // heuristic 6 + 10 = 16, lift 3.2
+      // heuristic 6 + 10 = 16, lift 16/26 ~ 0.6154
       case "reference-index":
         return { ...base, namespace: "meta", key: "reference-index", entry_type: "state", content: `index ${label}` } as Entry;
     }
@@ -1186,35 +1200,40 @@ describe("rerankQueryResults relevance-anchored ordering (#335, #248)", () => {
   const labels = (entries: Entry[]) => entries.map((e) => e.namespace.split("/").pop() ?? e.namespace);
   const rank = (entries: Entry[], params: Params) => rerankQueryResults(entries, params, new Set());
 
-  it("lifts a tracked status at most five places and not to the top from far away", () => {
-    // Logs L0..L7 have key i + 0.6 (log lift -0.6 => key = i + 0.6). Tracked status
-    // lift = min(5, 26/5 = 5.2) = 5.
+  it("lifts a tracked status at most one place and not to the top from far away", () => {
+    // Logs L0..L6 have key i + 3/26 ~ i + 0.1154 (log lift -3/26). Tracked status
+    // lift = min(1, 26/26 = 1) = 1, so a tracked status at index t has key t - 1.
     const mk = (trackedAt: number) => {
       const entries: Entry[] = [];
       for (let i = 0; i < 8; i++) entries.push(i === trackedAt ? synth("T", "tracked") : synth(`L${i}`, "log"));
       return entries;
     };
-    // i = 7: key 2 -> after L0 (0.6), L1 (1.6), before L2 (2.6).
-    expect(labels(rank(mk(7), q({ search_recency_weight: 0 }))).slice(0, 4)).toEqual(["L0", "L1", "T", "L2"]);
-    // i = 3: key -2 -> first. i = 5: key 0 -> before L0 (0.6), first.
-    expect(labels(rank(mk(3), q({ search_recency_weight: 0 })))[0]).toBe("T");
-    expect(labels(rank(mk(5), q({ search_recency_weight: 0 })))[0]).toBe("T");
+    // t = 7: key 6 -> after L5 (5.1154), before L6 (6.1154): position 6, one place up.
+    expect(labels(rank(mk(7), q({ search_recency_weight: 0 })))).toEqual(["L0", "L1", "L2", "L3", "L4", "L5", "T", "L6"]);
+    // t = 3: key 2 -> after L1 (1.1154), before L2 (2.1154): position 2.
+    expect(labels(rank(mk(3), q({ search_recency_weight: 0 }))).indexOf("T")).toBe(2);
+    // t = 5: key 4 -> after L3 (3.1154), before L4 (4.1154): position 4.
+    expect(labels(rank(mk(5), q({ search_recency_weight: 0 }))).indexOf("T")).toBe(4);
   });
 
-  it("lets a state entry overtake a log directly above it but not one two places above", () => {
-    // state key = i - 1.2; log key = i + 0.6.
-    // [log, state]: state 1 - 1.2 = -0.2 < log 0.6 -> state first.
-    const above = rank([synth("log", "log"), synth("state", "state")], q({ search_recency_weight: 0 }));
-    expect(labels(above)).toEqual(["state", "log"]);
-    // [log, filler-log, state]: state 2 - 1.2 = 0.8 > log 0.6 -> log stays first.
-    const two = rank([synth("log", "log"), synth("log2", "log"), synth("state", "state")], q({ search_recency_weight: 0 }));
-    expect(labels(two)[0]).toBe("log");
-    expect(labels(two)).toEqual(["log", "state", "log2"]); // log2 key 1.6
+  it("does not let a state entry overtake a log directly above it, but lets a tracked status do so", () => {
+    // log key = i + 3/26 ~ i + 0.1154; state key = i - 6/26 ~ i - 0.2308;
+    // tracked key = i - 1 (lift 1).
+    // [log, state]: state 1 - 0.2308 = 0.769 > log 0.1154 -> log stays first.
+    const aboveState = rank([synth("log", "log"), synth("state", "state")], q({ search_recency_weight: 0 }));
+    expect(labels(aboveState)).toEqual(["log", "state"]);
+    // [log, tracked]: tracked 1 - 1 = 0 < log 0.1154 -> tracked overtakes the log.
+    const aboveTracked = rank([synth("log", "log"), synth("T", "tracked")], q({ search_recency_weight: 0 }));
+    expect(labels(aboveTracked)).toEqual(["T", "log"]);
+    // [log, filler-log, tracked]: tracked 2 - 1 = 1 > log 0.1154 -> log stays first;
+    // log2 key 1.1154 sorts after the tracked status (key 1).
+    const two = rank([synth("log", "log"), synth("log2", "log"), synth("T", "tracked")], q({ search_recency_weight: 0 }));
+    expect(labels(two)).toEqual(["log", "T", "log2"]);
   });
 
   it("bounds the recency lift by the weight", () => {
-    // Ten same-class state entries (lift 1.2 each). The newest sits at index 9;
-    // all others share the oldest timestamp (r = 0, r = 1 for the newest).
+    // Ten same-class state entries (structural lift 6/26 ~ 0.2308 each). The newest
+    // sits at index 9 with r = 1; all others share the oldest timestamp (r = 0).
     const old = new Date(BASE).toISOString();
     const fresh = new Date(BASE + 86_400_000).toISOString();
     const mk = () => Array.from({ length: 10 }, (_, i) => synth(`S${i}`, "state", i === 9 ? fresh : old));
@@ -1222,24 +1241,27 @@ describe("rerankQueryResults relevance-anchored ordering (#335, #248)", () => {
 
     // weight 0: order equals incoming.
     expect(labels(rank(mk(), q({ search_recency_weight: 0 })))).toEqual(incoming);
-    // default 0.2: lift 0.2 * 10 * 1 = 2; key 9 - 1.2 - 2 = 5.8 ties S7 (7 - 1.2 = 5.8) -> S7 wins on index,
-    // so the newest lands at position 8 (index 8), never first.
+    // default 0.2: recency lift 0.2 * 5 * 1 = 1; newest key 9 - 6/26 - 1 = 8 - 6/26 ties
+    // S8 (8 - 6/26, r = 0) -> S8 wins on index, so the newest stays at position 9.
     const byDefault = labels(rank(mk(), q()));
-    expect(byDefault.indexOf("S9")).toBe(8);
+    expect(byDefault.indexOf("S9")).toBe(9);
     expect(byDefault[0]).toBe("S0");
-    // weight 1: lift 10; key 9 - 1.2 - 10 = -2.2 < S0's -1.2 -> first.
-    expect(labels(rank(mk(), q({ search_recency_weight: 1 })))[0]).toBe("S9");
+    // weight 1: recency lift 5; newest key 9 - 6/26 - 5 = 4 - 6/26 ties S4 -> it lands
+    // directly after S4 at position 5 (five places up, less the tie with S4). S0 stays first.
+    const full = labels(rank(mk(), q({ search_recency_weight: 1 })));
+    expect(full.indexOf("S9")).toBe(5);
+    expect(full[0]).toBe("S0");
   });
 
-  it("pins the documented displacement: a log can end five places down behind five tracked statuses", () => {
-    // Weight 0, equal timestamps. Log at index 0: heuristic -3, lift -0.6, key 0 + 0.6 = 0.6.
-    // Tracked statuses at indexes 1..5: lift 5 each (26 / 5 = 5.2, capped), keys
-    // 1 - 5 = -4, 2 - 5 = -3, 3 - 5 = -2, 4 - 5 = -1, 5 - 5 = 0. All are below 0.6, so the
-    // log (own demotion at most one place) ends at index 5: its neighbours moved up too.
+  it("pins the documented displacement: a log is pushed down one place by a tracked status and no further", () => {
+    // Weight 0, equal timestamps. Log at index 0: heuristic -3, lift -3/26, key 0 + 3/26 ~ 0.1154.
+    // Tracked statuses at indexes 1..5: lift 1 each (26 / 26 = 1, capped), keys
+    // 1 - 1 = 0, 2 - 1 = 1, 3 - 1 = 2, 4 - 1 = 3, 5 - 1 = 4. Only T1 (key 0) sorts before the
+    // log; T2..T5 sort after it, so the log ends at index 1.
     const entries = [synth("log", "log"), ...["T1", "T2", "T3", "T4", "T5"].map((l) => synth(l, "tracked"))];
     const order = labels(rank(entries, q({ search_recency_weight: 0 })));
-    expect(order).toEqual(["T1", "T2", "T3", "T4", "T5", "log"]);
-    expect(order.indexOf("log")).toBe(5);
+    expect(order).toEqual(["T1", "log", "T2", "T3", "T4", "T5"]);
+    expect(order.indexOf("log")).toBe(1);
   });
 
   it("normalises an invalid search_recency_weight at the reranker boundary", () => {
@@ -1318,28 +1340,57 @@ describe("rerankQueryResults relevance-anchored ordering (#335, #248)", () => {
     const params = { query: "zarquon-flimflam-42", search_recency_weight: 0 } as Params;
     // Without a pool the unique anchor is promoted to first.
     expect(rerankQueryResults([anchor, ...noise], params, new Set())[0]!.id).toBe(anchor.id);
-    // anchor key 0 + 0.6 = 0.6; tracked N1 key 1 - 5 = -4 -> first when the pool blocks promotion.
+    // anchor (log, index 0) key 0 + 3/26 ~ 0.1154; tracked N1 (index 1) key 1 - 1 = 0 -> N1 first
+    // when the pool blocks promotion.
     const withPool = rerankQueryResults([anchor, ...noise], params, new Set(), undefined, { anchorPool: [pooled] });
     expect(withPool[0]!.id).not.toBe(anchor.id);
     expect(withPool[0]!.id).toBe(noise[0]!.id);
   });
 
   it("treats mathematically equal keys as tied on incoming index despite floating-point noise", () => {
-    // A: state at index 0, lift 6/5 = 1.2, key -1.2.
-    // C: reference-index at index 2, heuristic 16, lift 16/5 = 3.2, key 2 - 3.2.
-    // Mathematically both are -1.2, but in doubles 2 - 3.2 = -1.2000000000000002 < -1.2,
-    // so a raw comparison would put C first. Tied on key -> index order: A, C.
-    // B is a log at index 1: heuristic -3, lift -0.6, key 1 + 0.6 = 1.6 (last).
-    expect(2 - 16 / 5).toBeLessThan(0 - 6 / 5);
+    // Divisor 26 gives no integer-separated structural pair (16/26, 6/26, 3/26 and 1 are
+    // not whole-number apart), so the tie is built from the recency lift instead.
+    // Default weight 0.2: the newest entry A (index 1, r = 1) gets recency lift 0.2 * 5 * 1 = 1
+    // exactly; the oldest B (index 0, r = 0) gets none. Both are state entries (lift 6/26).
+    // Keys: A = (1 - 6/26) - 1, B = 0 - 6/26. Mathematically both are -6/26, but in doubles
+    // (1 - 6/26) - 1 = -0.23076923076923084 < -0.23076923076923078, so a raw comparison would
+    // put A first. Tied on key -> index order: B, A.
+    const old = new Date(BASE).toISOString();
+    const fresh = new Date(BASE + 86_400_000).toISOString();
+    expect((1 - 6 / 26) - 1).toBeLessThan(0 - 6 / 26);
+    const order = rank([synth("B", "state", old), synth("A", "state", fresh)], q());
+    expect(labels(order)).toEqual(["B", "A"]);
+  });
+
+  it("lets the default recency weight reorder a fresh state above an old log, and weight 0 does not", () => {
+    // Old log (index 0): key 0 + 3/26 ~ 0.1154. Fresh state (index 1, r = 1): structural
+    // lift 6/26. Default weight 0.2 gives recency lift 0.2 * 5 * 1 = 1, so the key is
+    // 1 - 6/26 - 1 ~ -0.2308 and the state wins. At weight 0 the key is 1 - 6/26 ~ 0.769
+    // and the log stays first.
+    const old = new Date(BASE).toISOString();
+    const fresh = new Date(BASE + 86_400_000).toISOString();
+    const mk = () => [synth("oldlog", "log", old), synth("freshstate", "state", fresh)];
+    expect(labels(rank(mk(), q()))).toEqual(["freshstate", "oldlog"]);
+    expect(labels(rank(mk(), q({ search_recency_weight: 0 })))).toEqual(["oldlog", "freshstate"]);
+  });
+
+  it("clamps the structural lift of a tracked status above the +26 cap", () => {
+    // Query "work" gives a tracked status heuristic 6 + 20 + 4 = 30, i.e. 30/26 ~ 1.1538 before
+    // clamping. The cap holds it at 1, so with weight 0.03 (recency lift 0.15 for the fresh
+    // tracked status at index 1) its key is 1 - 1 - 0.15 = -0.15, which is after the old state
+    // at index 0 (key -6/26 ~ -0.2308). Without the clamp its key would be ~ -0.3038 and it
+    // would wrongly sort first.
+    const old = new Date(BASE).toISOString();
+    const fresh = new Date(BASE + 86_400_000).toISOString();
     const order = rank(
-      [synth("A", "state"), synth("B", "log"), synth("C", "reference-index")],
-      q({ search_recency_weight: 0 }),
+      [synth("oldstate", "state", old), synth("freshtracked", "tracked", fresh)],
+      { query: "work", search_recency_weight: 0.03 } as Params,
     );
-    expect(labels(order)).toEqual(["A", "meta", "B"]);
+    expect(labels(order)).toEqual(["oldstate", "freshtracked"]);
   });
 
   it("exports the documented constants", () => {
-    expect([RANK_STRUCTURAL_DIVISOR, RANK_STRUCTURAL_MAX_LIFT, RANK_STRUCTURAL_MAX_DEMOTION, RANK_RECENCY_MAX_LIFT]).toEqual([5, 5, 1, 10]);
+    expect([RANK_STRUCTURAL_DIVISOR, RANK_STRUCTURAL_MAX_LIFT, RANK_STRUCTURAL_MAX_DEMOTION, RANK_RECENCY_MAX_LIFT]).toEqual([26, 1, 1, 5]);
   });
 });
 

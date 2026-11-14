@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, afterAll } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
 import { existsSync, unlinkSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
@@ -597,6 +597,32 @@ describe("stateless HTTP transport", () => {
       status: 200,
     });
     expect(requestLogs.at(-1)).not.toHaveProperty("diagnostics");
+  });
+});
+
+describe("default access logging (MUNIN-426)", () => {
+  it("serves requests through the default access logger when no requestLogger is injected", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const defaultDb = initDatabase(TEST_DB_PATH);
+    try {
+      const { app: defaultApp } = createHttpApp({
+        database: defaultDb,
+        apiKey: LEGACY_API_KEY,
+        apiKeyDpa: DPA_API_KEY,
+        apiKeyConsumer: CONSUMER_API_KEY,
+        issuerUrl: ISSUER_URL,
+        httpHost: "127.0.0.1",
+        httpPort: 3030,
+      });
+
+      const response = await initializeClient(defaultApp);
+      expect(response.status).toBe(200);
+      expect(response.body.result?.serverInfo).toBeDefined();
+    } finally {
+      errorSpy.mockRestore();
+      defaultDb.close();
+      cleanupTestDb();
+    }
   });
 });
 

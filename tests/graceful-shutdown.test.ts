@@ -117,6 +117,31 @@ describe("runGracefulShutdown ordering and independence (#413)", () => {
     expect(deps.events).toEqual(["stop-embedding", "close-db", "exit:1"]);
   });
 
+  it("flushes the access log after the HTTP drain, before the workers stop and the database closes (MUNIN-426)", async () => {
+    const deps = makeDeps({
+      stopAccessLog: () => { deps.events.push("flush-access-log"); },
+    });
+
+    await runGracefulShutdown(deps);
+
+    expect(deps.events).toEqual(["flush-access-log", "stop-embedding", "stop-consolidation", "close-db", "exit:0"]);
+  });
+
+  it("still closes the database and exits 1 when the access log flush throws (MUNIN-426)", async () => {
+    const log = vi.fn();
+    const deps = makeDeps({
+      log,
+      stopAccessLog: () => {
+        throw new Error("access log flush failed");
+      },
+    });
+
+    await runGracefulShutdown(deps);
+
+    expect(deps.events).toEqual(["stop-embedding", "stop-consolidation", "close-db", "exit:1"]);
+    expect(log).toHaveBeenCalledWith("Error flushing access log during shutdown:", expect.any(Error));
+  });
+
   it("closes the database and exits 1 even if closing the database throws", async () => {
     const deps = makeDeps({
       closeDatabase: () => {
