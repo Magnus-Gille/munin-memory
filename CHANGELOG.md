@@ -27,10 +27,22 @@ changelog is the canonical record of what moved.
   characters are shortened to a prefix plus a digest of the full value (so they
   stay distinct), each client lists at most 10 tool names (further requests are
   counted in `toolsOther`), and the summary names at most 20 clients (the rest are
-  folded into `otherClients`). Set
-  `MUNIN_ACCESS_LOG_MODE=verbose` to restore one line per request. Summaries carry no session or request ids,
-  headers, or bodies. The summary is flushed during graceful shutdown before the
-  database closes.
+  folded into `otherClients`). Set `MUNIN_ACCESS_LOG_MODE=verbose` to restore one
+  line per request. Summaries carry no session or request ids, headers, or bodies.
+  The summary is flushed during graceful shutdown before the database closes.
+- `memory_query` ranking is now relevance-dominant on ordinary queries
+  (MUNIN-335, MUNIN-248). Inside the 50-candidate rerank window a structural
+  class (tracked status, entry type) moves an entry at most one position up or
+  down (was five up / one down) and recency lifts the newest candidate by at
+  most `search_recency_weight` x 5 positions (was x 10). Orientation and
+  attention-triage queries keep their structural-first ordering. No schema
+  change. LongMemEval-S, lexical, 500 questions, `production_ranker` runner:
+  NDCG@5 0.8551 -> 0.8723, MRR 0.8946 -> 0.9159, recall@1 0.5310 -> 0.5658
+  (raw retrieval for reference: 0.8741 / 0.9179 / 0.5678). Generated Swedish
+  decision fixture (24 questions), `production_ranker`: recall@1 0.000 -> 0.375,
+  MRR 0.417 -> 0.688 (keyword questions recall@1 0.00 -> 0.75; Swedish
+  natural-language questions stay at recall@1 0.00, MRR 0.50, so that gap is
+  still open).
 
 ### Added
 

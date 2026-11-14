@@ -115,12 +115,13 @@ retroactively marking the prior page as a query reformulation.
 
 Inside the rerank window ordering stays anchored to relevance: each candidate starts at its
 retrieval position and its ranking position is adjusted by a bounded amount. A structural
-class (tracked status, entry type) gives up to five positions' worth of lift or one of
-demotion; recency adds a lift of `search_recency_weight` x 10 positions' worth scaled by its
-relative `updated_at` rank among the candidates (about two at the default weight; 0 disables
-it). Entries are then ordered by the adjusted position, so an entry's final place also
-depends on how its neighbours were adjusted: a log at the top followed by five tracked
-statuses ends five places down even though its own demotion is at most one. Entries whose
+class (tracked status, entry type) gives up to one position's worth of lift or of
+demotion, so a clearly better-matching entry of any class keeps its place; recency adds a lift
+of `search_recency_weight` x 5 positions' worth scaled by its relative `updated_at` rank among
+the candidates (about one at the default weight; 0 disables it). Entries are then ordered by
+the adjusted position, so an entry's final place also depends on how its neighbours were
+adjusted: at the default weight a log at the top can be passed by entries up to two places
+below it even though its own demotion is at most one. Entries whose
 structural score is at or below the demotion threshold (a plain tombstone, for example) sort
 after all others; a tombstone that also carries a strong structural boost can stay above it.
 Broad orientation and attention-triage queries keep the structural-first ordering, with
