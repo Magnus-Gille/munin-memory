@@ -1362,6 +1362,33 @@ describe("rerankQueryResults relevance-anchored ordering (#335, #248)", () => {
     expect(labels(order)).toEqual(["B", "A"]);
   });
 
+  it("lets the default recency weight reorder a fresh state above an old log, and weight 0 does not", () => {
+    // Old log (index 0): key 0 + 3/26 ~ 0.1154. Fresh state (index 1, r = 1): structural
+    // lift 6/26. Default weight 0.2 gives recency lift 0.2 * 5 * 1 = 1, so the key is
+    // 1 - 6/26 - 1 ~ -0.2308 and the state wins. At weight 0 the key is 1 - 6/26 ~ 0.769
+    // and the log stays first.
+    const old = new Date(BASE).toISOString();
+    const fresh = new Date(BASE + 86_400_000).toISOString();
+    const mk = () => [synth("oldlog", "log", old), synth("freshstate", "state", fresh)];
+    expect(labels(rank(mk(), q()))).toEqual(["freshstate", "oldlog"]);
+    expect(labels(rank(mk(), q({ search_recency_weight: 0 })))).toEqual(["oldlog", "freshstate"]);
+  });
+
+  it("clamps the structural lift of a tracked status above the +26 cap", () => {
+    // Query "work" gives a tracked status heuristic 6 + 20 + 4 = 30, i.e. 30/26 ~ 1.1538 before
+    // clamping. The cap holds it at 1, so with weight 0.03 (recency lift 0.15 for the fresh
+    // tracked status at index 1) its key is 1 - 1 - 0.15 = -0.15, which is after the old state
+    // at index 0 (key -6/26 ~ -0.2308). Without the clamp its key would be ~ -0.3038 and it
+    // would wrongly sort first.
+    const old = new Date(BASE).toISOString();
+    const fresh = new Date(BASE + 86_400_000).toISOString();
+    const order = rank(
+      [synth("oldstate", "state", old), synth("freshtracked", "tracked", fresh)],
+      { query: "work", search_recency_weight: 0.03 } as Params,
+    );
+    expect(labels(order)).toEqual(["oldstate", "freshtracked"]);
+  });
+
   it("exports the documented constants", () => {
     expect([RANK_STRUCTURAL_DIVISOR, RANK_STRUCTURAL_MAX_LIFT, RANK_STRUCTURAL_MAX_DEMOTION, RANK_RECENCY_MAX_LIFT]).toEqual([26, 1, 1, 5]);
   });
