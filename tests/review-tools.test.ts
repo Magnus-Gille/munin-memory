@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { initDatabase, readState, writeState } from "../src/db.js";
+import { getPersistedIntake } from "../src/intake.js";
 import { ownerContext, type AccessContext } from "../src/access.js";
 import { registerTools } from "../src/tools.js";
 import {
@@ -180,6 +181,33 @@ describe("memory_extract durable review proposals", () => {
       approval_would_write_memory: true,
     });
     db.close();
+  });
+
+  it("accepts id as an alias for proposal_id and rejects conflicting values", async () => {
+    const db = initDatabase(":memory:");
+    const call = makeCall(db);
+    const extracted = await call("memory_extract", {
+      conversation_text: "We decided to keep review approval explicit.",
+      namespace_hint: "projects/munin-memory",
+      persist: true,
+    }) as { proposals: Array<{ id: string }> };
+    const pid = extracted.proposals[0].id;
+
+    const viaId = await call("memory_review", { action: "get", id: pid });
+    expect(viaId.id).toBe(pid);
+    const viaBoth = await call("memory_review", { action: "get", id: pid, proposal_id: pid });
+    expect(viaBoth.id).toBe(pid);
+    const viaProposalId = await call("memory_review", { action: "get", proposal_id: pid });
+    expect(viaProposalId.id).toBe(pid);
+
+    const conflict = await call("memory_review", {
+      action: "get",
+      id: pid,
+      proposal_id: "someone-else",
+    });
+    expect(conflict.error).toBeTruthy();
+    expect(JSON.stringify(conflict)).toContain("validation_error");
+    expect(JSON.stringify(conflict)).toMatch(/id and proposal_id/);
   });
 
   it("reports preview and approval write effects for every proposal action", async () => {
@@ -2273,6 +2301,48 @@ describe("memory_review lifecycle and isolation", () => {
 
     expect(result.proposals).toHaveLength(5);
     expect(result.counts.pending).toBe(55);
+    db.close();
+  });
+});
+
+describe("reviewed intentional overwrites", () => {
+  it("does not persist duplicate_key when an approved status proposal carries expected_updated_at", async () => {
+    useReviewTestClock();
+    const db = initDatabase(":memory:");
+    const call = makeCall(db);
+    await call("memory_update_status", {
+      namespace: "projects/munin-memory",
+      phase: "Active",
+      current_work: "Original work item with detail.",
+      lifecycle: "active",
+    });
+    const original = readState(db, "projects/munin-memory", "status")!;
+    const created = createReviewProposal(db, {
+      creatorPrincipalId: "owner",
+      operation: {
+        action: "memory_update_status" as const,
+        namespace: "projects/munin-memory",
+        status_patch: { current_work: "Reviewed replacement work item with detail." },
+        expected_updated_at: original.updated_at,
+        classification: "internal" as const,
+      },
+      classification: "internal",
+      confidence: 0.9,
+      reasons: ["cas status"],
+      sourceRefs: [],
+      sourceExcerpt: "cas",
+      sourceHash: "hash-cas",
+      createdAt: "2026-07-23T10:00:00.000Z",
+      expiresAt: "2026-08-22T10:00:00.000Z",
+    });
+    const approved = await call("memory_review", {
+      action: "approve",
+      proposal_id: created.id,
+    }) as { status: string; applied_entry_id: string };
+    expect(approved.status).toBe("approved");
+    const intake = getPersistedIntake(db, approved.applied_entry_id);
+    expect(intake).not.toBeNull();
+    expect(JSON.stringify(intake)).not.toContain("duplicate_key");
     db.close();
   });
 });

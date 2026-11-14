@@ -366,6 +366,52 @@ describe("write-path intake integration", () => {
     db.close();
   });
 
+  it("suppresses duplicate_key for intentional overwrites but keeps it for blind ones", async () => {
+    const first = await ownerCall("memory_write", {
+      namespace: "projects/intake-dup",
+      key: "state",
+      content: "Initial state entry with enough useful detail for durable memory.",
+    });
+    const checks = (r: Record<string, unknown>): string[] =>
+      ((r.intake as { flags: Array<{ check: string }> }).flags).map((f) => f.check);
+
+    const blind = await ownerCall("memory_write", {
+      namespace: "projects/intake-dup",
+      key: "state",
+      content: "Blind overwrite of state with different enough detail for memory.",
+    });
+    expect(checks(blind)).toContain("duplicate_key");
+    expect(JSON.stringify(blind.warnings ?? [])).toContain("intake:duplicate_key");
+
+    const current = readState(db, "projects/intake-dup", "state")!;
+    const cas = await ownerCall("memory_write", {
+      namespace: "projects/intake-dup",
+      key: "state",
+      content: "Deliberate CAS correction of state with new detail for memory.",
+      expected_updated_at: current.updated_at,
+    });
+    expect(cas.status).not.toBe("error");
+    expect(checks(cas)).not.toContain("duplicate_key");
+    expect(JSON.stringify(cas.warnings ?? [])).not.toContain("intake:duplicate_key");
+    void first;
+  });
+
+  it("evaluateIntake honours intentionalOverwrite", () => {
+    writeState(db, "projects/x", "k", "Some existing content about sqlite persistence layers.", [], "owner");
+    const candidates = getNamespaceStateEntries(db, "projects/x");
+    const base = {
+      namespace: "projects/x",
+      key: "k",
+      content: "Totally different replacement text regarding network topology.",
+      tags: [],
+      candidates,
+    };
+    expect(evaluateIntake(base).flags.map((f) => f.check)).toContain("duplicate_key");
+    expect(
+      evaluateIntake({ ...base, intentionalOverwrite: true }).flags.map((f) => f.check),
+    ).not.toContain("duplicate_key");
+  });
+
   it("returns and persists advisory findings without rejecting the write", async () => {
     const first = await ownerCall("memory_write", {
       namespace: "projects/intake",

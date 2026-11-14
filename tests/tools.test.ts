@@ -10743,6 +10743,70 @@ describe("memory_attention", () => {
     expect(result.items[0].namespace).toBe("clients/acme");
   });
 
+  it("does not claim all-clear when the prefix contains no tracked statuses", async () => {
+    await callTool("memory_write", {
+      namespace: "projects/release-train",
+      key: "status",
+      content: "Healthy.",
+      tags: ["active"],
+    });
+
+    const empty = parseToolResponse(
+      await callTool("memory_attention", { namespace_prefix: "testing/nothing-here" }),
+    ) as { items: unknown[]; message: string };
+    expect(empty.items).toHaveLength(0);
+    expect(empty.message).not.toContain("appear healthy");
+    expect(empty.message).toContain("No tracked statuses were found");
+    expect(empty.message).toContain("testing/nothing-here");
+
+    const healthy = parseToolResponse(
+      await callTool("memory_attention", { namespace_prefix: "projects/release-train" }),
+    ) as { message: string };
+    expect(healthy.message).toContain("appear healthy");
+  });
+
+  it("ignores unrelated redacted statuses when reporting an empty prefix", async () => {
+    const previousLibrarian = process.env.MUNIN_LIBRARIAN_ENABLED;
+    process.env.MUNIN_LIBRARIAN_ENABLED = "true";
+    try {
+      await callTool("memory_write", {
+        namespace: "projects/elsewhere",
+        key: "status",
+        content: "Blocked confidential status",
+        tags: ["blocked"],
+        classification: "client-confidential",
+      });
+      const consumerOwnerCall = makeContextCallTool({
+        ...ownerContext(),
+        transportType: "consumer",
+        maxClassification: "internal",
+      });
+      const result = parseToolResponse(
+        await consumerOwnerCall("memory_attention", { namespace_prefix: "testing/empty" }),
+      ) as { message: string };
+      expect(result.message).toContain("No tracked statuses were found");
+    } finally {
+      if (previousLibrarian === undefined) delete process.env.MUNIN_LIBRARIAN_ENABLED;
+      else process.env.MUNIN_LIBRARIAN_ENABLED = previousLibrarian;
+    }
+  });
+
+  it("declares id as an alias property on the memory_review schema", async () => {
+    const handler = (
+      server as unknown as { _requestHandlers: Map<string, Function> }
+    )._requestHandlers?.get("tools/list");
+    const toolList = await handler!({ method: "tools/list", params: {} });
+    const tool = (toolList as {
+      tools: Array<{
+        name: string;
+        inputSchema: { properties?: Record<string, { type?: string; description?: string }> };
+      }>;
+    }).tools.find((t) => t.name === "memory_review");
+    expect(tool?.inputSchema.properties?.id).toEqual(
+      expect.objectContaining({ type: "string", description: "Alias of proposal_id." }),
+    );
+  });
+
   it("surfaces expired and expiring tracked statuses", async () => {
     const soon = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString();
 
