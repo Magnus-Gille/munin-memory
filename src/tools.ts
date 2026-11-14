@@ -2174,6 +2174,7 @@ import {
   getQueryExplainReasons,
   type TrackedStatusAssessment,
 } from "./internal/reranker.js";
+import { compactToolResponseText, isToolEnabled, resolveResponseMode, resolveToolProfile } from "./surface.js";
 const DEFAULT_ORIENT_DETAIL: OrientDetail = "compact";
 const DEFAULT_ORIENT_RESPONSE_CHARACTER_BUDGET = 24_000;
 const MIN_ORIENT_RESPONSE_CHARACTER_BUDGET = 4_000;
@@ -7307,6 +7308,7 @@ const TOOL_DEFINITIONS = [
         },
         current_work: {
           type: "string",
+          description: "Only what the user stated, not your own plans.",
         },
         blockers: {
           type: "string",
@@ -7315,7 +7317,7 @@ const TOOL_DEFINITIONS = [
         next_steps: {
           type: "array",
           items: { type: "string" },
-          description: "Replaces the bullet list; [] clears it.",
+          description: "Replaces the bullet list; [] clears it. Only steps the user stated, never your own suggestions.",
         },
         notes: {
           type: "string",
@@ -7508,7 +7510,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_log",
     description:
-      "Append an immutable log entry for a decision, event or milestone. Status changes are not auto-logged. Correct an entry with `supersedes` plus exact `expected_updated_at`. Returns the stored `classification` and an advisory `intake` report.",
+      "Append-only chronological record: log each decision, event, milestone or change the user reports, with its date, so later questions about what happened and when can be answered. Use canonical tags `decision`, `milestone`, `blocker`, `discovery`, `correction`. Correct an entry with `supersedes` plus exact `expected_updated_at`. Returns the stored `classification` and an advisory `intake` report.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -7614,7 +7616,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_history",
     description:
-      "Chronological audit feed of writes, updates, corrections, deletes and log appends: 'what changed?', unlike relevance-based `memory_query`. Namespace filters are literal and case-sensitive: bare `projects/foo` returns that namespace plus descendants, while trailing-slash `projects/foo/` returns only descendants under that literal prefix.\n\nWithout cursors: newest first, with `sync_cursor` (newest id; 0 if empty) and `older_cursor`/`has_older`. `older_cursor` pages further back (`sync_cursor: null`; keep the first page's watermark). `cursor` switches to ascending sync mode (`id > cursor`); `next_cursor`/`sync_cursor` advance to the newest id seen, and an empty page keeps the input cursor. `cursor` and `older_cursor` are mutually exclusive.",
+      "Chronological audit feed of writes, corrections, deletes and log appends: 'what changed?', not relevance like `memory_query`. Namespace filters are literal and case-sensitive: bare `projects/foo` returns that namespace plus descendants, while trailing-slash `projects/foo/` returns only descendants under that literal prefix.\n\nWithout cursors: newest first, with `sync_cursor` (newest id; 0 if empty) and `older_cursor`/`has_older`. `older_cursor` pages further back (`sync_cursor: null`; keep the first page's watermark). `cursor` switches to ascending sync mode (`id > cursor`); `next_cursor`/`sync_cursor` advance to the newest id seen, and an empty page keeps the input cursor. `cursor` and `older_cursor` are mutually exclusive.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -7652,7 +7654,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_delete",
     description:
-      "Delete one state entry (namespace+key) or a whole namespace. A call without `delete_token` previews the scope (current and historical revision counts) and returns a token bound to that preview; repeat with it to delete. The token goes stale if targets change. Fails closed with `partial_lineage` if authorization or classification would split a correction lineage.",
+      "Delete one state entry (namespace+key) or a whole namespace. Without `delete_token` it previews the scope (current and historical revisions) and returns a bound token; repeat with it to delete. The token goes stale if targets change. Fails closed with `partial_lineage` if authorization or classification would split a correction lineage.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -7748,7 +7750,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_status",
     description:
-      "`memory_status` reports server version, capabilities, available tools and search modes. It is the safe fallback orientation check when deferred tool discovery did not expose `memory_orient` as callable.",
+      "`memory_status` reports server version, capabilities, available tools and search modes. Safe fallback when deferred tool discovery did not expose `memory_orient`.",
     inputSchema: {
       type: "object" as const,
       properties: {},
@@ -7758,7 +7760,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_health",
     description:
-      "Owner-only, read-only memory-engine health snapshot for operator dashboards. Sections: `embedding`, `size`, `retrieval`, `classification`, `maintenance`, `consolidation`, `security_events`; each degrades independently (`section.ok: false`, top-level `partial: true`). Contract: `docs/memory-health.schema.json` (`schema_version: 2`).",
+      "Owner-only, read-only memory-engine health snapshot. Sections: `embedding`, `size`, `retrieval`, `classification`, `maintenance`, `consolidation`, `security_events`; each degrades independently (`section.ok: false`, top-level `partial: true`). Contract: `docs/memory-health.schema.json` (`schema_version: 2`).",
     inputSchema: {
       type: "object" as const,
       properties: {},
@@ -7781,6 +7783,18 @@ export const REGISTERED_TOOL_METADATA: readonly { name: string; description: str
 
 function okResult(action: string, data: Record<string, unknown>) {
   return { content: [{ type: "text" as const, text: JSON.stringify({ ok: true, action, ...data }) }] };
+}
+
+/** Apply MUNIN_RESPONSE_MODE=compact to a single-text-block JSON tool result. */
+function compactToolResult<T extends { content?: Array<{ type: string; text?: string }> }>(
+  name: string,
+  result: T,
+  ctx: AccessContext,
+): T {
+  const block = result.content?.length === 1 ? result.content[0] : undefined;
+  if (!block || block.type !== "text" || typeof block.text !== "string") return result;
+  const text = compactToolResponseText(name, block.text, ctx);
+  return text === block.text ? result : { ...result, content: [{ ...block, text }] };
 }
 
 function errResult(action: string, error: string, message: string, extra?: Record<string, unknown>) {
@@ -8348,8 +8362,17 @@ export function registerTools(
     ? undefined
     : reviewSessionIdOverride ?? sessionId ?? randomUUID();
 
+  // Opt-in token-economy switches (MUNIN-434); defaults list every tool and
+  // return full responses. Invalid values are rejected at startup by
+  // validateSurfaceConfig, so resolving here cannot silently widen the surface.
+  const toolProfile = resolveToolProfile(REGISTERED_TOOL_NAMES);
+  const responseMode = resolveResponseMode();
+  const listedTools = toolProfile.tools === null
+    ? TOOL_DEFINITIONS
+    : TOOL_DEFINITIONS.filter((t) => isToolEnabled(toolProfile, t.name));
+
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: TOOL_DEFINITIONS,
+    tools: listedTools,
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest) => {
@@ -8358,7 +8381,16 @@ export function registerTools(
       const telemetryStart = performance.now();
 
       try {
-        const result = await (async () => { switch (name) {
+        const rawResult = await (async () => {
+          // Refusals go through the common telemetry path below, like unknown tools.
+          if (!isToolEnabled(toolProfile, name)) {
+            return errResult(
+              "unknown",
+              "tool_not_enabled",
+              `Tool ${name} is not enabled in this server's "${toolProfile.name}" tool profile (MUNIN_TOOL_PROFILE). Use one of the listed tools.`,
+            );
+          }
+          switch (name) {
           case "memory_orient": {
             const handleMemoryOrient = async () => {
               const orientArgs = (args ?? {}) as OrientParams;
@@ -13227,8 +13259,9 @@ export function registerTools(
                   consolidation: isConsolidationAvailable(),
                 },
                 tools: {
-                  count: TOOL_DEFINITIONS.length,
-                  names: TOOL_DEFINITIONS.map((t) => t.name),
+                  // The tools this server's MUNIN_TOOL_PROFILE exposes (all by default).
+                  count: listedTools.length,
+                  names: listedTools.map((t) => t.name),
                 },
                 principal: {
                   id: ctx.principalId,
@@ -13472,6 +13505,7 @@ export function registerTools(
           default:
             return errResult("unknown", "unknown_tool", `Unknown tool: ${name}`);
         } })();
+        const result = responseMode === "compact" ? compactToolResult(name, rawResult, ctx) : rawResult;
 
         const durationMs = performance.now() - telemetryStart;
         const responseText = result.content?.[0]?.type === "text"

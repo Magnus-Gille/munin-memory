@@ -216,6 +216,8 @@ All configuration is via environment variables. Copy `.env.example` for a starti
 | `MUNIN_ACCESS_LOG_MAX_INDIVIDUAL` | `20` | Individual lines (errors other than 429, slow requests) allowed per interval for each source (client id, or the shared unauthenticated source) and class (5xx or other), with a total ceiling of five times this value; overflow is counted as `suppressedIndividual` |
 | `MUNIN_MEMORY_DB_PATH` | `~/.munin-memory/memory.db` | Database file location |
 | `MUNIN_PROFILE` | — | Optional hardware preset: `zero-appliance`, `zero-plus`, or `full-node` |
+| `MUNIN_TOOL_PROFILE` | `full` | `core` exposes only the eight everyday tools; a comma-separated list selects an explicit set. This roughly halves the tool list re-sent with every model request. |
+| `MUNIN_RESPONSE_MODE` | `full` | `compact` drops redundant metadata from query, orient and write responses. Content, safety flags and degradation signals are kept. |
 | `MUNIN_EMBEDDINGS_ENABLED` | `true` | Enable semantic search |
 | `MUNIN_EMBEDDINGS_MODEL` | profile-dependent; otherwise `Xenova/bge-small-en-v1.5` | Local embedding model |
 | `MUNIN_EMBEDDINGS_REVISION` | built-in BGE/MiniLM commit pins | Immutable 40-character Hugging Face commit SHA; required for custom models |

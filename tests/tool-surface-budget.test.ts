@@ -14,8 +14,13 @@ import { createTestStorage } from "./helpers/test-storage.js";
  * the surface shrinks; never raise them to admit verbose regressions without a
  * deliberate decision. Measure with `npx tsx benchmark/tool-surface/measure.ts`.
  */
-const MAX_TOOLS_LIST_CHARS = 31_000;
+// Raised 31_000 -> 31_200 deliberately (MUNIN-434) to restore the memory_log
+// dated-record guidance and the memory_update_status "only what the user stated"
+// rule that the MUNIN-431 trim dropped; other prose was trimmed to offset most of it.
+const MAX_TOOLS_LIST_CHARS = 31_200;
 const MAX_SINGLE_TOOL_CHARS = 4_000;
+// MUNIN_TOOL_PROFILE=core (MUNIN-434): the eight everyday tools.
+const MAX_CORE_TOOLS_LIST_CHARS = 16_100;
 
 type ToolDefinition = { name: string; description: string; inputSchema: Record<string, unknown> };
 
@@ -39,6 +44,22 @@ afterAll(() => {
 describe("MCP tool surface token budget", () => {
   it("keeps the full tools/list payload within the ratcheted character budget", () => {
     expect(JSON.stringify(tools).length).toBeLessThanOrEqual(MAX_TOOLS_LIST_CHARS);
+  });
+
+  it("keeps the core tool profile within its own ratcheted budget", async () => {
+    const saved = process.env.MUNIN_TOOL_PROFILE;
+    process.env.MUNIN_TOOL_PROFILE = "core";
+    try {
+      const server = new Server({ name: "budget-core", version: "0.0.0" }, { capabilities: { tools: {} } });
+      registerTools(server, db, "budget-core-session");
+      const handler = (server as unknown as { _requestHandlers: Map<string, Function> })._requestHandlers.get("tools/list");
+      const core = ((await handler!({ method: "tools/list", params: {} })) as { tools: ToolDefinition[] }).tools;
+      expect(core).toHaveLength(8);
+      expect(JSON.stringify(core).length).toBeLessThanOrEqual(MAX_CORE_TOOLS_LIST_CHARS);
+    } finally {
+      if (saved === undefined) delete process.env.MUNIN_TOOL_PROFILE;
+      else process.env.MUNIN_TOOL_PROFILE = saved;
+    }
   });
 
   it("keeps every single tool definition within the per-tool budget", () => {
@@ -69,6 +90,13 @@ describe("MCP tool surface token budget", () => {
     expect(description("memory_write")).toContain("memory_update_status");
     expect(description("memory_update_status")).toContain("not after every `memory_log`");
     expect(description("memory_log")).toContain("supersedes");
+    // Write guidance restored after the MUNIN-431 trim (MUNIN-434): the arena
+    // showed fewer dated facts logged without it.
+    expect(description("memory_log")).toContain("Append-only chronological record");
+    expect(description("memory_log")).toContain("with its date");
+    for (const tag of ["decision", "milestone", "blocker", "discovery", "correction"]) {
+      expect(description("memory_log")).toContain(`\`${tag}\``);
+    }
     // Destructive and owner-only flows stay explicit.
     expect(description("memory_delete")).toContain("delete_token");
     expect(description("memory_consolidate")).toContain("confirm_token");
@@ -109,6 +137,10 @@ describe("MCP tool surface token budget", () => {
 
     // memory_list rejects only non-default paging with a namespace.
     expect(byName.get("memory_list")?.description).toContain("non-default paging is rejected");
+
+    // Status sections record what the user stated, not the model's own plans (MUNIN-434).
+    expect(property("memory_update_status", "next_steps")).toContain("Only steps the user stated");
+    expect(property("memory_update_status", "current_work")).toContain("Only what the user stated");
 
     // Expired statuses surface in attention only when include_expiring is enabled.
     expect(property("memory_update_status", "valid_until")).toContain("include_expiring");

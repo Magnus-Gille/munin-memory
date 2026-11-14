@@ -10,6 +10,38 @@ changelog is the canonical record of what moved.
 
 No schema change (still v32).
 
+### Added
+
+- Opt-in token-economy switches (MUNIN-434). Defaults are unchanged.
+  - `MUNIN_TOOL_PROFILE=core` lists and accepts only the eight everyday
+    tools: `memory_orient`, `memory_query`, `memory_read`, `memory_read_batch`,
+    `memory_write`, `memory_update_status`, `memory_log` and
+    `memory_attention`. A comma-separated list of tool names selects an
+    explicit set. Calls to tools outside the profile return
+    `tool_not_enabled`.
+  - `MUNIN_RESPONSE_MODE=compact` drops redundant fields from responses.
+    - `memory_query`: `created_at`, `valid_from`, `updated_at_local`,
+      self-provenance, mirrored `classification:*` tags, routine retrieval
+      diagnostics, the `total` alias and the query echo.
+    - `memory_orient`: local timestamps, empty dashboard groups,
+      the fixed `missing_status` suggestion and unadjusted budget meta.
+    - Write acknowledgements: intake metadata, warnings that repeat intake
+      flags, and the `memory_update_status` content echo.
+  - Compact mode keeps content, ids, `updated_at`, untrusted-content flags
+    and envelopes, redaction/expiry/synthesis markers, lexical-fallback
+    signals, one-arm hybrid signals (`search_meta.mode_effective`),
+    truncation signals, live maintenance details, `explain` output, `validate_only` previews
+    and error responses.
+  - An invalid value for either variable stops the server at startup.
+  - Calls to disabled tools return `tool_not_enabled` and are recorded in
+    tool-call telemetry; `memory_status` reports only the enabled tools.
+  - The Memory Arena breakdown is in `benchmark/tool-surface/REPORT.md`.
+    The offline replay projected about 37% fewer input tokens per question.
+    A Memory Arena run (Sonnet + Haiku × 2, judged blind with the v0.7.1
+    answers) measured −50% (Sonnet) and −38% (Haiku) input tokens per
+    question and a paired score change of +4.2 pp [0.0, +8.3]; safety
+    checks were unchanged.
+
 ### Changed
 
 - `memory_attention` with a `namespace_prefix` that has no tracked statuses now
@@ -20,6 +52,13 @@ No schema change (still v32).
   treated as deliberate (MUNIN-278).
 - `memory_review` accepts `id` as an alias of `proposal_id`; the alias is
   declared in the tool's input schema (MUNIN-278).
+- The `memory_log` description again calls the log an append-only,
+  chronological record of each decision, event or change with its date, and
+  names the canonical tags. MUNIN-431 had dropped this wording.
+- The `memory_update_status` `current_work` and `next_steps` fields now say
+  to record only what the user stated, not the model's own plans.
+- The `tools/list` ratchet rises from 31,000 to 31,200 characters for this
+  restored guidance.
 
 ## [0.7.2] — 2026-11-14
 
