@@ -8371,14 +8371,16 @@ export function registerTools(
       const telemetryStart = performance.now();
 
       try {
-        if (!isToolEnabled(toolProfile, name)) {
-          return errResult(
-            "unknown",
-            "tool_not_enabled",
-            `Tool ${name} is not enabled in this server's "${toolProfile.name}" tool profile (MUNIN_TOOL_PROFILE). Use one of the listed tools.`,
-          );
-        }
-        const rawResult = await (async () => { switch (name) {
+        const rawResult = await (async () => {
+          // Refusals go through the common telemetry path below, like unknown tools.
+          if (!isToolEnabled(toolProfile, name)) {
+            return errResult(
+              "unknown",
+              "tool_not_enabled",
+              `Tool ${name} is not enabled in this server's "${toolProfile.name}" tool profile (MUNIN_TOOL_PROFILE). Use one of the listed tools.`,
+            );
+          }
+          switch (name) {
           case "memory_orient": {
             const handleMemoryOrient = async () => {
               const orientArgs = (args ?? {}) as OrientParams;
@@ -13218,8 +13220,9 @@ export function registerTools(
                   consolidation: isConsolidationAvailable(),
                 },
                 tools: {
-                  count: TOOL_DEFINITIONS.length,
-                  names: TOOL_DEFINITIONS.map((t) => t.name),
+                  // The tools this server's MUNIN_TOOL_PROFILE exposes (all by default).
+                  count: listedTools.length,
+                  names: listedTools.map((t) => t.name),
                 },
                 principal: {
                   id: ctx.principalId,

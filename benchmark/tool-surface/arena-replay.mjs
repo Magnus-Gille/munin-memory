@@ -40,6 +40,14 @@ const EXTRA_ENV = Object.fromEntries(
     .filter(Boolean)
     .map((kv) => [kv.slice(0, kv.indexOf("=")), kv.slice(kv.indexOf("=") + 1)]),
 );
+// Only the tool-surface switches may be overridden; the scratch DB path and the
+// offline / no-worker settings below are applied last and cannot be replaced.
+const ALLOWED_ENV = new Set(["MUNIN_TOOL_PROFILE", "MUNIN_RESPONSE_MODE"]);
+const badEnv = Object.keys(EXTRA_ENV).filter((k) => !ALLOWED_ENV.has(k));
+if (badEnv.length) {
+  console.error(`--env only accepts ${[...ALLOWED_ENV].join(", ")}; got ${badEnv.join(", ")}`);
+  process.exit(2);
+}
 if (!RUNS || !STORES) {
   console.error("need --runs and --stores");
   process.exit(2);
@@ -73,13 +81,13 @@ async function startServer(storeDir, scratch) {
     args: [path.join(REPO, "dist/index.js")],
     cwd: REPO,
     env: childEnv({
+      ...EXTRA_ENV,
       MUNIN_MEMORY_DB_PATH: path.join(scratch, "memory.db"),
       MUNIN_TRANSPORT: "stdio",
       MUNIN_EMBEDDINGS_ENABLED: "true",
       MUNIN_SEMANTIC_ENABLED: "true",
       MUNIN_EMBEDDINGS_LOCAL_ONLY: "true",
       MUNIN_CONSOLIDATION_ENABLED: "false",
-      ...EXTRA_ENV,
     }),
     stderr: fs.openSync(path.join(scratch, "server.stderr.log"), "a"),
   });

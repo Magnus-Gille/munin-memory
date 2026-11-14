@@ -39,21 +39,21 @@ from `arena-replay.mjs`, which re-issues every recorded read call against copies
 - `MUNIN_TOOL_PROFILE=core` exposes 8 tools (orient, query, read, read_batch, write, update_status, log, attention). The tool list goes from 31,150 to about 15,950 chars. A comma list selects custom tools, and hidden tools return `tool_not_enabled`.
 - `MUNIN_RESPONSE_MODE=compact` is a post-processing allowlist that drops fields:
   - On query results: `created_at`, `valid_from`, `updated_at_local`, self-provenance, mirrored classification tags, routine retrieval diagnostics, the `total` alias and the `query` echo.
-  - On orient: local timestamps, empty groups, maintenance boilerplate and the unadjusted budget meta.
+  - On orient: local timestamps, empty groups, the fixed `missing_status` suggestion and the unadjusted budget meta. Suggestions with live detail (consolidation backlog, worker failures, retrieved-unused, untracked clusters) are kept.
   - On write acks: intake metadata, duplicate intake warnings and the update_status `content` echo.
-  - Kept: content, ids, `updated_at`, and the untrusted flags and envelopes, redaction, expiry, synthesis, degradation (`fallback_reason`, `warning`, `search_mode_actual`), `candidates_truncated`, and `explain` output.
+  - Kept: content, ids, `updated_at`, and the untrusted flags and envelopes, redaction, expiry, synthesis, degradation (`fallback_reason`, `warning`, `search_mode_actual`, one-arm `search_meta.mode_effective`), `candidates_truncated`, and `explain` output.
 - Guidance: `memory_log` again describes the dated chronological record and its canonical tags. `memory_update_status` now says that `current_work` and `next_steps` hold only what the user stated.
 
 ## Offline projection (replay, no model in the loop)
 
-Replay results: query 8,122 → 5,584 chars (−31%), orient 4,651 → 3,347 (−28%), tool list −49%. Applied to the
-breakdown, per-question input drops by about 38%:
+Replay results (after the Codex review fixes): query 8,122 → 5,585 chars (−31%), orient 4,651 → 3,951 (−15%),
+tool list 31,001 → 15,996 chars (−48%). Applied to the breakdown, per-question input drops by about 37%:
 
 | Model | v0.7.1 | core only | core + compact |
 |---|---|---|---|
-| Haiku | 41,910 | 28,494 | 25,907 |
-| Opus | 48,563 | 33,967 | 30,315 |
-| Sonnet | 50,009 | 34,290 | 31,118 |
+| Haiku | 41,910 | 28,494 | 26,409 |
+| Opus | 48,563 | 33,967 | 30,901 |
+| Sonnet | 50,009 | 34,290 | 31,705 |
 
 This assumes unchanged call patterns. Quality is unverified. The paid arena run (Sonnet + Haiku × 2, about $5,
 judged blind with the v0.7.1 cells) awaits owner approval.

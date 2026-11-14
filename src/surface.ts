@@ -112,7 +112,13 @@ function compactQuery(resp: Json, ctx: AccessContext): void {
   if (explain) return; // explain:true asked for diagnostics; keep them.
   delete resp.total; // alias of total_matched
   delete resp.query; // echo of the caller's own argument
-  delete resp.search_meta;
+  // Hybrid match counts are diagnostics; keep only a one-arm signal (semantic_only /
+  // lexical_only), which changes how the hybrid results must be read.
+  if (isObj(resp.search_meta)) {
+    const effective = resp.search_meta.mode_effective;
+    if (typeof effective === "string" && effective !== "hybrid") resp.search_meta = { mode_effective: effective };
+    else delete resp.search_meta;
+  }
   if (isObj(resp.retrieval)) {
     // Keep only signals that change how results must be read: an explicit
     // degradation reason, truncated candidates (total_matched is a lower
@@ -134,6 +140,8 @@ function compactQuery(resp: Json, ctx: AccessContext): void {
   if (resp.redacted_count === 0) delete resp.redacted_count;
 }
 
+const STATIC_MAINTENANCE_ISSUES = new Set(["missing_status"]);
+
 function compactOrient(resp: Json): void {
   if (isObj(resp.dashboard)) {
     for (const [group, items] of Object.entries(resp.dashboard)) {
@@ -145,8 +153,9 @@ function compactOrient(resp: Json): void {
     }
   }
   if (Array.isArray(resp.maintenance_needed)) {
-    // The per-item suggestion is boilerplate; namespace + issue carry the signal.
-    for (const it of resp.maintenance_needed) if (isObj(it) && typeof it.issue === "string") delete it.suggestion;
+    // Only the missing_status suggestion is fixed boilerplate; the others carry live
+    // detail (backlog counts, worker failures, namespace names) and are kept.
+    for (const it of resp.maintenance_needed) if (isObj(it) && STATIC_MAINTENANCE_ISSUES.has(String(it.issue))) delete it.suggestion;
   }
   const budget = resp.response_budget_meta;
   if (isObj(budget) && !(Array.isArray(budget.adjustments) && budget.adjustments.length > 0)) {

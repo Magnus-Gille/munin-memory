@@ -104,6 +104,20 @@ describe("tool profile", () => {
     expect(orient.json.ok).toBe(true);
   });
 
+  it("records refused calls to disabled tools in tool-call telemetry", async () => {
+    process.env.MUNIN_TOOL_PROFILE = "core";
+    const server = makeServer();
+    await call(server, "memory_list", {});
+    const row = db.prepare("SELECT success, error_type FROM tool_calls WHERE tool_name = ?").get("memory_list");
+    expect(row).toEqual({ success: 0, error_type: "tool_not_enabled" });
+  });
+
+  it("memory_status reports only the tools the profile enables", async () => {
+    process.env.MUNIN_TOOL_PROFILE = "memory_status,memory_query";
+    const status = await call(makeServer(), "memory_status", {});
+    expect(status.json.tools).toEqual({ count: 2, names: ["memory_query", "memory_status"] });
+  });
+
   it("a custom list exposes exactly those tools", async () => {
     process.env.MUNIN_TOOL_PROFILE = "memory_query,memory_write";
     const server = makeServer();
@@ -258,6 +272,24 @@ describe("compactToolResponseText", () => {
     const out = JSON.parse(compactToolResponseText("memory_log", text, ownerContext()));
     expect(out.intake).toEqual({ status: "flagged", flags: [{ check: "content_overlap", severity: "warning", message: "Overlaps." }] });
     expect(out.warnings).toEqual(["[intake:persistence_unavailable] Metadata not persisted."]);
+  });
+
+  it("keeps a one-arm hybrid signal and drops routine hybrid search_meta", () => {
+    const meta = { fts5_matches: 0, semantic_matches: 3, both_matches: 0, mode_effective: "semantic_only" };
+    const one = JSON.stringify({ ok: true, results: [], search_meta: meta });
+    expect(JSON.parse(compactToolResponseText("memory_query", one, ownerContext())).search_meta).toEqual({ mode_effective: "semantic_only" });
+    const both = JSON.stringify({ ok: true, results: [], search_meta: { ...meta, fts5_matches: 2, mode_effective: "hybrid" } });
+    expect(JSON.parse(compactToolResponseText("memory_query", both, ownerContext()))).not.toHaveProperty("search_meta");
+  });
+
+  it("drops only the static orient maintenance suggestion and keeps dynamic warning details", () => {
+    const maintenance_needed = [
+      { namespace: "projects/a", issue: "missing_status", suggestion: "Has entries but no 'status' key. Write a status entry with a lifecycle tag." },
+      { namespace: "projects/b", issue: "consolidation_backlog", suggestion: "12 unincorporated logs awaiting consolidation." },
+      { namespace: "projects/c", issue: "consolidation_circuit_breaker", suggestion: "Consolidation worker is failing: 3 failures, last: timeout." },
+    ];
+    const out = JSON.parse(compactToolResponseText("memory_orient", JSON.stringify({ ok: true, maintenance_needed }), ownerContext()));
+    expect(out.maintenance_needed).toEqual([{ namespace: "projects/a", issue: "missing_status" }, maintenance_needed[1], maintenance_needed[2]]);
   });
 
   it("keeps retrieval truncation signals and passes through non-JSON, errors and other tools", () => {

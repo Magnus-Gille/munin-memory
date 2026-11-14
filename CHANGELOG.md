@@ -22,16 +22,19 @@ changelog is the canonical record of what moved.
       self-provenance, mirrored `classification:*` tags, routine retrieval
       diagnostics, the `total` alias and the query echo.
     - `memory_orient`: local timestamps, empty dashboard groups,
-      maintenance boilerplate and unadjusted budget meta.
+      the fixed `missing_status` suggestion and unadjusted budget meta.
     - Write acknowledgements: intake metadata, warnings that repeat intake
       flags, and the `memory_update_status` content echo.
   - Compact mode keeps content, ids, `updated_at`, untrusted-content flags
     and envelopes, redaction/expiry/synthesis markers, lexical-fallback
-    signals, truncation signals, `explain` output, `validate_only` previews
+    signals, one-arm hybrid signals (`search_meta.mode_effective`),
+    truncation signals, live maintenance details, `explain` output, `validate_only` previews
     and error responses.
   - An invalid value for either variable stops the server at startup.
+  - Calls to disabled tools return `tool_not_enabled` and are recorded in
+    tool-call telemetry; `memory_status` reports only the enabled tools.
   - The Memory Arena breakdown is in `benchmark/tool-surface/REPORT.md`.
-    The offline replay projects about 38% fewer input tokens per question
+    The offline replay projects about 37% fewer input tokens per question
     with both switches on; answer quality has not been verified yet.
 
 ### Changed
