@@ -10,6 +10,26 @@ changelog is the canonical record of what moved.
 
 ### Changed
 
+- HTTP request logging is summarized by default (MUNIN-426). The control node
+  journal received one JSON line per request (about 103,000 lines and 85 MiB a
+  day). In the default `summary` mode, successful requests and rate-limiter
+  rejections (429) are aggregated into one `access_summary` line per interval
+  (default 60 s), with per-client request, rate-limited, error, and max-duration
+  counts and per-tool counts. Errors (status 400 and above, except 429) and
+  requests slower than `MUNIN_ACCESS_LOG_SLOW_MS` are still logged as individual
+  lines. They are capped at `MUNIN_ACCESS_LOG_MAX_INDIVIDUAL` per interval for each
+  source (client id, or the shared unauthenticated source) and class (5xx or
+  other), so an anonymous 401 flood cannot hide an authenticated client's 500,
+  with a total ceiling of five times that value; the overflow is reported as
+  `suppressedIndividual`. Summary state is bounded per interval: at most 1,000
+  distinct sources are tracked (the rest share one overflow bucket that is
+  reported inside `otherClients`), client ids and tool names longer than 128
+  characters are shortened to a prefix plus a digest of the full value (so they
+  stay distinct), each client lists at most 10 tool names (further requests are
+  counted in `toolsOther`), and the summary names at most 20 clients (the rest are
+  folded into `otherClients`). Set `MUNIN_ACCESS_LOG_MODE=verbose` to restore one
+  line per request. Summaries carry no session or request ids, headers, or bodies.
+  The summary is flushed during graceful shutdown before the database closes.
 - `memory_query` ranking is now relevance-dominant on ordinary queries
   (MUNIN-335, MUNIN-248). Inside the 50-candidate rerank window a structural
   class (tracked status, entry type) moves an entry at most one position up or
@@ -23,6 +43,14 @@ changelog is the canonical record of what moved.
   MRR 0.417 -> 0.688 (keyword questions recall@1 0.00 -> 0.75; Swedish
   natural-language questions stay at recall@1 0.00, MRR 0.50, so that gap is
   still open).
+
+### Added
+
+- Environment variables `MUNIN_ACCESS_LOG_MODE` (`summary` or `verbose`, default
+  `summary`), `MUNIN_ACCESS_LOG_INTERVAL_MS` (default `60000`, clamped to
+  1000–3600000), `MUNIN_ACCESS_LOG_SLOW_MS` (default `5000`, `0` disables), and
+  `MUNIN_ACCESS_LOG_MAX_INDIVIDUAL` (default `20`, minimum 1). Invalid values fall
+  back to defaults.
 
 ## [0.7.1] — 2026-11-13
 
