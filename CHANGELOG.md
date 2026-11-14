@@ -8,6 +8,8 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+## [0.7.3] — 2026-11-14
+
 No schema change (still v32).
 
 ### Added
@@ -1837,7 +1839,9 @@ Initial public release (commit `c40c127`). Core MCP tool surface
 `memory_list`, `memory_delete`), SQLite + FTS5 storage, Bearer token auth,
 stdio transport, and the first HTTP transport for Raspberry Pi deployment.
 
-[Unreleased]: https://github.com/Magnus-Gille/munin-memory/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/Magnus-Gille/munin-memory/compare/v0.7.3...HEAD
+[0.7.3]: https://github.com/Magnus-Gille/munin-memory/compare/v0.7.2...v0.7.3
+[0.7.2]: https://github.com/Magnus-Gille/munin-memory/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/Magnus-Gille/munin-memory/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/Magnus-Gille/munin-memory/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/Magnus-Gille/munin-memory/compare/v0.6.0...v0.6.1
