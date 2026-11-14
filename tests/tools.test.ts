@@ -5252,10 +5252,13 @@ describe("memory_query", () => {
 
       describe("exact-anchor uniqueness across the whole candidate set", () => {
         function seedAnchorCorpus(withSecondMatch: boolean) {
-          // Rank 1: short entry repeating the identifier. Fillers match only via
-          // their tag (not in the anchor haystack), so they are candidates that
-          // do not contain the identifier verbatim.
-          writeState(db, "notes/anchor-best", "item", "ancortok ancortok ancortok", []);
+          // Rank 1: short log entry repeating the identifier. A log is demoted by
+          // 3/26 of a position while the tracked-status fillers below are lifted a
+          // full position (MUNIN-335), so the structural ordering puts the first
+          // filler ahead of it and only the exact-anchor floor can keep it first.
+          // Fillers match only via their tag (not in the anchor haystack), so they
+          // are candidates that do not contain the identifier verbatim.
+          appendLog(db, "notes/anchor-best", "ancortok ancortok ancortok", []);
           for (let i = 0; i < 60; i++) {
             writeState(db, `projects/anchor-filler-${String(i).padStart(2, "0")}`, "status", `## Phase\nActive work ${i}`, ["active", "topic:ancortok"]);
           }
@@ -5834,7 +5837,7 @@ describe("memory_query", () => {
     expect(result.retrieval.expired_filtered_count).toBe(0);
   });
 
-  it("promotes fresher equivalent entries by default", async () => {
+  it("promotes fresher equivalent entries at full recency weight and reports the default weight", async () => {
     await callTool("memory_write", {
       namespace: "projects/old-recency",
       key: "status",
@@ -5849,9 +5852,12 @@ describe("memory_query", () => {
     });
     db.prepare("UPDATE entries SET updated_at = '2020-01-01T00:00:00.000Z' WHERE namespace = 'projects/old-recency'").run();
 
+    // Weight 1 lifts the newer entry five places, a strict promotion over the
+    // equally relevant older entry.
     const raw = await callTool("memory_query", {
       query: "Recency ranking candidate",
       search_mode: "lexical",
+      search_recency_weight: 1,
       limit: 2,
     });
     const result = parseToolResponse(raw) as {
@@ -5861,7 +5867,23 @@ describe("memory_query", () => {
 
     expect(result.results[0].namespace).toBe("projects/fresh-recency");
     expect(result.retrieval.recency_applied).toBe(true);
-    expect(result.retrieval.search_recency_weight).toBe(0.2);
+    expect(result.retrieval.search_recency_weight).toBe(1);
+
+    // Default weight 0.2 lifts the newer entry by at most one place. Both entries
+    // are equally relevant, so that lift only ties and input order decides; only
+    // the reported metadata is asserted here.
+    const rawDefault = await callTool("memory_query", {
+      query: "Recency ranking candidate",
+      search_mode: "lexical",
+      limit: 2,
+    });
+    const resultDefault = parseToolResponse(rawDefault) as {
+      results: Array<{ namespace: string }>;
+      retrieval: { recency_applied: boolean; search_recency_weight: number };
+    };
+
+    expect(resultDefault.retrieval.search_recency_weight).toBe(0.2);
+    expect(resultDefault.retrieval.recency_applied).toBe(true);
   });
 
   it("keeps the most relevant entry first by default when the least relevant is the newest (#335)", async () => {
@@ -5930,7 +5952,7 @@ describe("memory_query", () => {
     expect(result.retrieval.search_recency_weight).toBe(0);
   });
 
-  it("keeps strong tracked-status heuristics above fresher generic noise", async () => {
+  it("ranks a more relevant fresh generic note above a tracked status (relevance dominates structure)", async () => {
     await callTool("memory_write", {
       namespace: "projects/grimnir",
       key: "status",
@@ -5939,10 +5961,46 @@ describe("memory_query", () => {
     });
     db.prepare("UPDATE entries SET updated_at = '2020-01-01T00:00:00.000Z' WHERE namespace = 'projects/grimnir'").run();
 
+    // Repeats every query term, so it is clearly more relevant than the status.
     await callTool("memory_write", {
       namespace: "notes/fresh-noise",
       key: "summary",
-      content: "Current work blockers next steps generic fresh note.",
+      content: "Current work blockers next steps. Current work blockers next steps. Generic fresh note.",
+    });
+
+    const raw = await callTool("memory_query", {
+      query: "current work blockers next steps",
+      search_mode: "lexical",
+      limit: 3,
+    });
+    const result = parseToolResponse(raw) as { results: Array<{ namespace: string; key: string | null }> };
+
+    expect(result.results[0]).toEqual(expect.objectContaining({
+      namespace: "notes/fresh-noise",
+      key: "summary",
+    }));
+    expect(result.results[1]).toEqual(expect.objectContaining({
+      namespace: "projects/grimnir",
+      key: "status",
+    }));
+  });
+
+  it("keeps a tracked status first when the fresher generic note is equally relevant", async () => {
+    // Identical text, so lexical relevance is equal. The status (structural lift 1)
+    // outranks the fresh note (state lift 6/26 plus a full recency lift of 1).
+    const text = "Current work, blockers, and next steps for the main project.";
+    await callTool("memory_write", {
+      namespace: "projects/grimnir",
+      key: "status",
+      content: text,
+      tags: ["active"],
+    });
+    db.prepare("UPDATE entries SET updated_at = '2020-01-01T00:00:00.000Z' WHERE namespace = 'projects/grimnir'").run();
+
+    await callTool("memory_write", {
+      namespace: "notes/fresh-noise",
+      key: "summary",
+      content: text,
     });
 
     const raw = await callTool("memory_query", {
