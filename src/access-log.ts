@@ -132,17 +132,27 @@ function newCounters(): ClientCounters {
   return { requests: 0, rateLimited: 0, errors: 0, maxDurationMs: 0, tools: new Map(), toolsOther: 0 };
 }
 
+/** Shape of every label this module produces by shortening: `<prefix>~<16 hex digits>`. */
+const SHORTENED_LABEL = /~[0-9a-f]{16}$/;
+
 /**
- * Bound a caller-controlled label (client id, tool name). Longer labels become
- * `<100-char prefix>~<16 hex digest of the whole label>`: bounded in size, and
- * still distinct for distinct inputs. The prefix is copied through a Buffer so the
- * retained string owns its storage; a plain `slice` of a long string can keep the
- * original (possibly multi-megabyte) string alive as its backing store.
+ * Bound a caller-controlled label (client id, tool name). A label is kept as is
+ * only when it is at most 128 characters and does not already look like a
+ * shortened label; everything else becomes `<100-char prefix>~<16 hex digits of
+ * SHA-256 over the full label>`. That makes the shortened form
+ *   - bounded in size (at most 117 characters),
+ *   - distinct for distinct inputs (the digest covers the exact UTF-16 code
+ *     units, so lone surrogates and U+FFFD do not merge), and
+ *   - disjoint from kept labels, since a label that already ends in `~<16 hex>`
+ *     is itself shortened and so cannot be mistaken for another label's form.
+ * The prefix is copied through a Buffer so the retained string owns its storage;
+ * a plain `slice` of a long string can keep the original (possibly multi-megabyte)
+ * string alive as its backing store.
  */
 function boundLabel(label: string): string {
-  if (label.length <= MAX_LABEL_LENGTH) return label;
+  if (label.length <= MAX_LABEL_LENGTH && !SHORTENED_LABEL.test(label)) return label;
   const prefix = Buffer.from(label.slice(0, LABEL_PREFIX_LENGTH), "utf8").toString("utf8");
-  const digest = createHash("sha256").update(label).digest("hex").slice(0, LABEL_DIGEST_LENGTH);
+  const digest = createHash("sha256").update(Buffer.from(label, "utf16le")).digest("hex").slice(0, LABEL_DIGEST_LENGTH);
   return `${prefix}~${digest}`;
 }
 

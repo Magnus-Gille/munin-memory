@@ -302,6 +302,46 @@ describe("access logger", () => {
       .toEqual([1, 2]);
   });
 
+  it("does not let a short id impersonate the shortened form of a long id", () => {
+    const longId = "a".repeat(129);
+    // Learn how the logger displays the long id, then use exactly that string as a short id.
+    const probe = harness();
+    const probeLogger = createAccessLogger(options(probe));
+    probeLogger.log(entry({ clientId: longId }));
+    probeLogger.flush();
+    const shortenedForm = Object.keys(parse(probe.lines[0]!).clients)[0]!;
+    expect(shortenedForm).not.toBe(longId);
+    expect(shortenedForm.length).toBeLessThanOrEqual(128);
+
+    const h = harness();
+    const logger = createAccessLogger(options(h, { maxIndividualPerInterval: 1 }));
+    logger.log(entry({ clientId: longId, status: 500 }));
+    const impostor = entry({ clientId: shortenedForm, status: 500 });
+    logger.log(impostor);
+    // Separate sources: the impostor's first 500 keeps its own budget.
+    expect(h.lines).toContain(JSON.stringify(impostor));
+    logger.flush();
+    const summary = parse(h.lines.at(-1)!);
+    expect(summary.suppressedIndividual).toBe(0);
+    expect(Object.keys(summary.clients)).toHaveLength(2);
+  });
+
+  it("hashes exact UTF-16 code units so lone surrogates and U+FFFD stay distinct", () => {
+    const h = harness();
+    const logger = createAccessLogger(options(h));
+    const base = "a".repeat(129);
+    for (const tail of ["\uD800", "\uD801", "\uFFFD"]) logger.log(entry({ clientId: base + tail }));
+    // Valid surrogate pairs that straddle the 100-character prefix boundary.
+    const pairA = "a".repeat(99) + "\u{1F600}" + "x".repeat(40);
+    const pairB = "a".repeat(99) + "\u{1F601}" + "x".repeat(40);
+    logger.log(entry({ clientId: pairA }));
+    logger.log(entry({ clientId: pairB }));
+    logger.flush();
+
+    const keys = Object.keys(parse(h.lines.at(-1)!).clients);
+    expect(keys).toHaveLength(5);
+  });
+
   it("bounds oversized tool names and keeps distinct oversized names distinct", () => {
     const h = harness();
     const logger = createAccessLogger(options(h));
