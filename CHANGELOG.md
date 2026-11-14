@@ -8,6 +8,19 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+No schema change (still v32).
+
+### Changed
+
+- `memory_attention` with a `namespace_prefix` that has no tracked statuses now
+  says so explicitly instead of returning an empty list. Redacted statuses only
+  change the message when they fall under the requested prefix (MUNIN-278).
+- Intake no longer flags `duplicate_key` on intentional overwrites: status
+  updates and writes that carry `expected_updated_at` (compare-and-swap) are
+  treated as deliberate (MUNIN-278).
+- `memory_review` accepts `id` as an alias of `proposal_id`; the alias is
+  declared in the tool's input schema (MUNIN-278).
+
 ## [0.7.2] — 2026-11-14
 
 No schema change (still v32); rolling back to 0.7.1 code works against the same database.
