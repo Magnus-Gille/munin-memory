@@ -26,7 +26,9 @@
 import Database from "better-sqlite3";
 import { randomBytes, randomUUID, createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
+import { statSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { deriveClientSecretWrapKey, rewrapClientSecrets } from "./oauth.js";
 import {
   initDatabase,
   listEntriesBelowNamespaceFloor,
@@ -1102,6 +1104,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
     "--principal",
     "--scope",
     "--grace-hours",
+    "--old-key-file",
+    "--new-key-file",
   ]);
 
   for (let i = 0; i < args.length; i++) {
@@ -1115,6 +1119,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       init = true;
     } else if (arg === "--force") {
       force = true;
+    } else if (arg === "--dry-run") {
+      flags.set("--dry-run", "true");
     } else if (flagsWithValues.has(arg)) {
       const next = args[i + 1];
       if (next === undefined || next.startsWith("--")) {
@@ -1167,6 +1173,9 @@ Usage:
   munin-admin oauth-clients list [--principal <principal-id>]
   munin-admin oauth-clients remove <oauth-client-id>
   munin-admin oauth-clients clear <principal-id>
+  munin-admin oauth-clients rewrap-secrets [--dry-run] [--old-key-file <path>] [--new-key-file <path>]
+      Re-encrypt stored client secrets under a new wrap key. Keys come from
+      MUNIN_OAUTH_WRAP_KEY_OLD / MUNIN_OAUTH_WRAP_KEY_NEW or 0600 key files; never argv.
   munin-admin bearer list [--scope <owner|dpa|consumer>]
   munin-admin bearer rotate [--scope <owner|dpa|consumer>] [--grace-hours <n>]
   munin-admin bearer revoke <key-id>
@@ -1608,6 +1617,60 @@ export function handleOAuthClientsRemove(
   }
 }
 
+function readWrapKeyMaterial(filePath: string | undefined, envName: string): string {
+  let value: string | undefined;
+  if (filePath) {
+    const st = statSync(filePath);
+    if (!st.isFile()) throw new Error(`Key file is not a regular file: ${filePath}`);
+    if ((st.mode & 0o077) !== 0) {
+      throw new Error(`Key file must not be group/other accessible (chmod 600): ${filePath}`);
+    }
+    value = readFileSync(filePath, "utf-8");
+  } else {
+    value = process.env[envName];
+  }
+  value = value?.trim();
+  if (!value) {
+    throw new Error(`Missing key: set ${envName} or pass the matching --*-key-file option.`);
+  }
+  return value;
+}
+
+export function handleOAuthClientsRewrap(
+  db: Database.Database,
+  flags: Map<string, string>,
+  jsonOutput: boolean,
+): void {
+  const oldFile = flags.get("--old-key-file");
+  const newFile = flags.get("--new-key-file");
+  const dryRun = flags.get("--dry-run") === "true";
+  const oldKey = deriveClientSecretWrapKey(readWrapKeyMaterial(oldFile, "MUNIN_OAUTH_WRAP_KEY_OLD"));
+  const newKey = deriveClientSecretWrapKey(readWrapKeyMaterial(newFile, "MUNIN_OAUTH_WRAP_KEY_NEW"));
+  const result = rewrapClientSecrets(db, oldKey, newKey, {
+    dryRun,
+    audit: (r) =>
+      auditLog(db, "oauth_wrap_key_rewrap", "oauth-clients", JSON.stringify({
+        total: r.total,
+        rewrapped: r.rewrapped,
+        already_on_new_key: r.alreadyOnNewKey,
+      })),
+  });
+  if (result.total === 0) {
+    console.error(
+      "Warning: 0 confidential client secrets found. If you expected some, you are probably pointing at the wrong database (use --db <path>).",
+    );
+  }
+  if (jsonOutput) {
+    console.log(JSON.stringify(result));
+  } else {
+    console.log(
+      `${dryRun ? "[dry-run] " : ""}Client secrets: ${result.total} total, ${result.rewrapped} ` +
+        `${dryRun ? "would be " : ""}re-wrapped, ${result.alreadyOnNewKey} already on new key, ` +
+        `${result.plaintextSkipped} plaintext skipped.`,
+    );
+  }
+}
+
 export function handleOAuthClientsClear(
   db: Database.Database,
   principalId: string,
@@ -1773,7 +1836,7 @@ function handleBearerRevoke(
 const VALID_RESOURCES = new Set(["principals", "oauth-clients", "classification", "bearer"]);
 
 const RESOURCE_COMMANDS: Record<string, string> = {
-  "oauth-clients": "list, remove, clear",
+  "oauth-clients": "list, remove, clear, rewrap-secrets",
   "classification": "list-floors, set-floor, audit",
   "bearer": "list, rotate, revoke",
   "principals": "list, show, add, revoke, update, rotate-token, test",
@@ -1814,6 +1877,9 @@ function dispatchOAuthClients(
     case "clear":
       if (!pid) throw new Error("Missing <principal-id> argument.");
       handleOAuthClientsClear(db, pid, parsed.json);
+      break;
+    case "rewrap-secrets":
+      handleOAuthClientsRewrap(db, parsed.flags, parsed.json);
       break;
     default:
       console.error(`Unknown oauth-clients command: ${parsed.command}`);

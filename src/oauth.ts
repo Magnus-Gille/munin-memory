@@ -847,10 +847,97 @@ export class MuninOAuthProvider implements OAuthServerProvider {
 
 // --- Helpers ---
 
+let warnedWrapKeyFallback = false;
+
 function getClientSecretWrapKey(legacyApiKey?: string): Buffer | undefined {
-  const configuredKey = process.env.MUNIN_OAUTH_CLIENT_SECRET_KEY?.trim() || legacyApiKey;
+  const dedicatedKey = process.env.MUNIN_OAUTH_CLIENT_SECRET_KEY?.trim();
+  const configuredKey = dedicatedKey || legacyApiKey;
   if (!configuredKey) return undefined;
-  return createHash("sha256").update(configuredKey).digest();
+  if (!dedicatedKey && !warnedWrapKeyFallback) {
+    warnedWrapKeyFallback = true;
+    console.warn(
+      "[oauth] MUNIN_OAUTH_CLIENT_SECRET_KEY is not set; OAuth client secrets are wrapped with MUNIN_API_KEY. " +
+        "Rotating the bearer will then break confidential clients. Set a dedicated key " +
+        "(see docs/oauth-wrap-key-rotation.md).",
+    );
+  }
+  return deriveClientSecretWrapKey(configuredKey);
+}
+
+/**
+ * Derive the AES-256 wrap key from raw key material, hashed exactly as given
+ * (byte-identical to the runtime derivation; callers trim where the runtime does).
+ */
+export function deriveClientSecretWrapKey(rawKey: string): Buffer {
+  return createHash("sha256").update(rawKey).digest();
+}
+
+export interface RewrapResult {
+  total: number;
+  rewrapped: number;
+  alreadyOnNewKey: number;
+  plaintextSkipped: number;
+  dryRun: boolean;
+}
+
+/**
+ * Re-encrypt every stored confidential client secret from oldKey to newKey in
+ * ONE transaction. Idempotent: rows that already decrypt under newKey are left
+ * alone. If any row decrypts under neither key, nothing is written and an error
+ * naming the client_id (never the secret) is thrown. Each new ciphertext is
+ * round-trip verified before commit. Plaintext legacy rows are left for the
+ * server's startup upgrade.
+ */
+export function rewrapClientSecrets(
+  db: Database.Database,
+  oldKey: Buffer,
+  newKey: Buffer,
+  options: { dryRun?: boolean; audit?: (result: RewrapResult) => void } = {},
+): RewrapResult {
+  const dryRun = options.dryRun ?? false;
+  if (oldKey.equals(newKey)) {
+    throw new Error("Old and new wrap keys are identical; nothing to rotate.");
+  }
+  const result: RewrapResult = { total: 0, rewrapped: 0, alreadyOnNewKey: 0, plaintextSkipped: 0, dryRun };
+
+  const txn = db.transaction(() => {
+    const rows = db
+      .prepare("SELECT client_id, client_secret FROM oauth_clients WHERE client_secret IS NOT NULL")
+      .all() as Array<{ client_id: string; client_secret: string }>;
+    result.total = rows.length;
+    for (const row of rows) {
+      if (!isEncryptedClientSecret(row.client_secret)) {
+        result.plaintextSkipped++;
+        continue;
+      }
+      let plaintext: string;
+      try {
+        plaintext = decryptClientSecret(row.client_secret, oldKey);
+      } catch {
+        try {
+          decryptClientSecret(row.client_secret, newKey);
+          result.alreadyOnNewKey++;
+          continue;
+        } catch {
+          throw new Error(
+            `Client ${row.client_id}: secret decrypts under neither the old nor the new key. Aborted; no changes written.`,
+          );
+        }
+      }
+      const rewrapped = encryptClientSecret(plaintext, newKey);
+      if (decryptClientSecret(rewrapped, newKey) !== plaintext) {
+        throw new Error(`Client ${row.client_id}: round-trip verification failed. Aborted; no changes written.`);
+      }
+      if (!dryRun) {
+        db.prepare("UPDATE oauth_clients SET client_secret = ?, updated_at = ? WHERE client_id = ?")
+          .run(rewrapped, nowUTC(), row.client_id);
+      }
+      result.rewrapped++;
+    }
+    if (!dryRun && result.rewrapped > 0) options.audit?.(result);
+  });
+  txn.immediate();
+  return result;
 }
 
 function isEncryptedClientSecret(value: string): boolean {

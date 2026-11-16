@@ -8,6 +8,19 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Added
+
+- `munin-admin oauth-clients rewrap-secrets [--dry-run]` re-encrypts stored
+  confidential OAuth client secrets from an old wrap key to a new one in a single
+  atomic (immediate transaction), idempotent, audit-logged operation (MUNIN-438). Keys come from
+  `MUNIN_OAUTH_WRAP_KEY_OLD`/`MUNIN_OAUTH_WRAP_KEY_NEW` or 0600 key files, never
+  argv. Runbook: `docs/oauth-wrap-key-rotation.md`.
+
+### Changed
+
+- The server now logs a one-time warning when the OAuth client-secret wrap key
+  falls back to `MUNIN_API_KEY` (no dedicated `MUNIN_OAUTH_CLIENT_SECRET_KEY`).
+
 ## [0.7.3] — 2026-11-14
 
 No schema change (still v32).
