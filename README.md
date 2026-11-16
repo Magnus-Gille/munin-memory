@@ -297,6 +297,43 @@ MUNIN_REMOTE_URL = "https://munin.example.com/mcp"
 MUNIN_CREDENTIALS_FILE = "/Users/you/.config/munin/credentials.json"
 ```
 
+Claude Desktop uses the same pattern. Merge this entry into the `mcpServers`
+object of `claude_desktop_config.json` (on macOS,
+`~/Library/Application Support/Claude/claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "munin-memory": {
+      "command": "node",
+      "args": ["/absolute/path/to/munin-memory/dist/bridge.js"],
+      "env": {
+        "MUNIN_REMOTE_URL": "https://munin.example.com/mcp",
+        "MUNIN_CREDENTIALS_FILE": "/Users/you/.config/munin/credentials.json"
+      }
+    }
+  }
+}
+```
+
+> [!WARNING]
+> **Do not pass Munin credentials to `mcp-remote` (or any other launcher) with
+> `--header`.** A setup such as
+> `"args": ["mcp-remote", "https://munin.example.com/mcp", "--header", "Authorization: Bearer <token>"]`
+> (or `CF-Access-Client-Secret: <secret>`) places the secret in the process
+> argument list. On the same machine, any local process — including a coding
+> agent that runs `ps aux`, `pgrep -fa` or reads `/proc/<pid>/cmdline` — can read
+> it, and an agent's command output can then land in transcripts and request
+> logs. Rotating the credential afterwards does not undo that exposure.
+> The same applies whenever a shell or wrapper script expands a variable into the
+> header before starting the process (for example
+> `mcp-remote … --header "Authorization: Bearer $MUNIN_AUTH_TOKEN"` in a shell):
+> the expanded value is what ends up in argv. Use the bundled bridge with `MUNIN_CREDENTIALS_FILE` as shown above,
+> so the secret is read from a `0600` file at runtime and never appears on a
+> command line. If a client still uses `mcp-remote` with header credentials,
+> migrate it and rotate the exposed bearer token and Cloudflare Access service
+> token.
+
 The bridge refuses to read a credentials file that is group- or world-accessible — fix perms with `chmod 600`. If both the file and inline env vars are set, the file wins and a stderr warning lists the env vars that were ignored.
 
 All three fields are optional; omit `cf_client_id` / `cf_client_secret` if you don't use Cloudflare Access. Rotate the Bearer token at a cadence that fits your threat model — once a quarter is a reasonable default for a personal deployment.
