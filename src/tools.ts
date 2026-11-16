@@ -2174,7 +2174,7 @@ import {
   getQueryExplainReasons,
   type TrackedStatusAssessment,
 } from "./internal/reranker.js";
-import { compactToolResponseText, isToolEnabled, resolveResponseMode, resolveToolProfile } from "./surface.js";
+import { compactToolResponseText, isToolEnabled, resolveResponseMode, resolveToolProfile, type ToolProfile } from "./surface.js";
 const DEFAULT_ORIENT_DETAIL: OrientDetail = "compact";
 const DEFAULT_ORIENT_RESPONSE_CHARACTER_BUDGET = 24_000;
 const MIN_ORIENT_RESPONSE_CHARACTER_BUDGET = 4_000;
@@ -6863,11 +6863,60 @@ function projectConventions(
   return conv;
 }
 
-export const MCP_SERVER_INSTRUCTIONS =
-  "First memory operation: call `memory_orient` when it is callable. " +
-  "If your host or deferred tool discovery did not expose `memory_orient`, " +
-  "use `memory_status` to inspect available tools or `memory_resume` for " +
-  "targeted context instead of stalling.";
+/**
+ * Server instructions for the active tool profile. The fallback guidance may only
+ * name tools the profile actually enables (MUNIN-437): naming a disabled tool sends
+ * an agent into a `tool_not_enabled` error on its first memory call.
+ */
+export function buildServerInstructions(profile: ToolProfile): string {
+  const status = isToolEnabled(profile, "memory_status");
+  const resume = isToolEnabled(profile, "memory_resume");
+  const lead = "First memory operation: call `memory_orient` when it is callable. ";
+  if (!status && !resume) {
+    return lead +
+      "If your host or deferred tool discovery did not expose `memory_orient`, " +
+      "use `memory_query` or `memory_read` for targeted context instead of stalling.";
+  }
+  const fallbacks = [
+    status ? "`memory_status` to inspect available tools" : null,
+    resume ? "`memory_resume` for targeted context" : null,
+  ].filter(Boolean).join(" or ");
+  return lead +
+    "If your host or deferred tool discovery did not expose `memory_orient`, " +
+    `use ${fallbacks} instead of stalling.`;
+}
+
+export const MCP_SERVER_INSTRUCTIONS = buildServerInstructions({ name: "full", tools: null });
+
+/**
+ * Rewrite cross-references to tools the profile disables so no listed
+ * definition points at a tool the caller cannot use (MUNIN-437).
+ */
+function adaptToolForProfile<T extends { name: string }>(tool: T, profile: ToolProfile): T {
+  if (profile.tools === null) return tool;
+  const status = isToolEnabled(profile, "memory_status");
+  const resume = isToolEnabled(profile, "memory_resume");
+  const list = isToolEnabled(profile, "memory_list");
+  const swap = (text: string): string => {
+    let out = text;
+    if (!status || !resume) {
+      const alt = status ? "`memory_status`" : resume ? "`memory_resume`" : "`memory_query` or `memory_read`";
+      out = out.replace("use `memory_status` or `memory_resume` instead", `use ${alt} instead`);
+    }
+    if (!resume) out = out.replace(" Follow with `memory_resume` for a targeted pack.", "");
+    if (!list) out = out.replace("; page with `memory_list`", "");
+    return out;
+  };
+  const walk = (node: unknown): unknown => {
+    if (typeof node === "string") return swap(node);
+    if (Array.isArray(node)) return node.map(walk);
+    if (node && typeof node === "object") {
+      return Object.fromEntries(Object.entries(node).map(([k, v]) => [k, walk(v)]));
+    }
+    return node;
+  };
+  return walk(tool) as T;
+}
 
 function namespaceSchema(
   description: string,
@@ -8369,7 +8418,9 @@ export function registerTools(
   const responseMode = resolveResponseMode();
   const listedTools = toolProfile.tools === null
     ? TOOL_DEFINITIONS
-    : TOOL_DEFINITIONS.filter((t) => isToolEnabled(toolProfile, t.name));
+    : TOOL_DEFINITIONS
+      .filter((t) => isToolEnabled(toolProfile, t.name))
+      .map((t) => adaptToolForProfile(t, toolProfile));
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: listedTools,

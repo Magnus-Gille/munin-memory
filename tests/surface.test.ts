@@ -9,7 +9,7 @@ import Database from "better-sqlite3";
 import { existsSync, unlinkSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { initDatabase } from "../src/db.js";
-import { REGISTERED_TOOL_NAMES, registerTools } from "../src/tools.js";
+import { buildServerInstructions, REGISTERED_TOOL_NAMES, registerTools } from "../src/tools.js";
 import { ownerContext, type AccessContext } from "../src/access.js";
 import {
   CORE_TOOL_NAMES,
@@ -123,6 +123,47 @@ describe("tool profile", () => {
     const server = makeServer();
     expect(await listNames(server)).toEqual(["memory_write", "memory_query"]);
     expect((await call(server, "memory_read", { namespace: "a", key: "b" })).json.error).toBe("tool_not_enabled");
+  });
+});
+
+describe("profile-aware guidance (MUNIN-437)", () => {
+  const profiles = [
+    "core",
+    "full",
+    `${[...CORE_TOOL_NAMES].join(",")},memory_status,memory_resume`,
+    `${[...CORE_TOOL_NAMES].join(",")},memory_status`,
+    `${[...CORE_TOOL_NAMES].join(",")},memory_resume`,
+  ];
+
+  for (const profile of profiles) {
+    it(`never names a disabled tool in instructions or listed definitions (${profile.slice(0, 20)}...)`, async () => {
+      process.env.MUNIN_TOOL_PROFILE = profile;
+      const server = makeServer();
+      const listed = (await handler(server, "tools/list")({ method: "tools/list", params: {} })) as {
+        tools: Array<{ name: string }>;
+      };
+      const enabled = new Set(listed.tools.map((t) => t.name));
+      const resolved = resolveToolProfile(REGISTERED_TOOL_NAMES);
+      const instructions = buildServerInstructions(resolved);
+      const mentioned = (text: string) => [...new Set(text.match(/memory_[a-z_]+/g) ?? [])];
+
+      expect(mentioned(instructions).filter((n) => !enabled.has(n)), "instructions").toEqual([]);
+      for (const tool of listed.tools) {
+        expect(mentioned(JSON.stringify(tool)).filter((n) => !enabled.has(n)), tool.name).toEqual([]);
+      }
+    });
+  }
+
+  it("keeps naming status and resume under the full profile", () => {
+    const text = buildServerInstructions(resolveToolProfile(REGISTERED_TOOL_NAMES, {}));
+    expect(text).toContain("memory_status");
+    expect(text).toContain("memory_resume");
+  });
+
+  it("an explicit list that re-enables status and resume answers them normally", async () => {
+    process.env.MUNIN_TOOL_PROFILE = `${[...CORE_TOOL_NAMES].join(",")},memory_status,memory_resume`;
+    const server = makeServer();
+    expect((await call(server, "memory_status")).json.error).toBeUndefined();
   });
 });
 
