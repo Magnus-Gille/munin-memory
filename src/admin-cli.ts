@@ -26,7 +26,7 @@
 import Database from "better-sqlite3";
 import { randomBytes, randomUUID, createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { statSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { deriveClientSecretWrapKey, rewrapClientSecrets } from "./oauth.js";
 import {
@@ -1620,12 +1620,19 @@ export function handleOAuthClientsRemove(
 function readWrapKeyMaterial(filePath: string | undefined, envName: string): string {
   let value: string | undefined;
   if (filePath) {
-    const st = statSync(filePath);
-    if (!st.isFile()) throw new Error(`Key file is not a regular file: ${filePath}`);
-    if ((st.mode & 0o077) !== 0) {
-      throw new Error(`Key file must not be group/other accessible (chmod 600): ${filePath}`);
+    // Open first, then fstat the descriptor, so the checks and the read refer to
+    // the same file (no check-then-use race). O_NOFOLLOW rejects symlinks.
+    const fd = openSync(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const st = fstatSync(fd);
+      if (!st.isFile()) throw new Error(`Key file is not a regular file: ${filePath}`);
+      if ((st.mode & 0o077) !== 0) {
+        throw new Error(`Key file must not be group/other accessible (chmod 600): ${filePath}`);
+      }
+      value = readFileSync(fd, "utf-8");
+    } finally {
+      closeSync(fd);
     }
-    value = readFileSync(filePath, "utf-8");
   } else {
     value = process.env[envName];
   }
