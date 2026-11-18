@@ -8,6 +8,14 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Fixed
+
+- Server instructions and tool definitions no longer name tools the active
+  `MUNIN_TOOL_PROFILE` disables (MUNIN-437). Under `core`, the fallback guidance
+  and the `memory_orient` description pointed at `memory_status` and
+  `memory_resume`, which answered `tool_not_enabled`. The text now follows the
+  enabled set; the `full` profile is unchanged. A test checks every profile shape.
+
 ### Documentation
 
 - README warns against passing the Munin bearer token or Cloudflare Access
