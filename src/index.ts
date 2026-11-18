@@ -25,7 +25,7 @@ import {
   pruneRedactionLog,
   pruneRetrievalAnalytics,
 } from "./db.js";
-import { MCP_SERVER_INSTRUCTIONS, REGISTERED_TOOL_NAMES, registerTools } from "./tools.js";
+import { buildServerInstructions, REGISTERED_TOOL_NAMES, registerTools } from "./tools.js";
 import { resolveResponseMode, resolveToolProfile } from "./surface.js";
 import { initEmbeddings, startEmbeddingWorker, stopEmbeddingWorker } from "./embeddings.js";
 import { initConsolidation, startConsolidationWorker, stopConsolidationWorker } from "./consolidation.js";
@@ -234,7 +234,7 @@ function createMcpServer(
 ): Server {
   const server = new Server(
     { name: "munin-memory", version: SERVER_VERSION },
-    { capabilities: { tools: {} }, instructions: MCP_SERVER_INSTRUCTIONS },
+    { capabilities: { tools: {} }, instructions: buildServerInstructions(resolveToolProfile(REGISTERED_TOOL_NAMES)) },
   );
   registerTools(server, database, sessionId, accessContext, runtimeConfig, undefined, reviewSessionIdOverride);
   return server;

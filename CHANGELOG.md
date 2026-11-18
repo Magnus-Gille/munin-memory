@@ -21,6 +21,14 @@ changelog is the canonical record of what moved.
 - The server now logs a one-time warning when the OAuth client-secret wrap key
   falls back to `MUNIN_API_KEY` (no dedicated `MUNIN_OAUTH_CLIENT_SECRET_KEY`).
 
+### Fixed
+
+- Server instructions and tool definitions no longer name tools the active
+  `MUNIN_TOOL_PROFILE` disables (MUNIN-437). Under `core`, the fallback guidance
+  and the `memory_orient` description pointed at `memory_status` and
+  `memory_resume`, which answered `tool_not_enabled`. The text now follows the
+  enabled set; the `full` profile is unchanged. A test checks every profile shape.
+
 ## [0.7.3] — 2026-11-14
 
 No schema change (still v32).
