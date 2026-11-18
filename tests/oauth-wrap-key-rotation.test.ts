@@ -1,11 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, afterAll } from "vitest";
 import Database from "better-sqlite3";
-import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, chmodSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initDatabase } from "../src/db.js";
 import { MuninClientsStore, deriveClientSecretWrapKey, rewrapClientSecrets } from "../src/oauth.js";
-import { handleOAuthClientsRewrap } from "../src/admin-cli.js";
+import { handleOAuthClientsRewrap, parseArgs } from "../src/admin-cli.js";
 import { createTestStorage } from "./helpers/test-storage.js";
 
 const STORAGE = createTestStorage("oauth-wrap-rotation");
@@ -146,5 +146,52 @@ describe("admin rewrap-secrets keys", () => {
     delete process.env.MUNIN_OAUTH_WRAP_KEY_OLD;
     delete process.env.MUNIN_OAUTH_WRAP_KEY_NEW;
     expect(() => handleOAuthClientsRewrap(db, new Map(), true)).toThrow(/Missing key/);
+  });
+});
+
+describe("rewrap edge cases", () => {
+  it("handles mixed state and plaintext rows", async () => {
+    await new MuninClientsStore(db, OLD).registerClient(client("a", "secret-a"));
+    await new MuninClientsStore(db, NEW).registerClient(client("b", "secret-b"));
+    await new MuninClientsStore(db, OLD).registerClient(client("c", "secret-c"));
+    // set plaintext last: constructing a store would otherwise upgrade it
+    db.prepare("UPDATE oauth_clients SET client_secret = 'plain' WHERE client_id = 'a'").run();
+    const res = rewrapClientSecrets(db, OLD, NEW);
+    expect(res).toMatchObject({ total: 3, rewrapped: 1, alreadyOnNewKey: 1, plaintextSkipped: 1 });
+    expect((db.prepare("SELECT client_secret s FROM oauth_clients WHERE client_id='a'").get() as { s: string }).s).toBe("plain");
+  });
+
+  it("swapped keys report everything as already on new key and write nothing", async () => {
+    await new MuninClientsStore(db, OLD).registerClient(client("a", "secret-a"));
+    const res = rewrapClientSecrets(db, NEW, OLD);
+    expect(res).toMatchObject({ rewrapped: 0, alreadyOnNewKey: 1 });
+  });
+
+  it("dry run writes no audit row", async () => {
+    await new MuninClientsStore(db, OLD).registerClient(client("a", "secret-a"));
+    let called = false;
+    rewrapClientSecrets(db, OLD, NEW, { dryRun: true, audit: () => { called = true; } });
+    expect(called).toBe(false);
+  });
+
+  it("parseArgs rejects an empty --db and accepts --dry-run as a flag", () => {
+    expect(() => parseArgs(["node", "x", "--db", " ", "principals", "list"])).toThrow(/non-empty/);
+    expect(parseArgs(["node", "x", "oauth-clients", "rewrap-secrets", "--dry-run"]).flags.get("--dry-run")).toBe("true");
+  });
+
+  it("rejects symlinked and empty key files", () => {
+    const d = mkdtempSync(join(tmpdir(), "wrapkey2-"));
+    try {
+      const real = join(d, "real");
+      writeFileSync(real, "k", { mode: 0o600 });
+      symlinkSync(real, join(d, "link"));
+      writeFileSync(join(d, "empty"), "\n", { mode: 0o600 });
+      const ok = join(d, "ok");
+      writeFileSync(ok, "k2", { mode: 0o600 });
+      expect(() => handleOAuthClientsRewrap(db, new Map([["--old-key-file", join(d, "link")], ["--new-key-file", ok]]), true)).toThrow();
+      expect(() => handleOAuthClientsRewrap(db, new Map([["--old-key-file", join(d, "empty")], ["--new-key-file", ok]]), true)).toThrow(/Missing key/);
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
   });
 });

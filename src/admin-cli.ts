@@ -1127,6 +1127,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
         throw new Error(`Missing value for ${arg}`);
       }
       if (arg === "--db") {
+        if (next.trim() === "") throw new Error("--db requires a non-empty path");
         dbPath = next;
       } else {
         flags.set(arg, next);
@@ -1662,6 +1663,12 @@ export function handleOAuthClientsRewrap(
         already_on_new_key: r.alreadyOnNewKey,
       })),
   });
+  if (result.rewrapped === 0 && result.alreadyOnNewKey > 0) {
+    console.error(
+      "Warning: every secret already decrypts under the NEW key and none under the old one. " +
+        "If this is the first run, the old/new key files are probably swapped; do NOT switch the service key.",
+    );
+  }
   if (result.total === 0) {
     console.error(
       "Warning: 0 confidential client secrets found. If you expected some, you are probably pointing at the wrong database (use --db <path>).",
@@ -1994,6 +2001,12 @@ function dispatchPrincipals(
   }
 }
 
+function rejectMisplacedDryRun(parsed: ParsedArgs): void {
+  if (parsed.flags.has("--dry-run") && !(parsed.resource === "oauth-clients" && parsed.command === "rewrap-secrets")) {
+    throw new Error("--dry-run is only supported by 'oauth-clients rewrap-secrets'.");
+  }
+}
+
 function main(): void {
   let parsed: ParsedArgs;
   try {
@@ -2010,6 +2023,12 @@ function main(): void {
   }
 
   validateResourceAndCommand(parsed);
+  try {
+    rejectMisplacedDryRun(parsed);
+  } catch (err: unknown) {
+    console.error((err as Error).message);
+    process.exit(1);
+  }
 
   let db: Database.Database;
   try {
