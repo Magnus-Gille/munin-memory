@@ -16,6 +16,14 @@ changelog is the canonical record of what moved.
   `memory_resume`, which answered `tool_not_enabled`. The text now follows the
   enabled set; the `full` profile is unchanged. A test checks every profile shape.
 
+### Documentation
+
+- README warns against passing the Munin bearer token or Cloudflare Access
+  credentials to `mcp-remote` (or any launcher) with `--header`, because the
+  values become visible in the process argument list. It adds a Claude Desktop
+  example that uses `dist/bridge.js` with `MUNIN_CREDENTIALS_FILE` instead
+  (MUNIN-439).
+
 ## [0.7.3] — 2026-11-14
 
 No schema change (still v32).
