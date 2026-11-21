@@ -3,11 +3,21 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import Database from "better-sqlite3";
 import { parseArgs } from "../src/admin-cli.js";
 
 // MUNIN-440: --token-stdout prints only the secret on stdout (piped), never on stderr.
 let dir: string;
 let db: string;
+function auditCount(): number {
+  const d = new Database(db, { readonly: true });
+  try {
+    return (d.prepare("SELECT COUNT(*) AS n FROM audit_log").get() as { n: number }).n;
+  } finally {
+    d.close();
+  }
+}
+
 const RULES = '[{"pattern":"tasks/*","permissions":"rw"}]';
 
 function admin(args: string[]) {
@@ -34,7 +44,7 @@ describe("munin-admin --token-stdout", () => {
   it("add: stdout is exactly one token line, stderr never contains it", () => {
     const r = admin(["principals", "add", "p1", "--type", "agent", "--rules", RULES, "--token-stdout"]);
     expect(r.status).toBe(0);
-    expect(r.stdout).toMatch(/^[^\s]+\n$/);
+    expect(r.stdout).toMatch(/^[0-9a-f]{64}\n$/);
     expect(r.stderr).not.toContain(r.stdout.trim());
     expect(r.stderr).toContain("Created principal: p1");
   });
@@ -43,7 +53,7 @@ describe("munin-admin --token-stdout", () => {
     const first = admin(["principals", "rotate-token", "p1", "--token-stdout"]);
     const second = admin(["principals", "rotate-token", "p1", "--token-stdout"]);
     expect(first.status).toBe(0);
-    expect(second.stdout).toMatch(/^[^\s]+\n$/);
+    expect(second.stdout).toMatch(/^[0-9a-f]{64}\n$/);
     expect(second.stdout).not.toBe(first.stdout);
     expect(second.stderr).not.toContain(second.stdout.trim());
   });
@@ -51,15 +61,43 @@ describe("munin-admin --token-stdout", () => {
   it("bearer rotate: same contract", () => {
     const r = admin(["bearer", "rotate", "--grace-hours", "1", "--token-stdout"]);
     expect(r.status).toBe(0);
-    expect(r.stdout).toMatch(/^[^\s]+\n$/);
+    expect(r.stdout).toMatch(/^[0-9a-f]{64}\n$/);
     expect(r.stderr).not.toContain(r.stdout.trim());
   });
 
-  it("refuses --json and does not mutate", () => {
-    const before = admin(["principals", "show", "p1", "--json"]).stdout;
+  it("refuses --json: nothing on stdout, error on stderr, no mutation", () => {
+    const before = auditCount();
     const r = admin(["principals", "rotate-token", "p1", "--json", "--token-stdout"]);
     expect(r.status).not.toBe(0);
-    expect(r.stdout).toContain("--token-stdout cannot be combined");
-    expect(admin(["principals", "show", "p1", "--json"]).stdout).toBe(before);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toContain("--token-stdout cannot be combined");
+    expect(auditCount()).toBe(before);
+  });
+
+  it("add with a non-agent type is rejected before any mutation", () => {
+    const before = auditCount();
+    const r = admin(["principals", "add", "fam1", "--type", "family", "--rules", RULES, "--token-stdout"]);
+    expect(r.status).not.toBe(0);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toContain("requires --type agent");
+    expect(auditCount()).toBe(before);
+    expect(admin(["principals", "show", "fam1"]).status).not.toBe(0);
+  });
+
+  it("is rejected on unrelated commands", () => {
+    const r = admin(["principals", "list", "--token-stdout"]);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("only valid with");
+  });
+
+  it("not-found rotate emits nothing on stdout", () => {
+    const r = admin(["principals", "rotate-token", "nope", "--token-stdout"]);
+    expect(r.status).not.toBe(0);
+    expect(r.stdout).toBe("");
+  });
+
+  it("bearer rotate keeps the grace-window info on stderr", () => {
+    const r = admin(["bearer", "rotate", "--grace-hours", "1", "--token-stdout"]);
+    expect(r.stderr).toMatch(/retiring key/);
   });
 });

@@ -10,7 +10,7 @@ changelog is the canonical record of what moved.
 
 ### Added
 
-- `munin-admin --token-stdout` for `principals add`, `principals rotate-token` and `bearer rotate` (MUNIN-440): prints only the new token on stdout (everything else on stderr) so it can be piped straight into a consumer installer and never lands in argv or a terminal. It refuses a terminal stdout and `--json`, and checks both before any mutation.
+- `munin-admin --token-stdout` for `principals add`, `principals rotate-token` and `bearer rotate` (MUNIN-440): prints only the new token on stdout (everything else on stderr) so it can be piped straight into a consumer installer instead of landing in argv. It refuses a terminal stdout, `--json`, and non-agent `principals add` before any mutation, sends errors to stderr only, and exits 3 with a recovery hint if the token could not be written (redirecting to a file is not prevented).
 
 ### Fixed
 

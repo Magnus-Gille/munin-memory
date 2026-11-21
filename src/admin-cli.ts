@@ -25,7 +25,7 @@
 
 import Database from "better-sqlite3";
 import { randomBytes, randomUUID, createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import {
   initDatabase,
@@ -1174,7 +1174,7 @@ Usage:
   munin-admin oauth-clients clear <principal-id>
   munin-admin bearer list [--scope <owner|dpa|consumer>]
   munin-admin bearer rotate [--scope <owner|dpa|consumer>] [--grace-hours <n>]
-  (add / rotate-token / bearer rotate) --token-stdout   print ONLY the token on stdout, for piping into a consumer installer; refuses a TTY and --json
+  (add / rotate-token / bearer rotate) --token-stdout   print ONLY the token on stdout, for piping into a consumer installer; refuses a TTY and --json; exit 3 = token not delivered
   munin-admin bearer revoke <key-id>
 
 Global flags:
@@ -1260,7 +1260,7 @@ function handleAdd(
   jsonOutput: boolean,
   tokenStdout = false,
 ): void {
-  if (tokenStdout) assertTokenStdoutSafe(jsonOutput);
+  if (tokenStdout) assertTokenStdoutSafe(jsonOutput, flags.get("--type"));
   const typeStr = flags.get("--type");
   if (!typeStr) {
     throw new Error("Missing required flag: --type");
@@ -1289,10 +1289,12 @@ function handleAdd(
   if (tokenStdout) {
     console.error(`Created principal: ${result.principalId} (type: ${result.principalType})`);
     if (!result.token) {
-      console.error("No token issued for this principal.");
-      process.exit(1);
+      throw new Error("No token issued for this principal.");
     }
-    writeTokenOnly(result.token);
+    writeTokenOnly(
+      result.token,
+      `The principal exists; recover with: munin-admin principals rotate-token ${result.principalId} --token-stdout`,
+    );
     return;
   }
 
@@ -1374,7 +1376,12 @@ function handleUpdate(
  * piped straight into a consumer's stdin installer. It must never reach argv,
  * a terminal or scrollback, so the check runs BEFORE any mutation.
  */
-function assertTokenStdoutSafe(jsonOutput: boolean): void {
+function assertTokenStdoutSafe(jsonOutput: boolean, principalType?: string): void {
+  if (principalType !== undefined && principalType !== "agent") {
+    throw new Error(
+      "--token-stdout with `principals add` requires --type agent (only agent principals receive a token).",
+    );
+  }
   if (jsonOutput) {
     throw new Error("--token-stdout cannot be combined with --json.");
   }
@@ -1385,8 +1392,29 @@ function assertTokenStdoutSafe(jsonOutput: boolean): void {
   }
 }
 
-function writeTokenOnly(token: string): void {
-  process.stdout.write(`${token}\n`);
+const EXIT_TOKEN_NOT_DELIVERED = 3;
+
+/**
+ * Synchronous write so a failed pipe is detected while we still own the exit
+ * code. The mutation has already committed: on failure say so loudly and give
+ * the recovery path rather than silently losing the printed-once secret.
+ */
+function writeTokenOnly(token: string, recovery: string): void {
+  try {
+    writeSync(1, `${token}\n`);
+  } catch {
+    console.error(
+      `TOKEN NOT DELIVERED: the credential was changed but could not be written to stdout. ${recovery}`,
+    );
+    process.exitCode = EXIT_TOKEN_NOT_DELIVERED;
+    throw new TokenNotDeliveredError();
+  }
+}
+
+class TokenNotDeliveredError extends Error {
+  constructor() {
+    super("token not delivered");
+  }
 }
 
 function handleRotateToken(
@@ -1409,7 +1437,10 @@ function handleRotateToken(
 
   if (tokenStdout) {
     console.error(`Token rotated for: ${result.principalId}`);
-    writeTokenOnly(result.token);
+    writeTokenOnly(
+      result.token,
+      `The old token is already invalid; re-run: munin-admin principals rotate-token ${result.principalId} --token-stdout`,
+    );
     return;
   }
 
@@ -1773,8 +1804,13 @@ function handleBearerRotate(
   const result = rotateBearerToken(db, scope, graceHours);
 
   if (tokenStdout) {
-    console.error(`Rotated bearer (scope=${result.scope}, id=${result.id}).`);
-    writeTokenOnly(result.token);
+    console.error(
+      `Rotated bearer (scope=${result.scope}, id=${result.id}); retiring key ${result.retiringKeyId ?? "none"} valid until ${result.retiringExpiresAt ?? "n/a"}.`,
+    );
+    writeTokenOnly(
+      result.token,
+      `The new bearer ${result.id} exists but its value was lost; revoke it (munin-admin bearer revoke ${result.id}) and rotate again. The retiring key stays valid until the grace window ends.`,
+    );
     return;
   }
 
@@ -1992,6 +2028,12 @@ function main(): void {
 
   validateResourceAndCommand(parsed);
 
+  const tokenStdoutCommands = new Set(["principals add", "principals rotate-token", "bearer rotate"]);
+  if (parsed.tokenStdout && !tokenStdoutCommands.has(`${parsed.resource} ${parsed.command}`)) {
+    console.error("--token-stdout is only valid with: principals add, principals rotate-token, bearer rotate.");
+    process.exit(1);
+  }
+
   let db: Database.Database;
   try {
     db = openDb(parsed.dbPath, parsed.init);
@@ -2011,7 +2053,15 @@ function main(): void {
       dispatchPrincipals(db, parsed);
     }
   } catch (err: unknown) {
-    if (parsed.json) {
+    if (err instanceof TokenNotDeliveredError) {
+      // already reported on stderr; exit code set to EXIT_TOKEN_NOT_DELIVERED
+      db.close();
+      process.exit(EXIT_TOKEN_NOT_DELIVERED);
+    }
+    if (parsed.tokenStdout) {
+      // stdout is reserved for the token; never write error JSON into a pipe
+      console.error(`Error: ${(err as Error).message}`);
+    } else if (parsed.json) {
       console.log(JSON.stringify({ error: (err as Error).message }));
     } else {
       console.error(`Error: ${(err as Error).message}`);
