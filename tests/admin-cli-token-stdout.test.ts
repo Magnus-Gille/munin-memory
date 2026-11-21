@@ -4,7 +4,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
-import { parseArgs } from "../src/admin-cli.js";
+import { openSync, closeSync, readFileSync } from "node:fs";
+import {
+  parseArgs,
+  assertTokenStdoutSafe,
+  writeTokenOnly,
+  TokenNotDeliveredError,
+} from "../src/admin-cli.js";
 
 // MUNIN-440: --token-stdout prints only the secret on stdout (piped), never on stderr.
 let dir: string;
@@ -99,5 +105,38 @@ describe("munin-admin --token-stdout", () => {
   it("bearer rotate keeps the grace-window info on stderr", () => {
     const r = admin(["bearer", "rotate", "--grace-hours", "1", "--token-stdout"]);
     expect(r.stderr).toMatch(/retiring key/);
+  });
+
+  it("assertTokenStdoutSafe rejects a TTY, --json and non-agent types", () => {
+    const original = process.stdout.isTTY;
+    try {
+      process.stdout.isTTY = true;
+      expect(() => assertTokenStdoutSafe(false)).toThrow(/terminal/);
+      process.stdout.isTTY = false;
+      expect(() => assertTokenStdoutSafe(true)).toThrow(/--json/);
+      expect(() => assertTokenStdoutSafe(false, "owner")).toThrow(/agent/);
+      expect(() => assertTokenStdoutSafe(false, "agent")).not.toThrow();
+    } finally {
+      process.stdout.isTTY = original;
+    }
+  });
+
+  it("writeTokenOnly writes token+newline to the fd, and reports failure with exit code 3", () => {
+    const file = join(dir, "sink");
+    const fd = openSync(file, "w");
+    try {
+      writeTokenOnly("tok", "recover", fd);
+    } finally {
+      closeSync(fd);
+    }
+    expect(readFileSync(file, "utf8")).toBe("tok\n");
+
+    const prior = process.exitCode;
+    try {
+      expect(() => writeTokenOnly("tok", "recover", 9999)).toThrow(TokenNotDeliveredError);
+      expect(process.exitCode).toBe(3);
+    } finally {
+      process.exitCode = prior;
+    }
   });
 });

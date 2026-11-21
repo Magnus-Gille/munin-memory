@@ -1376,7 +1376,7 @@ function handleUpdate(
  * piped straight into a consumer's stdin installer. It must never reach argv,
  * a terminal or scrollback, so the check runs BEFORE any mutation.
  */
-function assertTokenStdoutSafe(jsonOutput: boolean, principalType?: string): void {
+export function assertTokenStdoutSafe(jsonOutput: boolean, principalType?: string): void {
   if (principalType !== undefined && principalType !== "agent") {
     throw new Error(
       "--token-stdout with `principals add` requires --type agent (only agent principals receive a token).",
@@ -1399,9 +1399,9 @@ const EXIT_TOKEN_NOT_DELIVERED = 3;
  * code. The mutation has already committed: on failure say so loudly and give
  * the recovery path rather than silently losing the printed-once secret.
  */
-function writeTokenOnly(token: string, recovery: string): void {
+export function writeTokenOnly(token: string, recovery: string, fd = 1): void {
   try {
-    writeSync(1, `${token}\n`);
+    writeSync(fd, `${token}\n`);
   } catch {
     console.error(
       `TOKEN NOT DELIVERED: the credential was changed but could not be written to stdout. ${recovery}`,
@@ -1411,7 +1411,7 @@ function writeTokenOnly(token: string, recovery: string): void {
   }
 }
 
-class TokenNotDeliveredError extends Error {
+export class TokenNotDeliveredError extends Error {
   constructor() {
     super("token not delivered");
   }
