@@ -224,7 +224,7 @@ All configuration is via environment variables. Copy `.env.example` for a starti
 | `MUNIN_SEMANTIC_ENABLED` | `true` | Allow semantic search requests |
 | `MUNIN_HYBRID_ENABLED` | `true` | Enable hybrid search (FTS5 + vector) |
 | `MUNIN_OAUTH_ISSUER_URL` | `http://localhost:3030` | OAuth issuer (set to your public URL) |
-| `MUNIN_OAUTH_CLIENT_SECRET_KEY` | — | Optional dedicated key for encrypting confidential OAuth client secrets at rest; defaults to `MUNIN_API_KEY` |
+| `MUNIN_OAUTH_CLIENT_SECRET_KEY` | — | Optional dedicated key for encrypting confidential OAuth client secrets at rest; defaults to `MUNIN_API_KEY` (warns); rotate via `docs/oauth-wrap-key-rotation.md` |
 | `MUNIN_OAUTH_TRUSTED_USER_HEADER` | — | Trusted header name required for public OAuth consent |
 | `MUNIN_OAUTH_TRUSTED_USER_VALUE` | — | Exact trusted header value required for public OAuth consent |
 | `MUNIN_OAUTH_IDENTITY_HEADER` | — | Optional trusted-proxy header containing the authenticated user's email; requires the trusted header/value gate and must resolve to one active principal |

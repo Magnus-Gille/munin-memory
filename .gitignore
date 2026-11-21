@@ -14,6 +14,7 @@ PUBLIC-REPO-AUDIT.local/
 tmp/
 docs/*
 !docs/vision.md
+!docs/oauth-wrap-key-rotation.md
 !docs/roadmap.md
 !docs/phase-1-engineering-plan.md
 !docs/phase-2-engineering-plan.md
