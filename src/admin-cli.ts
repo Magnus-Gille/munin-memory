@@ -25,7 +25,7 @@
 
 import Database from "better-sqlite3";
 import { randomBytes, randomUUID, createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import {
   initDatabase,
@@ -1073,6 +1073,7 @@ function formatClassificationAudit(items: ClassificationAuditItem[]): string {
 interface ParsedArgs {
   dbPath?: string;
   json: boolean;
+  tokenStdout: boolean;
   init: boolean;
   help: boolean;
   force: boolean;
@@ -1086,6 +1087,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   const args = argv.slice(2);
   let dbPath: string | undefined;
   let json = false;
+  let tokenStdout = false;
   let init = false;
   let help = false;
   let force = false;
@@ -1111,6 +1113,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       help = true;
     } else if (arg === "--json") {
       json = true;
+    } else if (arg === "--token-stdout") {
+      tokenStdout = true;
     } else if (arg === "--init") {
       init = true;
     } else if (arg === "--force") {
@@ -1136,6 +1140,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   return {
     dbPath,
     json,
+    tokenStdout,
     init,
     help,
     force,
@@ -1169,6 +1174,7 @@ Usage:
   munin-admin oauth-clients clear <principal-id>
   munin-admin bearer list [--scope <owner|dpa|consumer>]
   munin-admin bearer rotate [--scope <owner|dpa|consumer>] [--grace-hours <n>]
+  (add / rotate-token / bearer rotate) --token-stdout   print ONLY the token on stdout, for piping into a consumer installer; refuses a TTY and --json; exit 3 = token not delivered
   munin-admin bearer revoke <key-id>
 
 Global flags:
@@ -1252,7 +1258,9 @@ function handleAdd(
   flags: Map<string, string>,
   force: boolean,
   jsonOutput: boolean,
+  tokenStdout = false,
 ): void {
+  if (tokenStdout) assertTokenStdoutSafe(jsonOutput, flags.get("--type"));
   const typeStr = flags.get("--type");
   if (!typeStr) {
     throw new Error("Missing required flag: --type");
@@ -1277,6 +1285,18 @@ function handleAdd(
     profile,
     force,
   });
+
+  if (tokenStdout) {
+    console.error(`Created principal: ${result.principalId} (type: ${result.principalType})`);
+    if (!result.token) {
+      throw new Error("No token issued for this principal.");
+    }
+    writeTokenOnly(
+      result.token,
+      `The principal exists; recover with: munin-admin principals rotate-token ${result.principalId} --token-stdout`,
+    );
+    return;
+  }
 
   if (jsonOutput) {
     console.log(JSON.stringify(result, null, 2));
@@ -1351,11 +1371,59 @@ function handleUpdate(
   }
 }
 
+/**
+ * --token-stdout: the secret is the ONLY thing written to stdout, so it can be
+ * piped straight into a consumer's stdin installer. It must never reach argv,
+ * a terminal or scrollback, so the check runs BEFORE any mutation.
+ */
+export function assertTokenStdoutSafe(jsonOutput: boolean, principalType?: string): void {
+  if (principalType !== undefined && principalType !== "agent") {
+    throw new Error(
+      "--token-stdout with `principals add` requires --type agent (only agent principals receive a token).",
+    );
+  }
+  if (jsonOutput) {
+    throw new Error("--token-stdout cannot be combined with --json.");
+  }
+  if (process.stdout.isTTY) {
+    throw new Error(
+      "--token-stdout refuses to print to a terminal. Pipe stdout to the consumer's installer (e.g. `| ssh host installer`).",
+    );
+  }
+}
+
+const EXIT_TOKEN_NOT_DELIVERED = 3;
+
+/**
+ * Synchronous write so a failed pipe is detected while we still own the exit
+ * code. The mutation has already committed: on failure say so loudly and give
+ * the recovery path rather than silently losing the printed-once secret.
+ */
+export function writeTokenOnly(token: string, recovery: string, fd = 1): void {
+  try {
+    writeSync(fd, `${token}\n`);
+  } catch {
+    console.error(
+      `TOKEN NOT DELIVERED: the credential was changed but could not be written to stdout. ${recovery}`,
+    );
+    process.exitCode = EXIT_TOKEN_NOT_DELIVERED;
+    throw new TokenNotDeliveredError();
+  }
+}
+
+export class TokenNotDeliveredError extends Error {
+  constructor() {
+    super("token not delivered");
+  }
+}
+
 function handleRotateToken(
   db: Database.Database,
   principalId: string,
   jsonOutput: boolean,
+  tokenStdout = false,
 ): void {
+  if (tokenStdout) assertTokenStdoutSafe(jsonOutput);
   const result = rotateToken(db, principalId);
 
   if (!result) {
@@ -1365,6 +1433,15 @@ function handleRotateToken(
       console.error(`Principal not found: ${principalId}`);
     }
     process.exit(1);
+  }
+
+  if (tokenStdout) {
+    console.error(`Token rotated for: ${result.principalId}`);
+    writeTokenOnly(
+      result.token,
+      `The old token is already invalid; re-run: munin-admin principals rotate-token ${result.principalId} --token-stdout`,
+    );
+    return;
   }
 
   if (jsonOutput) {
@@ -1711,7 +1788,9 @@ function handleBearerRotate(
   db: Database.Database,
   flags: Map<string, string>,
   json: boolean,
+  tokenStdout = false,
 ): void {
+  if (tokenStdout) assertTokenStdoutSafe(json);
   const scope = (flags.get("--scope") ?? "owner") as BearerScope;
   if (!["owner", "dpa", "consumer"].includes(scope)) {
     throw new Error(`Invalid scope "${scope}". Must be: owner, dpa, consumer`);
@@ -1723,6 +1802,17 @@ function handleBearerRotate(
   }
 
   const result = rotateBearerToken(db, scope, graceHours);
+
+  if (tokenStdout) {
+    console.error(
+      `Rotated bearer (scope=${result.scope}, id=${result.id}); retiring key ${result.retiringKeyId ?? "none"} valid until ${result.retiringExpiresAt ?? "n/a"}.`,
+    );
+    writeTokenOnly(
+      result.token,
+      `The new bearer ${result.id} exists but its value was lost; revoke it (munin-admin bearer revoke ${result.id}) and rotate again. The retiring key stays valid until the grace window ends.`,
+    );
+    return;
+  }
 
   if (json) {
     console.log(
@@ -1831,7 +1921,7 @@ function dispatchBearer(
       handleBearerList(db, parsed.flags, parsed.json);
       break;
     case "rotate":
-      handleBearerRotate(db, parsed.flags, parsed.json);
+      handleBearerRotate(db, parsed.flags, parsed.json, parsed.tokenStdout);
       break;
     case "revoke": {
       const keyId = parsed.positionals[0];
@@ -1888,7 +1978,7 @@ function dispatchPrincipals(
 
     case "add":
       if (!pid) throw new Error("Missing <principal-id> argument.");
-      handleAdd(db, pid, parsed.flags, parsed.force, parsed.json);
+      handleAdd(db, pid, parsed.flags, parsed.force, parsed.json, parsed.tokenStdout);
       break;
 
     case "revoke":
@@ -1903,7 +1993,7 @@ function dispatchPrincipals(
 
     case "rotate-token":
       if (!pid) throw new Error("Missing <principal-id> argument.");
-      handleRotateToken(db, pid, parsed.json);
+      handleRotateToken(db, pid, parsed.json, parsed.tokenStdout);
       break;
 
     case "test": {
@@ -1938,6 +2028,12 @@ function main(): void {
 
   validateResourceAndCommand(parsed);
 
+  const tokenStdoutCommands = new Set(["principals add", "principals rotate-token", "bearer rotate"]);
+  if (parsed.tokenStdout && !tokenStdoutCommands.has(`${parsed.resource} ${parsed.command}`)) {
+    console.error("--token-stdout is only valid with: principals add, principals rotate-token, bearer rotate.");
+    process.exit(1);
+  }
+
   let db: Database.Database;
   try {
     db = openDb(parsed.dbPath, parsed.init);
@@ -1957,7 +2053,15 @@ function main(): void {
       dispatchPrincipals(db, parsed);
     }
   } catch (err: unknown) {
-    if (parsed.json) {
+    if (err instanceof TokenNotDeliveredError) {
+      // already reported on stderr; exit code set to EXIT_TOKEN_NOT_DELIVERED
+      db.close();
+      process.exit(EXIT_TOKEN_NOT_DELIVERED);
+    }
+    if (parsed.tokenStdout) {
+      // stdout is reserved for the token; never write error JSON into a pipe
+      console.error(`Error: ${(err as Error).message}`);
+    } else if (parsed.json) {
       console.log(JSON.stringify({ error: (err as Error).message }));
     } else {
       console.error(`Error: ${(err as Error).message}`);
