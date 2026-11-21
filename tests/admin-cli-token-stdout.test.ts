@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
-import { openSync, closeSync, readFileSync } from "node:fs";
+import { openSync, closeSync, readSync } from "node:fs";
 import {
   parseArgs,
   assertTokenStdoutSafe,
@@ -123,13 +123,15 @@ describe("munin-admin --token-stdout", () => {
 
   it("writeTokenOnly writes token+newline to the fd, and reports failure with exit code 3", () => {
     const file = join(dir, "sink");
-    const fd = openSync(file, "w");
+    const fd = openSync(file, "w+");
     try {
       writeTokenOnly("tok", "recover", fd);
+      const buf = Buffer.alloc(16);
+      const n = readSync(fd, buf, 0, 16, 0); // same descriptor: no path re-check
+      expect(buf.subarray(0, n).toString("utf8")).toBe("tok\n");
     } finally {
       closeSync(fd);
     }
-    expect(readFileSync(file, "utf8")).toBe("tok\n");
 
     const prior = process.exitCode;
     try {
