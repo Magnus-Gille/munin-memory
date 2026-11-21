@@ -1073,6 +1073,7 @@ function formatClassificationAudit(items: ClassificationAuditItem[]): string {
 interface ParsedArgs {
   dbPath?: string;
   json: boolean;
+  tokenStdout: boolean;
   init: boolean;
   help: boolean;
   force: boolean;
@@ -1086,6 +1087,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   const args = argv.slice(2);
   let dbPath: string | undefined;
   let json = false;
+  let tokenStdout = false;
   let init = false;
   let help = false;
   let force = false;
@@ -1111,6 +1113,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       help = true;
     } else if (arg === "--json") {
       json = true;
+    } else if (arg === "--token-stdout") {
+      tokenStdout = true;
     } else if (arg === "--init") {
       init = true;
     } else if (arg === "--force") {
@@ -1136,6 +1140,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   return {
     dbPath,
     json,
+    tokenStdout,
     init,
     help,
     force,
@@ -1169,6 +1174,7 @@ Usage:
   munin-admin oauth-clients clear <principal-id>
   munin-admin bearer list [--scope <owner|dpa|consumer>]
   munin-admin bearer rotate [--scope <owner|dpa|consumer>] [--grace-hours <n>]
+  (add / rotate-token / bearer rotate) --token-stdout   print ONLY the token on stdout, for piping into a consumer installer; refuses a TTY and --json
   munin-admin bearer revoke <key-id>
 
 Global flags:
@@ -1252,7 +1258,9 @@ function handleAdd(
   flags: Map<string, string>,
   force: boolean,
   jsonOutput: boolean,
+  tokenStdout = false,
 ): void {
+  if (tokenStdout) assertTokenStdoutSafe(jsonOutput);
   const typeStr = flags.get("--type");
   if (!typeStr) {
     throw new Error("Missing required flag: --type");
@@ -1277,6 +1285,16 @@ function handleAdd(
     profile,
     force,
   });
+
+  if (tokenStdout) {
+    console.error(`Created principal: ${result.principalId} (type: ${result.principalType})`);
+    if (!result.token) {
+      console.error("No token issued for this principal.");
+      process.exit(1);
+    }
+    writeTokenOnly(result.token);
+    return;
+  }
 
   if (jsonOutput) {
     console.log(JSON.stringify(result, null, 2));
@@ -1351,11 +1369,33 @@ function handleUpdate(
   }
 }
 
+/**
+ * --token-stdout: the secret is the ONLY thing written to stdout, so it can be
+ * piped straight into a consumer's stdin installer. It must never reach argv,
+ * a terminal or scrollback, so the check runs BEFORE any mutation.
+ */
+function assertTokenStdoutSafe(jsonOutput: boolean): void {
+  if (jsonOutput) {
+    throw new Error("--token-stdout cannot be combined with --json.");
+  }
+  if (process.stdout.isTTY) {
+    throw new Error(
+      "--token-stdout refuses to print to a terminal. Pipe stdout to the consumer's installer (e.g. `| ssh host installer`).",
+    );
+  }
+}
+
+function writeTokenOnly(token: string): void {
+  process.stdout.write(`${token}\n`);
+}
+
 function handleRotateToken(
   db: Database.Database,
   principalId: string,
   jsonOutput: boolean,
+  tokenStdout = false,
 ): void {
+  if (tokenStdout) assertTokenStdoutSafe(jsonOutput);
   const result = rotateToken(db, principalId);
 
   if (!result) {
@@ -1365,6 +1405,12 @@ function handleRotateToken(
       console.error(`Principal not found: ${principalId}`);
     }
     process.exit(1);
+  }
+
+  if (tokenStdout) {
+    console.error(`Token rotated for: ${result.principalId}`);
+    writeTokenOnly(result.token);
+    return;
   }
 
   if (jsonOutput) {
@@ -1711,7 +1757,9 @@ function handleBearerRotate(
   db: Database.Database,
   flags: Map<string, string>,
   json: boolean,
+  tokenStdout = false,
 ): void {
+  if (tokenStdout) assertTokenStdoutSafe(json);
   const scope = (flags.get("--scope") ?? "owner") as BearerScope;
   if (!["owner", "dpa", "consumer"].includes(scope)) {
     throw new Error(`Invalid scope "${scope}". Must be: owner, dpa, consumer`);
@@ -1723,6 +1771,12 @@ function handleBearerRotate(
   }
 
   const result = rotateBearerToken(db, scope, graceHours);
+
+  if (tokenStdout) {
+    console.error(`Rotated bearer (scope=${result.scope}, id=${result.id}).`);
+    writeTokenOnly(result.token);
+    return;
+  }
 
   if (json) {
     console.log(
@@ -1831,7 +1885,7 @@ function dispatchBearer(
       handleBearerList(db, parsed.flags, parsed.json);
       break;
     case "rotate":
-      handleBearerRotate(db, parsed.flags, parsed.json);
+      handleBearerRotate(db, parsed.flags, parsed.json, parsed.tokenStdout);
       break;
     case "revoke": {
       const keyId = parsed.positionals[0];
@@ -1888,7 +1942,7 @@ function dispatchPrincipals(
 
     case "add":
       if (!pid) throw new Error("Missing <principal-id> argument.");
-      handleAdd(db, pid, parsed.flags, parsed.force, parsed.json);
+      handleAdd(db, pid, parsed.flags, parsed.force, parsed.json, parsed.tokenStdout);
       break;
 
     case "revoke":
@@ -1903,7 +1957,7 @@ function dispatchPrincipals(
 
     case "rotate-token":
       if (!pid) throw new Error("Missing <principal-id> argument.");
-      handleRotateToken(db, pid, parsed.json);
+      handleRotateToken(db, pid, parsed.json, parsed.tokenStdout);
       break;
 
     case "test": {

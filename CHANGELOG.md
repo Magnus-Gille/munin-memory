@@ -8,6 +8,10 @@ changelog is the canonical record of what moved.
 
 ## [Unreleased]
 
+### Added
+
+- `munin-admin --token-stdout` for `principals add`, `principals rotate-token` and `bearer rotate` (MUNIN-440): prints only the new token on stdout (everything else on stderr) so it can be piped straight into a consumer installer and never lands in argv or a terminal. It refuses a terminal stdout and `--json`, and checks both before any mutation.
+
 ### Fixed
 
 - Server instructions and tool definitions no longer name tools the active
