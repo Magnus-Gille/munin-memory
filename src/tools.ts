@@ -3327,6 +3327,11 @@ function resolveExtractNamespace(
       params.namespace_hint.trim(),
       `Skipped namespace_hint ${params.namespace_hint.trim()} because the current principal cannot write there.`,
     );
+    // An exact, writable hint is the caller's answer. Adding unrelated tracked
+    // namespaces only invites accidental cross-project writes (MUNIN-278 item 5).
+    if (candidateNamespaces.length > 0) {
+      return { primaryNamespace: candidateNamespaces[0], candidateNamespaces, warnings };
+    }
   }
 
   const scopeFromProject = resolveResumeScope({
@@ -5201,7 +5206,13 @@ function buildNarrativeTimeline(
     });
   }
 
+  // A log already appears once as category "log"; its log_append audit row
+  // describes the same event and would read as a duplicate (MUNIN-278 item 4).
+  // The audit row stays available through include_sources.
+  const timelineLogIds = new Set(logs.map((entry) => entry.id));
+
   for (const entry of history) {
+    if (entry.action === "log_append" && entry.entry_id !== null && timelineLogIds.has(entry.entry_id)) continue;
     // Resolve trust from the SOURCE entry's full content + tags when entry_id
     // still resolves (#152 round 2 / Codex finding 2); falls back to scan-only.
     const safeDetail = safenAuditDetail(db, entry.entry_id, entry.detail ?? `${entry.action} ${entry.key ?? "namespace"}`, 180);
@@ -7276,7 +7287,7 @@ const TOOL_DEFINITIONS = [
         key: keySchema("Short slug such as `status`, `architecture` or `preferences`."),
         content: {
           type: "string",
-          description: "Markdown content. Be specific; write for your future self.",
+          description: "Markdown content. Be specific; write for your future self. Max 100k chars by default.",
         },
         tags: tagsArraySchema(
           "Optional freeform tags (array, not a comma-separated string). Status lifecycle: `active`, `blocked`, `completed`, `stopped`, `maintenance`, `archived` (`done`, `paused`, `inactive` normalize). Reuse `decision`, `architecture`, `preference`, `milestone`, `convention`, `bug`, `feature`, `research`, and prefixed forms like `client:acme`, `topic:auth`, `source:external`.",
@@ -11009,6 +11020,8 @@ export function registerTools(
                 namespace,
                 key,
                 updated_at: result.updated_at,
+                content_length: content.length,
+                max_content_length: maxContentSize,
                 classification: result.classification,
                 valid_from: result.status === "superseded" ? result.valid_from : undefined,
                 supersedes: result.status === "superseded" ? result.supersedes : undefined,
@@ -12680,6 +12693,8 @@ export function registerTools(
                 namespace,
                 timestamp: "timestamp" in result ? result.timestamp : result.updated_at,
                 timestamp_local: toLocalDisplay("timestamp" in result ? result.timestamp : result.updated_at),
+                content_length: content.length,
+                max_content_length: maxContentSize,
                 classification: result.classification,
                 valid_from: "valid_from" in result ? result.valid_from : undefined,
                 supersedes: "supersedes" in result ? result.supersedes : undefined,

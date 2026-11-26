@@ -11,9 +11,19 @@ changelog is the canonical record of what moved.
 ### Added
 
 - `munin-admin --token-stdout` for `principals add`, `principals rotate-token` and `bearer rotate` (MUNIN-440): prints only the new token on stdout (everything else on stderr) so it can be piped straight into a consumer installer instead of landing in argv. It refuses a terminal stdout, `--json`, and non-agent `principals add` before any mutation, sends errors to stderr only, and exits 3 with a recovery hint if the token could not be written (redirecting to a file is not prevented).
+- `memory_write` and `memory_log` responses include `content_length` and
+  `max_content_length` (the active `MUNIN_MEMORY_MAX_CONTENT_SIZE`), and the
+  `memory_write` content schema states the default limit (MUNIN-278 item 7).
 
 ### Fixed
 
+- `memory_narrative` no longer lists each log twice in its timeline (once as
+  `log`, once as its `log_append` audit row). The audit row is still returned
+  under `sources` with `include_sources` (MUNIN-278 item 4).
+- `memory_extract` with an exact, writable `namespace_hint` returns only that
+  namespace in `candidate_namespaces` instead of adding unrelated tracked
+  namespaces that matched conversation terms (MUNIN-278 item 5). A hint the
+  principal cannot write still falls back to inference.
 - Server instructions and tool definitions no longer name tools the active
   `MUNIN_TOOL_PROFILE` disables (MUNIN-437). Under `core`, the fallback guidance
   and the `memory_orient` description pointed at `memory_status` and

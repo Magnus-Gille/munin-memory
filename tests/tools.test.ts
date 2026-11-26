@@ -353,6 +353,18 @@ describe("memory_write", () => {
     expect(result.hint).toContain("first entry");
   });
 
+  it("returns content_length and the server limit so the size contract is discoverable (MUNIN-278 item 7)", async () => {
+    const content = "x".repeat(1234) + "å";
+    const raw = await callTool("memory_write", {
+      namespace: "projects/size-contract",
+      key: "notes",
+      content,
+    });
+    const result = parseToolResponse(raw) as { content_length: number; max_content_length: number };
+    expect(result.content_length).toBe(content.length);
+    expect(result.max_content_length).toBe(100_000);
+  });
+
   it("updates existing entry and shows related entries in hint", async () => {
     await callTool("memory_write", {
       namespace: "projects/test",
@@ -6365,6 +6377,14 @@ describe("memory_log", () => {
     expect(result.timestamp).toBeTruthy();
   });
 
+  it("returns content_length and the server limit for a log (MUNIN-278 item 7)", async () => {
+    const content = "Decided to publish the size contract.";
+    const raw = await callTool("memory_log", { namespace: "projects/size-contract", content });
+    const result = parseToolResponse(raw) as { content_length: number; max_content_length: number };
+    expect(result.content_length).toBe(content.length);
+    expect(result.max_content_length).toBe(100_000);
+  });
+
   it("defaults log classification from the namespace floor", async () => {
     const raw = await callTool("memory_log", {
       namespace: "clients/acme",
@@ -8155,6 +8175,33 @@ describe("memory_narrative", () => {
     const reversal = result.signals.find((signal) => signal.category === "reversal_pattern")!;
     expect(reversal.source_audit_ids.length).toBeGreaterThan(0);
     expect(result.sources.some((source) => source.kind === "audit")).toBe(true);
+  });
+
+  it("does not double-count a log as both a log and its log_append audit row in the timeline (MUNIN-278 item 4)", async () => {
+    await callTool("memory_log", {
+      namespace: "projects/timeline-dedupe",
+      content: "Decided to ship the timeline dedupe.",
+      tags: ["decision"],
+    });
+    await callTool("memory_write", {
+      namespace: "projects/timeline-dedupe",
+      key: "notes",
+      content: "A state write that should still appear as an audit event.",
+    });
+
+    const raw = await callTool("memory_narrative", { namespace: "projects/timeline-dedupe" });
+    const result = parseToolResponse(raw) as {
+      timeline: Array<{ category: string; summary: string; source_entry_id?: string; source_audit_id?: number }>;
+    };
+
+    const logItems = result.timeline.filter((item) => item.category === "log");
+    expect(logItems).toHaveLength(1);
+    const logAudits = result.timeline.filter(
+      (item) => item.category === "audit" && item.summary.includes("Decided to ship the timeline dedupe"),
+    );
+    expect(logAudits).toHaveLength(0);
+    // Non-log audit events (state writes) are still surfaced.
+    expect(result.timeline.some((item) => item.category === "audit" && item.summary.includes("state write"))).toBe(true);
   });
 
   it("surfaces old blockers", async () => {

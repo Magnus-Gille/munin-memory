@@ -1558,6 +1558,20 @@ describe("memory_extract edges", () => {
     );
   });
 
+  it("returns only the exact writable namespace_hint, without unrelated inferred candidates (MUNIN-278 item 5)", async () => {
+    await callTool("memory_update_status", {
+      namespace: "projects/gamma-one",
+      phase: "Gamma rollout phase one",
+      lifecycle: "active",
+    });
+    const res = parseToolResponse(await callTool("memory_extract", {
+      conversation_text: "Working on the gamma rollout today. Decided to stage it gradually.",
+      namespace_hint: "testing/sandbox-gamma",
+    }));
+    expect(res.ok).toBe(true);
+    expect(res.candidate_namespaces).toEqual(["testing/sandbox-gamma"]);
+  });
+
   it("dedupes extracted lines that already exist in related context", async () => {
     await callTool("memory_log", {
       namespace: "projects/dedupe",
