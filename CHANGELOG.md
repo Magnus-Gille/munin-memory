@@ -11,7 +11,7 @@ changelog is the canonical record of what moved.
 ### Added
 
 - `munin-admin --token-stdout` for `principals add`, `principals rotate-token` and `bearer rotate` (MUNIN-440): prints only the new token on stdout (everything else on stderr) so it can be piped straight into a consumer installer instead of landing in argv. It refuses a terminal stdout, `--json`, and non-agent `principals add` before any mutation, sends errors to stderr only, and exits 3 with a recovery hint if the token could not be written (redirecting to a file is not prevented).
-- `memory_write` and `memory_log` responses include `content_length` and
+- `memory_write` (full writes and patches) and `memory_log` responses include `content_length` and
   `max_content_length` (the active `MUNIN_MEMORY_MAX_CONTENT_SIZE`), and the
   `memory_write` content schema states the default limit (MUNIN-278 item 7).
 

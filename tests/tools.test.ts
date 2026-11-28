@@ -589,6 +589,21 @@ describe("memory_write", () => {
 });
 
 describe("memory_write patch", () => {
+  it("returns the merged content_length and the server limit (MUNIN-278 item 7)", async () => {
+    await callTool("memory_write", { namespace: "projects/patch-size", key: "notes", content: "version one" });
+    const raw = await callTool("memory_write", {
+      namespace: "projects/patch-size",
+      key: "notes",
+      patch: { content_append: "version two" },
+    });
+    const result = parseToolResponse(raw) as { status: string; content_length: number; max_content_length: number };
+    expect(result.status).toBe("patched");
+    const read = parseToolResponse(await callTool("memory_read", { namespace: "projects/patch-size", key: "notes" })) as { content: string };
+    expect(result.content_length).toBe(read.content.length);
+    expect(result.content_length).toBeGreaterThan("version one".length);
+    expect(result.max_content_length).toBe(100_000);
+  });
+
   it("returns the persisted patch timestamp for the next CAS write", async () => {
     const initialRaw = await callTool("memory_write", {
       namespace: "projects/patch-cas",

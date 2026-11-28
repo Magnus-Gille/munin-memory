@@ -10816,6 +10816,10 @@ export function registerTools(
                 }
 
                 const patchedResponse: Record<string, unknown> = { status: "patched", id: patchResult.id, namespace, key, updated_at: patchResult.updated_at, hint: hintPatch };
+                if (patchedEntry) {
+                  patchedResponse.content_length = patchedEntry.content.length;
+                  patchedResponse.max_content_length = maxContentSize;
+                }
                 const patchWarnings: string[] = [];
                 if (patchReservedRemoved.length > 0) {
                   patchWarnings.push(`Removed reserved tag(s): ${patchReservedRemoved.join(", ")}`);
