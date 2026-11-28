@@ -81,10 +81,12 @@ export interface ReadParams {
   namespace: string;
   key: string;
   as_of?: string;
+  max_chars?: unknown;
 }
 
 export interface ReadBatchParams {
   reads: Array<{ namespace: string; key: string }>;
+  max_chars?: unknown;
 }
 
 export interface GetParams {

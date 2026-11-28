@@ -17,7 +17,10 @@ import { createTestStorage } from "./helpers/test-storage.js";
 // Raised 31_000 -> 31_200 deliberately (MUNIN-434) to restore the memory_log
 // dated-record guidance and the memory_update_status "only what the user stated"
 // rule that the MUNIN-431 trim dropped; other prose was trimmed to offset most of it.
-const MAX_TOOLS_LIST_CHARS = 31_200;
+// Raised 31_200 -> 31_330 deliberately (MUNIN-278 item 7) for `max_chars` on
+// memory_read/memory_read_batch: two description-less integer schemas plus one
+// clause per tool description. The core profile stays within its budget.
+const MAX_TOOLS_LIST_CHARS = 31_330;
 const MAX_SINGLE_TOOL_CHARS = 4_000;
 // MUNIN_TOOL_PROFILE=core (MUNIN-434): the eight everyday tools.
 const MAX_CORE_TOOLS_LIST_CHARS = 16_100;

@@ -1259,6 +1259,7 @@ function serializeEntry(
   entry: ReturnType<typeof parseEntry>,
   toolName: string,
   sessionId?: string,
+  maxChars?: number,
 ): { response: Record<string, unknown>; redacted: boolean; untrusted: boolean } {
   const policy = readPolicy(db, ctx, entry, toolName, sessionId);
   if (policy.redactedResponse) {
@@ -1287,8 +1288,42 @@ function serializeEntry(
       response.superseded_by = lineage.superseded_by;
     }
   }
-  applyUntrustedEnvelope(response, entry.content, entry.tags, policy.untrusted);
-  return { response, redacted: false, untrusted: policy.untrusted };
+  // max_chars (MUNIN-278 item 7): the trust verdict above is taken from the
+  // FULL content; only the emitted body is shortened, and the untrusted
+  // envelope wraps the shortened body so its delimiters survive.
+  // The cut itself can also produce a flagged phrase from text that is clean in
+  // full (e.g. "...instructionsXYZ" cut to "...instructions"), so the shortened
+  // body is scanned too and either verdict wraps it.
+  let emittedContent = entry.content;
+  let untrusted = policy.untrusted;
+  if (maxChars !== undefined && entry.content.length > maxChars) {
+    emittedContent = truncateUtf16Safe(entry.content, maxChars);
+    response.content = emittedContent;
+    response.content_truncated = true;
+    response.content_length = entry.content.length;
+    untrusted = untrusted || shouldWrapAsUntrusted(emittedContent, entry.tags);
+  }
+  applyUntrustedEnvelope(response, emittedContent, entry.tags, untrusted);
+  return { response, redacted: false, untrusted };
+}
+
+/** Cut to at most `maxChars` UTF-16 units without splitting a surrogate pair. */
+function truncateUtf16Safe(text: string, maxChars: number): string {
+  let end = Math.min(maxChars, text.length);
+  if (end > 0 && end < text.length) {
+    const last = text.charCodeAt(end - 1);
+    if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  }
+  return text.slice(0, end);
+}
+
+/** Validate the optional read-path `max_chars`; undefined means no limit. */
+function parseMaxChars(value: unknown): { ok: true; value?: number } | { ok: false; error: string } {
+  if (value === undefined) return { ok: true };
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    return { ok: false, error: "max_chars must be a positive integer." };
+  }
+  return { ok: true, value };
 }
 
 function appendStatusPreviewContent(
@@ -7006,6 +7041,9 @@ const VALID_FROM_DESCRIPTION =
 
 const SCOPED_NAMESPACE_DESCRIPTION = "Namespace or prefix; prefix filters may end with '/'.";
 
+// Self-describing name; the tool descriptions say what it does (tool-surface budget).
+const MAX_CHARS_SCHEMA = { type: "integer", minimum: 1 };
+
 const TOOL_DEFINITIONS = [
   {
     name: "memory_orient",
@@ -7417,7 +7455,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_read",
     description:
-      "Read one state entry by namespace and key: full content, tags, timestamps and classification. `as_of` returns the revision valid at a past instant; this is reliable across `supersedes` correction lineage, while ordinary overwrites may return found:false with history_available:false.",
+      "Read one state entry by namespace and key: content, tags, timestamps and classification; `max_chars` caps content. `as_of` returns the revision valid at a past instant; reliable across `supersedes` correction lineage, while ordinary overwrites may return found:false with history_available:false.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -7428,6 +7466,7 @@ const TOOL_DEFINITIONS = [
           description:
             "ISO 8601 instant. Future times are rejected, except the exact visible current valid_from/updated_at boundary echoed from a server response; hidden boundaries are rejected.",
         },
+        max_chars: MAX_CHARS_SCHEMA,
       },
       required: ["namespace", "key"],
     },
@@ -7435,7 +7474,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "memory_read_batch",
     description:
-      "Read several state entries in one call; results (found or not) keep input order. Use instead of sequential `memory_read` calls.",
+      "Read several state entries in one call; results (found or not) keep input order; `max_chars` caps each content. Use instead of sequential `memory_read` calls.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -7450,6 +7489,7 @@ const TOOL_DEFINITIONS = [
             required: ["namespace", "key"],
           },
         },
+        max_chars: MAX_CHARS_SCHEMA,
       },
       required: ["reads"],
     },
@@ -11424,7 +11464,11 @@ export function registerTools(
 
           case "memory_read": {
             const handleMemoryRead = async () => {
-              const { namespace, key, as_of } = args as unknown as ReadParams;
+              const { namespace, key, as_of, max_chars } = args as unknown as ReadParams;
+              const maxChars = parseMaxChars(max_chars);
+              if (!maxChars.ok) {
+                return errResult("read", "validation_error", maxChars.error);
+              }
               const nsCheck = validateNamespace(namespace);
               if (!nsCheck.valid) {
                 return errResult("read", "validation_error", nsCheck.error!);
@@ -11460,7 +11504,7 @@ export function registerTools(
                 const parsed = parseEntry(entry);
                 // Unified read gate (#154): classification redaction + untrusted
                 // envelope in one call. Redaction is logged as a side effect.
-                const gate = serializeEntry(db, ctx, parsed, "memory_read", sessionId);
+                const gate = serializeEntry(db, ctx, parsed, "memory_read", sessionId, maxChars.value);
                 if (gate.redacted) {
                   return okResult("read", { found: true, ...gate.response });
                 }
@@ -11528,7 +11572,11 @@ export function registerTools(
 
           case "memory_read_batch": {
             const handleMemoryReadBatch = async () => {
-              const { reads } = args as unknown as ReadBatchParams;
+              const { reads, max_chars } = args as unknown as ReadBatchParams;
+              const maxChars = parseMaxChars(max_chars);
+              if (!maxChars.ok) {
+                return errResult("read_batch", "validation_error", maxChars.error);
+              }
               if (!Array.isArray(reads) || reads.length === 0) {
                 return errResult("read_batch", "validation_error", "reads must be a non-empty array of {namespace, key} pairs.");
               }
@@ -11547,7 +11595,7 @@ export function registerTools(
                 const entry = readState(db, ns, k);
                 if (entry) {
                   const parsed = parseEntry(entry);
-                  const gate = serializeEntry(db, ctx, parsed, "memory_read_batch", sessionId);
+                  const gate = serializeEntry(db, ctx, parsed, "memory_read_batch", sessionId, maxChars.value);
                   if (gate.redacted) {
                     return { found: true, ...gate.response };
                   }
