@@ -17,8 +17,9 @@ changelog is the canonical record of what moved.
 - `memory_read` and `memory_read_batch` accept an optional positive-integer
   `max_chars`. Longer content is cut (never splitting a surrogate pair) and the
   entry reports `content_truncated: true` and the full `content_length`. The
-  untrusted-content verdict is still taken from the full stored content, and the
-  envelope wraps the shortened body. This completes MUNIN-278 item 7.
+  untrusted-content verdict is taken from the full stored content and from the
+  shortened body (a cut can turn clean text into an instruction-shaped phrase);
+  either verdict wraps the shortened body in the envelope. This completes MUNIN-278 item 7.
 
 ### Fixed
 

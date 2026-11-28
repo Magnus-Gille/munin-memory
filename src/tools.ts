@@ -1288,18 +1288,23 @@ function serializeEntry(
       response.superseded_by = lineage.superseded_by;
     }
   }
-  // max_chars (MUNIN-278 item 7): the trust verdict above is already taken
-  // from the FULL content; only the emitted body is shortened, and the
-  // untrusted envelope wraps the shortened body so its delimiters survive.
+  // max_chars (MUNIN-278 item 7): the trust verdict above is taken from the
+  // FULL content; only the emitted body is shortened, and the untrusted
+  // envelope wraps the shortened body so its delimiters survive.
+  // The cut itself can also produce a flagged phrase from text that is clean in
+  // full (e.g. "...instructionsXYZ" cut to "...instructions"), so the shortened
+  // body is scanned too and either verdict wraps it.
   let emittedContent = entry.content;
+  let untrusted = policy.untrusted;
   if (maxChars !== undefined && entry.content.length > maxChars) {
     emittedContent = truncateUtf16Safe(entry.content, maxChars);
     response.content = emittedContent;
     response.content_truncated = true;
     response.content_length = entry.content.length;
+    untrusted = untrusted || shouldWrapAsUntrusted(emittedContent, entry.tags);
   }
-  applyUntrustedEnvelope(response, emittedContent, entry.tags, policy.untrusted);
-  return { response, redacted: false, untrusted: policy.untrusted };
+  applyUntrustedEnvelope(response, emittedContent, entry.tags, untrusted);
+  return { response, redacted: false, untrusted };
 }
 
 /** Cut to at most `maxChars` UTF-16 units without splitting a surrogate pair. */
